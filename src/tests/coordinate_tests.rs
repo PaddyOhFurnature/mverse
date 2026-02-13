@@ -799,3 +799,242 @@ fn test_enu_round_trip_antimeridian() {
     assert!((ecef_back.z - point_ecef.z).abs() < 0.001,
         "Z: {} vs {}", ecef_back.z, point_ecef.z);
 }
+
+// ============================================================================
+// Phase 1 Scale Gate Tests - Comprehensive coordinate accuracy validation
+// ============================================================================
+
+#[test]
+fn test_scale_gate_1m_separation() {
+    // Two points 1m apart
+    let origin = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.000008983, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&origin, &offset);
+    let expected = 1.0;
+    let tolerance = 0.001; // 1mm
+    
+    assert!((distance - expected).abs() < tolerance,
+        "1m scale: distance = {:.6}m, expected {:.6}m (±{:.6}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_10m_separation() {
+    let origin = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.000089831, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&origin, &offset);
+    let expected = 10.0;
+    let tolerance = 0.005; // 5mm
+    
+    assert!((distance - expected).abs() < tolerance,
+        "10m scale: distance = {:.6}m, expected {:.6}m (±{:.6}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_100m_separation() {
+    let origin = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.000898311, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&origin, &offset);
+    let expected = 100.0;
+    let tolerance = 0.01; // 10mm
+    
+    assert!((distance - expected).abs() < tolerance,
+        "100m scale: distance = {:.3}m, expected {:.3}m (±{:.3}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_1km_separation() {
+    let origin = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.008983112, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&origin, &offset);
+    let expected = 1000.0;
+    let tolerance = 0.1; // 100mm
+    
+    assert!((distance - expected).abs() < tolerance,
+        "1km scale: distance = {:.3}m, expected {:.3}m (±{:.3}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_10km_separation() {
+    // Brisbane CBD to ~10km north
+    let cbd = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.089831117, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&cbd, &offset);
+    let expected = 10000.0;
+    let tolerance = 1.0; // 1m
+    
+    assert!((distance - expected).abs() < tolerance,
+        "10km scale: distance = {:.1}m, expected {:.1}m (±{:.1}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_100km_separation() {
+    let origin = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let offset = GpsPos { lat_deg: -27.4698 + 0.898311175, lon_deg: 153.0251, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&origin, &offset);
+    let expected = 100000.0;
+    let tolerance = 10.0; // 10m
+    
+    assert!((distance - expected).abs() < tolerance,
+        "100km scale: distance = {:.1}m, expected {:.1}m (±{:.1}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_1000km_separation() {
+    // Brisbane to Sydney (~732km actual)
+    let brisbane = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let sydney = GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&brisbane, &sydney);
+    let expected = 733199.0; // Known accurate value from earlier tests
+    let tolerance = 100.0; // 100m
+    
+    assert!((distance - expected).abs() < tolerance,
+        "1000km scale: distance = {:.0}m, expected {:.0}m (±{:.0}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_10000km_separation() {
+    // Brisbane to London (~16,545km)
+    let brisbane = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let london = GpsPos { lat_deg: 51.5074, lon_deg: -0.1278, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&brisbane, &london);
+    let expected = 16544579.0; // Known accurate value
+    let tolerance = 1000.0; // 1km
+    
+    assert!((distance - expected).abs() < tolerance,
+        "10000km scale: distance = {:.0}m, expected {:.0}m (±{:.0}m)",
+        distance, expected, tolerance);
+}
+
+#[test]
+fn test_scale_gate_20000km_antipodal() {
+    // Antipodal points: opposite sides of Earth
+    let point1 = GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 };
+    let point2 = GpsPos { lat_deg: 0.0, lon_deg: 180.0, elevation_m: 0.0 };
+    
+    let distance = haversine_distance(&point1, &point2);
+    let expected = 20037508.0; // Half Earth's circumference
+    let min = 19900000.0;
+    let max = 20100000.0;
+    
+    assert!(distance > min && distance < max,
+        "20000km scale (antipodal): distance = {:.0}m, expected range [{:.0}m, {:.0}m]",
+        distance, min, max);
+}
+
+#[test]
+fn test_scale_gate_round_trip_all_scales() {
+    // Test GPS → ECEF → GPS round-trip at multiple scales
+    let test_cases = vec![
+        (-27.4698, 153.0251, 0.0, "Origin"),
+        (-27.4698 + 0.000009, 153.0251, 0.0, "1m offset"),
+        (-27.4698 + 0.00009, 153.0251, 0.0, "10m offset"),
+        (-27.4698 + 0.0009, 153.0251, 0.0, "100m offset"),
+        (-27.4698 + 0.009, 153.0251, 0.0, "1km offset"),
+        (-27.4698 + 0.09, 153.0251, 0.0, "10km offset"),
+        (-27.4698 + 0.9, 153.0251, 0.0, "100km offset"),
+        (-33.8688, 151.2093, 0.0, "Sydney (732km)"),
+        (51.5074, -0.1278, 0.0, "London (16545km)"),
+        (0.0, 180.0, 0.0, "Antipodal"),
+    ];
+    
+    for (lat, lon, elev, label) in test_cases {
+        let original = GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: elev };
+        let ecef = gps_to_ecef(&original);
+        let result = ecef_to_gps(&ecef);
+        
+        let lat_error = (result.lat_deg - original.lat_deg).abs();
+        let lon_error = (result.lon_deg - original.lon_deg).abs();
+        let elev_error = (result.elevation_m - original.elevation_m).abs();
+        
+        assert!(lat_error < 0.0000001, "{}: lat error = {}°", label, lat_error);
+        assert!(lon_error < 0.0000001, "{}: lon error = {}°", label, lon_error);
+        assert!(elev_error < 0.001, "{}: elev error = {}m", label, elev_error);
+    }
+}
+
+#[test]
+fn test_scale_gate_enu_accuracy_within_50km() {
+    // ENU should be accurate within ~50km of origin
+    let origin_gps = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    let test_distances = vec![
+        (100.0, "100m"),
+        (1000.0, "1km"),
+        (10000.0, "10km"),
+        (50000.0, "50km"),
+    ];
+    
+    for (distance_m, label) in test_distances {
+        // Point north of origin at test distance
+        let lat_offset = distance_m / 111320.0; // Approximate degrees per metre latitude
+        let point_gps = GpsPos {
+            lat_deg: origin_gps.lat_deg + lat_offset,
+            lon_deg: origin_gps.lon_deg,
+            elevation_m: 0.0,
+        };
+        let point_ecef = gps_to_ecef(&point_gps);
+        
+        // Convert to ENU and back
+        let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+        let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+        
+        // Check round-trip accuracy
+        let error = ecef_distance(&point_ecef, &ecef_back);
+        
+        // Tolerance increases with distance (tangent plane approximation breaks down)
+        let tolerance = if distance_m <= 10000.0 {
+            0.01 // 1cm for distances up to 10km
+        } else {
+            distance_m * 0.00001 // 0.001% of distance for larger scales
+        };
+        
+        assert!(error < tolerance,
+            "{}: ENU round-trip error = {:.6}m (tolerance {:.6}m)",
+            label, error, tolerance);
+    }
+}
+
+#[test]
+fn test_scale_gate_enu_limitation_beyond_50km() {
+    // Document that ENU accuracy degrades beyond ~50km
+    // This is expected due to Earth's curvature - ENU is a tangent plane approximation
+    let origin_gps = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    // Test at 100km - error should be detectable but within reasonable bounds
+    let far_point_gps = GpsPos {
+        lat_deg: origin_gps.lat_deg + 0.9, // ~100km north
+        lon_deg: origin_gps.lon_deg,
+        elevation_m: 0.0,
+    };
+    let far_point_ecef = gps_to_ecef(&far_point_gps);
+    
+    let enu = ecef_to_enu(&far_point_ecef, &origin_ecef, &origin_gps);
+    let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+    
+    let error = ecef_distance(&far_point_ecef, &ecef_back);
+    
+    // At 100km, error should be < 10m (tangent plane approximation holds reasonably)
+    assert!(error < 10.0,
+        "100km: ENU round-trip error = {:.3}m (should be < 10m)",
+        error);
+    
+    println!("ENU limitation test: 100km distance has {:.3}m round-trip error", error);
+    println!("Note: ENU is a local tangent plane - use ECEF for distances > 50km");
+}
