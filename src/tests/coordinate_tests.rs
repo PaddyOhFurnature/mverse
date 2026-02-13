@@ -586,3 +586,216 @@ fn test_gps_to_ecef_batch_performance() {
     #[cfg(debug_assertions)]
     println!("Note: Debug mode - run with --release for accurate performance measurement");
 }
+
+// ============================================================================
+// ENU (East-North-Up) local coordinate frame tests
+// ============================================================================
+
+#[test]
+fn test_ecef_to_enu_origin_is_zero() {
+    // Origin point in ENU frame should be (0, 0, 0)
+    let origin_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    let enu = ecef_to_enu(&origin_ecef, &origin_ecef, &origin_gps);
+    
+    assert!(enu.east.abs() < 0.001, "East = {}, expected ≈ 0", enu.east);
+    assert!(enu.north.abs() < 0.001, "North = {}, expected ≈ 0", enu.north);
+    assert!(enu.up.abs() < 0.001, "Up = {}, expected ≈ 0", enu.up);
+}
+
+#[test]
+fn test_ecef_to_enu_100m_east() {
+    // Point ~100m east of origin
+    let origin_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    // Calculate exact longitude offset for 100m at this latitude
+    let lat_rad = origin_gps.lat_deg.to_radians();
+    let lon_offset = 100.0 / (WGS84_A * lat_rad.cos()) * (180.0 / std::f64::consts::PI);
+    
+    let point_gps = GpsPos {
+        lat_deg: origin_gps.lat_deg,
+        lon_deg: origin_gps.lon_deg + lon_offset,
+        elevation_m: 0.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    
+    // Should be approximately 100m east, 0m north, 0m up
+    assert!((enu.east - 100.0).abs() < 1.0, "East = {}, expected ≈ 100", enu.east);
+    assert!(enu.north.abs() < 1.0, "North = {}, expected ≈ 0", enu.north);
+    assert!(enu.up.abs() < 1.0, "Up = {}, expected ≈ 0", enu.up);
+}
+
+#[test]
+fn test_ecef_to_enu_100m_north() {
+    // Point 100m north of origin
+    let origin_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    // ~100m north
+    let point_gps = GpsPos {
+        lat_deg: -27.4698 + 0.0009, // ~100m north
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    
+    // Should be approximately 0m east, 100m north, 0m up
+    assert!(enu.east.abs() < 1.0, "East = {}, expected ≈ 0", enu.east);
+    assert!((enu.north - 100.0).abs() < 1.0, "North = {}, expected ≈ 100", enu.north);
+    assert!(enu.up.abs() < 1.0, "Up = {}, expected ≈ 0", enu.up);
+}
+
+#[test]
+fn test_ecef_to_enu_50m_up() {
+    // Point 50m above origin
+    let origin_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    let point_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 50.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    
+    // Should be approximately 0m east, 0m north, 50m up
+    assert!(enu.east.abs() < 1.0, "East = {}, expected ≈ 0", enu.east);
+    assert!(enu.north.abs() < 1.0, "North = {}, expected ≈ 0", enu.north);
+    assert!((enu.up - 50.0).abs() < 1.0, "Up = {}, expected ≈ 50", enu.up);
+}
+
+#[test]
+fn test_enu_round_trip_brisbane() {
+    let origin_gps = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    // Point 200m east, 150m north, 25m up
+    let point_gps = GpsPos {
+        lat_deg: -27.4698 + 0.00135,
+        lon_deg: 153.0251 + 0.002,
+        elevation_m: 25.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    // ECEF → ENU → ECEF
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+    
+    assert!((ecef_back.x - point_ecef.x).abs() < 0.001, 
+        "X: {} vs {}", ecef_back.x, point_ecef.x);
+    assert!((ecef_back.y - point_ecef.y).abs() < 0.001,
+        "Y: {} vs {}", ecef_back.y, point_ecef.y);
+    assert!((ecef_back.z - point_ecef.z).abs() < 0.001,
+        "Z: {} vs {}", ecef_back.z, point_ecef.z);
+}
+
+#[test]
+fn test_enu_round_trip_north_pole() {
+    let origin_gps = GpsPos {
+        lat_deg: 90.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    // Point slightly offset from pole
+    let point_gps = GpsPos {
+        lat_deg: 89.999,
+        lon_deg: 45.0,
+        elevation_m: 10.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    // Round-trip test
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+    
+    assert!((ecef_back.x - point_ecef.x).abs() < 0.001,
+        "X: {} vs {}", ecef_back.x, point_ecef.x);
+    assert!((ecef_back.y - point_ecef.y).abs() < 0.001,
+        "Y: {} vs {}", ecef_back.y, point_ecef.y);
+    assert!((ecef_back.z - point_ecef.z).abs() < 0.001,
+        "Z: {} vs {}", ecef_back.z, point_ecef.z);
+}
+
+#[test]
+fn test_enu_round_trip_equator() {
+    let origin_gps = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    let point_gps = GpsPos {
+        lat_deg: 0.001,
+        lon_deg: 0.001,
+        elevation_m: 100.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+    
+    assert!((ecef_back.x - point_ecef.x).abs() < 0.001,
+        "X: {} vs {}", ecef_back.x, point_ecef.x);
+    assert!((ecef_back.y - point_ecef.y).abs() < 0.001,
+        "Y: {} vs {}", ecef_back.y, point_ecef.y);
+    assert!((ecef_back.z - point_ecef.z).abs() < 0.001,
+        "Z: {} vs {}", ecef_back.z, point_ecef.z);
+}
+
+#[test]
+fn test_enu_round_trip_antimeridian() {
+    let origin_gps = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 180.0,
+        elevation_m: 0.0,
+    };
+    let origin_ecef = gps_to_ecef(&origin_gps);
+    
+    let point_gps = GpsPos {
+        lat_deg: 0.001,
+        lon_deg: 179.999,
+        elevation_m: 50.0,
+    };
+    let point_ecef = gps_to_ecef(&point_gps);
+    
+    let enu = ecef_to_enu(&point_ecef, &origin_ecef, &origin_gps);
+    let ecef_back = enu_to_ecef(&enu, &origin_ecef, &origin_gps);
+    
+    assert!((ecef_back.x - point_ecef.x).abs() < 0.001,
+        "X: {} vs {}", ecef_back.x, point_ecef.x);
+    assert!((ecef_back.y - point_ecef.y).abs() < 0.001,
+        "Y: {} vs {}", ecef_back.y, point_ecef.y);
+    assert!((ecef_back.z - point_ecef.z).abs() < 0.001,
+        "Z: {} vs {}", ecef_back.z, point_ecef.z);
+}
