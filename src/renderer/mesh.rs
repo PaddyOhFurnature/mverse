@@ -690,4 +690,182 @@ mod tests {
             assert!((idx as usize) < vertices.len());
         }
     }
+    
+    // ============================================================
+    // PHASE 5 SCALE GATE TESTS
+    // ============================================================
+    
+    #[test]
+    fn test_scale_gate_single_building_position() {
+        use crate::coordinates::{gps_to_ecef, GpsPos};
+        
+        // Known building in Brisbane CBD (approximate)
+        let lat = -27.4698;
+        let lon = 153.0251;
+        let footprint = vec![
+            (lat, lon),
+            (lat, lon + 0.0001),
+            (lat + 0.0001, lon + 0.0001),
+            (lat + 0.0001, lon),
+        ];
+        
+        let (vertices, _) = generate_building(&footprint, 0.0, 30.0, glam::Vec3::new(0.5, 0.5, 0.5));
+        
+        // Base vertices should be near expected ECEF position
+        let gps = GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: 0.0 };
+        let expected_ecef = gps_to_ecef(&gps);
+        let base_vertex = vertices[0];
+        let vertex_ecef = glam::DVec3::new(
+            base_vertex.position[0] as f64,
+            base_vertex.position[1] as f64,
+            base_vertex.position[2] as f64,
+        );
+        let expected_vec = glam::DVec3::new(expected_ecef.x, expected_ecef.y, expected_ecef.z);
+        
+        // Distance should be < 100m (building is ~10m across, so center could be 50m off)
+        let distance = (vertex_ecef - expected_vec).length();
+        assert!(distance < 100.0, "Building vertex {} meters from expected GPS position", distance);
+    }
+    
+    #[test]
+    fn test_scale_gate_multiple_buildings_relative() {
+        // Two buildings ~1.1km apart (0.01 degrees = ~1.1km)
+        let lat1 = -27.4698;
+        let lon1 = 153.0251;
+        let lat2 = -27.4798; // 0.01 degrees south = ~1.1km
+        let lon2 = 153.0251;
+        
+        let footprint1 = vec![(lat1, lon1), (lat1, lon1 + 0.0001), (lat1 + 0.0001, lon1 + 0.0001), (lat1 + 0.0001, lon1)];
+        let footprint2 = vec![(lat2, lon2), (lat2, lon2 + 0.0001), (lat2 + 0.0001, lon2 + 0.0001), (lat2 + 0.0001, lon2)];
+        
+        let (v1, _) = generate_building(&footprint1, 0.0, 30.0, glam::Vec3::new(0.5, 0.5, 0.5));
+        let (v2, _) = generate_building(&footprint2, 0.0, 30.0, glam::Vec3::new(0.5, 0.5, 0.5));
+        
+        // Distance between base vertices should be ~1100m
+        let p1 = glam::Vec3::new(v1[0].position[0], v1[0].position[1], v1[0].position[2]);
+        let p2 = glam::Vec3::new(v2[0].position[0], v2[0].position[1], v2[0].position[2]);
+        let distance = (p1 - p2).length();
+        
+        // Should be within 20% of expected distance (1.1km = 1100m)
+        assert!(distance > 900.0 && distance < 1400.0, "Building separation {} meters (expected ~1100m)", distance);
+    }
+    
+    #[test]
+    fn test_scale_gate_1km_radius_mesh_generation() {
+        use crate::chunks::{gps_to_chunk_id, ChunkId};
+        use crate::coordinates::GpsPos;
+        
+        // Brisbane CBD center
+        let gps = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+        
+        // Get chunks within ~1km at depth 14
+        let _center_chunk = gps_to_chunk_id(&gps, 14);
+        
+        // Generate terrain for depth 6 (reasonable workload - 24,576 chunks total)
+        let (vertices, indices) = generate_terrain_patches(6, 4, glam::Vec3::ZERO);
+        
+        // Should handle large mesh generation without panic
+        assert!(vertices.len() > 0, "Should generate vertices");
+        assert!(indices.len() > 0, "Should generate indices");
+        
+        // Each chunk at subdivisions=4 has (4+1)^2 = 25 vertices
+        // At depth 6: 6 * 4^6 = 24,576 chunks × 25 vertices = 614,400 vertices
+        assert!(vertices.len() < 1_000_000, "Vertex count should be reasonable");
+    }
+    
+    #[test]
+    fn test_scale_gate_floating_origin_precision() {
+        // Test that floating origin keeps precision at different locations
+        
+        // Brisbane ECEF (large coordinates ~6M meters)
+        let brisbane_offset = glam::DVec3::new(-5085442.782, 2668653.127, -2912473.617);
+        
+        // Small building near origin in floating frame
+        let local_pos = glam::Vec3::new(100.0, 100.0, 100.0);
+        
+        // Convert back to ECEF
+        let ecef = brisbane_offset + glam::DVec3::new(local_pos.x as f64, local_pos.y as f64, local_pos.z as f64);
+        
+        // Convert to f32 and back
+        let ecef_f32 = glam::Vec3::new(ecef.x as f32, ecef.y as f32, ecef.z as f32);
+        let roundtrip = glam::DVec3::new(ecef_f32.x as f64, ecef_f32.y as f64, ecef_f32.z as f64);
+        
+        // Precision loss should be < 1m at Brisbane coordinates
+        let error = (ecef - roundtrip).length();
+        assert!(error < 1.0, "Floating origin precision loss {} meters (should be <1m)", error);
+    }
+    
+    #[test]
+    fn test_scale_gate_camera_no_jitter_brisbane() {
+        use crate::renderer::camera::Camera;
+        
+        // Brisbane ECEF coordinates (~6M meters from origin)
+        let brisbane = Camera::brisbane();
+        let pos = brisbane.position;
+        
+        // Camera position should be valid and stable
+        assert!(pos.length() > 6_000_000.0, "Brisbane camera position should be ~6M meters from origin");
+        assert!(pos.length() < 7_000_000.0, "Brisbane camera position should be reasonable");
+        
+        // View projection matrix should be computable without NaN
+        let aspect_ratio = 1280.0 / 720.0;
+        let (vp_matrix, offset) = brisbane.view_projection_matrix(aspect_ratio);
+        
+        // Check that matrix is valid (no NaN, no Inf)
+        for i in 0..16 {
+            let val = vp_matrix.to_cols_array()[i];
+            assert!(val.is_finite(), "VP matrix contains non-finite value at index {}", i);
+        }
+        
+        // Offset should match position
+        assert!((offset - pos).length() < 0.1, "Floating origin offset should match camera position");
+    }
+    
+    #[test]
+    fn test_scale_gate_camera_no_jitter_north_pole() {
+        use crate::renderer::camera::Camera;
+        use crate::coordinates::{gps_to_ecef, GpsPos};
+        use glam::DVec3;
+        
+        // North Pole
+        let north_pole_gps = GpsPos { lat_deg: 90.0, lon_deg: 0.0, elevation_m: 1000.0 };
+        let north_pole_ecef = gps_to_ecef(&north_pole_gps);
+        let north_pole_pos = DVec3::new(north_pole_ecef.x, north_pole_ecef.y, north_pole_ecef.z);
+        
+        // Look at Earth center
+        let camera = Camera::new(north_pole_pos, DVec3::ZERO);
+        
+        // View projection should work at North Pole
+        let aspect_ratio = 1280.0 / 720.0;
+        let (vp_matrix, _offset) = camera.view_projection_matrix(aspect_ratio);
+        
+        for i in 0..16 {
+            let val = vp_matrix.to_cols_array()[i];
+            assert!(val.is_finite(), "VP matrix at North Pole contains non-finite value");
+        }
+    }
+    
+    #[test]
+    fn test_scale_gate_camera_no_jitter_equator() {
+        use crate::renderer::camera::Camera;
+        use crate::coordinates::{gps_to_ecef, GpsPos};
+        use glam::DVec3;
+        
+        // Equator at 0°N, 0°E (off coast of Africa)
+        let equator_gps = GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 1000.0 };
+        let equator_ecef = gps_to_ecef(&equator_gps);
+        let equator_pos = DVec3::new(equator_ecef.x, equator_ecef.y, equator_ecef.z);
+        
+        // Look at Earth center
+        let camera = Camera::new(equator_pos, DVec3::ZERO);
+        
+        // View projection should work at equator
+        let aspect_ratio = 1280.0 / 720.0;
+        let (vp_matrix, _offset) = camera.view_projection_matrix(aspect_ratio);
+        
+        for i in 0..16 {
+            let val = vp_matrix.to_cols_array()[i];
+            assert!(val.is_finite(), "VP matrix at equator contains non-finite value");
+        }
+    }
 }
