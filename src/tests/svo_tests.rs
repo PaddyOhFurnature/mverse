@@ -169,3 +169,97 @@ fn test_clear_does_not_merge_if_siblings_differ() {
     assert_eq!(svo.get_voxel(0, 0, 0), AIR);
     assert_eq!(svo.get_voxel(1, 0, 0), DIRT);
 }
+
+// ============================================================================
+// Phase 3.4: Fill and clear region tests
+// ============================================================================
+
+#[test]
+fn test_fill_region_small() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    // Fill 8x8x8 region
+    svo.fill_region([10, 10, 10], [17, 17, 17], STONE);
+    
+    // Check all voxels in region
+    for x in 10..18 {
+        for y in 10..18 {
+            for z in 10..18 {
+                assert_eq!(svo.get_voxel(x, y, z), STONE,
+                    "Voxel at ({},{},{}) should be STONE", x, y, z);
+            }
+        }
+    }
+    
+    // Check outside region is still AIR
+    assert_eq!(svo.get_voxel(9, 10, 10), AIR);
+    assert_eq!(svo.get_voxel(18, 10, 10), AIR);
+}
+
+#[test]
+fn test_fill_entire_tree() {
+    let mut svo = SparseVoxelOctree::new(6);
+    let max_coord = (1u32 << 6) - 1;
+    
+    // Fill entire volume
+    svo.fill_region([0, 0, 0], [max_coord, max_coord, max_coord], CONCRETE);
+    
+    // All voxels should be CONCRETE (root may or may not be optimized to Solid)
+    assert_eq!(svo.get_voxel(0, 0, 0), CONCRETE);
+    assert_eq!(svo.get_voxel(max_coord / 2, max_coord / 2, max_coord / 2), CONCRETE);
+    assert_eq!(svo.get_voxel(max_coord, max_coord, max_coord), CONCRETE);
+}
+
+#[test]
+fn test_fill_then_clear_subregion() {
+    let mut svo = SparseVoxelOctree::new(6);
+    
+    // Fill large region
+    svo.fill_region([10, 10, 10], [30, 30, 30], STONE);
+    
+    // Clear sub-region
+    svo.clear_region([15, 15, 15], [20, 20, 20]);
+    
+    // Check cleared area is AIR
+    assert_eq!(svo.get_voxel(17, 17, 17), AIR);
+    
+    // Check surrounding area still STONE
+    assert_eq!(svo.get_voxel(12, 12, 12), STONE);
+    assert_eq!(svo.get_voxel(25, 25, 25), STONE);
+}
+
+#[test]
+fn test_overlapping_fills_last_wins() {
+    let mut svo = SparseVoxelOctree::new(6);
+    
+    // Fill with STONE
+    svo.fill_region([10, 10, 10], [20, 20, 20], STONE);
+    
+    // Overlapping fill with DIRT
+    svo.fill_region([15, 15, 15], [25, 25, 25], DIRT);
+    
+    // Overlap area should be DIRT
+    assert_eq!(svo.get_voxel(17, 17, 17), DIRT);
+    
+    // Non-overlap area should be STONE
+    assert_eq!(svo.get_voxel(12, 12, 12), STONE);
+    
+    // Second-only area should be DIRT
+    assert_eq!(svo.get_voxel(23, 23, 23), DIRT);
+}
+
+#[test]
+fn test_clear_region_basic() {
+    let mut svo = SparseVoxelOctree::new(6);
+    
+    // Fill a region
+    svo.fill_region([10, 10, 10], [20, 20, 20], STONE);
+    
+    // Clear it
+    svo.clear_region([10, 10, 10], [20, 20, 20]);
+    
+    // Should all be AIR
+    assert_eq!(svo.get_voxel(15, 15, 15), AIR);
+    assert_eq!(svo.get_voxel(10, 10, 10), AIR);
+    assert_eq!(svo.get_voxel(20, 20, 20), AIR);
+}

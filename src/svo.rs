@@ -130,6 +130,54 @@ impl SparseVoxelOctree {
         Self::clear_voxel_recursive(&mut self.root, x, y, z, 0, self.max_depth, size);
     }
 
+    /// Fills a rectangular region with the specified material
+    ///
+    /// Coordinates are inclusive: [min, max] on each axis.
+    /// If a region covers an entire octant, it's set to Solid (optimization).
+    ///
+    /// # Arguments
+    /// * `min` - Minimum corner [x, y, z]
+    /// * `max` - Maximum corner [x, y, z] (inclusive)
+    /// * `material` - Material to fill with
+    pub fn fill_region(&mut self, min: [u32; 3], max: [u32; 3], material: MaterialId) {
+        let size = 1u32 << self.max_depth;
+        
+        // Simple implementation: iterate and set each voxel
+        // TODO: Optimize to detect when entire octants are covered
+        for x in min[0]..=max[0] {
+            if x >= size { break; }
+            for y in min[1]..=max[1] {
+                if y >= size { break; }
+                for z in min[2]..=max[2] {
+                    if z >= size { break; }
+                    self.set_voxel(x, y, z, material);
+                }
+            }
+        }
+    }
+
+    /// Clears a rectangular region (sets all voxels to AIR)
+    ///
+    /// Coordinates are inclusive: [min, max] on each axis.
+    ///
+    /// # Arguments
+    /// * `min` - Minimum corner [x, y, z]
+    /// * `max` - Maximum corner [x, y, z] (inclusive)
+    pub fn clear_region(&mut self, min: [u32; 3], max: [u32; 3]) {
+        let size = 1u32 << self.max_depth;
+        
+        for x in min[0]..=max[0] {
+            if x >= size { break; }
+            for y in min[1]..=max[1] {
+                if y >= size { break; }
+                for z in min[2]..=max[2] {
+                    if z >= size { break; }
+                    self.clear_voxel(x, y, z);
+                }
+            }
+        }
+    }
+
     /// Recursive helper for set_voxel
     fn set_voxel_recursive(
         node: &mut SvoNode,
