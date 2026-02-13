@@ -9,6 +9,8 @@
 //! - Op log: all mutations recorded for CRDT synchronization
 //! - Serializable: can be saved/loaded from disk or network
 
+use sha2::{Sha256, Digest};
+
 /// Material identifier (16-bit allows 65,536 material types)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MaterialId(pub u16);
@@ -414,6 +416,48 @@ impl SparseVoxelOctree {
             let all_empty = children.iter().all(|child| matches!(child, SvoNode::Empty));
             if all_empty {
                 *node = SvoNode::Empty;
+            }
+        }
+    }
+
+    /// Computes SHA-256 hash of the tree state
+    ///
+    /// This hash is deterministic and depends only on the tree structure,
+    /// not on the operation log. Useful for verifying consistency across
+    /// network synchronization.
+    ///
+    /// # Returns
+    /// 32-byte SHA-256 hash of the serialized tree state
+    pub fn content_hash(&self) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        
+        // Hash max_depth
+        hasher.update(&self.max_depth.to_le_bytes());
+        
+        // Hash tree structure
+        Self::hash_node(&self.root, &mut hasher);
+        
+        let result = hasher.finalize();
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&result);
+        hash
+    }
+
+    /// Recursively hashes a node
+    fn hash_node(node: &SvoNode, hasher: &mut Sha256) {
+        match node {
+            SvoNode::Empty => {
+                hasher.update(&[0u8]); // Tag for Empty
+            }
+            SvoNode::Solid(material) => {
+                hasher.update(&[1u8]); // Tag for Solid
+                hasher.update(&material.0.to_le_bytes());
+            }
+            SvoNode::Branch(children) => {
+                hasher.update(&[2u8]); // Tag for Branch
+                for child in children.iter() {
+                    Self::hash_node(child, hasher);
+                }
             }
         }
     }

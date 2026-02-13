@@ -341,3 +341,72 @@ fn test_apply_ops_does_not_log() {
     assert_eq!(svo2.op_log().len(), 0, 
         "apply_ops should not add operations to the log");
 }
+
+// ============================================================================
+// Phase 3.6: Determinism and content hashing tests
+// ============================================================================
+
+#[test]
+fn test_same_ops_same_hash() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    svo1.set_voxel(10, 20, 30, STONE);
+    svo1.set_voxel(11, 21, 31, DIRT);
+    svo1.clear_voxel(10, 20, 30);
+    
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.set_voxel(10, 20, 30, STONE);
+    svo2.set_voxel(11, 21, 31, DIRT);
+    svo2.clear_voxel(10, 20, 30);
+    
+    let hash1 = svo1.content_hash();
+    let hash2 = svo2.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Two SVOs with same operations should have identical content hash");
+}
+
+#[test]
+fn test_different_states_different_hash() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    svo1.set_voxel(10, 20, 30, STONE);
+    
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.set_voxel(10, 20, 30, DIRT); // Different material
+    
+    let hash1 = svo1.content_hash();
+    let hash2 = svo2.content_hash();
+    
+    assert_ne!(hash1, hash2, 
+        "Two SVOs with different states should have different content hash");
+}
+
+#[test]
+fn test_apply_ops_identical_hash() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    svo1.set_voxel(10, 20, 30, STONE);
+    svo1.set_voxel(11, 21, 31, DIRT);
+    svo1.fill_region([5, 5, 5], [7, 7, 7], CONCRETE);
+    
+    let ops = svo1.op_log().to_vec();
+    let hash1 = svo1.content_hash();
+    
+    // Apply ops to fresh SVO
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.apply_ops(&ops);
+    let hash2 = svo2.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Applying ops from one SVO to another should produce identical content hash");
+}
+
+#[test]
+fn test_empty_svo_deterministic_hash() {
+    let svo1 = SparseVoxelOctree::new(8);
+    let svo2 = SparseVoxelOctree::new(8);
+    
+    let hash1 = svo1.content_hash();
+    let hash2 = svo2.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Two empty SVOs with same depth should have identical hash");
+}
