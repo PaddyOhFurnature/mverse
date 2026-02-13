@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::coordinates::EcefPos;
+use crate::coordinates::{EcefPos, GpsPos, gps_to_ecef};
 
 /// Unique identifier for a chunk tile on the quad-sphere
 ///
@@ -286,4 +286,85 @@ pub fn sphere_to_cube(ecef: &EcefPos) -> (u8, f64, f64) {
     }
     
     (face, u, v)
+}
+
+/// Converts GPS position to ChunkId at specified depth
+///
+/// # Arguments
+/// * `gps` - GPS position (latitude, longitude, elevation)
+/// * `depth` - Quadtree depth (0 = face-level, higher = more subdivisions)
+///
+/// # Returns
+/// ChunkId identifying the tile containing this position
+///
+/// # Algorithm
+/// 1. Convert GPS → ECEF
+/// 2. Determine cube face and UV coordinates
+/// 3. Recursively subdivide UV space into quadrants to specified depth
+///    - Quadrant 0: top-left (u < mid, v < mid)
+///    - Quadrant 1: top-right (u >= mid, v < mid)
+///    - Quadrant 2: bottom-left (u < mid, v >= mid)
+///    - Quadrant 3: bottom-right (u >= mid, v >= mid)
+///
+/// # Examples
+/// ```
+/// use metaverse_core::chunks::gps_to_chunk_id;
+/// use metaverse_core::coordinates::GpsPos;
+///
+/// let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+/// let chunk = gps_to_chunk_id(&brisbane, 8);
+/// assert_eq!(chunk.depth(), 8);
+/// ```
+pub fn gps_to_chunk_id(gps: &GpsPos, depth: u8) -> ChunkId {
+    // Convert to ECEF
+    let ecef = gps_to_ecef(gps);
+    
+    // Get cube face and UV coordinates
+    let (face, mut u, mut v) = ecef_to_cube_face(&ecef);
+    
+    // UV coordinates are in [-1, 1], subdivide into quadtree
+    let mut path = Vec::with_capacity(depth as usize);
+    
+    // Current UV bounds for subdivision
+    let mut u_min = -1.0;
+    let mut u_max = 1.0;
+    let mut v_min = -1.0;
+    let mut v_max = 1.0;
+    
+    // Recursively subdivide
+    for _ in 0..depth {
+        let u_mid = (u_min + u_max) / 2.0;
+        let v_mid = (v_min + v_max) / 2.0;
+        
+        // Determine which quadrant (0-3)
+        let quadrant = if u < u_mid {
+            if v < v_mid {
+                // Top-left
+                u_max = u_mid;
+                v_max = v_mid;
+                0
+            } else {
+                // Bottom-left
+                u_max = u_mid;
+                v_min = v_mid;
+                2
+            }
+        } else {
+            if v < v_mid {
+                // Top-right
+                u_min = u_mid;
+                v_max = v_mid;
+                1
+            } else {
+                // Bottom-right
+                u_min = u_mid;
+                v_min = v_mid;
+                3
+            }
+        };
+        
+        path.push(quadrant);
+    }
+    
+    ChunkId { face, path }
 }

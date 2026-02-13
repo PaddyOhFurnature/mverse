@@ -445,3 +445,181 @@ fn test_cube_sphere_inverse_consistency() {
             face_orig, u_orig, v_orig, error);
     }
 }
+
+// ============================================================================
+// Phase 2.4: GPS → ChunkId tests
+// ============================================================================
+
+#[test]
+fn test_gps_to_chunk_id_brisbane_depth_0() {
+    // Brisbane at depth 0 should give a face with empty path
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 0);
+    
+    assert_eq!(chunk.depth(), 0, "Depth 0 should have empty path");
+    assert!(chunk.face < 6, "Face should be 0-5, got {}", chunk.face);
+    assert_eq!(chunk.path.len(), 0, "Path should be empty at depth 0");
+}
+
+#[test]
+fn test_gps_to_chunk_id_brisbane_depth_8() {
+    // Brisbane at depth 8 - record the result for consistency testing
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 8);
+    
+    assert_eq!(chunk.depth(), 8, "Should have depth 8");
+    assert_eq!(chunk.path.len(), 8, "Path should have 8 elements");
+    
+    // All path elements should be 0-3 (quadrant indices)
+    for &quadrant in &chunk.path {
+        assert!(quadrant <= 3, "Quadrant should be 0-3, got {}", quadrant);
+    }
+    
+    // Test determinism: same input should give same output
+    let chunk2 = gps_to_chunk_id(&brisbane, 8);
+    assert_eq!(chunk, chunk2, "Should be deterministic");
+}
+
+#[test]
+fn test_gps_to_chunk_id_brisbane_depth_14() {
+    // Brisbane at depth 14 should be a descendant of depth-8 result
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    
+    let chunk8 = gps_to_chunk_id(&brisbane, 8);
+    let chunk14 = gps_to_chunk_id(&brisbane, 14);
+    
+    assert_eq!(chunk14.depth(), 14, "Should have depth 14");
+    assert_eq!(chunk14.face, chunk8.face, "Should be on same face");
+    
+    // First 8 elements of path should match depth-8 result
+    assert_eq!(&chunk14.path[0..8], &chunk8.path[..],
+        "Depth-14 tile should be descendant of depth-8 tile");
+}
+
+#[test]
+fn test_gps_to_chunk_id_north_pole() {
+    // North Pole should map to face 4 (+Z)
+    let north_pole = GpsPos { lat_deg: 90.0, lon_deg: 0.0, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&north_pole, 14);
+    
+    assert_eq!(chunk.face, 4, "North Pole should be on face 4 (+Z)");
+    assert_eq!(chunk.depth(), 14, "Should have depth 14");
+}
+
+#[test]
+fn test_gps_to_chunk_id_deterministic() {
+    // Same GPS position should always produce same ChunkId
+    let pos = GpsPos { lat_deg: 51.5074, lon_deg: -0.1278, elevation_m: 0.0 }; // London
+    
+    let chunk1 = gps_to_chunk_id(&pos, 10);
+    let chunk2 = gps_to_chunk_id(&pos, 10);
+    let chunk3 = gps_to_chunk_id(&pos, 10);
+    
+    assert_eq!(chunk1, chunk2, "Should be deterministic (run 1 vs 2)");
+    assert_eq!(chunk2, chunk3, "Should be deterministic (run 2 vs 3)");
+}
+
+#[test]
+fn test_gps_to_chunk_id_nearby_points_same_chunk() {
+    // Two points 20m apart at depth 14 (~779m tiles) should be in same chunk
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    
+    // Offset by ~20m (approximately 0.0002° at Brisbane's latitude)
+    let nearby = GpsPos { 
+        lat_deg: brisbane.lat_deg + 0.0002, 
+        lon_deg: brisbane.lon_deg, 
+        elevation_m: 0.0 
+    };
+    
+    let chunk1 = gps_to_chunk_id(&brisbane, 14);
+    let chunk2 = gps_to_chunk_id(&nearby, 14);
+    
+    // At 20m apart in a ~779m tile, they should usually be in same chunk
+    // (unless we're very close to a tile boundary)
+    // Check they're at least on the same face and share most of the path
+    assert_eq!(chunk1.face, chunk2.face, "Should be on same face");
+    
+    // Count how many path elements match
+    let mut matching = 0;
+    for i in 0..14 {
+        if chunk1.path[i] == chunk2.path[i] {
+            matching += 1;
+        } else {
+            break;
+        }
+    }
+    
+    // Should match at least the first 13 levels (differ only in last level at most)
+    assert!(matching >= 13, 
+        "Points 20m apart should share at least 13 path levels, matched {}", matching);
+}
+
+#[test]
+fn test_gps_to_chunk_id_distant_points_different_chunks() {
+    // Two points 500m apart at depth 14 should likely be in different chunks
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    
+    // Offset by ~500m (approximately 0.005° at Brisbane's latitude)
+    let distant = GpsPos { 
+        lat_deg: brisbane.lat_deg + 0.005, 
+        lon_deg: brisbane.lon_deg, 
+        elevation_m: 0.0 
+    };
+    
+    let chunk1 = gps_to_chunk_id(&brisbane, 14);
+    let chunk2 = gps_to_chunk_id(&distant, 14);
+    
+    assert_ne!(chunk1, chunk2, 
+        "Points 500m apart should be in different depth-14 chunks");
+}
+
+#[test]
+fn test_gps_to_chunk_id_parent_child_relationship() {
+    // Verify that deeper tiles are descendants of shallower tiles
+    let pos = GpsPos { lat_deg: 35.6762, lon_deg: 139.6503, elevation_m: 0.0 }; // Tokyo
+    
+    let depth5 = gps_to_chunk_id(&pos, 5);
+    let depth10 = gps_to_chunk_id(&pos, 10);
+    let depth15 = gps_to_chunk_id(&pos, 15);
+    
+    // All should be on same face
+    assert_eq!(depth10.face, depth5.face, "Should be on same face");
+    assert_eq!(depth15.face, depth5.face, "Should be on same face");
+    
+    // Path prefixes should match
+    assert_eq!(&depth10.path[0..5], &depth5.path[..], 
+        "Depth-10 should start with depth-5 path");
+    assert_eq!(&depth15.path[0..5], &depth5.path[..], 
+        "Depth-15 should start with depth-5 path");
+    assert_eq!(&depth15.path[0..10], &depth10.path[..], 
+        "Depth-15 should start with depth-10 path");
+}
+
+#[test]
+fn test_gps_to_chunk_id_all_quadrants_used() {
+    // Over many random points, all 4 quadrants (0-3) should be used
+    use std::collections::HashSet;
+    
+    let test_positions = vec![
+        GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.0, lon_deg: 90.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.0, lon_deg: 180.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.0, lon_deg: -90.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 45.0, lon_deg: 45.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: -45.0, lon_deg: -45.0, elevation_m: 0.0 },
+    ];
+    
+    let mut quadrants_seen = HashSet::new();
+    
+    for pos in test_positions {
+        let chunk = gps_to_chunk_id(&pos, 5);
+        for &q in &chunk.path {
+            quadrants_seen.insert(q);
+        }
+    }
+    
+    assert!(quadrants_seen.contains(&0), "Quadrant 0 should be used");
+    assert!(quadrants_seen.contains(&1), "Quadrant 1 should be used");
+    assert!(quadrants_seen.contains(&2), "Quadrant 2 should be used");
+    assert!(quadrants_seen.contains(&3), "Quadrant 3 should be used");
+}
