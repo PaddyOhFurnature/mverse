@@ -87,6 +87,78 @@ pub fn parse_hgt(filename: &str, bytes: &[u8]) -> Result<SrtmTile, Box<dyn std::
     })
 }
 
+/// Queries elevation at a specific GPS coordinate using bilinear interpolation
+///
+/// Returns None if:
+/// - The coordinate is outside the tile bounds
+/// - Any of the 4 nearest samples is void (-32768)
+pub fn get_elevation(tile: &SrtmTile, lat: f64, lon: f64) -> Option<f64> {
+    // Check if coordinate is within tile bounds
+    // Tile covers [sw_lat, sw_lat+1) × [sw_lon, sw_lon+1)
+    if lat < tile.sw_lat as f64 || lat >= (tile.sw_lat + 1) as f64 {
+        return None;
+    }
+    if lon < tile.sw_lon as f64 || lon >= (tile.sw_lon + 1) as f64 {
+        return None;
+    }
+    
+    let samples = tile.resolution.samples();
+    
+    // Convert lat/lon to grid coordinates
+    // Grid origin is NW corner (sw_lat + 1, sw_lon)
+    // Row 0 = north edge, Col 0 = west edge
+    let grid_lat = (tile.sw_lat + 1) as f64 - lat; // Distance from north edge
+    let grid_lon = lon - tile.sw_lon as f64; // Distance from west edge
+    
+    // Convert to sample indices (fractional)
+    let row_f = grid_lat * (samples - 1) as f64;
+    let col_f = grid_lon * (samples - 1) as f64;
+    
+    // Get integer indices of the 4 nearest samples
+    let row0 = row_f.floor() as usize;
+    let col0 = col_f.floor() as usize;
+    let row1 = row0 + 1;
+    let col1 = col0 + 1;
+    
+    // Check bounds
+    if row1 >= samples || col1 >= samples {
+        return None;
+    }
+    
+    // Get the 4 corner elevations
+    let idx_00 = row0 * samples + col0; // NW
+    let idx_01 = row0 * samples + col1; // NE
+    let idx_10 = row1 * samples + col0; // SW
+    let idx_11 = row1 * samples + col1; // SE
+    
+    let elev_00 = tile.elevations[idx_00];
+    let elev_01 = tile.elevations[idx_01];
+    let elev_10 = tile.elevations[idx_10];
+    let elev_11 = tile.elevations[idx_11];
+    
+    // Check for void values
+    const VOID: i16 = -32768;
+    if elev_00 == VOID || elev_01 == VOID || elev_10 == VOID || elev_11 == VOID {
+        return None;
+    }
+    
+    // Bilinear interpolation
+    let dx = col_f - col0 as f64; // Fractional part [0, 1)
+    let dy = row_f - row0 as f64; // Fractional part [0, 1)
+    
+    // Interpolate along top edge (row0)
+    let top = elev_00 as f64 * (1.0 - dx) + elev_01 as f64 * dx;
+    
+    // Interpolate along bottom edge (row1)
+    let bottom = elev_10 as f64 * (1.0 - dx) + elev_11 as f64 * dx;
+    
+    // Interpolate between top and bottom
+    let elevation = top * (1.0 - dy) + bottom * dy;
+    
+    Some(elevation)
+}
+
+
 /// Parses SRTM HGT filename to extract tile origin
 ///
 /// Examples:
