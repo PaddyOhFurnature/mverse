@@ -98,3 +98,74 @@ fn test_set_get_at_max_bounds() {
     assert_eq!(svo.get_voxel(max_coord, max_coord, max_coord), GLASS, 
         "Should work at max bounds");
 }
+
+// ============================================================================
+// Phase 3.3: Clear voxel tests
+// ============================================================================
+
+#[test]
+fn test_clear_voxel() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(50, 50, 50, STONE);
+    assert_eq!(svo.get_voxel(50, 50, 50), STONE);
+    
+    svo.clear_voxel(50, 50, 50);
+    assert_eq!(svo.get_voxel(50, 50, 50), AIR, "Cleared voxel should return AIR");
+}
+
+#[test]
+fn test_clear_already_empty() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    // Should not panic when clearing empty voxel
+    svo.clear_voxel(10, 10, 10);
+    assert_eq!(svo.get_voxel(10, 10, 10), AIR);
+}
+
+#[test]
+fn test_node_merging_all_empty() {
+    let mut svo = SparseVoxelOctree::new(4); // Small depth for easier testing
+    
+    // Set 8 voxels in the same parent octant
+    // At depth 4, these should all be siblings at the leaf level
+    svo.set_voxel(0, 0, 0, STONE);
+    svo.set_voxel(1, 0, 0, STONE);
+    svo.set_voxel(0, 1, 0, STONE);
+    svo.set_voxel(1, 1, 0, STONE);
+    svo.set_voxel(0, 0, 1, STONE);
+    svo.set_voxel(1, 0, 1, STONE);
+    svo.set_voxel(0, 1, 1, STONE);
+    svo.set_voxel(1, 1, 1, STONE);
+    
+    // Clear all 8
+    svo.clear_voxel(0, 0, 0);
+    svo.clear_voxel(1, 0, 0);
+    svo.clear_voxel(0, 1, 0);
+    svo.clear_voxel(1, 1, 0);
+    svo.clear_voxel(0, 0, 1);
+    svo.clear_voxel(1, 0, 1);
+    svo.clear_voxel(0, 1, 1);
+    svo.clear_voxel(1, 1, 1);
+    
+    // After clearing all 8 siblings, parent should collapse to Empty
+    // We can verify by checking root is Empty again
+    assert!(matches!(svo.root(), SvoNode::Empty), 
+        "After clearing all voxels, tree should collapse to Empty");
+}
+
+#[test]
+fn test_clear_does_not_merge_if_siblings_differ() {
+    let mut svo = SparseVoxelOctree::new(4);
+    
+    // Set some voxels
+    svo.set_voxel(0, 0, 0, STONE);
+    svo.set_voxel(1, 0, 0, DIRT); // Different material
+    
+    // Clear one
+    svo.clear_voxel(0, 0, 0);
+    
+    // Should not have collapsed (because sibling is DIRT, not empty)
+    assert_eq!(svo.get_voxel(0, 0, 0), AIR);
+    assert_eq!(svo.get_voxel(1, 0, 0), DIRT);
+}

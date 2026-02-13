@@ -115,6 +115,21 @@ impl SparseVoxelOctree {
         Self::get_voxel_recursive(&self.root, x, y, z, 0, self.max_depth, size)
     }
 
+    /// Clears a voxel (sets it to AIR)
+    ///
+    /// If clearing makes all 8 siblings Empty, the parent collapses to Empty.
+    ///
+    /// # Arguments
+    /// * `x`, `y`, `z` - Voxel coordinates
+    pub fn clear_voxel(&mut self, x: u32, y: u32, z: u32) {
+        let size = 1u32 << self.max_depth;
+        if x >= size || y >= size || z >= size {
+            return;
+        }
+        
+        Self::clear_voxel_recursive(&mut self.root, x, y, z, 0, self.max_depth, size);
+    }
+
     /// Recursive helper for set_voxel
     fn set_voxel_recursive(
         node: &mut SvoNode,
@@ -215,5 +230,64 @@ impl SparseVoxelOctree {
         
         // Octant encoding: z*4 + y*2 + x
         (z_bit << 2) | (y_bit << 1) | x_bit
+    }
+
+    /// Recursive helper for clear_voxel
+    fn clear_voxel_recursive(
+        node: &mut SvoNode,
+        x: u32, y: u32, z: u32,
+        depth: u8,
+        max_depth: u8,
+        size: u32,
+    ) {
+        match node {
+            SvoNode::Empty => {
+                // Already empty, nothing to do
+                return;
+            }
+            SvoNode::Solid(_) => {
+                // If we're at target depth, just set to Empty
+                if depth == max_depth {
+                    *node = SvoNode::Empty;
+                    return;
+                }
+                
+                // Need to subdivide solid, then clear
+                let material = if let SvoNode::Solid(m) = node { *m } else { unreachable!() };
+                *node = SvoNode::Branch(Box::new([
+                    SvoNode::Solid(material), SvoNode::Solid(material), 
+                    SvoNode::Solid(material), SvoNode::Solid(material),
+                    SvoNode::Solid(material), SvoNode::Solid(material), 
+                    SvoNode::Solid(material), SvoNode::Solid(material),
+                ]));
+            }
+            SvoNode::Branch(_) => {
+                // Continue recursion
+            }
+        }
+
+        // At this point, node must be Branch
+        let half_size = size / 2;
+        let octant = Self::compute_octant(x, y, z, half_size);
+        
+        if let SvoNode::Branch(children) = node {
+            let child_x = if x >= half_size { x - half_size } else { x };
+            let child_y = if y >= half_size { y - half_size } else { y };
+            let child_z = if z >= half_size { z - half_size } else { z };
+            
+            Self::clear_voxel_recursive(
+                &mut children[octant],
+                child_x, child_y, child_z,
+                depth + 1,
+                max_depth,
+                half_size,
+            );
+            
+            // After clearing, check if all children are Empty (node merging)
+            let all_empty = children.iter().all(|child| matches!(child, SvoNode::Empty));
+            if all_empty {
+                *node = SvoNode::Empty;
+            }
+        }
     }
 }
