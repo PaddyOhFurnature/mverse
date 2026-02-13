@@ -167,11 +167,74 @@
 
 ---
 
-## PHASE 2: QUAD-SPHERE CHUNKING SYSTEM
+## PHASE 2: QUAD-SPHERE CHUNKING SYSTEM ✅ COMPLETE
 
 > **Goal:** The sphere is divided into hierarchical tiles. Any GPS coordinate resolves to a tile at any depth. Tiles have neighbours, parents, children, and bounding geometry. Pure math and data structures — no rendering.
 
-- [ ] **2.1 — ChunkId data structure**
+**STATUS: ALL TASKS COMPLETE — 122 tests pass (48 coordinate + 74 chunk)**
+
+- [x] **2.1 — ChunkId data structure**
+  - ✅ Created src/chunks.rs and src/tests/chunk_tests.rs
+  - ✅ Implemented ChunkId with face (0-5) and path (Vec<u8>)
+  - ✅ Implemented depth(), root(), Display trait
+  - ✅ 6 tests pass
+
+- [x] **2.2 — Cube-face mapping (ECEF → face + UV)**
+  - ✅ Implemented ecef_to_cube_face()
+  - ✅ Face assignment by dominant axis
+  - ✅ UV projection onto [-1, 1]
+  - ✅ 8 tests pass, all 6 faces reachable
+
+- [x] **2.3 — Cube-to-sphere projection (forward and inverse)**
+  - ✅ Implemented cube_to_sphere() with Snyder's equal-area projection
+  - ✅ Implemented sphere_to_cube() with iterative inverse (20 iterations)
+  - ✅ Round-trip accuracy < 1mm
+  - ✅ 8 tests pass
+
+- [x] **2.4 — GPS → ChunkId at arbitrary depth**
+  - ✅ Implemented gps_to_chunk_id() with quadtree subdivision
+  - ✅ Deterministic and consistent
+  - ✅ 9 tests pass
+
+- [x] **2.5 — ChunkId → bounding geometry**
+  - ✅ Implemented chunk_center_ecef(), chunk_corners_ecef()
+  - ✅ Implemented chunk_bounding_radius(), chunk_approximate_width()
+  - ✅ Tile sizes: depth 0 ~9km, depth 8 ~45km, depth 14 ~779m
+  - ✅ 8 tests pass
+
+- [x] **2.6 — Neighbour queries**
+  - ✅ Implemented chunk_neighbors() returning 4 edge-adjacent tiles
+  - ✅ 6×4 face adjacency table for cross-face neighbours
+  - ✅ Same-face and cross-face logic working
+  - ✅ 9 tests pass (interior, edges, bidirectional, uniqueness)
+
+- [x] **2.7 — Parent and child queries**
+  - ✅ Implemented chunk_parent(), chunk_children()
+  - ✅ Parent-child consistency verified
+  - ✅ 8 tests pass
+
+- [x] **2.8 — Tile containment test**
+  - ✅ Implemented chunk_contains_gps()
+  - ✅ 6 tests pass
+
+- [x] **2.9 — Phase 2 scale gate tests**
+  - ✅ 100 random global points at depth 14: all valid
+  - ✅ All 6 faces cover sphere
+  - ✅ Adjacent tiles share corners within 1m
+  - ✅ Brisbane landmarks nearby at depth 14
+  - ✅ Chunk centers valid GPS on sphere
+  - ✅ Tile widths decrease with depth
+  - ✅ Global coverage verified
+  - ✅ 7 scale gate tests pass
+
+**DELIVERABLES:**
+- ✅ All 9 Phase 2 subtasks complete
+- ✅ 122 tests pass (exceeds 80+ requirement)
+- ✅ No failing tests
+- ✅ All code committed with descriptive messages
+- ✅ Ready for Phase 3
+
+
   - Create `src/chunks.rs`
   - Create `src/tests/chunk_tests.rs`
   - Add module declarations to `lib.rs` and `tests/mod.rs`
