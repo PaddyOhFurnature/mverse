@@ -34,3 +34,44 @@ pub struct EcefPos {
     /// Z coordinate in metres (through North Pole)
     pub z: f64,
 }
+
+/// Converts a GPS position to ECEF (Earth-Centered Earth-Fixed) coordinates.
+///
+/// Uses the WGS84 ellipsoid model. The resulting ECEF position is in metres,
+/// with origin at Earth's centre.
+///
+/// # Arguments
+/// * `gps` - GPS position with latitude/longitude in degrees and elevation in metres
+///
+/// # Returns
+/// ECEF position in metres
+///
+/// # Examples
+/// ```
+/// use metaverse_core::coordinates::{gps_to_ecef, GpsPos};
+/// let gps = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+/// let ecef = gps_to_ecef(&gps);
+/// // ecef.x ≈ -5046137, ecef.y ≈ 2568285, ecef.z ≈ -2924797
+/// ```
+pub fn gps_to_ecef(gps: &GpsPos) -> EcefPos {
+    // Convert degrees to radians
+    let phi = gps.lat_deg.to_radians();
+    let lambda = gps.lon_deg.to_radians();
+    let h = gps.elevation_m;
+    
+    // Compute prime vertical radius of curvature N(φ)
+    // N = a / sqrt(1 - e² × sin²(φ))
+    let sin_phi = phi.sin();
+    let n = WGS84_A / (1.0 - WGS84_E2 * sin_phi * sin_phi).sqrt();
+    
+    // Compute ECEF coordinates
+    let cos_phi = phi.cos();
+    let cos_lambda = lambda.cos();
+    let sin_lambda = lambda.sin();
+    
+    let x = (n + h) * cos_phi * cos_lambda;
+    let y = (n + h) * cos_phi * sin_lambda;
+    let z = (n * (1.0 - WGS84_E2) + h) * sin_phi;
+    
+    EcefPos { x, y, z }
+}
