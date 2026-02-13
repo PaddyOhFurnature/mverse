@@ -744,3 +744,124 @@ fn test_chunk_corners_form_quadrilateral() {
         }
     }
 }
+
+// ============================================================================
+// Phase 2.7: Parent and child queries tests
+// ============================================================================
+
+#[test]
+fn test_chunk_parent_depth_0() {
+    // Parent of depth-0 tile should be None
+    let root = ChunkId::root(0);
+    let parent = chunk_parent(&root);
+    
+    assert!(parent.is_none(), "Depth-0 tile should have no parent");
+}
+
+#[test]
+fn test_chunk_parent_depth_5() {
+    // Parent of depth-5 tile should be depth-4
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 5);
+    let parent = chunk_parent(&chunk);
+    
+    assert!(parent.is_some(), "Depth-5 tile should have a parent");
+    
+    let p = parent.unwrap();
+    assert_eq!(p.depth(), 4, "Parent should be depth 4");
+    assert_eq!(p.face, chunk.face, "Parent should be on same face");
+    assert_eq!(&p.path[..], &chunk.path[0..4], "Parent path should be first 4 elements");
+}
+
+#[test]
+fn test_chunk_children_count() {
+    // Should return exactly 4 children
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    let children = chunk_children(&chunk);
+    
+    assert_eq!(children.len(), 4, "Should have exactly 4 children");
+}
+
+#[test]
+fn test_chunk_children_distinct() {
+    // All 4 children should be distinct
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    let children = chunk_children(&chunk);
+    
+    for i in 0..4 {
+        for j in (i+1)..4 {
+            assert_ne!(children[i], children[j], 
+                "Children {} and {} should be distinct", i, j);
+        }
+    }
+}
+
+#[test]
+fn test_chunk_children_depth() {
+    // Children should be at depth = parent.depth + 1
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 45.0, lon_deg: 90.0, elevation_m: 0.0 }, 10);
+    let children = chunk_children(&chunk);
+    
+    for (i, child) in children.iter().enumerate() {
+        assert_eq!(child.depth(), chunk.depth() + 1, 
+            "Child {} should be at depth {}", i, chunk.depth() + 1);
+        assert_eq!(child.face, chunk.face, 
+            "Child {} should be on same face", i);
+    }
+}
+
+#[test]
+fn test_chunk_children_parent_round_trip() {
+    // child.parent() should equal original for all 4 children
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 8);
+    let children = chunk_children(&chunk);
+    
+    for (i, child) in children.iter().enumerate() {
+        let parent = chunk_parent(child);
+        assert!(parent.is_some(), "Child {} should have a parent", i);
+        assert_eq!(parent.unwrap(), chunk, 
+            "Child {}'s parent should equal original chunk", i);
+    }
+}
+
+#[test]
+fn test_chunk_gps_point_in_one_child() {
+    // A GPS point inside parent falls inside exactly one child
+    let parent = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    
+    // Pick a specific GPS point that should be in the parent
+    let test_point = GpsPos { lat_deg: 0.001, lon_deg: 0.001, elevation_m: 0.0 };
+    
+    // Get the chunk at parent's depth - should match parent
+    let parent_of_point = gps_to_chunk_id(&test_point, parent.depth() as u8);
+    assert_eq!(parent_of_point, parent, "Test point should be in parent tile");
+    
+    // Get the chunk at child depth
+    let child_of_point = gps_to_chunk_id(&test_point, (parent.depth() + 1) as u8);
+    
+    // This child should be one of the parent's 4 children
+    let children = chunk_children(&parent);
+    let matches: Vec<_> = children.iter().filter(|c| **c == child_of_point).collect();
+    
+    assert_eq!(matches.len(), 1, 
+        "Point should fall in exactly one child, found {} matches", matches.len());
+}
+
+#[test]
+fn test_chunk_grandparent_consistency() {
+    // Grandparent of grandchild should equal original
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10);
+    let children = chunk_children(&chunk);
+    
+    for child in &children {
+        let grandchildren = chunk_children(child);
+        for grandchild in &grandchildren {
+            // grandchild -> parent -> grandparent should equal chunk
+            let parent = chunk_parent(grandchild);
+            assert!(parent.is_some());
+            let grandparent = chunk_parent(&parent.unwrap());
+            assert!(grandparent.is_some());
+            assert_eq!(grandparent.unwrap(), chunk, 
+                "Grandparent should equal original chunk");
+        }
+    }
+}

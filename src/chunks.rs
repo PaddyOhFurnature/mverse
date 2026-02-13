@@ -495,3 +495,56 @@ fn chunk_uv_bounds(id: &ChunkId) -> (f64, f64, f64, f64) {
 fn ecef_distance(a: &EcefPos, b: &EcefPos) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
+
+/// Returns the parent tile of a given ChunkId
+///
+/// # Arguments
+/// * `id` - The ChunkId to get the parent of
+///
+/// # Returns
+/// Some(parent) if depth > 0, None if depth == 0
+///
+/// The parent is simply the tile with path truncated by one element.
+pub fn chunk_parent(id: &ChunkId) -> Option<ChunkId> {
+    if id.path.is_empty() {
+        // Depth 0 has no parent
+        None
+    } else {
+        // Parent has same face, path with last element removed
+        let mut parent_path = id.path.clone();
+        parent_path.pop();
+        Some(ChunkId {
+            face: id.face,
+            path: parent_path,
+        })
+    }
+}
+
+/// Returns the 4 children of a given ChunkId
+///
+/// # Arguments
+/// * `id` - The ChunkId to get children for
+///
+/// # Returns
+/// Array of 4 ChunkIds representing the quadrants (0=TL, 1=TR, 2=BL, 3=BR)
+///
+/// Each child has the same face, with path extended by one quadrant index.
+pub fn chunk_children(id: &ChunkId) -> [ChunkId; 4] {
+    let mut children = Vec::with_capacity(4);
+    
+    for quadrant in 0..4 {
+        let mut child_path = id.path.clone();
+        child_path.push(quadrant);
+        children.push(ChunkId {
+            face: id.face,
+            path: child_path,
+        });
+    }
+    
+    [
+        children[0].clone(),
+        children[1].clone(),
+        children[2].clone(),
+        children[3].clone(),
+    ]
+}
