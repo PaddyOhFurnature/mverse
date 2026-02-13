@@ -5,6 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
+    mesh::generate_earth_sphere,
     Renderer
 };
 use std::sync::Arc;
@@ -21,6 +22,8 @@ struct App {
     pipeline: Option<BasicPipeline>,
     camera: Camera,
     vertex_buffer: Option<wgpu::Buffer>,
+    index_buffer: Option<wgpu::Buffer>,
+    num_indices: u32,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -33,12 +36,33 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        // Start camera far from sphere so we can see it
+        let mut camera = Camera::brisbane();
+        
+        // Move camera back so we can see the whole sphere
+        // Earth radius is ~6.4M meters, so move back to ~10M meters
+        let distance_from_center = 10_000_000.0; // 10,000 km
+        camera.position = camera.position.normalize() * distance_from_center;
+        
+        // Look at Earth center
+        camera.orientation = {
+            use glam::{DVec3, DQuat, DMat3};
+            let forward = -camera.position.normalize(); // Look toward origin
+            let up = DVec3::Z;
+            let right = forward.cross(up).normalize();
+            let up = right.cross(forward).normalize();
+            let rotation_matrix = DMat3::from_cols(right, up, -forward);
+            DQuat::from_mat3(&rotation_matrix)
+        };
+        
         Self {
             window: None,
             renderer: None,
             pipeline: None,
-            camera: Camera::brisbane(),
+            camera,
             vertex_buffer: None,
+            index_buffer: None,
+            num_indices: 0,
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -112,32 +136,25 @@ impl ApplicationHandler for App {
             // Create pipeline
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
             
-            // Create a test triangle
-            let vertices = vec![
-                Vertex {
-                    position: [0.0, 0.5, 0.0],
-                    normal: [0.0, 0.0, 1.0],
-                    color: [1.0, 0.0, 0.0, 1.0], // Red
-                },
-                Vertex {
-                    position: [-0.5, -0.5, 0.0],
-                    normal: [0.0, 0.0, 1.0],
-                    color: [0.0, 1.0, 0.0, 1.0], // Green
-                },
-                Vertex {
-                    position: [0.5, -0.5, 0.0],
-                    normal: [0.0, 0.0, 1.0],
-                    color: [0.0, 0.0, 1.0, 1.0], // Blue
-                },
-            ];
+            // Generate Earth sphere
+            let (vertices, indices) = generate_earth_sphere();
+            let num_indices = indices.len() as u32;
             
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Triangle Vertex Buffer"),
+                label: Some("Earth Sphere Vertex Buffer"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
             
+            let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Earth Sphere Index Buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            
             self.vertex_buffer = Some(vertex_buffer);
+            self.index_buffer = Some(index_buffer);
+            self.num_indices = num_indices;
             self.pipeline = Some(pipeline);
             self.renderer = Some(renderer);
             self.window = Some(window);
@@ -214,13 +231,24 @@ impl ApplicationHandler for App {
                 // Handle input
                 self.handle_input(delta_time);
                 
-                if let (Some(renderer), Some(window), Some(pipeline), Some(vertex_buffer)) = 
-                    (&mut self.renderer, &self.window, &self.pipeline, &self.vertex_buffer) {
+                if let (Some(renderer), Some(window), Some(pipeline), Some(vertex_buffer), Some(index_buffer)) = 
+                    (&mut self.renderer, &self.window, &self.pipeline, &self.vertex_buffer, &self.index_buffer) {
                     
-                    // Update camera matrix
+                    // Update camera matrix with floating origin
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
-                    let (view_proj, _offset) = self.camera.view_projection_matrix(aspect);
-                    pipeline.update_uniforms(&renderer.queue, view_proj);
+                    let (view_proj, camera_offset) = self.camera.view_projection_matrix(aspect);
+                    
+                    // Apply floating origin: translate sphere by -camera_offset before rendering
+                    // This is done by offsetting the MVP matrix
+                    let camera_offset_f32 = glam::Vec3::new(
+                        camera_offset.x as f32,
+                        camera_offset.y as f32,
+                        camera_offset.z as f32,
+                    );
+                    let origin_transform = glam::Mat4::from_translation(-camera_offset_f32);
+                    let final_view_proj = view_proj * origin_transform;
+                    
+                    pipeline.update_uniforms(&renderer.queue, final_view_proj);
                     
                     // Sky blue color
                     let clear_color = wgpu::Color {
@@ -230,12 +258,14 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame with triangle
+                    // Render frame with sphere
+                    let num_indices = self.num_indices;
                     let result = renderer.render(clear_color, |render_pass| {
                         render_pass.set_pipeline(&pipeline.pipeline);
                         render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
                         render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                        render_pass.draw(0..3, 0..1);
+                        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..num_indices, 0, 0..1);
                     });
 
                     match result {

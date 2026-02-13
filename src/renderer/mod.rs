@@ -6,6 +6,7 @@
 pub mod pipeline;
 pub mod camera;
 pub mod shaders;
+pub mod mesh;
 
 use wgpu;
 use winit::window::Window;
