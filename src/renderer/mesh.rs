@@ -287,6 +287,112 @@ fn generate_all_paths(depth: u8) -> Vec<Vec<u8>> {
     paths
 }
 
+/// Generate a terrain patch for a chunk
+///
+/// Creates a subdivided quad mesh on the sphere surface for the given chunk.
+/// The quad is subdivided into a grid to follow the sphere's curvature smoothly.
+/// - `chunk_id`: The chunk to generate a patch for
+/// - `subdivisions`: Number of grid divisions per side (e.g., 16 = 16×16 = 256 quads)
+/// - `color`: Color for the patch (e.g., green for terrain)
+///
+/// Returns (vertices, indices) for the patch mesh.
+pub fn generate_chunk_patch(chunk_id: &crate::chunks::ChunkId, subdivisions: u32, color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    use crate::chunks::chunk_corners_ecef;
+    
+    let corners = chunk_corners_ecef(chunk_id);
+    
+    // Convert to Vec3
+    let c0 = Vec3::new(corners[0].x as f32, corners[0].y as f32, corners[0].z as f32);
+    let c1 = Vec3::new(corners[1].x as f32, corners[1].y as f32, corners[1].z as f32);
+    let c2 = Vec3::new(corners[2].x as f32, corners[2].y as f32, corners[2].z as f32);
+    let c3 = Vec3::new(corners[3].x as f32, corners[3].y as f32, corners[3].z as f32);
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Generate grid vertices
+    for row in 0..=subdivisions {
+        let v = row as f32 / subdivisions as f32; // 0 to 1
+        
+        for col in 0..=subdivisions {
+            let u = col as f32 / subdivisions as f32; // 0 to 1
+            
+            // Bilinear interpolation between corners
+            let p0 = c0.lerp(c1, u);
+            let p1 = c3.lerp(c2, u);
+            let pos = p0.lerp(p1, v);
+            
+            // Project onto sphere surface at constant radius
+            // Handle case where interpolation passes near origin
+            let earth_radius = WGS84_A as f32;
+            let len = pos.length();
+            let projected = if len > 1.0 {
+                pos.normalize() * earth_radius
+            } else {
+                // Fallback: if too close to origin, just use the up direction
+                Vec3::Z * earth_radius
+            };
+            
+            let normal = projected.normalize();
+            
+            vertices.push(Vertex {
+                position: projected.to_array(),
+                normal: normal.to_array(),
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+    }
+    
+    // Generate indices for triangles
+    for row in 0..subdivisions {
+        for col in 0..subdivisions {
+            let base = row * (subdivisions + 1) + col;
+            let next_row = base + subdivisions + 1;
+            
+            // Two triangles per quad
+            indices.push(base);
+            indices.push(next_row);
+            indices.push(base + 1);
+            
+            indices.push(base + 1);
+            indices.push(next_row);
+            indices.push(next_row + 1);
+        }
+    }
+    
+    (vertices, indices)
+}
+
+/// Generate terrain patches for multiple chunks
+///
+/// - `depth`: Chunk depth level
+/// - `subdivisions`: Grid subdivisions per chunk
+/// - `color`: Color for all patches
+///
+/// Returns combined (vertices, indices) for all patches.
+pub fn generate_terrain_patches(depth: u8, subdivisions: u32, color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    use crate::chunks::ChunkId;
+    
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    let all_paths = generate_all_paths(depth);
+    
+    for face in 0..6 {
+        for path in &all_paths {
+            let chunk_id = ChunkId { face, path: path.clone() };
+            let (vertices, indices) = generate_chunk_patch(&chunk_id, subdivisions, color);
+            
+            // Offset indices by current vertex count
+            let vertex_offset = all_vertices.len() as u32;
+            all_vertices.extend(vertices);
+            all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
+        }
+    }
+    
+    (all_vertices, all_indices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,6 +473,51 @@ mod tests {
                 + vertex.normal[2] * vertex.normal[2];
             let len = len_sq.sqrt();
             assert!((len - 1.0).abs() < 0.01); // Within 1%
+        }
+    }
+    
+    #[test]
+    fn test_chunk_patch_generation() {
+        use crate::chunks::ChunkId;
+        
+        // Generate a patch for depth-0 chunk on face 0
+        let chunk_id = ChunkId { face: 0, path: vec![] };
+        let (vertices, indices) = generate_chunk_patch(&chunk_id, 4, glam::Vec3::new(0.0, 1.0, 0.0));
+        
+        // Should have (subdivisions+1)^2 vertices
+        assert_eq!(vertices.len(), 5 * 5);
+        
+        // Should have subdivisions^2 * 6 indices (2 triangles per quad)
+        assert_eq!(indices.len(), 4 * 4 * 6);
+        
+        // All vertices should be at Earth radius (we project onto constant radius sphere)
+        let expected_radius = WGS84_A as f32;
+        for (i, vertex) in vertices.iter().enumerate() {
+            let len = (vertex.position[0] * vertex.position[0]
+                + vertex.position[1] * vertex.position[1]
+                + vertex.position[2] * vertex.position[2]).sqrt();
+            let diff = (len - expected_radius).abs();
+            if i == 0 || diff > 1.0 {
+                println!("Vertex {}: len={}, expected={}, diff={}", i, len, expected_radius, diff);
+            }
+            // Should be exact since we normalize and multiply by exact radius
+            assert!(diff < 10.0, "Vertex {} radius {} differs from expected {} by {}", i, len, expected_radius, diff);
+        }
+    }
+    
+    #[test]
+    fn test_terrain_patches_multiple_chunks() {
+        let (vertices, indices) = generate_terrain_patches(0, 4, glam::Vec3::new(0.0, 1.0, 0.0));
+        
+        // Depth 0 = 6 chunks, each with (4+1)^2 = 25 vertices
+        assert_eq!(vertices.len(), 6 * 25);
+        
+        // Each chunk has 4*4*6 = 96 indices
+        assert_eq!(indices.len(), 6 * 96);
+        
+        // All indices should be valid
+        for &idx in &indices {
+            assert!((idx as usize) < vertices.len());
         }
     }
 }

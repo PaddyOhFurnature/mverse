@@ -5,7 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
-    mesh::{generate_earth_sphere, generate_tile_outlines},
+    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches},
     Renderer
 };
 use std::sync::Arc;
@@ -28,7 +28,13 @@ struct App {
     tile_vertex_buffer: Option<wgpu::Buffer>,
     tile_index_buffer: Option<wgpu::Buffer>,
     tile_num_indices: u32,
+    terrain_vertex_buffer: Option<wgpu::Buffer>,
+    terrain_index_buffer: Option<wgpu::Buffer>,
+    terrain_num_indices: u32,
     tile_depth: u8,
+    show_sphere: bool,
+    show_tiles: bool,
+    show_terrain: bool,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -72,7 +78,13 @@ impl App {
             tile_vertex_buffer: None,
             tile_index_buffer: None,
             tile_num_indices: 0,
-            tile_depth: 0, // Start with depth 0 (6 tiles)
+            terrain_vertex_buffer: None,
+            terrain_index_buffer: None,
+            terrain_num_indices: 0,
+            tile_depth: 2, // Start with depth 2 (96 tiles)
+            show_sphere: false, // Hide sphere by default
+            show_tiles: true,
+            show_terrain: true,
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -173,7 +185,7 @@ impl ApplicationHandler for App {
             self.pipeline = Some(pipeline);
             self.line_pipeline = Some(line_pipeline);
             
-            // Generate initial tiles
+            // Generate initial tiles and terrain
             let (tile_vertices, tile_indices) = generate_tile_outlines(self.tile_depth, None);
             let tile_num_indices = tile_indices.len() as u32;
             
@@ -189,9 +201,32 @@ impl ApplicationHandler for App {
                 usage: wgpu::BufferUsages::INDEX,
             });
             
+            // Generate terrain patches (green)
+            let (terrain_vertices, terrain_indices) = generate_terrain_patches(
+                self.tile_depth, 
+                16, // 16x16 subdivisions
+                glam::Vec3::new(0.2, 0.8, 0.2) // Green
+            );
+            let terrain_num_indices = terrain_indices.len() as u32;
+            
+            let terrain_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Terrain Patch Vertex Buffer"),
+                contents: bytemuck::cast_slice(&terrain_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            
+            let terrain_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Terrain Patch Index Buffer"),
+                contents: bytemuck::cast_slice(&terrain_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            
             self.tile_vertex_buffer = Some(tile_vertex_buffer);
             self.tile_index_buffer = Some(tile_index_buffer);
             self.tile_num_indices = tile_num_indices;
+            self.terrain_vertex_buffer = Some(terrain_vertex_buffer);
+            self.terrain_index_buffer = Some(terrain_index_buffer);
+            self.terrain_num_indices = terrain_num_indices;
             
             self.renderer = Some(renderer);
             self.window = Some(window);
@@ -220,6 +255,7 @@ impl ApplicationHandler for App {
                             if keycode == KeyCode::BracketLeft && self.tile_depth > 0 {
                                 self.tile_depth -= 1;
                                 if let Some(renderer) = &self.renderer {
+                                    // Regenerate tiles
                                     let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
                                     let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                         label: Some("Tile Outline Vertex Buffer"),
@@ -234,12 +270,32 @@ impl ApplicationHandler for App {
                                     self.tile_vertex_buffer = Some(vertex_buffer);
                                     self.tile_index_buffer = Some(index_buffer);
                                     self.tile_num_indices = indices.len() as u32;
+                                    
+                                    // Regenerate terrain
+                                    let (terrain_verts, terrain_inds) = generate_terrain_patches(
+                                        self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2)
+                                    );
+                                    let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Terrain Patch Vertex Buffer"),
+                                        contents: bytemuck::cast_slice(&terrain_verts),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                                    let terrain_ib = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Terrain Patch Index Buffer"),
+                                        contents: bytemuck::cast_slice(&terrain_inds),
+                                        usage: wgpu::BufferUsages::INDEX,
+                                    });
+                                    self.terrain_vertex_buffer = Some(terrain_vb);
+                                    self.terrain_index_buffer = Some(terrain_ib);
+                                    self.terrain_num_indices = terrain_inds.len() as u32;
+                                    
                                     println!("Generated tiles at depth {} ({} tiles)", 
                                         self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
                                 }
-                            } else if keycode == KeyCode::BracketRight && self.tile_depth < 6 {
+                            } else if keycode == KeyCode::BracketRight && self.tile_depth < 5 {
                                 self.tile_depth += 1;
                                 if let Some(renderer) = &self.renderer {
+                                    // Regenerate tiles
                                     let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
                                     let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                         label: Some("Tile Outline Vertex Buffer"),
@@ -254,9 +310,40 @@ impl ApplicationHandler for App {
                                     self.tile_vertex_buffer = Some(vertex_buffer);
                                     self.tile_index_buffer = Some(index_buffer);
                                     self.tile_num_indices = indices.len() as u32;
+                                    
+                                    // Regenerate terrain
+                                    let (terrain_verts, terrain_inds) = generate_terrain_patches(
+                                        self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2)
+                                    );
+                                    let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Terrain Patch Vertex Buffer"),
+                                        contents: bytemuck::cast_slice(&terrain_verts),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                                    let terrain_ib = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Terrain Patch Index Buffer"),
+                                        contents: bytemuck::cast_slice(&terrain_inds),
+                                        usage: wgpu::BufferUsages::INDEX,
+                                    });
+                                    self.terrain_vertex_buffer = Some(terrain_vb);
+                                    self.terrain_index_buffer = Some(terrain_ib);
+                                    self.terrain_num_indices = terrain_inds.len() as u32;
+                                    
                                     println!("Generated tiles at depth {} ({} tiles)", 
                                         self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
                                 }
+                            }
+                            
+                            // Toggle visibility
+                            if keycode == KeyCode::Digit1 {
+                                self.show_sphere = !self.show_sphere;
+                                println!("Sphere: {}", if self.show_sphere { "ON" } else { "OFF" });
+                            } else if keycode == KeyCode::Digit2 {
+                                self.show_tiles = !self.show_tiles;
+                                println!("Tiles: {}", if self.show_tiles { "ON" } else { "OFF" });
+                            } else if keycode == KeyCode::Digit3 {
+                                self.show_terrain = !self.show_terrain;
+                                println!("Terrain: {}", if self.show_terrain { "ON" } else { "OFF" });
                             }
                             
                             // Toggle mouse capture on click
@@ -311,8 +398,8 @@ impl ApplicationHandler for App {
                 // Handle input
                 self.handle_input(delta_time);
                 
-                if let (Some(renderer), Some(window), Some(pipeline), Some(line_pipeline), Some(sphere_vb), Some(sphere_ib), Some(tile_vb), Some(tile_ib)) = 
-                    (&mut self.renderer, &self.window, &self.pipeline, &self.line_pipeline, &self.sphere_vertex_buffer, &self.sphere_index_buffer, &self.tile_vertex_buffer, &self.tile_index_buffer) {
+                if let (Some(renderer), Some(window), Some(pipeline), Some(line_pipeline), Some(sphere_vb), Some(sphere_ib), Some(tile_vb), Some(tile_ib), Some(terrain_vb), Some(terrain_ib)) = 
+                    (&mut self.renderer, &self.window, &self.pipeline, &self.line_pipeline, &self.sphere_vertex_buffer, &self.sphere_index_buffer, &self.tile_vertex_buffer, &self.tile_index_buffer, &self.terrain_vertex_buffer, &self.terrain_index_buffer) {
                     
                     // Update camera matrix with floating origin
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
@@ -338,23 +425,41 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame with sphere and tile outlines
+                    // Render frame with conditional geometry
                     let sphere_num_indices = self.sphere_num_indices;
                     let tile_num_indices = self.tile_num_indices;
+                    let terrain_num_indices = self.terrain_num_indices;
+                    let show_sphere = self.show_sphere;
+                    let show_tiles = self.show_tiles;
+                    let show_terrain = self.show_terrain;
+                    
                     let result = renderer.render(clear_color, |render_pass| {
-                        // Draw sphere
-                        render_pass.set_pipeline(&pipeline.pipeline);
-                        render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                        render_pass.set_vertex_buffer(0, sphere_vb.slice(..));
-                        render_pass.set_index_buffer(sphere_ib.slice(..), wgpu::IndexFormat::Uint32);
-                        render_pass.draw_indexed(0..sphere_num_indices, 0, 0..1);
+                        // Draw terrain patches first (behind everything)
+                        if show_terrain {
+                            render_pass.set_pipeline(&pipeline.pipeline);
+                            render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                            render_pass.set_vertex_buffer(0, terrain_vb.slice(..));
+                            render_pass.set_index_buffer(terrain_ib.slice(..), wgpu::IndexFormat::Uint32);
+                            render_pass.draw_indexed(0..terrain_num_indices, 0, 0..1);
+                        }
                         
-                        // Draw tile outlines
-                        render_pass.set_pipeline(&line_pipeline.pipeline);
-                        render_pass.set_bind_group(0, &line_pipeline.uniform_bind_group, &[]);
-                        render_pass.set_vertex_buffer(0, tile_vb.slice(..));
-                        render_pass.set_index_buffer(tile_ib.slice(..), wgpu::IndexFormat::Uint32);
-                        render_pass.draw_indexed(0..tile_num_indices, 0, 0..1);
+                        // Draw sphere
+                        if show_sphere {
+                            render_pass.set_pipeline(&pipeline.pipeline);
+                            render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                            render_pass.set_vertex_buffer(0, sphere_vb.slice(..));
+                            render_pass.set_index_buffer(sphere_ib.slice(..), wgpu::IndexFormat::Uint32);
+                            render_pass.draw_indexed(0..sphere_num_indices, 0, 0..1);
+                        }
+                        
+                        // Draw tile outlines (on top)
+                        if show_tiles {
+                            render_pass.set_pipeline(&line_pipeline.pipeline);
+                            render_pass.set_bind_group(0, &line_pipeline.uniform_bind_group, &[]);
+                            render_pass.set_vertex_buffer(0, tile_vb.slice(..));
+                            render_pass.set_index_buffer(tile_ib.slice(..), wgpu::IndexFormat::Uint32);
+                            render_pass.draw_indexed(0..tile_num_indices, 0, 0..1);
+                        }
                     });
 
                     match result {
@@ -409,8 +514,10 @@ fn main() {
     println!("  Q/E or Shift/Space - Move down/up");
     println!("  Right Shift - 10x speed boost");
     println!("  Left Ctrl - 0.1x speed (slow)");
-    println!("  [ ] - Decrease/increase tile depth (0-6)");
-    println!("  Left Click - Capture mouse for look");
+    println!("  [ ] - Decrease/increase tile depth (0-5)");
+    println!("  1 - Toggle sphere visibility");
+    println!("  2 - Toggle tile outlines");
+    println!("  3 - Toggle terrain patches");
     println!("  Escape - Release mouse");
     println!();
 
