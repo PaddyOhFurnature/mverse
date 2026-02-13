@@ -374,11 +374,72 @@
 
 ---
 
-## PHASE 3: SPARSE VOXEL OCTREE ENGINE
+## PHASE 3: SPARSE VOXEL OCTREE ENGINE ✅ COMPLETE
 
 > **Goal:** A working SVO that stores volumetric data, supports set/clear/query, produces deterministic op logs, and serialises to bytes. Data structure only — no rendering.
 
-- [ ] **3.1 — SVO data structure**
+**STATUS: ALL TASKS COMPLETE — 161 tests pass (122 Phase 1+2 + 39 Phase 3)**
+
+- [x] **3.1 — SVO data structure**
+  - ✅ Created src/svo.rs and src/tests/svo_tests.rs
+  - ✅ Defined SvoNode (Empty, Solid, Branch), MaterialId, SparseVoxelOctree
+  - ✅ 12 material constants (AIR through ASPHALT)
+  - ✅ 3 tests pass
+
+- [x] **3.2 — Set and get voxel**
+  - ✅ Implemented set_voxel() with recursive subdivision
+  - ✅ Implemented get_voxel() with recursive traversal
+  - ✅ 6 tests pass
+
+- [x] **3.3 — Clear voxel**
+  - ✅ Implemented clear_voxel() with node merging
+  - ✅ Collapses to Empty when all siblings empty
+  - ✅ 4 tests pass
+
+- [x] **3.4 — Fill and clear region**
+  - ✅ Implemented fill_region() for bulk operations
+  - ✅ Implemented clear_region()
+  - ✅ 5 tests pass
+
+- [x] **3.5 — Op log**
+  - ✅ All mutations logged (SetVoxel, ClearVoxel, FillRegion, ClearRegion)
+  - ✅ Implemented op_log(), clear_op_log(), apply_ops()
+  - ✅ 4 tests pass
+
+- [x] **3.6 — Determinism and content hashing**
+  - ✅ Added sha2 dependency
+  - ✅ Implemented content_hash() returning SHA-256
+  - ✅ Same ops = same hash, different states = different hash
+  - ✅ 4 tests pass
+
+- [x] **3.7 — Binary serialisation**
+  - ✅ Added serde and bincode dependencies
+  - ✅ Implemented serialize() and deserialize()
+  - ✅ Round-trip lossless, empty SVO < 100 bytes
+  - ✅ 5 tests pass
+
+- [x] **3.8 — Memory efficiency**
+  - ✅ Empty SVO root < 100 bytes
+  - ✅ Single voxel scales with depth, not volume
+  - ✅ Sparse data memory << full volume
+  - ✅ 4 tests pass
+
+- [x] **3.9 — Phase 3 scale gate tests**
+  - ✅ Depth 8 (256³): 10K voxels set/get/clear correctly
+  - ✅ Depth 10 (1024³): operations work at scale
+  - ✅ Op log replay produces identical hash
+  - ✅ Serialize/deserialize preserves content
+  - ✅ 4 tests pass
+
+**DELIVERABLES:**
+- ✅ All 9 Phase 3 subtasks complete
+- ✅ 39 SVO tests pass (exceeds 25+ requirement from Phase 3.9)
+- ✅ 161 total tests pass (122 Phase 1+2 + 39 Phase 3)
+- ✅ No failing tests
+- ✅ All code committed with descriptive messages
+- ✅ Ready for Phase 4
+
+
   - Create `src/svo.rs` and `src/tests/svo_tests.rs`
   - Add module declarations
   - Define:
