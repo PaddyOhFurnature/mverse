@@ -554,3 +554,109 @@ fn test_sparse_data_memory_efficiency() {
     println!("10K voxels in 1024³ space: {} bytes ({:.1} KB)", 
         serialized_size, serialized_size as f64 / 1024.0);
 }
+
+// ============================================================================
+// Phase 3.9: Scale gate tests
+// ============================================================================
+
+#[test]
+fn test_scale_gate_depth_8_10k_voxels() {
+    let mut svo = SparseVoxelOctree::new(8); // 256³ space
+    
+    // Create a map to track what we actually set (some coords may collide with modulo)
+    use std::collections::HashMap;
+    let mut expected_materials: HashMap<(u32, u32, u32), MaterialId> = HashMap::new();
+    
+    // Set 10,000 voxels
+    for i in 0..10_000 {
+        let x = (i * 7) % 256;
+        let y = (i * 11) % 256;
+        let z = (i * 13) % 256;
+        let material = MaterialId((i % 10) as u16 + 1);
+        svo.set_voxel(x, y, z, material);
+        expected_materials.insert((x, y, z), material);
+    }
+    
+    // Verify all can be retrieved correctly
+    for ((x, y, z), expected) in &expected_materials {
+        assert_eq!(svo.get_voxel(*x, *y, *z), *expected,
+            "Voxel at ({},{},{}) should be {:?}", x, y, z, expected);
+    }
+    
+    // Clear every 3rd voxel
+    let positions: Vec<_> = expected_materials.keys().copied().collect();
+    for (idx, (x, y, z)) in positions.iter().enumerate() {
+        if idx % 3 == 0 {
+            svo.clear_voxel(*x, *y, *z);
+        }
+    }
+    
+    // Verify cleared
+    for (idx, (x, y, z)) in positions.iter().enumerate() {
+        if idx % 3 == 0 {
+            assert_eq!(svo.get_voxel(*x, *y, *z), AIR,
+                "Cleared voxel at ({},{},{}) should be AIR", x, y, z);
+        }
+    }
+}
+
+#[test]
+fn test_scale_gate_depth_10_works() {
+    let mut svo = SparseVoxelOctree::new(10); // 1024³ space
+    
+    // Set some voxels across the space
+    svo.set_voxel(0, 0, 0, STONE);
+    svo.set_voxel(1023, 1023, 1023, DIRT);
+    svo.set_voxel(512, 512, 512, CONCRETE);
+    
+    assert_eq!(svo.get_voxel(0, 0, 0), STONE);
+    assert_eq!(svo.get_voxel(1023, 1023, 1023), DIRT);
+    assert_eq!(svo.get_voxel(512, 512, 512), CONCRETE);
+}
+
+#[test]
+fn test_scale_gate_op_log_replay_depth_8() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    
+    // Perform operations
+    for i in 0..1000 {
+        let x = (i * 7) % 256;
+        let y = (i * 11) % 256;
+        let z = (i * 13) % 256;
+        svo1.set_voxel(x, y, z, STONE);
+    }
+    
+    let ops = svo1.op_log().to_vec();
+    let hash1 = svo1.content_hash();
+    
+    // Replay on fresh SVO
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.apply_ops(&ops);
+    let hash2 = svo2.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Op log replay at depth 8 should produce identical hash");
+}
+
+#[test]
+fn test_scale_gate_serialize_deserialize_depth_10() {
+    let mut svo = SparseVoxelOctree::new(10);
+    
+    // Add some data
+    for i in 0..500 {
+        let x = (i * 7) % 1024;
+        let y = (i * 11) % 1024;
+        let z = (i * 13) % 1024;
+        svo.set_voxel(x, y, z, STONE);
+    }
+    
+    let hash1 = svo.content_hash();
+    
+    // Serialize and deserialize
+    let bytes = svo.serialize();
+    let deserialized = SparseVoxelOctree::deserialize(&bytes).unwrap();
+    let hash2 = deserialized.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Serialize/deserialize at depth 10 should preserve content hash");
+}
