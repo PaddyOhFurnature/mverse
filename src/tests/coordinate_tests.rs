@@ -294,3 +294,141 @@ fn test_ecef_to_gps_round_trip_negative_elevation() {
     assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
         "Elev: {} vs {}", result.elevation_m, original.elevation_m);
 }
+
+// ============================================================================
+// Haversine great-circle distance tests
+// ============================================================================
+
+#[test]
+fn test_haversine_same_point() {
+    let point = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let distance = haversine_distance(&point, &point);
+    assert_eq!(distance, 0.0, "Distance to same point should be exactly 0");
+}
+
+#[test]
+fn test_haversine_brisbane_to_story_bridge() {
+    // Queen Street Mall to Story Bridge (Brisbane CBD)
+    let queen_st = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let story_bridge = GpsPos {
+        lat_deg: -27.4634,
+        lon_deg: 153.0394,
+        elevation_m: 0.0,
+    };
+    
+    let distance = haversine_distance(&queen_st, &story_bridge);
+    let expected = 1582.0; // metres
+    let tolerance = 10.0;
+    
+    assert!(
+        (distance - expected).abs() < tolerance,
+        "Distance = {:.1}m, expected ≈ {}m (±{}m)",
+        distance, expected, tolerance
+    );
+}
+
+#[test]
+fn test_haversine_brisbane_to_sydney() {
+    let brisbane = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let sydney = GpsPos {
+        lat_deg: -33.8688,
+        lon_deg: 151.2093,
+        elevation_m: 0.0,
+    };
+    
+    let distance = haversine_distance(&brisbane, &sydney);
+    let expected = 732_000.0; // metres
+    let tolerance = 5_000.0;
+    
+    assert!(
+        (distance - expected).abs() < tolerance,
+        "Distance = {:.0}m, expected ≈ {}m (±{}m)",
+        distance, expected, tolerance
+    );
+}
+
+#[test]
+fn test_haversine_brisbane_to_london() {
+    let brisbane = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let london = GpsPos {
+        lat_deg: 51.5074,
+        lon_deg: -0.1278,
+        elevation_m: 0.0,
+    };
+    
+    let distance = haversine_distance(&brisbane, &london);
+    let expected = 16_500_000.0; // metres
+    let tolerance = 100_000.0;
+    
+    assert!(
+        (distance - expected).abs() < tolerance,
+        "Distance = {:.0}m, expected ≈ {}m (±{}m)",
+        distance, expected, tolerance
+    );
+}
+
+#[test]
+fn test_haversine_antipodal() {
+    // Antipodal points: opposite sides of Earth
+    let point1 = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let point2 = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 180.0,
+        elevation_m: 0.0,
+    };
+    
+    let distance = haversine_distance(&point1, &point2);
+    let expected = 20_015_000.0; // Half Earth's circumference
+    let tolerance = 50_000.0;
+    
+    assert!(
+        (distance - expected).abs() < tolerance,
+        "Distance = {:.0}m, expected ≈ {}m (±{}m)",
+        distance, expected, tolerance
+    );
+}
+
+#[test]
+fn test_haversine_short_distance() {
+    // Two points approximately 1m apart
+    let point1 = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let point2 = GpsPos {
+        lat_deg: 0.000009, // ~1 metre north at equator
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    
+    let distance = haversine_distance(&point1, &point2);
+    let expected = 1.0; // metres
+    let tolerance = 0.1;
+    
+    assert!(
+        (distance - expected).abs() < tolerance,
+        "Distance = {:.3}m, expected ≈ {}m (±{}m)",
+        distance, expected, tolerance
+    );
+}

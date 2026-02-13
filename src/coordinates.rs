@@ -144,3 +144,40 @@ pub fn ecef_to_gps(ecef: &EcefPos) -> GpsPos {
         elevation_m: h,
     }
 }
+
+/// Calculates the great-circle distance between two GPS positions using the Haversine formula.
+///
+/// Returns the distance along the surface of the WGS84 ellipsoid (approximated as a sphere
+/// with radius = WGS84_A). Ignores elevation differences.
+///
+/// # Arguments
+/// * `a` - First GPS position
+/// * `b` - Second GPS position
+///
+/// # Returns
+/// Distance in metres along the great circle
+///
+/// # Examples
+/// ```
+/// use metaverse_core::coordinates::{haversine_distance, GpsPos};
+/// let brisbane = GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 };
+/// let sydney = GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 };
+/// let distance = haversine_distance(&brisbane, &sydney);
+/// // distance ≈ 732,000 metres
+/// ```
+pub fn haversine_distance(a: &GpsPos, b: &GpsPos) -> f64 {
+    // Convert to radians
+    let phi1 = a.lat_deg.to_radians();
+    let phi2 = b.lat_deg.to_radians();
+    let delta_phi = (b.lat_deg - a.lat_deg).to_radians();
+    let delta_lambda = (b.lon_deg - a.lon_deg).to_radians();
+    
+    // Haversine formula
+    let a_val = (delta_phi / 2.0).sin().powi(2)
+        + phi1.cos() * phi2.cos() * (delta_lambda / 2.0).sin().powi(2);
+    
+    let c = 2.0 * a_val.sqrt().atan2((1.0 - a_val).sqrt());
+    
+    // Distance = radius × angular distance
+    WGS84_A * c
+}
