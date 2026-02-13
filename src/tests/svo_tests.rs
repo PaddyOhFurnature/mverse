@@ -410,3 +410,77 @@ fn test_empty_svo_deterministic_hash() {
     assert_eq!(hash1, hash2, 
         "Two empty SVOs with same depth should have identical hash");
 }
+
+// ============================================================================
+// Phase 3.7: Binary serialization tests
+// ============================================================================
+
+#[test]
+fn test_serialize_deserialize_empty() {
+    let svo = SparseVoxelOctree::new(8);
+    
+    let bytes = svo.serialize();
+    let deserialized = SparseVoxelOctree::deserialize(&bytes).unwrap();
+    
+    let hash1 = svo.content_hash();
+    let hash2 = deserialized.content_hash();
+    
+    assert_eq!(hash1, hash2, 
+        "Deserialized empty SVO should have same hash as original");
+}
+
+#[test]
+fn test_serialize_deserialize_with_data() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    // Add 1000 voxels
+    for i in 0..1000 {
+        let x = (i * 7) % 200;
+        let y = (i * 11) % 200;
+        let z = (i * 13) % 200;
+        let material = MaterialId((i % 10) as u16);
+        svo.set_voxel(x, y, z, material);
+    }
+    
+    let bytes = svo.serialize();
+    let deserialized = SparseVoxelOctree::deserialize(&bytes).unwrap();
+    
+    // Check hash matches
+    let hash1 = svo.content_hash();
+    let hash2 = deserialized.content_hash();
+    assert_eq!(hash1, hash2, "Hashes should match after round-trip");
+    
+    // Spot-check some voxels
+    assert_eq!(deserialized.get_voxel(0, 0, 0), svo.get_voxel(0, 0, 0));
+    assert_eq!(deserialized.get_voxel(100, 100, 100), svo.get_voxel(100, 100, 100));
+}
+
+#[test]
+fn test_empty_svo_serialized_size() {
+    let svo = SparseVoxelOctree::new(8);
+    let bytes = svo.serialize();
+    
+    assert!(bytes.len() < 100, 
+        "Empty SVO should serialize to < 100 bytes, got {}", bytes.len());
+}
+
+#[test]
+fn test_deserialize_corrupted_returns_error() {
+    let corrupted = vec![0xFF; 50]; // Invalid bincode data
+    
+    let result = SparseVoxelOctree::deserialize(&corrupted);
+    
+    assert!(result.is_err(), 
+        "Deserializing corrupted data should return error, not panic");
+}
+
+#[test]
+fn test_serialize_preserves_max_depth() {
+    let svo = SparseVoxelOctree::new(10);
+    
+    let bytes = svo.serialize();
+    let deserialized = SparseVoxelOctree::deserialize(&bytes).unwrap();
+    
+    assert_eq!(deserialized.max_depth(), 10, 
+        "max_depth should be preserved after serialization");
+}

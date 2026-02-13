@@ -10,9 +10,10 @@
 //! - Serializable: can be saved/loaded from disk or network
 
 use sha2::{Sha256, Digest};
+use serde::{Serialize, Deserialize};
 
 /// Material identifier (16-bit allows 65,536 material types)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MaterialId(pub u16);
 
 /// Material constants for common types
@@ -30,7 +31,7 @@ pub const BRICK: MaterialId = MaterialId(10);
 pub const ASPHALT: MaterialId = MaterialId(11);
 
 /// SVO node - recursive octree structure
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SvoNode {
     /// No material (all AIR)
     Empty,
@@ -43,7 +44,7 @@ pub enum SvoNode {
 }
 
 /// Operation log entry for CRDT synchronization
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SvoOp {
     SetVoxel { x: u32, y: u32, z: u32, material: MaterialId },
     ClearVoxel { x: u32, y: u32, z: u32 },
@@ -52,6 +53,7 @@ pub enum SvoOp {
 }
 
 /// Sparse Voxel Octree - volumetric data structure
+#[derive(Serialize, Deserialize)]
 pub struct SparseVoxelOctree {
     root: SvoNode,
     max_depth: u8,
@@ -460,5 +462,26 @@ impl SparseVoxelOctree {
                 }
             }
         }
+    }
+
+    /// Serializes the SVO to bytes
+    ///
+    /// Uses bincode for efficient binary serialization.
+    ///
+    /// # Returns
+    /// Byte vector containing the serialized SVO
+    pub fn serialize(&self) -> Vec<u8> {
+        bincode::serialize(self).expect("Serialization should not fail")
+    }
+
+    /// Deserializes an SVO from bytes
+    ///
+    /// # Arguments
+    /// * `bytes` - Byte slice containing serialized SVO
+    ///
+    /// # Returns
+    /// Result containing the deserialized SVO or an error
+    pub fn deserialize(bytes: &[u8]) -> Result<Self, Box<bincode::ErrorKind>> {
+        bincode::deserialize(bytes)
     }
 }
