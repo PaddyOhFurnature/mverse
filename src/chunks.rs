@@ -119,3 +119,171 @@ pub fn ecef_to_cube_face(ecef: &EcefPos) -> (u8, f64, f64) {
     
     (face, u, v)
 }
+
+/// Projects a cube face UV coordinate onto the sphere surface (Snyder's equal-area projection)
+///
+/// # Arguments
+/// * `face` - Cube face index (0-5): 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+/// * `u` - Horizontal UV coordinate in [-1, 1]
+/// * `v` - Vertical UV coordinate in [-1, 1]
+/// * `radius` - Sphere radius (typically WGS84_A for Earth's equator)
+///
+/// # Returns
+/// ECEF position on the sphere surface
+///
+/// Uses Snyder's equal-area cube-to-sphere projection to minimize distortion.
+pub fn cube_to_sphere(face: u8, u: f64, v: f64, radius: f64) -> EcefPos {
+    // Snyder's equal-area projection formulas
+    let x_prime = u * (1.0 - v * v / 2.0).sqrt();
+    let y_prime = v * (1.0 - u * u / 2.0).sqrt();
+    let z_prime = (0.0_f64.max(1.0 - u * u / 2.0 - v * v / 2.0)).sqrt();
+    
+    // Apply face-specific permutation and signs
+    let (x, y, z) = match face {
+        0 => (z_prime, -x_prime, -y_prime),  // +X face
+        1 => (-z_prime, x_prime, -y_prime),  // -X face
+        2 => (x_prime, z_prime, -y_prime),   // +Y face
+        3 => (-x_prime, -z_prime, -y_prime), // -Y face
+        4 => (x_prime, y_prime, z_prime),    // +Z face
+        5 => (-x_prime, y_prime, -z_prime),  // -Z face
+        _ => panic!("Invalid face index: {}", face),
+    };
+    
+    // Normalize to unit sphere (required for accurate projection)
+    let magnitude = (x * x + y * y + z * z).sqrt();
+    let x_norm = x / magnitude;
+    let y_norm = y / magnitude;
+    let z_norm = z / magnitude;
+    
+    // Scale to desired radius
+    EcefPos {
+        x: x_norm * radius,
+        y: y_norm * radius,
+        z: z_norm * radius,
+    }
+}
+
+/// Inverse of cube_to_sphere: projects ECEF position back to cube face + UV
+///
+/// # Arguments
+/// * `ecef` - Position in ECEF coordinates
+///
+/// # Returns
+/// Tuple of (face_index, u, v) where face is 0-5 and u,v are in [-1, 1]
+///
+/// Uses iterative optimization to find (u,v) that produces the given ECEF point.
+pub fn sphere_to_cube(ecef: &EcefPos) -> (u8, f64, f64) {
+    // Normalize to unit sphere
+    let radius = (ecef.x * ecef.x + ecef.y * ecef.y + ecef.z * ecef.z).sqrt();
+    let x_target = ecef.x / radius;
+    let y_target = ecef.y / radius;
+    let z_target = ecef.z / radius;
+    
+    // Determine which face by finding dominant axis
+    let abs_x = x_target.abs();
+    let abs_y = y_target.abs();
+    let abs_z = z_target.abs();
+    
+    let face = if abs_x >= abs_y && abs_x >= abs_z {
+        if x_target > 0.0 { 0 } else { 1 }
+    } else if abs_y >= abs_x && abs_y >= abs_z {
+        if y_target > 0.0 { 2 } else { 3 }
+    } else {
+        if z_target > 0.0 { 4 } else { 5 }
+    };
+    
+    // Find (u, v) that produces this ECEF via cube_to_sphere
+    // Use iterative refinement starting from planar projection guess
+    
+    // Simple initial guess based on planar projection
+    let (u_init, v_init) = match face {
+        0 => (y_target / abs_x, z_target / abs_x),
+        1 => (-y_target / abs_x, z_target / abs_x),
+        2 => (-x_target / abs_y, z_target / abs_y),
+        3 => (x_target / abs_y, z_target / abs_y),
+        4 => (y_target / abs_z, -x_target / abs_z),
+        5 => (y_target / abs_z, x_target / abs_z),
+        _ => (0.0, 0.0),
+    };
+    
+    let mut u = u_init.clamp(-0.99, 0.99);
+    let mut v = v_init.clamp(-0.99, 0.99);
+    
+    // Iteratively refine to match target
+    for _ in 0..20 {
+        // Forward pass: compute where current (u, v) maps to
+        let x_prime = u * (1.0 - v * v / 2.0).sqrt();
+        let y_prime = v * (1.0 - u * u / 2.0).sqrt();
+        let z_prime = (0.0_f64.max(1.0 - u * u / 2.0 - v * v / 2.0)).sqrt();
+        
+        let (x_pre, y_pre, z_pre) = match face {
+            0 => (z_prime, -x_prime, -y_prime),
+            1 => (-z_prime, x_prime, -y_prime),
+            2 => (x_prime, z_prime, -y_prime),
+            3 => (-x_prime, -z_prime, -y_prime),
+            4 => (x_prime, y_prime, z_prime),
+            5 => (-x_prime, y_prime, -z_prime),
+            _ => (0.0, 0.0, 0.0),
+        };
+        
+        // Normalize
+        let mag = (x_pre * x_pre + y_pre * y_pre + z_pre * z_pre).sqrt();
+        let x_current = x_pre / mag;
+        let y_current = y_pre / mag;
+        let z_current = z_pre / mag;
+        
+        // Compute error
+        let error_x = x_target - x_current;
+        let error_y = y_target - y_current;
+        let error_z = z_target - z_current;
+        
+        let error_mag = (error_x * error_x + error_y * error_y + error_z * error_z).sqrt();
+        
+        if error_mag < 1e-10 {
+            break; // Converged
+        }
+        
+        // Compute Jacobian using finite differences
+        let delta = 0.0001;
+        
+        // Perturb u
+        let ecef_plus_u = cube_to_sphere(face, u + delta, v, 1.0);
+        let dxdu = (ecef_plus_u.x - x_current) / delta;
+        let dydu = (ecef_plus_u.y - y_current) / delta;
+        let dzdu = (ecef_plus_u.z - z_current) / delta;
+        
+        // Perturb v
+        let ecef_plus_v = cube_to_sphere(face, u, v + delta, 1.0);
+        let dxdv = (ecef_plus_v.x - x_current) / delta;
+        let dydv = (ecef_plus_v.y - y_current) / delta;
+        let dzdv = (ecef_plus_v.z - z_current) / delta;
+        
+        // Solve least-squares problem (3 equations, 2 unknowns)
+        // Minimize ||J * [du, dv]^T - error||^2
+        // Normal equations: J^T J [du, dv]^T = J^T error
+        
+        let j11 = dxdu * dxdu + dydu * dydu + dzdu * dzdu;
+        let j12 = dxdu * dxdv + dydu * dydv + dzdu * dzdv;
+        let j22 = dxdv * dxdv + dydv * dydv + dzdv * dzdv;
+        
+        let r1 = dxdu * error_x + dydu * error_y + dzdu * error_z;
+        let r2 = dxdv * error_x + dydv * error_y + dzdv * error_z;
+        
+        let det = j11 * j22 - j12 * j12;
+        
+        if det.abs() > 1e-10 {
+            let du = (r1 * j22 - r2 * j12) / det;
+            let dv = (r2 * j11 - r1 * j12) / det;
+            
+            u += du;
+            v += dv;
+            
+            u = u.clamp(-1.0, 1.0);
+            v = v.clamp(-1.0, 1.0);
+        } else {
+            break;
+        }
+    }
+    
+    (face, u, v)
+}

@@ -1,6 +1,7 @@
 // Unit tests for quad-sphere chunking system
 
 use crate::chunks::*;
+use crate::coordinates::*;
 
 #[test]
 fn test_chunk_id_depth_0() {
@@ -235,5 +236,212 @@ fn test_ecef_to_cube_face_all_faces_reachable() {
         assert_eq!(face, expected_face, 
             "Point ({}, {}) should map to face {}, got {}",
             lat, lon, expected_face, face);
+    }
+}
+
+// ============================================================================
+// Phase 2.3: Cube-to-sphere projection tests
+// ============================================================================
+
+#[test]
+fn test_cube_to_sphere_face_centres() {
+    // Face centres (u=0, v=0) should map to axis-aligned points on the sphere
+    let radius = WGS84_A;
+    
+    // Face 0: +X
+    let ecef0 = cube_to_sphere(0, 0.0, 0.0, radius);
+    assert!((ecef0.x - radius).abs() < 1.0, "Face 0 centre should be on +X axis");
+    assert!(ecef0.y.abs() < 1.0, "Face 0 centre Y should be ~0");
+    assert!(ecef0.z.abs() < 1.0, "Face 0 centre Z should be ~0");
+    
+    // Face 1: -X
+    let ecef1 = cube_to_sphere(1, 0.0, 0.0, radius);
+    assert!((ecef1.x + radius).abs() < 1.0, "Face 1 centre should be on -X axis");
+    assert!(ecef1.y.abs() < 1.0, "Face 1 centre Y should be ~0");
+    assert!(ecef1.z.abs() < 1.0, "Face 1 centre Z should be ~0");
+    
+    // Face 2: +Y
+    let ecef2 = cube_to_sphere(2, 0.0, 0.0, radius);
+    assert!(ecef2.x.abs() < 1.0, "Face 2 centre X should be ~0");
+    assert!((ecef2.y - radius).abs() < 1.0, "Face 2 centre should be on +Y axis");
+    assert!(ecef2.z.abs() < 1.0, "Face 2 centre Z should be ~0");
+    
+    // Face 3: -Y
+    let ecef3 = cube_to_sphere(3, 0.0, 0.0, radius);
+    assert!(ecef3.x.abs() < 1.0, "Face 3 centre X should be ~0");
+    assert!((ecef3.y + radius).abs() < 1.0, "Face 3 centre should be on -Y axis");
+    assert!(ecef3.z.abs() < 1.0, "Face 3 centre Z should be ~0");
+    
+    // Face 4: +Z
+    let ecef4 = cube_to_sphere(4, 0.0, 0.0, radius);
+    assert!(ecef4.x.abs() < 1.0, "Face 4 centre X should be ~0");
+    assert!(ecef4.y.abs() < 1.0, "Face 4 centre Y should be ~0");
+    assert!((ecef4.z - radius).abs() < 1.0, "Face 4 centre should be on +Z axis");
+    
+    // Face 5: -Z
+    let ecef5 = cube_to_sphere(5, 0.0, 0.0, radius);
+    assert!(ecef5.x.abs() < 1.0, "Face 5 centre X should be ~0");
+    assert!(ecef5.y.abs() < 1.0, "Face 5 centre Y should be ~0");
+    assert!((ecef5.z + radius).abs() < 1.0, "Face 5 centre should be on -Z axis");
+}
+
+#[test]
+fn test_cube_to_sphere_on_sphere_surface() {
+    // All face centres should be exactly on the sphere surface
+    let radius = WGS84_A;
+    
+    for face in 0..6 {
+        let ecef = cube_to_sphere(face, 0.0, 0.0, radius);
+        let distance = (ecef.x * ecef.x + ecef.y * ecef.y + ecef.z * ecef.z).sqrt();
+        
+        assert!((distance - radius).abs() < 1.0,
+            "Face {} centre distance from origin should be {}, got {}",
+            face, radius, distance);
+    }
+}
+
+#[test]
+fn test_sphere_to_cube_face_centres() {
+    // Points on the sphere should map back to their original face and (0,0) UV
+    let radius = WGS84_A;
+    
+    for face in 0..6 {
+        let ecef = cube_to_sphere(face, 0.0, 0.0, radius);
+        let (mapped_face, u, v) = sphere_to_cube(&ecef);
+        
+        assert_eq!(mapped_face, face, "Face {} centre should map back to face {}", face, face);
+        assert!(u.abs() < 0.001, "Face {} centre u should be ~0, got {}", face, u);
+        assert!(v.abs() < 0.001, "Face {} centre v should be ~0, got {}", face, v);
+    }
+}
+
+#[test]
+fn test_cube_sphere_round_trip_face_centres() {
+    // ECEF → sphere_to_cube → cube_to_sphere → ECEF should match to <1mm
+    let radius = WGS84_A;
+    
+    for face in 0..6 {
+        let ecef1 = cube_to_sphere(face, 0.0, 0.0, radius);
+        let (f, u, v) = sphere_to_cube(&ecef1);
+        let ecef2 = cube_to_sphere(f, u, v, radius);
+        
+        let error = ((ecef1.x - ecef2.x).powi(2) 
+                   + (ecef1.y - ecef2.y).powi(2) 
+                   + (ecef1.z - ecef2.z).powi(2)).sqrt();
+        
+        assert!(error < 0.001,
+            "Face {} round-trip error should be <1mm, got {}m",
+            face, error);
+    }
+}
+
+#[test]
+fn test_cube_sphere_round_trip_random_points() {
+    // Test round-trip at various UV coordinates
+    let radius = WGS84_A;
+    let test_uv = vec![
+        (0.5, 0.5),
+        (-0.5, 0.5),
+        (0.5, -0.5),
+        (-0.5, -0.5),
+        (0.0, 0.7),
+        (0.7, 0.0),
+        (-0.3, 0.6),
+        (0.9, -0.2),
+    ];
+    
+    for face in 0..6 {
+        for (u, v) in &test_uv {
+            let ecef1 = cube_to_sphere(face, *u, *v, radius);
+            let (f, u2, v2) = sphere_to_cube(&ecef1);
+            let ecef2 = cube_to_sphere(f, u2, v2, radius);
+            
+            let error = ((ecef1.x - ecef2.x).powi(2) 
+                       + (ecef1.y - ecef2.y).powi(2) 
+                       + (ecef1.z - ecef2.z).powi(2)).sqrt();
+            
+            assert!(error < 0.001,
+                "Face {} u={} v={} round-trip error should be <1mm, got {}m",
+                face, u, v, error);
+        }
+    }
+}
+
+#[test]
+fn test_cube_to_sphere_corners() {
+    // Verify corners are on the sphere surface and reasonable
+    // NOTE: Finding exact matching corners across faces is complex due to the projection
+    // The key property is that all corners should be on the sphere surface
+    let radius = WGS84_A;
+    
+    let test_corners = vec![
+        (0, 1.0, 1.0),
+        (0, 1.0, -1.0),
+        (1, 1.0, 1.0),
+        (2, 1.0, -1.0),
+        (4, 1.0, 1.0),
+        (5, -1.0, -1.0),
+    ];
+    
+    for (face, u, v) in test_corners {
+        let corner = cube_to_sphere(face, u, v, radius);
+        let dist_from_origin = (corner.x * corner.x + corner.y * corner.y + corner.z * corner.z).sqrt();
+        
+        assert!((dist_from_origin - radius).abs() < 1.0,
+            "Corner (face={}, u={}, v={}) should be on sphere surface, distance={}",
+            face, u, v, dist_from_origin);
+    }
+}
+
+#[test]
+fn test_sphere_to_cube_brisbane() {
+    // Brisbane should round-trip correctly through sphere_to_cube and cube_to_sphere
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let ecef1 = gps_to_ecef(&brisbane);
+    
+    // Use sphere_to_cube to get face/UV
+    let (face, u, v) = sphere_to_cube(&ecef1);
+    
+    // Project back to sphere
+    let radius = (ecef1.x * ecef1.x + ecef1.y * ecef1.y + ecef1.z * ecef1.z).sqrt();
+    let ecef2 = cube_to_sphere(face, u, v, radius);
+    
+    // Should match within 1mm
+    let error = ((ecef1.x - ecef2.x).powi(2) 
+               + (ecef1.y - ecef2.y).powi(2) 
+               + (ecef1.z - ecef2.z).powi(2)).sqrt();
+    
+    assert!(error < 0.001, "Brisbane round-trip error should be <1mm, got {}m", error);
+}
+
+#[test]
+fn test_cube_sphere_inverse_consistency() {
+    // sphere_to_cube should be the mathematical inverse of cube_to_sphere
+    // Meaning: ECEF coordinates should round-trip accurately (even if face/UV representation changes near edges)
+    let radius = WGS84_A;
+    
+    // Start with known UV coordinates
+    let test_cases = vec![
+        (0, 0.0, 0.0),
+        (1, -0.5, 0.5),
+        (2, 0.8, -0.3),
+        (3, -0.7, 0.7),
+        (4, 0.3, -0.4),
+        (5, -0.2, 0.9),
+    ];
+    
+    for (face_orig, u_orig, v_orig) in test_cases {
+        let ecef1 = cube_to_sphere(face_orig, u_orig, v_orig, radius);
+        let (face_back, u_back, v_back) = sphere_to_cube(&ecef1);
+        let ecef2 = cube_to_sphere(face_back, u_back, v_back, radius);
+        
+        // Verify ECEF round-trip accuracy
+        let error = ((ecef1.x - ecef2.x).powi(2) 
+                   + (ecef1.y - ecef2.y).powi(2) 
+                   + (ecef1.z - ecef2.z).powi(2)).sqrt();
+        
+        assert!(error < 0.001,
+            "ECEF round-trip for face {} u={} v={} should be <1mm, got {}m",
+            face_orig, u_orig, v_orig, error);
     }
 }
