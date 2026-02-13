@@ -985,3 +985,229 @@ fn test_chunk_contains_deterministic() {
     assert_eq!(result1, result2, "Should be deterministic");
     assert_eq!(result2, result3, "Should be deterministic");
 }
+
+// ============================================================================
+// Phase 2.9: Phase 2 scale gate tests
+// ============================================================================
+
+#[test]
+fn test_scale_gate_100_random_points_depth_14() {
+    // 100 random GPS points should all resolve to valid ChunkIds at depth 14
+    use std::collections::HashSet;
+    
+    let mut unique_chunks = HashSet::new();
+    
+    // Generate 100 semi-random but deterministic points
+    for i in 0..100 {
+        let lat = -90.0 + (i as f64 * 1.8); // -90 to 90
+        let lon = -180.0 + (i as f64 * 3.6); // -180 to 180
+        
+        let gps = GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: 0.0 };
+        let chunk = gps_to_chunk_id(&gps, 14);
+        
+        // Verify it's a valid chunk
+        assert!(chunk.face < 6, "Face should be 0-5, got {}", chunk.face);
+        assert_eq!(chunk.depth(), 14, "Should be depth 14");
+        assert_eq!(chunk.path.len(), 14, "Path should have 14 elements");
+        
+        // All path elements should be 0-3
+        for &q in &chunk.path {
+            assert!(q <= 3, "Quadrant should be 0-3, got {}", q);
+        }
+        
+        unique_chunks.insert(chunk);
+    }
+    
+    // Should have many unique chunks (100 points spread globally)
+    assert!(unique_chunks.len() > 50, 
+        "100 global points should map to >50 unique depth-14 tiles, got {}", 
+        unique_chunks.len());
+}
+
+#[test]
+fn test_scale_gate_all_faces_cover_sphere() {
+    // All 6 root tiles should together cover the sphere
+    // Test with points distributed across all octants
+    
+    let mut face_counts = [0; 6];
+    let mut total = 0;
+    
+    // Generate points distributed across latitude and longitude
+    for lat_i in 0..20 {
+        for lon_i in 0..50 {
+            let lat = -90.0 + (lat_i as f64 * 9.0); // -90 to 81
+            let lon = -180.0 + (lon_i as f64 * 7.2); // -180 to 180
+            
+            let gps = GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: 0.0 };
+            let chunk = gps_to_chunk_id(&gps, 0);
+            
+            // Should be on exactly one face
+            assert!(chunk.face < 6, "Face should be 0-5");
+            assert_eq!(chunk.depth(), 0, "Should be depth 0");
+            
+            face_counts[chunk.face as usize] += 1;
+            total += 1;
+        }
+    }
+    
+    // Each face should have some points
+    for (face, &count) in face_counts.iter().enumerate() {
+        assert!(count > 0, "Face {} should have at least one point, got {}", face, count);
+    }
+    
+    // All points should sum correctly
+    assert_eq!(total, 20 * 50, "Total points should be 1000");
+}
+
+#[test]
+fn test_scale_gate_adjacent_tiles_shared_edges() {
+    // Adjacent depth-14 tiles near Brisbane should have corners that nearly match
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 14);
+    
+    // Get all 4 children to find adjacent tiles
+    let parent = chunk_parent(&chunk).expect("Depth 14 should have parent");
+    let siblings = chunk_children(&parent);
+    
+    // Find a sibling (adjacent tile at same depth)
+    let sibling = siblings.iter().find(|s| **s != chunk).expect("Should have siblings");
+    
+    // Get corners of both tiles
+    let corners1 = chunk_corners_ecef(&chunk);
+    let corners2 = chunk_corners_ecef(sibling);
+    
+    // At least one corner should be very close (shared corner)
+    let mut min_distance = f64::MAX;
+    for c1 in &corners1 {
+        for c2 in &corners2 {
+            let dist = ((c1.x - c2.x).powi(2) 
+                      + (c1.y - c2.y).powi(2) 
+                      + (c1.z - c2.z).powi(2)).sqrt();
+            min_distance = min_distance.min(dist);
+        }
+    }
+    
+    // Shared corners should be within 1m
+    assert!(min_distance < 1.0, 
+        "Adjacent tiles should share corners within 1m, closest was {}m", min_distance);
+}
+
+#[test]
+fn test_scale_gate_brisbane_landmarks() {
+    // Brisbane landmarks should resolve to nearby tiles at depth 14
+    let landmarks = vec![
+        ("Queen St Mall", GpsPos { lat_deg: -27.4698, lon_deg: 153.0256, elevation_m: 0.0 }),
+        ("Story Bridge", GpsPos { lat_deg: -27.4633, lon_deg: 153.0401, elevation_m: 0.0 }),
+        ("Mt Coot-tha", GpsPos { lat_deg: -27.4753, lon_deg: 152.9569, elevation_m: 0.0 }),
+        ("Brisbane Airport", GpsPos { lat_deg: -27.3942, lon_deg: 153.1218, elevation_m: 0.0 }),
+    ];
+    
+    let brisbane_cbd = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let cbd_chunk = gps_to_chunk_id(&brisbane_cbd, 14);
+    
+    for (name, landmark) in landmarks {
+        let chunk = gps_to_chunk_id(&landmark, 14);
+        
+        // Should be valid chunks
+        assert!(chunk.face < 6, "{} should map to valid face", name);
+        assert_eq!(chunk.depth(), 14, "{} should be depth 14", name);
+        
+        // Should be on same face as CBD (Brisbane region)
+        assert_eq!(chunk.face, cbd_chunk.face, 
+            "{} should be on same face as Brisbane CBD", name);
+        
+        // Should have some common path prefix (nearby tiles)
+        let mut common_prefix = 0;
+        for i in 0..14 {
+            if chunk.path[i] == cbd_chunk.path[i] {
+                common_prefix += 1;
+            } else {
+                break;
+            }
+        }
+        
+        assert!(common_prefix >= 5, 
+            "{} should share at least 5 path levels with CBD (regional proximity), got {}", 
+            name, common_prefix);
+    }
+}
+
+#[test]
+fn test_scale_gate_chunk_centers_valid() {
+    // Chunk centers should be valid GPS positions on the sphere
+    let test_locations = vec![
+        GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, // Brisbane
+        GpsPos { lat_deg: 51.5074, lon_deg: -0.1278, elevation_m: 0.0 },   // London
+        GpsPos { lat_deg: 35.6762, lon_deg: 139.6503, elevation_m: 0.0 },  // Tokyo
+        GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 },           // Null Island
+    ];
+    
+    for original in test_locations {
+        let chunk = gps_to_chunk_id(&original, 8);
+        let center_ecef = chunk_center_ecef(&chunk);
+        
+        // Center should be on sphere surface
+        let dist = (center_ecef.x * center_ecef.x 
+                  + center_ecef.y * center_ecef.y 
+                  + center_ecef.z * center_ecef.z).sqrt();
+        
+        assert!((dist - WGS84_A).abs() < 100.0,
+            "Chunk center should be on sphere surface, distance={}m", dist);
+        
+        // Should convert to valid GPS
+        let center_gps = ecef_to_gps(&center_ecef);
+        assert!(center_gps.lat_deg >= -90.0 && center_gps.lat_deg <= 90.0,
+            "Center latitude should be valid");
+        assert!(center_gps.lon_deg >= -180.0 && center_gps.lon_deg <= 180.0,
+            "Center longitude should be valid");
+    }
+}
+
+#[test]
+fn test_scale_gate_tile_width_decreases_with_depth() {
+    // Verify tile widths decrease as depth increases
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    
+    let w0 = chunk_approximate_width(&gps_to_chunk_id(&brisbane, 0));
+    let w5 = chunk_approximate_width(&gps_to_chunk_id(&brisbane, 5));
+    let w10 = chunk_approximate_width(&gps_to_chunk_id(&brisbane, 10));
+    let w14 = chunk_approximate_width(&gps_to_chunk_id(&brisbane, 14));
+    
+    assert!(w0 > w5, "Depth 0 should be larger than depth 5");
+    assert!(w5 > w10, "Depth 5 should be larger than depth 10");
+    assert!(w10 > w14, "Depth 10 should be larger than depth 14");
+    
+    // Depth 0 should be ~millions of meters
+    assert!(w0 > 5_000_000.0, "Depth 0 should be >5,000km");
+    
+    // Depth 14 should be ~hundreds of meters
+    assert!(w14 < 1_000.0, "Depth 14 should be <1km");
+}
+
+#[test]
+fn test_scale_gate_global_coverage() {
+    // Every point on Earth should map to exactly one chunk
+    // Test representative points from all continents
+    let global_points = vec![
+        GpsPos { lat_deg: 40.7128, lon_deg: -74.0060, elevation_m: 0.0 },  // New York
+        GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 }, // Sydney
+        GpsPos { lat_deg: 55.7558, lon_deg: 37.6173, elevation_m: 0.0 },   // Moscow
+        GpsPos { lat_deg: -23.5505, lon_deg: -46.6333, elevation_m: 0.0 }, // São Paulo
+        GpsPos { lat_deg: 30.0444, lon_deg: 31.2357, elevation_m: 0.0 },   // Cairo
+        GpsPos { lat_deg: 1.3521, lon_deg: 103.8198, elevation_m: 0.0 },   // Singapore
+        GpsPos { lat_deg: -1.2921, lon_deg: 36.8219, elevation_m: 0.0 },   // Nairobi
+    ];
+    
+    for point in global_points {
+        let chunk = gps_to_chunk_id(&point, 12);
+        
+        // Should produce valid chunk
+        assert!(chunk.face < 6);
+        assert_eq!(chunk.depth(), 12);
+        
+        // Point should be in its own chunk
+        assert!(chunk_contains_gps(&chunk, &point),
+            "Point at ({}, {}) should be in its own chunk",
+            point.lat_deg, point.lon_deg);
+    }
+}
