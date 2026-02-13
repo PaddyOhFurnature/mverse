@@ -5,12 +5,13 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
-    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches, generate_buildings_from_osm},
+    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches, generate_chunk_patch_with_elevation, generate_buildings_from_osm},
     Renderer
 };
 use metaverse_core::osm::{load_chunk_osm_data, OverpassClient};
 use metaverse_core::chunks::ChunkId;
 use metaverse_core::cache::DiskCache;
+use metaverse_core::elevation::SrtmManager;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -25,6 +26,7 @@ struct App {
     pipeline: Option<BasicPipeline>,
     line_pipeline: Option<BasicPipeline>,
     camera: Camera,
+    srtm: Option<SrtmManager>,
     sphere_vertex_buffer: Option<wgpu::Buffer>,
     sphere_index_buffer: Option<wgpu::Buffer>,
     sphere_num_indices: u32,
@@ -99,6 +101,7 @@ impl App {
             buildings_vertex_buffer: None,
             buildings_index_buffer: None,
             buildings_num_indices: 0,
+            srtm: None, // Will be initialized with cache
             tile_depth: 2, // Start with depth 2 (96 tiles)
             show_sphere: false, // Hide sphere by default
             show_tiles: false, // Hide tiles by default
