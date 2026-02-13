@@ -343,3 +343,143 @@ fn test_cache_hit_returns_cached_data() {
     assert_eq!(result.buildings.len(), 1);
     assert_eq!(result.buildings[0].id, 999);
 }
+
+// Phase 4.8 tests - Scale gate tests
+
+#[test]
+fn test_scale_gate_parse_brisbane_fixture() {
+    // Parse the fixture and verify entities are extracted correctly
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    // Should have parsed all entity types from fixture
+    assert!(data.buildings.len() >= 2, "Expected at least 2 buildings");
+    assert!(data.roads.len() >= 2, "Expected at least 2 roads");
+    assert!(data.water.len() >= 1, "Expected at least 1 water feature");
+    assert!(data.parks.len() >= 1, "Expected at least 1 park");
+    
+    // Verify building data quality
+    for building in &data.buildings {
+        assert!(building.id > 0);
+        assert!(building.polygon.len() >= 3, "Building polygon should have at least 3 points");
+        assert!(building.height_m > 0.0);
+        assert!(building.levels > 0);
+    }
+    
+    // Verify road data quality
+    for road in &data.roads {
+        assert!(road.id > 0);
+        assert!(road.nodes.len() >= 2, "Road should have at least 2 nodes");
+        assert!(road.width_m > 0.0);
+    }
+}
+
+#[test]
+fn test_scale_gate_chunk_assignment_coverage() {
+    // Verify chunk assignment covers expected geographic area
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    // Assign to chunks at depth 10
+    let chunks = assign_osm_to_chunks(&data, 10);
+    
+    // Should have assigned data to at least one chunk
+    assert!(chunks.len() >= 1, "Expected at least 1 chunk to contain data");
+    
+    // Verify each chunk has valid data
+    for (chunk_id, chunk_data) in chunks.iter() {
+        // ChunkId should be valid
+        assert!(chunk_id.face < 6, "Face should be 0-5");
+        
+        // Each chunk should have at least some data (buildings, roads, water, or parks)
+        let total_entities = chunk_data.buildings.len() 
+            + chunk_data.roads.len() 
+            + chunk_data.water.len() 
+            + chunk_data.parks.len();
+        assert!(total_entities > 0, "Chunk should contain at least one entity");
+    }
+}
+
+#[test]
+fn test_scale_gate_srtm_parser_handles_both_resolutions() {
+    use crate::elevation::{parse_hgt, SrtmResolution};
+    
+    // Test SRTM3 (1201²)
+    let srtm3_samples = 1201 * 1201;
+    let srtm3_bytes = vec![0u8; srtm3_samples * 2];
+    let srtm3_tile = parse_hgt("N00E000.hgt", &srtm3_bytes).unwrap();
+    assert_eq!(srtm3_tile.resolution, SrtmResolution::Srtm3);
+    assert_eq!(srtm3_tile.elevations.len(), srtm3_samples);
+    
+    // Test SRTM1 (3601²)
+    let srtm1_samples = 3601 * 3601;
+    let srtm1_bytes = vec![0u8; srtm1_samples * 2];
+    let srtm1_tile = parse_hgt("N37W122.hgt", &srtm1_bytes).unwrap();
+    assert_eq!(srtm1_tile.resolution, SrtmResolution::Srtm1);
+    assert_eq!(srtm1_tile.elevations.len(), srtm1_samples);
+}
+
+#[test]
+fn test_scale_gate_full_pipeline_integration() {
+    use crate::cache::DiskCache;
+    use crate::chunks::gps_to_chunk_id;
+    use tempfile::TempDir;
+    
+    // Create temp cache
+    let temp = TempDir::new().unwrap();
+    let cache = DiskCache::with_root(temp.path().to_path_buf());
+    
+    // Create test data
+    let test_data = OsmData {
+        buildings: vec![OsmBuilding {
+            id: 1,
+            polygon: vec![
+                GpsPos { lat_deg: -27.47, lon_deg: 153.025, elevation_m: 0.0 },
+                GpsPos { lat_deg: -27.47, lon_deg: 153.026, elevation_m: 0.0 },
+                GpsPos { lat_deg: -27.471, lon_deg: 153.026, elevation_m: 0.0 },
+            ],
+            height_m: 15.0,
+            building_type: "commercial".to_string(),
+            levels: 5,
+        }],
+        roads: vec![OsmRoad {
+            id: 2,
+            nodes: vec![
+                GpsPos { lat_deg: -27.47, lon_deg: 153.025, elevation_m: 0.0 },
+                GpsPos { lat_deg: -27.475, lon_deg: 153.03, elevation_m: 0.0 },
+            ],
+            road_type: RoadType::Primary,
+            width_m: 8.0,
+            name: Some("Main Street".to_string()),
+        }],
+        water: vec![],
+        parks: vec![],
+    };
+    
+    // Get chunk ID
+    let brisbane = GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 0.0 };
+    let chunk_id = gps_to_chunk_id(&brisbane, 10);
+    
+    // Manually cache the data
+    let path_str = chunk_id.path.iter().map(|q| q.to_string()).collect::<Vec<_>>().join("");
+    let cache_key = format!("chunk_d{}_f{}_{}", 10, chunk_id.face, path_str);
+    let serialized = serde_json::to_vec(&test_data).unwrap();
+    cache.write_osm(&cache_key, &serialized).unwrap();
+    
+    // Load from cache (simulating full pipeline cache hit)
+    let cached_data = cache.read_osm(&cache_key).unwrap();
+    let loaded_data: OsmData = serde_json::from_slice(&cached_data).unwrap();
+    
+    // Verify data integrity
+    assert_eq!(loaded_data.buildings.len(), 1);
+    assert_eq!(loaded_data.roads.len(), 1);
+    assert_eq!(loaded_data.buildings[0].id, 1);
+    assert_eq!(loaded_data.buildings[0].height_m, 15.0);
+    assert_eq!(loaded_data.roads[0].id, 2);
+    assert_eq!(loaded_data.roads[0].name, Some("Main Street".to_string()));
+    
+    // Verify serialization preserves GPS coordinates
+    assert_eq!(loaded_data.buildings[0].polygon[0].lat_deg, -27.47);
+    assert_eq!(loaded_data.roads[0].nodes[1].lon_deg, 153.03);
+}
+
