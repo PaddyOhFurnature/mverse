@@ -393,6 +393,102 @@ pub fn generate_terrain_patches(depth: u8, subdivisions: u32, color: Vec3) -> (V
     (all_vertices, all_indices)
 }
 
+/// Generate terrain patch for a single chunk with SRTM elevation data
+///
+/// Similar to `generate_chunk_patch` but displaces vertices by elevation.
+///
+/// - `chunk_id`: The chunk to generate terrain for
+/// - `subdivisions`: Grid subdivisions (higher = smoother terrain)
+/// - `color`: Base terrain color
+/// - `get_elevation_fn`: Function to query elevation at (lat, lon) → Option<f64> in meters
+///
+/// Returns (vertices, indices) for the terrain patch with elevation applied.
+pub fn generate_chunk_patch_with_elevation<F>(
+    chunk_id: &crate::chunks::ChunkId,
+    subdivisions: u32,
+    color: Vec3,
+    mut get_elevation_fn: F,
+) -> (Vec<Vertex>, Vec<u32>)
+where
+    F: FnMut(f64, f64) -> Option<f64>,
+{
+    use crate::chunks::chunk_corners_ecef;
+    use crate::coordinates::{ecef_to_gps, EcefPos};
+    
+    let corners = chunk_corners_ecef(chunk_id);
+    
+    // Convert to Vec3
+    let c0 = Vec3::new(corners[0].x as f32, corners[0].y as f32, corners[0].z as f32);
+    let c1 = Vec3::new(corners[1].x as f32, corners[1].y as f32, corners[1].z as f32);
+    let c2 = Vec3::new(corners[2].x as f32, corners[2].y as f32, corners[2].z as f32);
+    let c3 = Vec3::new(corners[3].x as f32, corners[3].y as f32, corners[3].z as f32);
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Generate grid vertices
+    for row in 0..=subdivisions {
+        let v = row as f32 / subdivisions as f32; // 0 to 1
+        
+        for col in 0..=subdivisions {
+            let u = col as f32 / subdivisions as f32; // 0 to 1
+            
+            // Bilinear interpolation between corners
+            let p0 = c0.lerp(c1, u);
+            let p1 = c3.lerp(c2, u);
+            let pos = p0.lerp(p1, v);
+            
+            // Project onto sphere surface at WGS84 radius (base height)
+            let earth_radius = WGS84_A as f32;
+            let len = pos.length();
+            let base_pos = if len > 1.0 {
+                pos.normalize() * earth_radius
+            } else {
+                Vec3::Z * earth_radius
+            };
+            
+            // Convert to GPS to query elevation
+            let ecef = EcefPos {
+                x: base_pos.x as f64,
+                y: base_pos.y as f64,
+                z: base_pos.z as f64,
+            };
+            let gps = ecef_to_gps(&ecef);
+            
+            // Query elevation and displace vertex outward
+            let elevation = get_elevation_fn(gps.lat_deg, gps.lon_deg).unwrap_or(0.0);
+            let final_pos = base_pos.normalize() * (earth_radius + elevation as f32);
+            
+            let normal = final_pos.normalize();
+            
+            vertices.push(Vertex {
+                position: final_pos.to_array(),
+                normal: normal.to_array(),
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+    }
+    
+    // Generate indices for triangles (same as before)
+    for row in 0..subdivisions {
+        for col in 0..subdivisions {
+            let base = row * (subdivisions + 1) + col;
+            let next_row = base + subdivisions + 1;
+            
+            // Two triangles per quad
+            indices.push(base);
+            indices.push(next_row);
+            indices.push(base + 1);
+            
+            indices.push(base + 1);
+            indices.push(next_row);
+            indices.push(next_row + 1);
+        }
+    }
+    
+    (vertices, indices)
+}
+
 /// Generate a building mesh from OSM data
 ///
 /// Creates an extruded prism from a building footprint.
@@ -748,6 +844,78 @@ mod tests {
         
         // Should be within 20% of expected distance (1.1km = 1100m)
         assert!(distance > 900.0 && distance < 1400.0, "Building separation {} meters (expected ~1100m)", distance);
+    }
+    
+    #[test]
+    fn test_chunk_patch_with_elevation() {
+        use crate::chunks::ChunkId;
+        
+        // Test terrain generation with mock elevation data
+        let chunk_id = ChunkId { face: 0, path: vec![] };
+        
+        // Mock elevation function: returns 100m everywhere
+        let elevation_fn = |_lat: f64, _lon: f64| Some(100.0);
+        
+        let (vertices, indices) = generate_chunk_patch_with_elevation(
+            &chunk_id,
+            4,
+            glam::Vec3::new(0.2, 0.8, 0.2),
+            elevation_fn,
+        );
+        
+        // Should have (4+1)^2 = 25 vertices
+        assert_eq!(vertices.len(), 25);
+        
+        // Should have 4*4*6 = 96 indices
+        assert_eq!(indices.len(), 96);
+        
+        // All vertices should be at approximately WGS84_A + 100m radius
+        let expected_radius = (WGS84_A + 100.0) as f32;
+        for vertex in &vertices {
+            let len = (vertex.position[0] * vertex.position[0]
+                + vertex.position[1] * vertex.position[1]
+                + vertex.position[2] * vertex.position[2]).sqrt();
+            let diff = (len - expected_radius).abs();
+            assert!(diff < 1.0, "Vertex radius {} differs from expected {} by {}", len, expected_radius, diff);
+        }
+    }
+    
+    #[test]
+    fn test_chunk_patch_with_varying_elevation() {
+        use crate::chunks::ChunkId;
+        
+        // Test with varying elevation (simulating a hill)
+        let chunk_id = ChunkId { face: 0, path: vec![] };
+        
+        // Mock elevation function: creates a gradient from 0m to 1000m
+        let elevation_fn = |lat: f64, _lon: f64| {
+            // Higher latitude = higher elevation
+            Some((lat + 90.0) * 10.0) // 0m at -90°, 1800m at +90°
+        };
+        
+        let (vertices, _indices) = generate_chunk_patch_with_elevation(
+            &chunk_id,
+            4,
+            glam::Vec3::new(0.2, 0.8, 0.2),
+            elevation_fn,
+        );
+        
+        // Vertices should have varying radii
+        let mut min_radius = f32::MAX;
+        let mut max_radius = f32::MIN;
+        
+        for vertex in &vertices {
+            let radius = (vertex.position[0] * vertex.position[0]
+                + vertex.position[1] * vertex.position[1]
+                + vertex.position[2] * vertex.position[2]).sqrt();
+            min_radius = min_radius.min(radius);
+            max_radius = max_radius.max(radius);
+        }
+        
+        let radius_range = max_radius - min_radius;
+        
+        // Should have significant elevation variation (at least 100m range)
+        assert!(radius_range > 100.0, "Expected elevation variation but got range of {}", radius_range);
     }
     
     #[test]
