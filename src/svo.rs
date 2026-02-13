@@ -94,6 +94,9 @@ impl SparseVoxelOctree {
         assert!(x < size && y < size && z < size, 
             "Voxel coordinates ({},{},{}) out of bounds (max: {})", x, y, z, size);
         
+        // Log the operation
+        self.op_log.push(SvoOp::SetVoxel { x, y, z, material });
+        
         Self::set_voxel_recursive(&mut self.root, x, y, z, material, 0, self.max_depth, size);
     }
 
@@ -127,6 +130,9 @@ impl SparseVoxelOctree {
             return;
         }
         
+        // Log the operation
+        self.op_log.push(SvoOp::ClearVoxel { x, y, z });
+        
         Self::clear_voxel_recursive(&mut self.root, x, y, z, 0, self.max_depth, size);
     }
 
@@ -140,6 +146,9 @@ impl SparseVoxelOctree {
     /// * `max` - Maximum corner [x, y, z] (inclusive)
     /// * `material` - Material to fill with
     pub fn fill_region(&mut self, min: [u32; 3], max: [u32; 3], material: MaterialId) {
+        // Log the operation
+        self.op_log.push(SvoOp::FillRegion { min, max, material });
+        
         let size = 1u32 << self.max_depth;
         
         // Simple implementation: iterate and set each voxel
@@ -150,7 +159,7 @@ impl SparseVoxelOctree {
                 if y >= size { break; }
                 for z in min[2]..=max[2] {
                     if z >= size { break; }
-                    self.set_voxel(x, y, z, material);
+                    self.set_voxel_internal(x, y, z, material);
                 }
             }
         }
@@ -164,6 +173,9 @@ impl SparseVoxelOctree {
     /// * `min` - Minimum corner [x, y, z]
     /// * `max` - Maximum corner [x, y, z] (inclusive)
     pub fn clear_region(&mut self, min: [u32; 3], max: [u32; 3]) {
+        // Log the operation
+        self.op_log.push(SvoOp::ClearRegion { min, max });
+        
         let size = 1u32 << self.max_depth;
         
         for x in min[0]..=max[0] {
@@ -172,7 +184,74 @@ impl SparseVoxelOctree {
                 if y >= size { break; }
                 for z in min[2]..=max[2] {
                     if z >= size { break; }
-                    self.clear_voxel(x, y, z);
+                    self.clear_voxel_internal(x, y, z);
+                }
+            }
+        }
+    }
+
+    /// Internal set_voxel without logging (for use by fill_region)
+    fn set_voxel_internal(&mut self, x: u32, y: u32, z: u32, material: MaterialId) {
+        let size = 1u32 << self.max_depth;
+        Self::set_voxel_recursive(&mut self.root, x, y, z, material, 0, self.max_depth, size);
+    }
+
+    /// Internal clear_voxel without logging (for use by clear_region)
+    fn clear_voxel_internal(&mut self, x: u32, y: u32, z: u32) {
+        let size = 1u32 << self.max_depth;
+        Self::clear_voxel_recursive(&mut self.root, x, y, z, 0, self.max_depth, size);
+    }
+
+    /// Returns the operation log
+    pub fn op_log(&self) -> &[SvoOp] {
+        &self.op_log
+    }
+
+    /// Clears the operation log
+    pub fn clear_op_log(&mut self) {
+        self.op_log.clear();
+    }
+
+    /// Applies a sequence of operations to this SVO
+    ///
+    /// Operations are applied in order. This does NOT add to the op log.
+    ///
+    /// # Arguments
+    /// * `ops` - Slice of operations to apply
+    pub fn apply_ops(&mut self, ops: &[SvoOp]) {
+        for op in ops {
+            match *op {
+                SvoOp::SetVoxel { x, y, z, material } => {
+                    self.set_voxel_internal(x, y, z, material);
+                }
+                SvoOp::ClearVoxel { x, y, z } => {
+                    self.clear_voxel_internal(x, y, z);
+                }
+                SvoOp::FillRegion { min, max, material } => {
+                    let size = 1u32 << self.max_depth;
+                    for x in min[0]..=max[0] {
+                        if x >= size { break; }
+                        for y in min[1]..=max[1] {
+                            if y >= size { break; }
+                            for z in min[2]..=max[2] {
+                                if z >= size { break; }
+                                self.set_voxel_internal(x, y, z, material);
+                            }
+                        }
+                    }
+                }
+                SvoOp::ClearRegion { min, max } => {
+                    let size = 1u32 << self.max_depth;
+                    for x in min[0]..=max[0] {
+                        if x >= size { break; }
+                        for y in min[1]..=max[1] {
+                            if y >= size { break; }
+                            for z in min[2]..=max[2] {
+                                if z >= size { break; }
+                                self.clear_voxel_internal(x, y, z);
+                            }
+                        }
+                    }
                 }
             }
         }

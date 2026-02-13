@@ -263,3 +263,81 @@ fn test_clear_region_basic() {
     assert_eq!(svo.get_voxel(10, 10, 10), AIR);
     assert_eq!(svo.get_voxel(20, 20, 20), AIR);
 }
+
+// ============================================================================
+// Phase 3.5: Op log tests
+// ============================================================================
+
+#[test]
+fn test_op_log_records_operations() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(10, 20, 30, STONE);
+    svo.set_voxel(11, 21, 31, DIRT);
+    svo.clear_voxel(10, 20, 30);
+    svo.fill_region([5, 5, 5], [7, 7, 7], CONCRETE);
+    svo.clear_region([6, 6, 6], [6, 6, 6]);
+    
+    let log = svo.op_log();
+    assert_eq!(log.len(), 5, "Should have 5 operations in log");
+    
+    // Check first op
+    assert!(matches!(log[0], SvoOp::SetVoxel { x: 10, y: 20, z: 30, material: STONE }));
+    
+    // Check second op
+    assert!(matches!(log[1], SvoOp::SetVoxel { x: 11, y: 21, z: 31, material: DIRT }));
+}
+
+#[test]
+fn test_clear_op_log() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(10, 20, 30, STONE);
+    svo.set_voxel(11, 21, 31, DIRT);
+    
+    assert_eq!(svo.op_log().len(), 2);
+    
+    svo.clear_op_log();
+    
+    assert_eq!(svo.op_log().len(), 0, "Op log should be empty after clear");
+}
+
+#[test]
+fn test_apply_ops_produces_same_state() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    
+    // Perform operations on svo1
+    svo1.set_voxel(10, 20, 30, STONE);
+    svo1.set_voxel(11, 21, 31, DIRT);
+    svo1.clear_voxel(10, 20, 30);
+    svo1.fill_region([5, 5, 5], [7, 7, 7], CONCRETE);
+    
+    // Get the op log
+    let ops = svo1.op_log().to_vec();
+    
+    // Create fresh SVO and apply ops
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.apply_ops(&ops);
+    
+    // Check same state
+    assert_eq!(svo2.get_voxel(10, 20, 30), AIR); // was cleared
+    assert_eq!(svo2.get_voxel(11, 21, 31), DIRT);
+    assert_eq!(svo2.get_voxel(5, 5, 5), CONCRETE);
+    assert_eq!(svo2.get_voxel(6, 6, 6), CONCRETE);
+    assert_eq!(svo2.get_voxel(7, 7, 7), CONCRETE);
+}
+
+#[test]
+fn test_apply_ops_does_not_log() {
+    let mut svo1 = SparseVoxelOctree::new(8);
+    svo1.set_voxel(10, 20, 30, STONE);
+    
+    let ops = svo1.op_log().to_vec();
+    
+    let mut svo2 = SparseVoxelOctree::new(8);
+    svo2.apply_ops(&ops);
+    
+    // apply_ops should not add to the op log
+    assert_eq!(svo2.op_log().len(), 0, 
+        "apply_ops should not add operations to the log");
+}
