@@ -5,7 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
-    mesh::generate_earth_sphere,
+    mesh::{generate_earth_sphere, generate_tile_outlines},
     Renderer
 };
 use std::sync::Arc;
@@ -20,10 +20,15 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pipeline: Option<BasicPipeline>,
+    line_pipeline: Option<BasicPipeline>,
     camera: Camera,
-    vertex_buffer: Option<wgpu::Buffer>,
-    index_buffer: Option<wgpu::Buffer>,
-    num_indices: u32,
+    sphere_vertex_buffer: Option<wgpu::Buffer>,
+    sphere_index_buffer: Option<wgpu::Buffer>,
+    sphere_num_indices: u32,
+    tile_vertex_buffer: Option<wgpu::Buffer>,
+    tile_index_buffer: Option<wgpu::Buffer>,
+    tile_num_indices: u32,
+    tile_depth: u8,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -59,10 +64,15 @@ impl App {
             window: None,
             renderer: None,
             pipeline: None,
+            line_pipeline: None,
             camera,
-            vertex_buffer: None,
-            index_buffer: None,
-            num_indices: 0,
+            sphere_vertex_buffer: None,
+            sphere_index_buffer: None,
+            sphere_num_indices: 0,
+            tile_vertex_buffer: None,
+            tile_index_buffer: None,
+            tile_num_indices: 0,
+            tile_depth: 0, // Start with depth 0 (6 tiles)
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -133,29 +143,56 @@ impl ApplicationHandler for App {
             // Create renderer
             let renderer = pollster::block_on(Renderer::new(window.clone()));
             
-            // Create pipeline
+            // Create pipelines
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
+            let line_pipeline = BasicPipeline::new_with_topology(
+                &renderer.device, 
+                renderer.config.format, 
+                wgpu::PrimitiveTopology::LineList
+            );
             
             // Generate Earth sphere
             let (vertices, indices) = generate_earth_sphere();
-            let num_indices = indices.len() as u32;
+            let sphere_num_indices = indices.len() as u32;
             
-            let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let sphere_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Earth Sphere Vertex Buffer"),
                 contents: bytemuck::cast_slice(&vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
             
-            let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let sphere_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Earth Sphere Index Buffer"),
                 contents: bytemuck::cast_slice(&indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
             
-            self.vertex_buffer = Some(vertex_buffer);
-            self.index_buffer = Some(index_buffer);
-            self.num_indices = num_indices;
+            self.sphere_vertex_buffer = Some(sphere_vertex_buffer);
+            self.sphere_index_buffer = Some(sphere_index_buffer);
+            self.sphere_num_indices = sphere_num_indices;
             self.pipeline = Some(pipeline);
+            self.line_pipeline = Some(line_pipeline);
+            
+            // Generate initial tiles
+            let (tile_vertices, tile_indices) = generate_tile_outlines(self.tile_depth, None);
+            let tile_num_indices = tile_indices.len() as u32;
+            
+            let tile_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Tile Outline Vertex Buffer"),
+                contents: bytemuck::cast_slice(&tile_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            
+            let tile_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Tile Outline Index Buffer"),
+                contents: bytemuck::cast_slice(&tile_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            
+            self.tile_vertex_buffer = Some(tile_vertex_buffer);
+            self.tile_index_buffer = Some(tile_index_buffer);
+            self.tile_num_indices = tile_num_indices;
+            
             self.renderer = Some(renderer);
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
@@ -178,6 +215,49 @@ impl ApplicationHandler for App {
                     match event.state {
                         ElementState::Pressed => {
                             self.keys_pressed.insert(keycode);
+                            
+                            // Tile depth controls
+                            if keycode == KeyCode::BracketLeft && self.tile_depth > 0 {
+                                self.tile_depth -= 1;
+                                if let Some(renderer) = &self.renderer {
+                                    let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
+                                    let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Tile Outline Vertex Buffer"),
+                                        contents: bytemuck::cast_slice(&vertices),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                                    let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Tile Outline Index Buffer"),
+                                        contents: bytemuck::cast_slice(&indices),
+                                        usage: wgpu::BufferUsages::INDEX,
+                                    });
+                                    self.tile_vertex_buffer = Some(vertex_buffer);
+                                    self.tile_index_buffer = Some(index_buffer);
+                                    self.tile_num_indices = indices.len() as u32;
+                                    println!("Generated tiles at depth {} ({} tiles)", 
+                                        self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
+                                }
+                            } else if keycode == KeyCode::BracketRight && self.tile_depth < 6 {
+                                self.tile_depth += 1;
+                                if let Some(renderer) = &self.renderer {
+                                    let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
+                                    let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Tile Outline Vertex Buffer"),
+                                        contents: bytemuck::cast_slice(&vertices),
+                                        usage: wgpu::BufferUsages::VERTEX,
+                                    });
+                                    let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                        label: Some("Tile Outline Index Buffer"),
+                                        contents: bytemuck::cast_slice(&indices),
+                                        usage: wgpu::BufferUsages::INDEX,
+                                    });
+                                    self.tile_vertex_buffer = Some(vertex_buffer);
+                                    self.tile_index_buffer = Some(index_buffer);
+                                    self.tile_num_indices = indices.len() as u32;
+                                    println!("Generated tiles at depth {} ({} tiles)", 
+                                        self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
+                                }
+                            }
                             
                             // Toggle mouse capture on click
                             if keycode == KeyCode::Escape {
@@ -231,15 +311,14 @@ impl ApplicationHandler for App {
                 // Handle input
                 self.handle_input(delta_time);
                 
-                if let (Some(renderer), Some(window), Some(pipeline), Some(vertex_buffer), Some(index_buffer)) = 
-                    (&mut self.renderer, &self.window, &self.pipeline, &self.vertex_buffer, &self.index_buffer) {
+                if let (Some(renderer), Some(window), Some(pipeline), Some(line_pipeline), Some(sphere_vb), Some(sphere_ib), Some(tile_vb), Some(tile_ib)) = 
+                    (&mut self.renderer, &self.window, &self.pipeline, &self.line_pipeline, &self.sphere_vertex_buffer, &self.sphere_index_buffer, &self.tile_vertex_buffer, &self.tile_index_buffer) {
                     
                     // Update camera matrix with floating origin
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
                     let (view_proj, camera_offset) = self.camera.view_projection_matrix(aspect);
                     
                     // Apply floating origin: translate sphere by -camera_offset before rendering
-                    // This is done by offsetting the MVP matrix
                     let camera_offset_f32 = glam::Vec3::new(
                         camera_offset.x as f32,
                         camera_offset.y as f32,
@@ -249,6 +328,7 @@ impl ApplicationHandler for App {
                     let final_view_proj = view_proj * origin_transform;
                     
                     pipeline.update_uniforms(&renderer.queue, final_view_proj);
+                    line_pipeline.update_uniforms(&renderer.queue, final_view_proj);
                     
                     // Sky blue color
                     let clear_color = wgpu::Color {
@@ -258,14 +338,23 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame with sphere
-                    let num_indices = self.num_indices;
+                    // Render frame with sphere and tile outlines
+                    let sphere_num_indices = self.sphere_num_indices;
+                    let tile_num_indices = self.tile_num_indices;
                     let result = renderer.render(clear_color, |render_pass| {
+                        // Draw sphere
                         render_pass.set_pipeline(&pipeline.pipeline);
                         render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        render_pass.draw_indexed(0..num_indices, 0, 0..1);
+                        render_pass.set_vertex_buffer(0, sphere_vb.slice(..));
+                        render_pass.set_index_buffer(sphere_ib.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..sphere_num_indices, 0, 0..1);
+                        
+                        // Draw tile outlines
+                        render_pass.set_pipeline(&line_pipeline.pipeline);
+                        render_pass.set_bind_group(0, &line_pipeline.uniform_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, tile_vb.slice(..));
+                        render_pass.set_index_buffer(tile_ib.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..tile_num_indices, 0, 0..1);
                     });
 
                     match result {
@@ -281,12 +370,12 @@ impl ApplicationHandler for App {
                         let fps =
                             self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
                         
-                        // Also show camera position
+                        // Also show camera position and tile depth
                         let pos = self.camera.position;
                         let alt = pos.length() - 6_371_000.0;
                         window.set_title(&format!(
-                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x",
-                            fps, alt, self.camera.speed_multiplier
+                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x | Tiles: Depth {}",
+                            fps, alt, self.camera.speed_multiplier, self.tile_depth
                         ));
                         
                         self.frame_count = 0;
@@ -320,6 +409,7 @@ fn main() {
     println!("  Q/E or Shift/Space - Move down/up");
     println!("  Right Shift - 10x speed boost");
     println!("  Left Ctrl - 0.1x speed (slow)");
+    println!("  [ ] - Decrease/increase tile depth (0-6)");
     println!("  Left Click - Capture mouse for look");
     println!("  Escape - Release mouse");
     println!();

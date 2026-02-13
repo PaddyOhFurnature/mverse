@@ -66,6 +66,10 @@ pub struct BasicPipeline {
 
 impl BasicPipeline {
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_topology(device, surface_format, wgpu::PrimitiveTopology::TriangleList)
+    }
+    
+    pub fn new_with_topology(device: &wgpu::Device, surface_format: wgpu::TextureFormat, topology: wgpu::PrimitiveTopology) -> Self {
         // Create uniform buffer
         let uniforms = Uniforms::new();
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -134,10 +138,10 @@ impl BasicPipeline {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
+                topology,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: if topology == wgpu::PrimitiveTopology::LineList { None } else { Some(wgpu::Face::Back) },
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,

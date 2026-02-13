@@ -198,6 +198,95 @@ pub fn generate_earth_sphere() -> (Vec<Vertex>, Vec<u32>) {
     generate_icosphere(radius, 3)
 }
 
+/// Generate line segments for quad-sphere tile outlines
+///
+/// Creates lines along tile edges projected onto the sphere surface.
+/// - `depth`: Chunk depth level (0 = 6 tiles, 1 = 24, 2 = 96, etc.)
+/// - `face_colors`: Optional array of 6 colors for each cube face (if None, uses default colors)
+///
+/// Returns (vertices, indices) where indices form line segments (pairs of vertices).
+pub fn generate_tile_outlines(depth: u8, face_colors: Option<[Vec3; 6]>) -> (Vec<Vertex>, Vec<u32>) {
+    use crate::chunks::{ChunkId, chunk_corners_ecef};
+    
+    let colors = face_colors.unwrap_or([
+        Vec3::new(1.0, 0.0, 0.0), // Face 0: Red
+        Vec3::new(0.0, 1.0, 0.0), // Face 1: Green
+        Vec3::new(0.0, 0.0, 1.0), // Face 2: Blue
+        Vec3::new(1.0, 1.0, 0.0), // Face 3: Yellow
+        Vec3::new(1.0, 0.0, 1.0), // Face 4: Magenta
+        Vec3::new(0.0, 1.0, 1.0), // Face 5: Cyan
+    ]);
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Generate all chunk IDs at this depth
+    let tiles_per_face = 4_usize.pow(depth as u32);
+    
+    for face in 0..6 {
+        let face_color = colors[face as usize];
+        
+        // Generate all possible paths iteratively
+        let all_paths = generate_all_paths(depth);
+        
+        for path in all_paths {
+            let chunk_id = ChunkId { face, path };
+            let corners = chunk_corners_ecef(&chunk_id);
+            
+            // Convert ECEF corners to f32 Vec3
+            let c0 = Vec3::new(corners[0].x as f32, corners[0].y as f32, corners[0].z as f32);
+            let c1 = Vec3::new(corners[1].x as f32, corners[1].y as f32, corners[1].z as f32);
+            let c2 = Vec3::new(corners[2].x as f32, corners[2].y as f32, corners[2].z as f32);
+            let c3 = Vec3::new(corners[3].x as f32, corners[3].y as f32, corners[3].z as f32);
+            
+            // Add vertices for the 4 corners
+            let base_idx = vertices.len() as u32;
+            for &pos in &[c0, c1, c2, c3] {
+                let normal = pos.normalize();
+                vertices.push(Vertex {
+                    position: pos.to_array(),
+                    normal: normal.to_array(),
+                    color: [face_color.x, face_color.y, face_color.z, 1.0],
+                });
+            }
+            
+            // Add line segments for the 4 edges
+            // Edge order: 0->1, 1->2, 2->3, 3->0
+            indices.extend_from_slice(&[
+                base_idx, base_idx + 1,
+                base_idx + 1, base_idx + 2,
+                base_idx + 2, base_idx + 3,
+                base_idx + 3, base_idx,
+            ]);
+        }
+    }
+    
+    (vertices, indices)
+}
+
+/// Generate all possible quadtree paths at given depth iteratively
+fn generate_all_paths(depth: u8) -> Vec<Vec<u8>> {
+    if depth == 0 {
+        return vec![Vec::new()];
+    }
+    
+    let mut paths = vec![Vec::new()];
+    
+    for _ in 0..depth {
+        let mut new_paths = Vec::new();
+        for path in paths {
+            for child in 0..4 {
+                let mut new_path = path.clone();
+                new_path.push(child);
+                new_paths.push(new_path);
+            }
+        }
+        paths = new_paths;
+    }
+    
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
