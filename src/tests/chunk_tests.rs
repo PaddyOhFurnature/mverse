@@ -1211,3 +1211,154 @@ fn test_scale_gate_global_coverage() {
             point.lat_deg, point.lon_deg);
     }
 }
+
+// ============================================================================
+// Phase 2.6: Neighbour queries tests  
+// ============================================================================
+
+#[test]
+fn test_chunk_neighbors_interior_tile() {
+    // Interior tile should have 4 neighbours, all same face, same depth
+    // Use quadrant patterns that keep us away from edges
+    // Alternating 0 and 3 keeps us in the middle regions
+    let chunk = ChunkId { 
+        face: 0, 
+        path: vec![0, 3, 0, 3] // Interior pattern
+    };
+    
+    let neighbors = chunk_neighbors(&chunk);
+    
+    assert_eq!(neighbors.len(), 4, "Should have exactly 4 neighbours");
+    
+    // All neighbours should be on same face for truly interior tile
+    let same_face_count = neighbors.iter().filter(|n| n.face == chunk.face).count();
+    assert!(same_face_count >= 3, 
+        "Interior tile should have mostly same-face neighbours, got {} out of 4", 
+        same_face_count);
+    
+    for neighbor in &neighbors {
+        assert_eq!(neighbor.depth(), chunk.depth(), "Neighbours should be at same depth");
+    }
+}
+
+#[test]
+fn test_chunk_neighbors_count() {
+    // Any tile should have exactly 4 neighbours
+    let test_chunks = vec![
+        ChunkId::root(0),
+        gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8),
+        gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10),
+    ];
+    
+    for chunk in test_chunks {
+        let neighbors = chunk_neighbors(&chunk);
+        assert_eq!(neighbors.len(), 4, "Should have exactly 4 neighbours");
+    }
+}
+
+#[test]
+fn test_chunk_neighbors_no_duplicates() {
+    // No duplicate neighbours in result
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    let neighbors = chunk_neighbors(&chunk);
+    
+    use std::collections::HashSet;
+    let unique: HashSet<_> = neighbors.iter().collect();
+    
+    assert_eq!(unique.len(), neighbors.len(), 
+        "All neighbours should be unique, got {} unique out of {} total",
+        unique.len(), neighbors.len());
+}
+
+#[test]
+fn test_chunk_neighbors_same_depth() {
+    // All neighbours should be at same depth as input
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10);
+    let neighbors = chunk_neighbors(&chunk);
+    
+    for neighbor in neighbors {
+        assert_eq!(neighbor.depth(), chunk.depth(), 
+            "Neighbour should be at same depth as original");
+    }
+}
+
+#[test]
+fn test_chunk_neighbors_bidirectional() {
+    // Each neighbour's neighbours should include the original tile
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 6);
+    let neighbors = chunk_neighbors(&chunk);
+    
+    for neighbor in neighbors {
+        let neighbor_neighbors = chunk_neighbors(&neighbor);
+        
+        assert!(neighbor_neighbors.contains(&chunk),
+            "Neighbour's neighbours should include original tile (bidirectional)");
+    }
+}
+
+#[test]
+fn test_chunk_neighbors_different_from_original() {
+    // None of the neighbours should be the original tile
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 8);
+    let neighbors = chunk_neighbors(&chunk);
+    
+    for neighbor in neighbors {
+        assert_ne!(neighbor, chunk, "Neighbour should not be the original tile");
+    }
+}
+
+#[test]
+fn test_chunk_neighbors_root_tile() {
+    // Root tiles should have neighbours on adjacent faces
+    let root = ChunkId::root(0);
+    let neighbors = chunk_neighbors(&root);
+    
+    assert_eq!(neighbors.len(), 4, "Root should have 4 neighbours");
+    
+    // At least some neighbours should be on different faces (cross-face adjacency)
+    let different_face_count = neighbors.iter().filter(|n| n.face != root.face).count();
+    assert!(different_face_count > 0, 
+        "Root tile should have at least one neighbour on different face (cross-face adjacency)");
+}
+
+#[test]
+fn test_chunk_neighbors_consistency() {
+    // Same chunk queried multiple times should give same neighbours
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    
+    let neighbors1 = chunk_neighbors(&chunk);
+    let neighbors2 = chunk_neighbors(&chunk);
+    
+    assert_eq!(neighbors1.len(), neighbors2.len());
+    
+    // Convert to sets for comparison (order doesn't matter)
+    use std::collections::HashSet;
+    let set1: HashSet<_> = neighbors1.iter().collect();
+    let set2: HashSet<_> = neighbors2.iter().collect();
+    
+    assert_eq!(set1, set2, "Neighbour queries should be deterministic");
+}
+
+#[test]
+fn test_chunk_neighbors_cross_face_edges() {
+    // Test face-edge tiles to verify cross-face adjacency works correctly
+    
+    // Test tile at edge of face 0 (should have neighbours on adjacent faces)
+    let edge_chunk = ChunkId { 
+        face: 0, 
+        path: vec![1, 1, 1] // Right edge
+    };
+    
+    let neighbors = chunk_neighbors(&edge_chunk);
+    assert_eq!(neighbors.len(), 4, "Edge tile should have 4 neighbours");
+    
+    // At least one neighbour should be on a different face
+    let cross_face = neighbors.iter().any(|n| n.face != edge_chunk.face);
+    assert!(cross_face, "Edge tile should have at least one cross-face neighbour");
+    
+    // All neighbours should be at same depth
+    for neighbor in &neighbors {
+        assert_eq!(neighbor.depth(), edge_chunk.depth(), 
+            "Neighbours should be at same depth");
+    }
+}

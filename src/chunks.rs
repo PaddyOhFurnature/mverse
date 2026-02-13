@@ -564,3 +564,189 @@ pub fn chunk_contains_gps(id: &ChunkId, gps: &GpsPos) -> bool {
     let point_chunk = gps_to_chunk_id(gps, id.depth() as u8);
     point_chunk == *id
 }
+
+// ============================================================================
+// Phase 2.6: Neighbour queries
+// ============================================================================
+
+/// Face adjacency table for cube projection
+/// Each face has 4 edges (top, right, bottom, left in UV space)
+/// For each edge, we store: (adjacent_face, u_transform, v_transform)
+/// 
+/// UV space on each face goes from -1 to +1
+/// Edges are at u=-1 (left), u=+1 (right), v=-1 (bottom), v=+1 (top)
+///
+/// Face layout (cube net):
+///     [4]
+/// [3] [0] [2] [1]
+///     [5]
+///
+/// Faces: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+#[derive(Debug, Copy, Clone)]
+struct FaceEdge {
+    face: u8,
+    /// Transform u coordinate: 0=keep u, 1=keep v, 2=negate u, 3=negate v
+    u_map: u8,
+    /// Transform v coordinate: 0=keep v, 1=keep u, 2=negate v, 3=negate u
+    v_map: u8,
+}
+
+/// Adjacency table: [face][edge] -> FaceEdge
+/// Edge order: 0=left (-u), 1=right (+u), 2=bottom (-v), 3=top (+v)
+const FACE_ADJACENCY: [[FaceEdge; 4]; 6] = [
+    // Face 0 (+X): left=3(-Y), right=2(+Y), bottom=5(-Z), top=4(+Z)
+    [
+        FaceEdge { face: 3, u_map: 1, v_map: 0 },  // left -> -Y (v->u, v->v)
+        FaceEdge { face: 2, u_map: 3, v_map: 0 },  // right -> +Y (-v->u, v->v)
+        FaceEdge { face: 5, u_map: 0, v_map: 1 },  // bottom -> -Z (u->u, u->v)
+        FaceEdge { face: 4, u_map: 0, v_map: 3 },  // top -> +Z (u->u, -u->v)
+    ],
+    // Face 1 (-X): left=2(+Y), right=3(-Y), bottom=5(-Z), top=4(+Z)
+    [
+        FaceEdge { face: 2, u_map: 1, v_map: 0 },  // left -> +Y (v->u, v->v)
+        FaceEdge { face: 3, u_map: 3, v_map: 0 },  // right -> -Y (-v->u, v->v)
+        FaceEdge { face: 5, u_map: 2, v_map: 1 },  // bottom -> -Z (-u->u, u->v)
+        FaceEdge { face: 4, u_map: 2, v_map: 3 },  // top -> +Z (-u->u, -u->v)
+    ],
+    // Face 2 (+Y): left=0(+X), right=1(-X), bottom=5(-Z), top=4(+Z)
+    [
+        FaceEdge { face: 0, u_map: 1, v_map: 0 },  // left -> +X (v->u, v->v)
+        FaceEdge { face: 1, u_map: 3, v_map: 0 },  // right -> -X (-v->u, v->v)
+        FaceEdge { face: 5, u_map: 1, v_map: 2 },  // bottom -> -Z (v->u, -v->v)
+        FaceEdge { face: 4, u_map: 1, v_map: 0 },  // top -> +Z (v->u, v->v)
+    ],
+    // Face 3 (-Y): left=1(-X), right=0(+X), bottom=5(-Z), top=4(+Z)
+    [
+        FaceEdge { face: 1, u_map: 1, v_map: 0 },  // left -> -X (v->u, v->v)
+        FaceEdge { face: 0, u_map: 3, v_map: 0 },  // right -> +X (-v->u, v->v)
+        FaceEdge { face: 5, u_map: 3, v_map: 0 },  // bottom -> -Z (-v->u, v->v)
+        FaceEdge { face: 4, u_map: 3, v_map: 2 },  // top -> +Z (-v->u, -v->v)
+    ],
+    // Face 4 (+Z): left=3(-Y), right=2(+Y), bottom=0(+X), top=1(-X)
+    [
+        FaceEdge { face: 3, u_map: 0, v_map: 2 },  // left -> -Y (u->u, -v->v)
+        FaceEdge { face: 2, u_map: 0, v_map: 0 },  // right -> +Y (u->u, v->v)
+        FaceEdge { face: 0, u_map: 0, v_map: 1 },  // bottom -> +X (u->u, u->v)
+        FaceEdge { face: 1, u_map: 2, v_map: 1 },  // top -> -X (-u->u, u->v)
+    ],
+    // Face 5 (-Z): left=3(-Y), right=2(+Y), bottom=1(-X), top=0(+X)
+    [
+        FaceEdge { face: 3, u_map: 0, v_map: 0 },  // left -> -Y (u->u, v->v)
+        FaceEdge { face: 2, u_map: 0, v_map: 2 },  // right -> +Y (u->u, -v->v)
+        FaceEdge { face: 1, u_map: 2, v_map: 3 },  // bottom -> -X (-u->u, -u->v)
+        FaceEdge { face: 0, u_map: 0, v_map: 3 },  // top -> +X (u->u, -u->v)
+    ],
+];
+
+/// Returns the 4 edge-adjacent neighbours of a chunk
+///
+/// Neighbours are at the same depth and share an edge with the input chunk.
+/// This includes cross-face neighbours at face boundaries.
+///
+/// # Arguments
+/// * `id` - The chunk to find neighbours for
+///
+/// # Returns
+/// A vector of exactly 4 ChunkIds representing the edge-adjacent neighbours
+pub fn chunk_neighbors(id: &ChunkId) -> Vec<ChunkId> {
+    let mut neighbors = Vec::with_capacity(4);
+    let (u_min, u_max, v_min, v_max) = chunk_uv_bounds(id);
+    let u_mid = (u_min + u_max) / 2.0;
+    let v_mid = (v_min + v_max) / 2.0;
+    let u_size = u_max - u_min;
+    let v_size = v_max - v_min;
+    
+    // Try to build 4 neighbours: left, right, bottom, top
+    
+    // Left neighbour (u - size)
+    if u_min > -1.0 + 1e-9 {
+        // Same face
+        neighbors.push(build_chunk_from_uv(id.face, u_mid - u_size, v_mid, id.depth()));
+    } else {
+        // Cross-face: left edge
+        neighbors.push(cross_face_neighbor(id, 0));
+    }
+    
+    // Right neighbour (u + size)
+    if u_max < 1.0 - 1e-9 {
+        // Same face
+        neighbors.push(build_chunk_from_uv(id.face, u_mid + u_size, v_mid, id.depth()));
+    } else {
+        // Cross-face: right edge
+        neighbors.push(cross_face_neighbor(id, 1));
+    }
+    
+    // Bottom neighbour (v - size)
+    if v_min > -1.0 + 1e-9 {
+        // Same face
+        neighbors.push(build_chunk_from_uv(id.face, u_mid, v_mid - v_size, id.depth()));
+    } else {
+        // Cross-face: bottom edge
+        neighbors.push(cross_face_neighbor(id, 2));
+    }
+    
+    // Top neighbour (v + size)
+    if v_max < 1.0 - 1e-9 {
+        // Same face
+        neighbors.push(build_chunk_from_uv(id.face, u_mid, v_mid + v_size, id.depth()));
+    } else {
+        // Cross-face: top edge
+        neighbors.push(cross_face_neighbor(id, 3));
+    }
+    
+    neighbors
+}
+
+/// Helper: builds a ChunkId from a UV position on a given face
+fn build_chunk_from_uv(face: u8, u: f64, v: f64, depth: usize) -> ChunkId {
+    let mut path = Vec::with_capacity(depth);
+    let mut u_min = -1.0;
+    let mut u_max = 1.0;
+    let mut v_min = -1.0;
+    let mut v_max = 1.0;
+    
+    for _ in 0..depth {
+        let u_mid = (u_min + u_max) / 2.0;
+        let v_mid = (v_min + v_max) / 2.0;
+        
+        let quadrant = if v >= v_mid {
+            if u < u_mid { 0 } else { 1 }
+        } else {
+            if u < u_mid { 2 } else { 3 }
+        };
+        
+        path.push(quadrant);
+        
+        if u < u_mid { u_max = u_mid; } else { u_min = u_mid; }
+        if v < v_mid { v_max = v_mid; } else { v_min = v_mid; }
+    }
+    
+    ChunkId { face, path }
+}
+
+/// Helper: finds neighbour across a face boundary
+fn cross_face_neighbor(id: &ChunkId, edge: usize) -> ChunkId {
+    let adjacency = FACE_ADJACENCY[id.face as usize][edge];
+    let (u_min, u_max, v_min, v_max) = chunk_uv_bounds(id);
+    let u_mid = (u_min + u_max) / 2.0;
+    let v_mid = (v_min + v_max) / 2.0;
+    
+    // Transform UV coordinates to adjacent face's coordinate system
+    let new_u = match adjacency.u_map {
+        0 => u_mid,      // keep u
+        1 => v_mid,      // v -> u
+        2 => -u_mid,     // negate u
+        3 => -v_mid,     // negate v
+        _ => unreachable!(),
+    };
+    
+    let new_v = match adjacency.v_map {
+        0 => v_mid,      // keep v
+        1 => u_mid,      // u -> v
+        2 => -v_mid,     // negate v
+        3 => -u_mid,     // negate u
+        _ => unreachable!(),
+    };
+    
+    build_chunk_from_uv(adjacency.face, new_u, new_v, id.depth())
+}
