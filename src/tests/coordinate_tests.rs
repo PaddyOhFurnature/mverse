@@ -165,3 +165,132 @@ fn test_gps_to_ecef_null_island() {
     assert!(ecef.y.abs() < 1.0, "Y should be near zero");
     assert!(ecef.z.abs() < 1.0, "Z should be near zero");
 }
+
+// ============================================================================
+// ECEF to GPS conversion tests
+// ============================================================================
+
+#[test]
+fn test_ecef_to_gps_round_trip_equator() {
+    let original = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1, 
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.lon_deg - original.lon_deg).abs() < 0.000_000_1,
+        "Lon: {} vs {}", result.lon_deg, original.lon_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_north_pole() {
+    let original = GpsPos {
+        lat_deg: 90.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    // At pole, longitude is undefined, only check latitude and elevation
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_south_pole() {
+    let original = GpsPos {
+        lat_deg: -90.0,
+        lon_deg: 0.0,
+        elevation_m: 0.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_brisbane() {
+    let original = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.lon_deg - original.lon_deg).abs() < 0.000_000_1,
+        "Lon: {} vs {}", result.lon_deg, original.lon_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_everest() {
+    let original = GpsPos {
+        lat_deg: 27.9881,
+        lon_deg: 86.9250,
+        elevation_m: 8848.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.lon_deg - original.lon_deg).abs() < 0.000_000_1,
+        "Lon: {} vs {}", result.lon_deg, original.lon_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_antimeridian() {
+    // Test near the 180° longitude line
+    let original = GpsPos {
+        lat_deg: 0.0,
+        lon_deg: 180.0,
+        elevation_m: 0.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    // Longitude could be ±180°, both are equivalent
+    let lon_diff = (result.lon_deg - original.lon_deg).abs();
+    assert!(lon_diff < 0.000_000_1 || (lon_diff - 360.0).abs() < 0.000_000_1,
+        "Lon: {} vs {}", result.lon_deg, original.lon_deg);
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+}
+
+#[test]
+fn test_ecef_to_gps_round_trip_negative_elevation() {
+    // Dead Sea: below sea level
+    let original = GpsPos {
+        lat_deg: 31.5,
+        lon_deg: 35.5,
+        elevation_m: -430.0,
+    };
+    let ecef = gps_to_ecef(&original);
+    let result = ecef_to_gps(&ecef);
+    
+    assert!((result.lat_deg - original.lat_deg).abs() < 0.000_000_1,
+        "Lat: {} vs {}", result.lat_deg, original.lat_deg);
+    assert!((result.lon_deg - original.lon_deg).abs() < 0.000_000_1,
+        "Lon: {} vs {}", result.lon_deg, original.lon_deg);
+    assert!((result.elevation_m - original.elevation_m).abs() < 0.001,
+        "Elev: {} vs {}", result.elevation_m, original.elevation_m);
+}
