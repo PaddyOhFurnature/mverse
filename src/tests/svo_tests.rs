@@ -35,3 +35,66 @@ fn test_material_constants() {
     assert_eq!(BRICK.0, 10, "BRICK should be 10");
     assert_eq!(ASPHALT.0, 11, "ASPHALT should be 11");
 }
+
+// ============================================================================
+// Phase 3.2: Set and get voxel tests
+// ============================================================================
+
+#[test]
+fn test_set_get_single_voxel() {
+    let mut svo = SparseVoxelOctree::new(8);
+    svo.set_voxel(10, 20, 30, STONE);
+    
+    let material = svo.get_voxel(10, 20, 30);
+    assert_eq!(material, STONE, "Should retrieve the material that was set");
+}
+
+#[test]
+fn test_get_unset_voxel_returns_air() {
+    let svo = SparseVoxelOctree::new(8);
+    let material = svo.get_voxel(10, 20, 30);
+    assert_eq!(material, AIR, "Unset voxel should return AIR");
+}
+
+#[test]
+fn test_set_multiple_voxels() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(0, 0, 0, STONE);
+    svo.set_voxel(10, 10, 10, DIRT);
+    svo.set_voxel(100, 100, 100, CONCRETE);
+    
+    assert_eq!(svo.get_voxel(0, 0, 0), STONE);
+    assert_eq!(svo.get_voxel(10, 10, 10), DIRT);
+    assert_eq!(svo.get_voxel(100, 100, 100), CONCRETE);
+}
+
+#[test]
+fn test_set_same_position_twice() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(50, 50, 50, STONE);
+    svo.set_voxel(50, 50, 50, WOOD);
+    
+    assert_eq!(svo.get_voxel(50, 50, 50), WOOD, 
+        "Second material should overwrite first");
+}
+
+#[test]
+fn test_set_get_at_origin() {
+    let mut svo = SparseVoxelOctree::new(8);
+    
+    svo.set_voxel(0, 0, 0, METAL);
+    assert_eq!(svo.get_voxel(0, 0, 0), METAL, 
+        "Should work at origin (0,0,0)");
+}
+
+#[test]
+fn test_set_get_at_max_bounds() {
+    let mut svo = SparseVoxelOctree::new(8);
+    let max_coord = (1u32 << 8) - 1; // 2^8 - 1 = 255
+    
+    svo.set_voxel(max_coord, max_coord, max_coord, GLASS);
+    assert_eq!(svo.get_voxel(max_coord, max_coord, max_coord), GLASS, 
+        "Should work at max bounds");
+}
