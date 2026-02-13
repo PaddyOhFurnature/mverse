@@ -54,22 +54,32 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        // Start camera at Brisbane looking down at city
+        // Start camera at Brisbane looking down at city  
         let mut camera = Camera::brisbane();
         
         // Move camera to 5km altitude for better city view
-        camera.position = camera.position.normalize() * (6_371_000.0 + 5000.0);
+        // Current: ~100m, Target: 5000m above surface
+        let current_altitude = camera.position.length() - 6_371_000.0;
+        let target_altitude = 5000.0;
+        let altitude_diff = target_altitude - current_altitude;
         
-        // Look down at Brisbane
-        camera.orientation = {
-            use glam::{DVec3, DQuat, DMat3};
-            let forward = -camera.position.normalize(); // Look toward Earth center
-            let up = DVec3::Z;
-            let right = forward.cross(up).normalize();
-            let up = right.cross(forward).normalize();
-            let rotation_matrix = DMat3::from_cols(right, up, -forward);
-            DQuat::from_mat3(&rotation_matrix)
-        };
+        // Move camera outward along radial direction
+        let radial_direction = camera.position.normalize();
+        camera.position = camera.position + (radial_direction * altitude_diff);
+        
+        // Recompute orientation to look straight down at Brisbane
+        let forward = -camera.position.normalize(); // Look toward Earth center
+        let up = glam::DVec3::Z; // North pole direction
+        let right = forward.cross(up).normalize();
+        let actual_up = right.cross(forward).normalize();
+        let rotation_matrix = glam::DMat3::from_cols(right, actual_up, -forward);
+        camera.orientation = glam::DQuat::from_mat3(&rotation_matrix);
+        
+        println!("Camera initialized at Brisbane");
+        println!("  Position ECEF: ({:.1}, {:.1}, {:.1})",
+            camera.position.x, camera.position.y, camera.position.z);
+        println!("  Altitude: {:.2} km", camera.position.length() / 1000.0 - 6371.0);
+        println!("  Looking down at city center");
         
         Self {
             window: None,
@@ -464,17 +474,21 @@ impl ApplicationHandler for App {
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
                     let (view_proj, camera_offset) = self.camera.view_projection_matrix(aspect);
                     
-                    // Apply floating origin: translate sphere by -camera_offset before rendering
+                    // The meshes are in absolute ECEF coordinates (millions of meters)
+                    // We need to translate everything by -camera_offset to center the world around camera
+                    // Transform order: model coords → subtract camera offset → view → projection
                     let camera_offset_f32 = glam::Vec3::new(
                         camera_offset.x as f32,
                         camera_offset.y as f32,
                         camera_offset.z as f32,
                     );
+                    // Create a translation matrix that shifts world by -camera position
                     let origin_transform = glam::Mat4::from_translation(-camera_offset_f32);
-                    let final_view_proj = view_proj * origin_transform;
+                    // Apply: projection * view * translate
+                    let final_mvp = view_proj * origin_transform;
                     
-                    pipeline.update_uniforms(&renderer.queue, final_view_proj);
-                    line_pipeline.update_uniforms(&renderer.queue, final_view_proj);
+                    pipeline.update_uniforms(&renderer.queue, final_mvp);
+                    line_pipeline.update_uniforms(&renderer.queue, final_mvp);
                     
                     // Sky blue color
                     let clear_color = wgpu::Color {
