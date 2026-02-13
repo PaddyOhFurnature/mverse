@@ -198,3 +198,71 @@ pub fn parse_hgt_filename(filename: &str) -> Result<(i16, i16), Box<dyn std::err
     
     Ok((lat, lon))
 }
+
+/// Simple SRTM elevation manager with in-memory tile cache
+///
+/// Loads SRTM tiles on demand and caches them for repeated queries.
+pub struct SrtmManager {
+    tiles: std::collections::HashMap<(i16, i16), SrtmTile>,
+    cache: crate::cache::DiskCache,
+}
+
+impl SrtmManager {
+    /// Create a new SRTM manager with the given cache
+    pub fn new(cache: crate::cache::DiskCache) -> Self {
+        Self {
+            tiles: std::collections::HashMap::new(),
+            cache,
+        }
+    }
+    
+    /// Get elevation at a GPS coordinate
+    ///
+    /// Returns None if:
+    /// - The tile isn't cached and can't be loaded
+    /// - The coordinate has void/no-data in SRTM
+    pub fn get_elevation(&mut self, lat: f64, lon: f64) -> Option<f64> {
+        // Determine which tile this coordinate is in
+        // SRTM tiles are named by their SW corner
+        let tile_lat = lat.floor() as i16;
+        let tile_lon = lon.floor() as i16;
+        
+        // Try to get tile from cache, or load it
+        if !self.tiles.contains_key(&(tile_lat, tile_lon)) {
+            if let Some(tile) = self.load_tile(tile_lat, tile_lon) {
+                self.tiles.insert((tile_lat, tile_lon), tile);
+            } else {
+                // Tile not available
+                return None;
+            }
+        }
+        
+        // Query elevation from the tile
+        let tile = self.tiles.get(&(tile_lat, tile_lon))?;
+        get_elevation(tile, lat, lon)
+    }
+    
+    /// Load an SRTM tile from cache
+    ///
+    /// Returns None if tile isn't in cache
+    fn load_tile(&self, lat: i16, lon: i16) -> Option<SrtmTile> {
+        // Generate tile filename
+        let lat_dir = if lat >= 0 { 'N' } else { 'S' };
+        let lon_dir = if lon >= 0 { 'E' } else { 'W' };
+        let filename = format!("{}{:02}{}{:03}.hgt",
+            lat_dir, lat.abs(), lon_dir, lon.abs());
+        
+        // Try to load from cache
+        let bytes = self.cache.read_srtm(&filename).ok()?;
+        
+        // Parse HGT file
+        parse_hgt(&filename, &bytes).ok()
+    }
+    
+    /// Get elevation with a fallback value for missing data
+    ///
+    /// Returns the elevation if available, otherwise returns the fallback value.
+    pub fn get_elevation_or(&mut self, lat: f64, lon: f64, fallback: f64) -> f64 {
+        self.get_elevation(lat, lon).unwrap_or(fallback)
+    }
+}
