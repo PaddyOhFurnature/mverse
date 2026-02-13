@@ -432,3 +432,72 @@ fn test_haversine_short_distance() {
         distance, expected, tolerance
     );
 }
+
+// ============================================================================
+// ECEF Euclidean distance tests
+// ============================================================================
+
+#[test]
+fn test_ecef_distance_same_point() {
+    let point = EcefPos {
+        x: -5046951.809,
+        y: 2568766.054,
+        z: -2924501.502,
+    };
+    let distance = ecef_distance(&point, &point);
+    assert_eq!(distance, 0.0, "Distance to same point should be exactly 0");
+}
+
+#[test]
+fn test_ecef_distance_known_points() {
+    // Two points with known ECEF coordinates
+    let brisbane = gps_to_ecef(&GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    });
+    let sydney = gps_to_ecef(&GpsPos {
+        lat_deg: -33.8688,
+        lon_deg: 151.2093,
+        elevation_m: 0.0,
+    });
+    
+    let distance = ecef_distance(&brisbane, &sydney);
+    
+    // ECEF distance should be positive and non-zero
+    assert!(distance > 0.0, "Distance should be positive");
+    
+    // Verify it's calculated correctly using Pythagorean theorem
+    let dx = sydney.x - brisbane.x;
+    let dy = sydney.y - brisbane.y;
+    let dz = sydney.z - brisbane.z;
+    let expected = (dx * dx + dy * dy + dz * dz).sqrt();
+    
+    assert!((distance - expected).abs() < 0.001, 
+        "Distance = {}, expected = {}", distance, expected);
+}
+
+#[test]
+fn test_ecef_distance_shorter_than_haversine() {
+    // ECEF (straight line through Earth) should be shorter than Haversine (surface)
+    let brisbane = GpsPos {
+        lat_deg: -27.4698,
+        lon_deg: 153.0251,
+        elevation_m: 0.0,
+    };
+    let sydney = GpsPos {
+        lat_deg: -33.8688,
+        lon_deg: 151.2093,
+        elevation_m: 0.0,
+    };
+    
+    let ecef_brisbane = gps_to_ecef(&brisbane);
+    let ecef_sydney = gps_to_ecef(&sydney);
+    
+    let straight_line = ecef_distance(&ecef_brisbane, &ecef_sydney);
+    let surface = haversine_distance(&brisbane, &sydney);
+    
+    assert!(straight_line < surface,
+        "Straight line ({:.0}m) should be shorter than surface ({:.0}m)",
+        straight_line, surface);
+}

@@ -181,3 +181,32 @@ pub fn haversine_distance(a: &GpsPos, b: &GpsPos) -> f64 {
     // Distance = radius × angular distance
     WGS84_A * c
 }
+
+/// Calculates the straight-line Euclidean distance between two ECEF positions.
+///
+/// This is the direct 3D distance through space (potentially through the Earth),
+/// not the surface distance. Always shorter than the great-circle distance for
+/// the same two points.
+///
+/// # Arguments
+/// * `a` - First ECEF position
+/// * `b` - Second ECEF position
+///
+/// # Returns
+/// Distance in metres
+///
+/// # Examples
+/// ```
+/// use metaverse_core::coordinates::{ecef_distance, gps_to_ecef, GpsPos};
+/// let brisbane = gps_to_ecef(&GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 });
+/// let sydney = gps_to_ecef(&GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 });
+/// let distance = ecef_distance(&brisbane, &sydney);
+/// // Straight-line distance < surface distance
+/// ```
+pub fn ecef_distance(a: &EcefPos, b: &EcefPos) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let dz = b.z - a.z;
+    
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
