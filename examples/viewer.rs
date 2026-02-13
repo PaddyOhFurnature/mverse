@@ -2,16 +2,19 @@
 //!
 //! Opens a window and renders the metaverse world.
 
-use metaverse_core::renderer::Renderer;
+use metaverse_core::renderer::{Renderer, pipeline::{BasicPipeline, Vertex}};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
+use wgpu::util::DeviceExt;
 
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    pipeline: Option<BasicPipeline>,
+    vertex_buffer: Option<wgpu::Buffer>,
     frame_count: usize,
     fps_update_time: std::time::Instant,
 }
@@ -30,7 +33,42 @@ impl ApplicationHandler for App {
             );
 
             // Create renderer
-            self.renderer = Some(pollster::block_on(Renderer::new(window.clone())));
+            let renderer = pollster::block_on(Renderer::new(window.clone()));
+            
+            // Create pipeline
+            let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
+            
+            // Create a test triangle
+            let vertices = vec![
+                Vertex {
+                    position: [0.0, 0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    color: [1.0, 0.0, 0.0, 1.0], // Red
+                },
+                Vertex {
+                    position: [-0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    color: [0.0, 1.0, 0.0, 1.0], // Green
+                },
+                Vertex {
+                    position: [0.5, -0.5, 0.0],
+                    normal: [0.0, 0.0, 1.0],
+                    color: [0.0, 0.0, 1.0, 1.0], // Blue
+                },
+            ];
+            
+            let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Triangle Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            
+            // Set identity matrix (no transform)
+            pipeline.update_uniforms(&renderer.queue, glam::Mat4::IDENTITY);
+            
+            self.vertex_buffer = Some(vertex_buffer);
+            self.pipeline = Some(pipeline);
+            self.renderer = Some(renderer);
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
         }
@@ -47,7 +85,9 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                if let (Some(renderer), Some(window), Some(pipeline), Some(vertex_buffer)) = 
+                    (&mut self.renderer, &self.window, &self.pipeline, &self.vertex_buffer) {
+                    
                     // Sky blue color
                     let clear_color = wgpu::Color {
                         r: 0.529,
@@ -56,8 +96,15 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame
-                    match renderer.render(clear_color) {
+                    // Render frame with triangle
+                    let result = renderer.render(clear_color, |render_pass| {
+                        render_pass.set_pipeline(&pipeline.pipeline);
+                        render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        render_pass.draw(0..3, 0..1);
+                    });
+
+                    match result {
                         Ok(_) => {}
                         Err(wgpu::SurfaceError::Lost) => renderer.resize(renderer.size),
                         Err(wgpu::SurfaceError::OutOfMemory) => event_loop.exit(),
@@ -97,6 +144,8 @@ fn main() {
     let mut app = App {
         window: None,
         renderer: None,
+        pipeline: None,
+        vertex_buffer: None,
         frame_count: 0,
         fps_update_time: std::time::Instant::now(),
     };

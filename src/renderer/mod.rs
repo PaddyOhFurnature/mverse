@@ -5,6 +5,7 @@
 
 pub mod pipeline;
 pub mod camera;
+pub mod shaders;
 
 use wgpu;
 use winit::window::Window;
@@ -97,8 +98,11 @@ impl Renderer {
         }
     }
 
-    /// Render a frame with the given clear color
-    pub fn render(&mut self, clear_color: wgpu::Color) -> Result<(), wgpu::SurfaceError> {
+    /// Render a frame with the given clear color and optional render callback
+    pub fn render<F>(&mut self, clear_color: wgpu::Color, render_fn: F) -> Result<(), wgpu::SurfaceError>
+    where
+        F: FnOnce(&mut wgpu::RenderPass),
+    {
         let output = self.surface.get_current_texture()?;
         let view = output
             .texture
@@ -111,7 +115,7 @@ impl Renderer {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -125,6 +129,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
+            
+            // Call the render function to draw geometry
+            render_fn(&mut render_pass);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

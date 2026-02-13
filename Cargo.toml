@@ -11,10 +11,11 @@ bincode = "1"
 dirs = "5"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 serde_json = "1"
-wgpu = "24"
+wgpu = { version = "24", features = ["wgsl"] }
 winit = "0.30"
 pollster = "0.4"
 glam = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

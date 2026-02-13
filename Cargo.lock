@@ -1372,6 +1372,7 @@ name = "metaverse_core"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytemuck",
  "dirs",
  "env_logger",
  "glam",
