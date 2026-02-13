@@ -1,4 +1,5 @@
-use crate::osm::{OverpassClient, parse_overpass_response, RoadType};
+use crate::osm::{OverpassClient, parse_overpass_response, assign_osm_to_chunks, RoadType, OsmData, OsmBuilding, OsmRoad};
+use crate::coordinates::GpsPos;
 use std::time::{Duration, Instant};
 
 const FIXTURE_JSON: &str = include_str!("../../tests/fixtures/brisbane_cbd.json");
@@ -165,4 +166,114 @@ fn test_parse_empty_response() {
     assert_eq!(data.roads.len(), 0);
     assert_eq!(data.water.len(), 0);
     assert_eq!(data.parks.len(), 0);
+}
+
+// Phase 4.4 tests - Chunk assignment
+
+#[test]
+fn test_building_fully_in_one_chunk() {
+    // Create a small building in a single chunk
+    let mut data = OsmData::default();
+    data.buildings.push(OsmBuilding {
+        id: 1,
+        polygon: vec![
+            GpsPos { lat_deg: -27.470, lon_deg: 153.025, elevation_m: 0.0 },
+            GpsPos { lat_deg: -27.470, lon_deg: 153.026, elevation_m: 0.0 },
+            GpsPos { lat_deg: -27.471, lon_deg: 153.026, elevation_m: 0.0 },
+            GpsPos { lat_deg: -27.471, lon_deg: 153.025, elevation_m: 0.0 },
+        ],
+        height_m: 10.0,
+        building_type: "yes".to_string(),
+        levels: 3,
+    });
+    
+    let chunks = assign_osm_to_chunks(&data, 10);
+    
+    // Building should be assigned to exactly one chunk (by centroid)
+    assert_eq!(chunks.len(), 1);
+    let chunk_data = chunks.values().next().unwrap();
+    assert_eq!(chunk_data.buildings.len(), 1);
+    assert_eq!(chunk_data.buildings[0].id, 1);
+}
+
+#[test]
+fn test_road_crossing_chunk_boundary() {
+    // Create a road that spans multiple chunks
+    let mut data = OsmData::default();
+    data.roads.push(OsmRoad {
+        id: 1,
+        nodes: vec![
+            GpsPos { lat_deg: -27.0, lon_deg: 153.0, elevation_m: 0.0 },
+            GpsPos { lat_deg: -27.5, lon_deg: 153.5, elevation_m: 0.0 }, // Far apart
+        ],
+        road_type: RoadType::Residential,
+        width_m: 6.0,
+        name: None,
+    });
+    
+    let chunks = assign_osm_to_chunks(&data, 10);
+    
+    // Road should be in at least 2 chunks (likely many more given distance)
+    assert!(chunks.len() >= 2, "Expected road in multiple chunks, got {}", chunks.len());
+    
+    // Each chunk should have the road
+    for chunk_data in chunks.values() {
+        assert_eq!(chunk_data.roads.len(), 1);
+        assert_eq!(chunk_data.roads[0].id, 1);
+    }
+}
+
+#[test]
+fn test_all_entities_assigned_to_at_least_one_chunk() {
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    let chunks = assign_osm_to_chunks(&data, 10);
+    
+    // Count total entities across all chunks
+    let mut total_buildings = 0;
+    let mut total_roads = 0;
+    let mut total_water = 0;
+    let mut total_parks = 0;
+    
+    for chunk_data in chunks.values() {
+        total_buildings += chunk_data.buildings.len();
+        total_roads += chunk_data.roads.len();
+        total_water += chunk_data.water.len();
+        total_parks += chunk_data.parks.len();
+    }
+    
+    // All entities should be assigned (buildings/water/parks: 1 chunk each, roads: possibly multiple)
+    assert!(total_buildings >= data.buildings.len());
+    assert!(total_roads >= data.roads.len());
+    assert!(total_water >= data.water.len());
+    assert!(total_parks >= data.parks.len());
+}
+
+#[test]
+fn test_no_entities_lost_in_assignment() {
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    let original_building_count = data.buildings.len();
+    let original_road_count = data.roads.len();
+    
+    let chunks = assign_osm_to_chunks(&data, 10);
+    
+    // Collect unique building IDs across all chunks
+    let mut building_ids = std::collections::HashSet::new();
+    let mut road_ids = std::collections::HashSet::new();
+    
+    for chunk_data in chunks.values() {
+        for building in &chunk_data.buildings {
+            building_ids.insert(building.id);
+        }
+        for road in &chunk_data.roads {
+            road_ids.insert(road.id);
+        }
+    }
+    
+    // No entities should be lost
+    assert_eq!(building_ids.len(), original_building_count);
+    assert_eq!(road_ids.len(), original_road_count);
 }

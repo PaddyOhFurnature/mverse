@@ -1,6 +1,7 @@
 /// OpenStreetMap data fetching via Overpass API.
 
 use crate::coordinates::GpsPos;
+use crate::chunks::{ChunkId, gps_to_chunk_id};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -228,6 +229,108 @@ pub fn parse_overpass_response(json: &serde_json::Value) -> Result<OsmData, Box<
     
     Ok(data)
 }
+
+/// Assigns OSM entities to chunks based on their GPS coordinates
+pub fn assign_osm_to_chunks(data: &OsmData, depth: u8) -> HashMap<ChunkId, OsmData> {
+    let mut chunk_map: HashMap<ChunkId, OsmData> = HashMap::new();
+    
+    // Assign buildings by centroid
+    for building in &data.buildings {
+        if building.polygon.is_empty() {
+            continue;
+        }
+        
+        // Calculate centroid
+        let mut lat_sum = 0.0;
+        let mut lon_sum = 0.0;
+        let count = building.polygon.len() as f64;
+        
+        for pos in &building.polygon {
+            lat_sum += pos.lat_deg;
+            lon_sum += pos.lon_deg;
+        }
+        
+        let centroid = GpsPos {
+            lat_deg: lat_sum / count,
+            lon_deg: lon_sum / count,
+            elevation_m: 0.0,
+        };
+        
+        let chunk_id = gps_to_chunk_id(&centroid, depth);
+        let chunk_data = chunk_map.entry(chunk_id).or_insert_with(OsmData::default);
+        chunk_data.buildings.push(building.clone());
+    }
+    
+    // Assign roads to all chunks they pass through
+    for road in &data.roads {
+        let mut visited_chunks = std::collections::HashSet::new();
+        
+        for pos in &road.nodes {
+            let chunk_id = gps_to_chunk_id(pos, depth);
+            visited_chunks.insert(chunk_id);
+        }
+        
+        for chunk_id in visited_chunks {
+            let chunk_data = chunk_map.entry(chunk_id).or_insert_with(OsmData::default);
+            chunk_data.roads.push(road.clone());
+        }
+    }
+    
+    // Assign water by centroid
+    for water in &data.water {
+        if water.polygon.is_empty() {
+            continue;
+        }
+        
+        let mut lat_sum = 0.0;
+        let mut lon_sum = 0.0;
+        let count = water.polygon.len() as f64;
+        
+        for pos in &water.polygon {
+            lat_sum += pos.lat_deg;
+            lon_sum += pos.lon_deg;
+        }
+        
+        let centroid = GpsPos {
+            lat_deg: lat_sum / count,
+            lon_deg: lon_sum / count,
+            elevation_m: 0.0,
+        };
+        
+        let chunk_id = gps_to_chunk_id(&centroid, depth);
+        let chunk_data = chunk_map.entry(chunk_id).or_insert_with(OsmData::default);
+        chunk_data.water.push(water.clone());
+    }
+    
+    // Assign parks by centroid
+    for park in &data.parks {
+        if park.polygon.is_empty() {
+            continue;
+        }
+        
+        let mut lat_sum = 0.0;
+        let mut lon_sum = 0.0;
+        let count = park.polygon.len() as f64;
+        
+        for pos in &park.polygon {
+            lat_sum += pos.lat_deg;
+            lon_sum += pos.lon_deg;
+        }
+        
+        let centroid = GpsPos {
+            lat_deg: lat_sum / count,
+            lon_deg: lon_sum / count,
+            elevation_m: 0.0,
+        };
+        
+        let chunk_id = gps_to_chunk_id(&centroid, depth);
+        let chunk_data = chunk_map.entry(chunk_id).or_insert_with(OsmData::default);
+        chunk_data.parks.push(park.clone());
+    }
+    
+    chunk_map
+}
+
 
 
 /// Client for querying OpenStreetMap data via Overpass API
