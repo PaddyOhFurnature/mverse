@@ -5,9 +5,12 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
-    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches},
+    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches, generate_buildings_from_osm},
     Renderer
 };
+use metaverse_core::osm::{load_chunk_osm_data, OverpassClient};
+use metaverse_core::chunks::ChunkId;
+use metaverse_core::cache::DiskCache;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -31,10 +34,14 @@ struct App {
     terrain_vertex_buffer: Option<wgpu::Buffer>,
     terrain_index_buffer: Option<wgpu::Buffer>,
     terrain_num_indices: u32,
+    buildings_vertex_buffer: Option<wgpu::Buffer>,
+    buildings_index_buffer: Option<wgpu::Buffer>,
+    buildings_num_indices: u32,
     tile_depth: u8,
     show_sphere: bool,
     show_tiles: bool,
     show_terrain: bool,
+    show_buildings: bool,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -47,18 +54,16 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        // Start camera far from sphere so we can see it
+        // Start camera at Brisbane looking down at city
         let mut camera = Camera::brisbane();
         
-        // Move camera back so we can see the whole sphere
-        // Earth radius is ~6.4M meters, so move back to ~10M meters
-        let distance_from_center = 10_000_000.0; // 10,000 km
-        camera.position = camera.position.normalize() * distance_from_center;
+        // Move camera to 5km altitude for better city view
+        camera.position = camera.position.normalize() * (6_371_000.0 + 5000.0);
         
-        // Look at Earth center
+        // Look down at Brisbane
         camera.orientation = {
             use glam::{DVec3, DQuat, DMat3};
-            let forward = -camera.position.normalize(); // Look toward origin
+            let forward = -camera.position.normalize(); // Look toward Earth center
             let up = DVec3::Z;
             let right = forward.cross(up).normalize();
             let up = right.cross(forward).normalize();
@@ -81,10 +86,14 @@ impl App {
             terrain_vertex_buffer: None,
             terrain_index_buffer: None,
             terrain_num_indices: 0,
+            buildings_vertex_buffer: None,
+            buildings_index_buffer: None,
+            buildings_num_indices: 0,
             tile_depth: 2, // Start with depth 2 (96 tiles)
             show_sphere: false, // Hide sphere by default
-            show_tiles: true,
+            show_tiles: false, // Hide tiles by default
             show_terrain: true,
+            show_buildings: true,
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -228,6 +237,53 @@ impl ApplicationHandler for App {
             self.terrain_index_buffer = Some(terrain_index_buffer);
             self.terrain_num_indices = terrain_num_indices;
             
+            // Load OSM buildings for Brisbane CBD
+            println!("Loading OSM buildings for Brisbane CBD...");
+            let cache = DiskCache::new().unwrap();
+            let client = OverpassClient::new(2); // 2 second cooldown
+            
+            // Brisbane CBD is roughly at chunk depth 14
+            let brisbane_chunk = ChunkId {
+                face: 0,
+                path: vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1], // Approx Brisbane location
+            };
+            
+            let buildings_color = glam::Vec3::new(0.7, 0.7, 0.8); // Light gray/blue
+            let (buildings_vertices, buildings_indices) = match load_chunk_osm_data(&brisbane_chunk, 14, &client, &cache) {
+                Ok(osm_data) => {
+                    println!("Loaded {} buildings from OSM", osm_data.buildings.len());
+                    generate_buildings_from_osm(&osm_data, buildings_color)
+                }
+                Err(e) => {
+                    println!("Failed to load OSM data: {}, using empty", e);
+                    (Vec::new(), Vec::new())
+                }
+            };
+            
+            let buildings_num_indices = buildings_indices.len() as u32;
+            
+            if !buildings_vertices.is_empty() {
+                let buildings_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Buildings Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&buildings_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                
+                let buildings_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Buildings Index Buffer"),
+                    contents: bytemuck::cast_slice(&buildings_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                
+                self.buildings_vertex_buffer = Some(buildings_vertex_buffer);
+                self.buildings_index_buffer = Some(buildings_index_buffer);
+                self.buildings_num_indices = buildings_num_indices;
+                
+                println!("Generated {} building vertices, {} indices", buildings_vertices.len(), buildings_indices.len());
+            } else {
+                println!("No buildings to render");
+            }
+            
             self.renderer = Some(renderer);
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
@@ -344,6 +400,9 @@ impl ApplicationHandler for App {
                             } else if keycode == KeyCode::Digit3 {
                                 self.show_terrain = !self.show_terrain;
                                 println!("Terrain: {}", if self.show_terrain { "ON" } else { "OFF" });
+                            } else if keycode == KeyCode::Digit4 {
+                                self.show_buildings = !self.show_buildings;
+                                println!("Buildings: {}", if self.show_buildings { "ON" } else { "OFF" });
                             }
                             
                             // Toggle mouse capture on click
@@ -429,9 +488,13 @@ impl ApplicationHandler for App {
                     let sphere_num_indices = self.sphere_num_indices;
                     let tile_num_indices = self.tile_num_indices;
                     let terrain_num_indices = self.terrain_num_indices;
+                    let buildings_num_indices = self.buildings_num_indices;
                     let show_sphere = self.show_sphere;
                     let show_tiles = self.show_tiles;
                     let show_terrain = self.show_terrain;
+                    let show_buildings = self.show_buildings;
+                    let buildings_vb = self.buildings_vertex_buffer.as_ref();
+                    let buildings_ib = self.buildings_index_buffer.as_ref();
                     
                     let result = renderer.render(clear_color, |render_pass| {
                         // Draw terrain patches first (behind everything)
@@ -441,6 +504,17 @@ impl ApplicationHandler for App {
                             render_pass.set_vertex_buffer(0, terrain_vb.slice(..));
                             render_pass.set_index_buffer(terrain_ib.slice(..), wgpu::IndexFormat::Uint32);
                             render_pass.draw_indexed(0..terrain_num_indices, 0, 0..1);
+                        }
+                        
+                        // Draw buildings
+                        if show_buildings {
+                            if let (Some(bvb), Some(bib)) = (buildings_vb, buildings_ib) {
+                                render_pass.set_pipeline(&pipeline.pipeline);
+                                render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                                render_pass.set_vertex_buffer(0, bvb.slice(..));
+                                render_pass.set_index_buffer(bib.slice(..), wgpu::IndexFormat::Uint32);
+                                render_pass.draw_indexed(0..buildings_num_indices, 0, 0..1);
+                            }
                         }
                         
                         // Draw sphere
@@ -518,6 +592,7 @@ fn main() {
     println!("  1 - Toggle sphere visibility");
     println!("  2 - Toggle tile outlines");
     println!("  3 - Toggle terrain patches");
+    println!("  4 - Toggle OSM buildings");
     println!("  Escape - Release mouse");
     println!();
 

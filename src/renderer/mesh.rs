@@ -393,6 +393,151 @@ pub fn generate_terrain_patches(depth: u8, subdivisions: u32, color: Vec3) -> (V
     (all_vertices, all_indices)
 }
 
+/// Generate a building mesh from OSM data
+///
+/// Creates an extruded prism from a building footprint.
+/// - `footprint`: GPS coordinates of building corners (lat, lon)
+/// - `elevation_m`: Base elevation above WGS84 ellipsoid
+/// - `height_m`: Building height
+/// - `color`: Color for the building
+///
+/// Returns (vertices, indices) for the building mesh.
+pub fn generate_building(
+    footprint: &[(f64, f64)],
+    elevation_m: f64,
+    height_m: f64,
+    color: Vec3,
+) -> (Vec<Vertex>, Vec<u32>) {
+    use crate::coordinates::{gps_to_ecef, GpsPos};
+    
+    if footprint.len() < 3 {
+        return (Vec::new(), Vec::new());
+    }
+    
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    // Convert footprint to ECEF at base elevation
+    let base_positions: Vec<Vec3> = footprint
+        .iter()
+        .map(|&(lat, lon)| {
+            let gps = GpsPos {
+                lat_deg: lat,
+                lon_deg: lon,
+                elevation_m,
+            };
+            let ecef = gps_to_ecef(&gps);
+            Vec3::new(ecef.x as f32, ecef.y as f32, ecef.z as f32)
+        })
+        .collect();
+    
+    // Convert footprint to ECEF at top elevation
+    let top_positions: Vec<Vec3> = footprint
+        .iter()
+        .map(|&(lat, lon)| {
+            let gps = GpsPos {
+                lat_deg: lat,
+                lon_deg: lon,
+                elevation_m: elevation_m + height_m,
+            };
+            let ecef = gps_to_ecef(&gps);
+            Vec3::new(ecef.x as f32, ecef.y as f32, ecef.z as f32)
+        })
+        .collect();
+    
+    let n = footprint.len();
+    
+    // Add base vertices
+    for pos in &base_positions {
+        let normal = pos.normalize();
+        vertices.push(Vertex {
+            position: pos.to_array(),
+            normal: normal.to_array(),
+            color: [color.x, color.y, color.z, 1.0],
+        });
+    }
+    
+    // Add top vertices
+    for pos in &top_positions {
+        let normal = pos.normalize();
+        vertices.push(Vertex {
+            position: pos.to_array(),
+            normal: normal.to_array(),
+            color: [color.x, color.y, color.z, 1.0],
+        });
+    }
+    
+    // Generate wall faces (sides)
+    for i in 0..n {
+        let next = (i + 1) % n;
+        let base_i = i as u32;
+        let base_next = next as u32;
+        let top_i = (n + i) as u32;
+        let top_next = (n + next) as u32;
+        
+        // Two triangles per wall face
+        indices.extend_from_slice(&[
+            base_i, top_i, base_next,
+            base_next, top_i, top_next,
+        ]);
+    }
+    
+    // Generate base face (triangulate as fan from first vertex)
+    if n >= 3 {
+        for i in 1..(n - 1) {
+            indices.extend_from_slice(&[0, i as u32 + 1, i as u32]);
+        }
+    }
+    
+    // Generate top face (triangulate as fan from first vertex)
+    if n >= 3 {
+        let top_offset = n as u32;
+        for i in 1..(n - 1) {
+            indices.extend_from_slice(&[
+                top_offset,
+                top_offset + i as u32,
+                top_offset + i as u32 + 1,
+            ]);
+        }
+    }
+    
+    (vertices, indices)
+}
+
+/// Generate meshes for multiple buildings from OSM data
+///
+/// Returns combined (vertices, indices) for all buildings.
+pub fn generate_buildings_from_osm(osm_data: &crate::osm::OsmData, color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for building in &osm_data.buildings {
+        // Use building centroid elevation as base
+        let elevation = building.polygon.first()
+            .map(|pos| pos.elevation_m)
+            .unwrap_or(0.0);
+        
+        let footprint: Vec<(f64, f64)> = building.polygon
+            .iter()
+            .map(|pos| (pos.lat_deg, pos.lon_deg))
+            .collect();
+        
+        let (vertices, indices) = generate_building(
+            &footprint,
+            elevation,
+            building.height_m,
+            color,
+        );
+        
+        // Offset indices by current vertex count
+        let vertex_offset = all_vertices.len() as u32;
+        all_vertices.extend(vertices);
+        all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
+    }
+    
+    (all_vertices, all_indices)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -514,6 +659,31 @@ mod tests {
         
         // Each chunk has 4*4*6 = 96 indices
         assert_eq!(indices.len(), 6 * 96);
+        
+        // All indices should be valid
+        for &idx in &indices {
+            assert!((idx as usize) < vertices.len());
+        }
+    }
+    
+    #[test]
+    fn test_building_generation() {
+        // Simple square building
+        let footprint = vec![
+            (-27.47, 153.02), // SW corner
+            (-27.47, 153.03), // SE corner
+            (-27.46, 153.03), // NE corner
+            (-27.46, 153.02), // NW corner
+        ];
+        
+        let (vertices, indices) = generate_building(&footprint, 0.0, 30.0, glam::Vec3::new(0.5, 0.5, 0.5));
+        
+        // Should have 8 vertices (4 base + 4 top)
+        assert_eq!(vertices.len(), 8);
+        
+        // Should have indices for walls (4 walls × 6 indices) + base (2 triangles × 3) + top (2 triangles × 3)
+        // = 24 + 6 + 6 = 36
+        assert_eq!(indices.len(), 36);
         
         // All indices should be valid
         for &idx in &indices {
