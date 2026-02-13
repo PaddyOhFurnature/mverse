@@ -548,3 +548,19 @@ pub fn chunk_children(id: &ChunkId) -> [ChunkId; 4] {
         children[3].clone(),
     ]
 }
+
+/// Tests if a GPS position is contained within a given chunk tile
+///
+/// # Arguments
+/// * `id` - The ChunkId to test
+/// * `gps` - The GPS position to check
+///
+/// # Returns
+/// true if the point is inside the tile, false otherwise
+///
+/// A point is inside a tile if converting it to a ChunkId at the same depth
+/// produces the same ChunkId.
+pub fn chunk_contains_gps(id: &ChunkId, gps: &GpsPos) -> bool {
+    let point_chunk = gps_to_chunk_id(gps, id.depth() as u8);
+    point_chunk == *id
+}

@@ -865,3 +865,123 @@ fn test_chunk_grandparent_consistency() {
         }
     }
 }
+
+// ============================================================================
+// Phase 2.8: Tile containment tests
+// ============================================================================
+
+#[test]
+fn test_chunk_contains_center() {
+    // A point that generated this chunk should be inside it
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 10);
+    
+    // Brisbane itself should be in the chunk it generated
+    assert!(chunk_contains_gps(&chunk, &brisbane), 
+        "Point that generated chunk should be inside it");
+}
+
+#[test]
+fn test_chunk_contains_outside_point() {
+    // A point clearly outside the tile should return false
+    let brisbane_chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10);
+    
+    // London is definitely not in a Brisbane tile
+    let london = GpsPos { lat_deg: 51.5074, lon_deg: -0.1278, elevation_m: 0.0 };
+    
+    assert!(!chunk_contains_gps(&brisbane_chunk, &london),
+        "London should not be in a Brisbane tile");
+}
+
+#[test]
+fn test_chunk_contains_nearby_point() {
+    // A point very close to Brisbane should be in Brisbane tile at low depth
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 5); // Depth 5 is a larger tile
+    
+    // Point 100m away
+    let nearby = GpsPos { 
+        lat_deg: brisbane.lat_deg + 0.001, 
+        lon_deg: brisbane.lon_deg, 
+        elevation_m: 0.0 
+    };
+    
+    assert!(chunk_contains_gps(&chunk, &nearby),
+        "Point 100m away should be in same depth-5 tile");
+}
+
+#[test]
+fn test_chunk_contains_edge_consistency() {
+    // Points on tile edges should consistently belong to exactly one tile
+    // Test by checking that adjacent tiles don't both claim the same edge point
+    let center = GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&center, 8);
+    
+    // Get all 4 children
+    let children = chunk_children(&chunk);
+    
+    // Pick a test point that should be in the parent
+    let test_point = GpsPos { lat_deg: 0.0001, lon_deg: 0.0001, elevation_m: 0.0 };
+    
+    // Count how many children claim this point
+    let mut count = 0;
+    for child in &children {
+        if chunk_contains_gps(child, &test_point) {
+            count += 1;
+        }
+    }
+    
+    assert_eq!(count, 1, 
+        "Point should be in exactly one child, found {} children claiming it", count);
+}
+
+#[test]
+fn test_chunk_children_cover_parent() {
+    // All 4 children together should completely cover the parent
+    // Test with multiple random-ish points in the parent
+    let parent = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    let children = chunk_children(&parent);
+    
+    // Test points that should be in the parent
+    let test_points = vec![
+        GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.01, lon_deg: 0.01, elevation_m: 0.0 },
+        GpsPos { lat_deg: -0.01, lon_deg: 0.01, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.01, lon_deg: -0.01, elevation_m: 0.0 },
+        GpsPos { lat_deg: -0.01, lon_deg: -0.01, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.005, lon_deg: 0.005, elevation_m: 0.0 },
+    ];
+    
+    for point in test_points {
+        // Verify point is in parent
+        if !chunk_contains_gps(&parent, &point) {
+            continue; // Skip points not in parent
+        }
+        
+        // Exactly one child should contain this point
+        let mut count = 0;
+        for child in &children {
+            if chunk_contains_gps(child, &point) {
+                count += 1;
+            }
+        }
+        
+        assert_eq!(count, 1, 
+            "Point at ({}, {}) should be in exactly one child, found {}", 
+            point.lat_deg, point.lon_deg, count);
+    }
+}
+
+#[test]
+fn test_chunk_contains_deterministic() {
+    // Same point checked multiple times should give same result
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10);
+    let test_point = GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 0.0 };
+    
+    let result1 = chunk_contains_gps(&chunk, &test_point);
+    let result2 = chunk_contains_gps(&chunk, &test_point);
+    let result3 = chunk_contains_gps(&chunk, &test_point);
+    
+    assert_eq!(result1, result2, "Should be deterministic");
+    assert_eq!(result2, result3, "Should be deterministic");
+}
