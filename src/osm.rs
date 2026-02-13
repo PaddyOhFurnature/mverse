@@ -1,14 +1,15 @@
 /// OpenStreetMap data fetching via Overpass API.
 
 use crate::coordinates::GpsPos;
-use crate::chunks::{ChunkId, gps_to_chunk_id};
+use crate::chunks::{ChunkId, gps_to_chunk_id, chunk_bounds_gps};
+use crate::cache::DiskCache;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use std::thread;
 
 /// Road type classification
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RoadType {
     Motorway,
     Trunk,
@@ -57,7 +58,7 @@ impl RoadType {
 }
 
 /// Parsed building data from OSM
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OsmBuilding {
     pub id: u64,
     pub polygon: Vec<GpsPos>,
@@ -67,7 +68,7 @@ pub struct OsmBuilding {
 }
 
 /// Parsed road data from OSM
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OsmRoad {
     pub id: u64,
     pub nodes: Vec<GpsPos>,
@@ -77,7 +78,7 @@ pub struct OsmRoad {
 }
 
 /// Parsed water feature from OSM
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OsmWater {
     pub id: u64,
     pub polygon: Vec<GpsPos>,
@@ -85,7 +86,7 @@ pub struct OsmWater {
 }
 
 /// Parsed park/leisure area from OSM
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OsmPark {
     pub id: u64,
     pub polygon: Vec<GpsPos>,
@@ -93,7 +94,7 @@ pub struct OsmPark {
 }
 
 /// Collection of parsed OSM data
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OsmData {
     pub buildings: Vec<OsmBuilding>,
     pub roads: Vec<OsmRoad>,
@@ -462,3 +463,60 @@ impl OverpassClient {
         Duration::from_secs(capped)
     }
 }
+
+/// Loads OSM data for a chunk with caching
+///
+/// Pipeline:
+/// 1. Check cache for chunk data
+/// 2. If miss, determine chunk bounds
+/// 3. Fetch OSM data from Overpass API
+/// 4. Parse and assign to chunks
+/// 5. Write to cache
+/// 6. Return data for requested chunk
+pub fn load_chunk_osm_data(
+    chunk_id: &ChunkId,
+    depth: u8,
+    client: &OverpassClient,
+    cache: &DiskCache,
+) -> Result<OsmData, Box<dyn std::error::Error>> {
+    // Generate cache key from chunk ID
+    let path_str = chunk_id.path.iter().map(|q| q.to_string()).collect::<Vec<_>>().join("");
+    let cache_key = format!("chunk_d{}_f{}_{}", depth, chunk_id.face, path_str);
+    
+    // Try to read from cache
+    if let Ok(cached_bytes) = cache.read_osm(&cache_key) {
+        // Deserialize cached data
+        if let Ok(data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+            return Ok(data);
+        }
+        // If deserialization fails, fall through to fetch fresh data
+    }
+    
+    // Cache miss - fetch from API
+    // Get chunk bounds in GPS coordinates
+    let (min_gps, max_gps) = chunk_bounds_gps(chunk_id)?;
+    
+    // Query Overpass API
+    let json = client.query_bbox(
+        min_gps.lat_deg.min(max_gps.lat_deg),
+        min_gps.lon_deg.min(max_gps.lon_deg),
+        min_gps.lat_deg.max(max_gps.lat_deg),
+        min_gps.lon_deg.max(max_gps.lon_deg),
+    )?;
+    
+    // Parse response
+    let all_data = parse_overpass_response(&json)?;
+    
+    // Assign to chunks
+    let chunks = assign_osm_to_chunks(&all_data, depth);
+    
+    // Get data for this specific chunk
+    let chunk_data = chunks.get(chunk_id).cloned().unwrap_or_default();
+    
+    // Write to cache
+    let serialized = serde_json::to_vec(&chunk_data)?;
+    let _ = cache.write_osm(&cache_key, &serialized); // Ignore cache write errors
+    
+    Ok(chunk_data)
+}
+

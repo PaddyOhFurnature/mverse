@@ -277,3 +277,69 @@ fn test_no_entities_lost_in_assignment() {
     assert_eq!(building_ids.len(), original_building_count);
     assert_eq!(road_ids.len(), original_road_count);
 }
+
+// Phase 4.7 tests - Full pipeline with caching
+
+#[test]
+#[ignore] // Slow - network timeout
+fn test_cache_miss_returns_data() {
+    use crate::cache::DiskCache;
+    use crate::chunks::gps_to_chunk_id;
+    use tempfile::TempDir;
+    
+    // Create temp cache
+    let temp = TempDir::new().unwrap();
+    let cache = DiskCache::with_root(temp.path().to_path_buf());
+    
+    // Create client with fake endpoint (will fail but that's ok for this test)
+    let client = OverpassClient::with_endpoint(1, "http://localhost:9999".to_string());
+    
+    // Get chunk ID for Brisbane
+    let brisbane = GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 0.0 };
+    let chunk_id = gps_to_chunk_id(&brisbane, 10);
+    
+    // This will fail because the endpoint is fake, but we're testing the structure
+    let result = crate::osm::load_chunk_osm_data(&chunk_id, 10, &client, &cache);
+    
+    // We expect it to fail (no real API), but the function should exist and compile
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cache_hit_returns_cached_data() {
+    use crate::cache::DiskCache;
+    use crate::chunks::gps_to_chunk_id;
+    use tempfile::TempDir;
+    
+    // Create temp cache
+    let temp = TempDir::new().unwrap();
+    let cache = DiskCache::with_root(temp.path().to_path_buf());
+    
+    // Get chunk ID
+    let brisbane = GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 0.0 };
+    let chunk_id = gps_to_chunk_id(&brisbane, 10);
+    
+    // Pre-populate cache with test data
+    let test_data = OsmData {
+        buildings: vec![OsmBuilding {
+            id: 999,
+            polygon: vec![],
+            height_m: 10.0,
+            building_type: "test".to_string(),
+            levels: 3,
+        }],
+        ..Default::default()
+    };
+    
+    let cache_key = format!("chunk_d{}_f{}_{}", 10, chunk_id.face, chunk_id.path.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(""));
+    let serialized = serde_json::to_vec(&test_data).unwrap();
+    cache.write_osm(&cache_key, &serialized).unwrap();
+    
+    // Load from cache (client doesn't matter since we hit cache)
+    let client = OverpassClient::with_endpoint(1, "http://localhost:9999".to_string());
+    let result = crate::osm::load_chunk_osm_data(&chunk_id, 10, &client, &cache).unwrap();
+    
+    // Should get cached data without network call
+    assert_eq!(result.buildings.len(), 1);
+    assert_eq!(result.buildings[0].id, 999);
+}

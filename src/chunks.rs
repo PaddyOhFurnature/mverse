@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use crate::coordinates::{EcefPos, GpsPos, gps_to_ecef};
+use crate::coordinates::{EcefPos, GpsPos, gps_to_ecef, ecef_to_gps};
 
 /// Unique identifier for a chunk tile on the quad-sphere
 ///
@@ -408,6 +408,28 @@ pub fn chunk_corners_ecef(id: &ChunkId) -> [EcefPos; 4] {
         cube_to_sphere(id.face, u_max, v_max, WGS84_A), // Bottom-right
     ]
 }
+
+/// Returns the GPS bounding box for a chunk
+///
+/// Returns (min_corner, max_corner) as GPS positions
+pub fn chunk_bounds_gps(id: &ChunkId) -> Result<(GpsPos, GpsPos), Box<dyn std::error::Error>> {
+    let corners = chunk_corners_ecef(id);
+    
+    // Convert all corners to GPS
+    let gps_corners: Vec<GpsPos> = corners.iter().map(ecef_to_gps).collect();
+    
+    // Find min/max lat/lon across all corners
+    let min_lat = gps_corners.iter().map(|p| p.lat_deg).fold(f64::INFINITY, f64::min);
+    let max_lat = gps_corners.iter().map(|p| p.lat_deg).fold(f64::NEG_INFINITY, f64::max);
+    let min_lon = gps_corners.iter().map(|p| p.lon_deg).fold(f64::INFINITY, f64::min);
+    let max_lon = gps_corners.iter().map(|p| p.lon_deg).fold(f64::NEG_INFINITY, f64::max);
+    
+    Ok((
+        GpsPos { lat_deg: min_lat, lon_deg: min_lon, elevation_m: 0.0 },
+        GpsPos { lat_deg: max_lat, lon_deg: max_lon, elevation_m: 0.0 },
+    ))
+}
+
 
 /// Returns the radius of the smallest sphere that contains the entire tile
 ///

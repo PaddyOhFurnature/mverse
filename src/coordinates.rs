@@ -16,7 +16,7 @@ pub const WGS84_E2: f64 = WGS84_F * (2.0 - WGS84_F);
 pub const WGS84_B: f64 = WGS84_A * (1.0 - WGS84_F);
 
 /// GPS position in geodetic coordinates (WGS84)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GpsPos {
     /// Latitude in degrees (−90 to +90)
     pub lat_deg: f64,
