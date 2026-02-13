@@ -501,3 +501,88 @@ fn test_ecef_distance_shorter_than_haversine() {
         "Straight line ({:.0}m) should be shorter than surface ({:.0}m)",
         straight_line, surface);
 }
+
+// ============================================================================
+// Batch parallel GPS to ECEF conversion tests
+// ============================================================================
+
+#[test]
+fn test_gps_to_ecef_batch_empty() {
+    let positions: Vec<GpsPos> = vec![];
+    let result = gps_to_ecef_batch(&positions);
+    assert_eq!(result.len(), 0, "Empty input should return empty output");
+}
+
+#[test]
+fn test_gps_to_ecef_batch_matches_sequential() {
+    // Generate test positions
+    let positions = vec![
+        GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 },
+        GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 },
+        GpsPos { lat_deg: 51.5074, lon_deg: -0.1278, elevation_m: 0.0 },
+        GpsPos { lat_deg: 90.0, lon_deg: 0.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: -90.0, lon_deg: 0.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 0.0, lon_deg: 180.0, elevation_m: 0.0 },
+        GpsPos { lat_deg: 27.9881, lon_deg: 86.9250, elevation_m: 8848.0 },
+    ];
+    
+    // Batch conversion
+    let batch_result = gps_to_ecef_batch(&positions);
+    
+    // Sequential conversion
+    let sequential_result: Vec<EcefPos> = positions.iter()
+        .map(|pos| gps_to_ecef(pos))
+        .collect();
+    
+    // Results must match exactly (bitwise identical)
+    assert_eq!(batch_result.len(), sequential_result.len());
+    for (i, (batch, seq)) in batch_result.iter().zip(sequential_result.iter()).enumerate() {
+        assert_eq!(batch.x, seq.x, "Position {}: X mismatch", i);
+        assert_eq!(batch.y, seq.y, "Position {}: Y mismatch", i);
+        assert_eq!(batch.z, seq.z, "Position {}: Z mismatch", i);
+    }
+}
+
+#[test]
+#[ignore] // Run with --ignored for performance test
+fn test_gps_to_ecef_batch_performance() {
+    use std::time::Instant;
+    
+    // Generate 10 million random GPS positions
+    let count = 10_000_000;
+    let mut positions = Vec::with_capacity(count);
+    
+    // Use a simple deterministic "random" generator for reproducibility
+    for i in 0..count {
+        let lat = ((i as f64 * 0.123456) % 180.0) - 90.0;  // -90 to 90
+        let lon = ((i as f64 * 0.789012) % 360.0) - 180.0; // -180 to 180
+        let elev = (i as f64 * 0.345678) % 2000.0;       // 0 to 2000
+        positions.push(GpsPos {
+            lat_deg: lat,
+            lon_deg: lon,
+            elevation_m: elev,
+        });
+    }
+    
+    println!("Converting {} GPS positions to ECEF...", count);
+    
+    let start = Instant::now();
+    let _result = gps_to_ecef_batch(&positions);
+    let elapsed = start.elapsed();
+    
+    let throughput = count as f64 / elapsed.as_secs_f64();
+    
+    println!("Converted {} positions in {:.3}s", count, elapsed.as_secs_f64());
+    println!("Throughput: {:.0} conversions/sec", throughput);
+    
+    // In release mode, must achieve >1M conversions/sec
+    #[cfg(not(debug_assertions))]
+    assert!(
+        throughput > 1_000_000.0,
+        "Throughput {:.0}/sec is below required 1M/sec (run with --release)",
+        throughput
+    );
+    
+    #[cfg(debug_assertions)]
+    println!("Note: Debug mode - run with --release for accurate performance measurement");
+}

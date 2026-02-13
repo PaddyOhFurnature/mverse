@@ -1,6 +1,8 @@
 // Coordinate system conversions: GPS ↔ ECEF ↔ ENU
 // WGS84 ellipsoid model for geodetic calculations
 
+use rayon::prelude::*;
+
 /// WGS84 semi-major axis (equatorial radius) in metres
 pub const WGS84_A: f64 = 6_378_137.0;
 
@@ -209,4 +211,34 @@ pub fn ecef_distance(a: &EcefPos, b: &EcefPos) -> f64 {
     let dz = b.z - a.z;
     
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// Converts a batch of GPS positions to ECEF coordinates in parallel.
+///
+/// Uses Rayon for parallel processing to achieve high throughput on multi-core systems.
+/// Results are bitwise identical to sequential `gps_to_ecef()` calls.
+///
+/// # Arguments
+/// * `positions` - Slice of GPS positions to convert
+///
+/// # Returns
+/// Vector of ECEF positions in the same order as input
+///
+/// # Performance
+/// Target: >1M conversions/sec in release mode on mid-range hardware
+///
+/// # Examples
+/// ```
+/// use metaverse_core::coordinates::{gps_to_ecef_batch, GpsPos};
+/// let positions = vec![
+///     GpsPos { lat_deg: -27.4698, lon_deg: 153.0251, elevation_m: 0.0 },
+///     GpsPos { lat_deg: -33.8688, lon_deg: 151.2093, elevation_m: 0.0 },
+/// ];
+/// let ecef_positions = gps_to_ecef_batch(&positions);
+/// assert_eq!(ecef_positions.len(), 2);
+/// ```
+pub fn gps_to_ecef_batch(positions: &[GpsPos]) -> Vec<EcefPos> {
+    positions.par_iter()
+        .map(|pos| gps_to_ecef(pos))
+        .collect()
 }
