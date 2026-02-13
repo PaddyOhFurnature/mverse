@@ -1,5 +1,7 @@
-use crate::osm::OverpassClient;
+use crate::osm::{OverpassClient, parse_overpass_response, RoadType};
 use std::time::{Duration, Instant};
+
+const FIXTURE_JSON: &str = include_str!("../../tests/fixtures/brisbane_cbd.json");
 
 #[test]
 fn test_query_builder_produces_valid_overpass_ql() {
@@ -78,4 +80,89 @@ fn test_fetch_brisbane_cbd_integration() {
     // Should have at least some data in Brisbane CBD
     let count = elements.unwrap().as_array().unwrap().len();
     assert!(count > 0, "Expected some OSM elements in Brisbane CBD, got {}", count);
+}
+
+// Phase 4.3 tests - OSM data parser
+
+#[test]
+fn test_parse_fixture_has_buildings() {
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    assert_eq!(data.buildings.len(), 2, "Expected 2 buildings in fixture");
+    
+    // First building has explicit height
+    let building1 = &data.buildings[0];
+    assert_eq!(building1.id, 100);
+    assert_eq!(building1.building_type, "commercial");
+    assert_eq!(building1.levels, 5);
+    assert_eq!(building1.height_m, 18.0);
+    assert_eq!(building1.polygon.len(), 5); // 4 corners + closing
+}
+
+#[test]
+fn test_parse_fixture_has_roads() {
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    assert_eq!(data.roads.len(), 2, "Expected 2 roads in fixture");
+    
+    // First road is motorway with explicit width
+    let road1 = &data.roads[0];
+    assert_eq!(road1.id, 200);
+    assert_eq!(road1.road_type, RoadType::Motorway);
+    assert_eq!(road1.width_m, 15.0);
+    assert_eq!(road1.name, Some("Pacific Motorway".to_string()));
+}
+
+#[test]
+fn test_missing_height_uses_default() {
+    let json: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let data = parse_overpass_response(&json).unwrap();
+    
+    // Second building has no height/levels tags
+    let building2 = &data.buildings[1];
+    assert_eq!(building2.id, 101);
+    assert_eq!(building2.levels, 3); // Default
+    assert_eq!(building2.height_m, 9.0); // 3 levels * 3m
+}
+
+#[test]
+fn test_road_classification() {
+    assert_eq!(RoadType::from_highway_tag("motorway"), RoadType::Motorway);
+    assert_eq!(RoadType::from_highway_tag("motorway_link"), RoadType::Motorway);
+    assert_eq!(RoadType::from_highway_tag("residential"), RoadType::Residential);
+    assert_eq!(RoadType::from_highway_tag("footway"), RoadType::Path);
+    
+    match RoadType::from_highway_tag("unknown") {
+        RoadType::Other(s) => assert_eq!(s, "unknown"),
+        _ => panic!("Expected Other variant"),
+    }
+}
+
+#[test]
+fn test_road_default_widths() {
+    assert_eq!(RoadType::Motorway.default_width_m(), 12.0);
+    assert_eq!(RoadType::Residential.default_width_m(), 6.0);
+    assert_eq!(RoadType::Path.default_width_m(), 2.0);
+}
+
+#[test]
+fn test_parse_malformed_json_returns_error() {
+    let json: serde_json::Value = serde_json::json!({"invalid": "structure"});
+    let result = parse_overpass_response(&json);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_empty_response() {
+    let json: serde_json::Value = serde_json::json!({"elements": []});
+    let result = parse_overpass_response(&json);
+    assert!(result.is_ok());
+    
+    let data = result.unwrap();
+    assert_eq!(data.buildings.len(), 0);
+    assert_eq!(data.roads.len(), 0);
+    assert_eq!(data.water.len(), 0);
+    assert_eq!(data.parks.len(), 0);
 }
