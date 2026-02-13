@@ -623,3 +623,124 @@ fn test_gps_to_chunk_id_all_quadrants_used() {
     assert!(quadrants_seen.contains(&2), "Quadrant 2 should be used");
     assert!(quadrants_seen.contains(&3), "Quadrant 3 should be used");
 }
+
+// ============================================================================
+// Phase 2.5: ChunkId → bounding geometry tests
+// ============================================================================
+
+#[test]
+fn test_chunk_approximate_width_depth_0() {
+    // Depth-0 tile should be ~9,000km wide (±1,000km)
+    let chunk = ChunkId::root(0);
+    let width = chunk_approximate_width(&chunk);
+    
+    assert!(width > 8_000_000.0 && width < 10_000_000.0,
+        "Depth-0 tile width should be ~9,000km (±1,000km), got {}m", width);
+}
+
+#[test]
+fn test_chunk_approximate_width_depth_8() {
+    // Depth-8 tile should be ~45km wide (±10km)
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 8);
+    let width = chunk_approximate_width(&chunk);
+    
+    assert!(width > 35_000.0 && width < 55_000.0,
+        "Depth-8 tile width should be ~45km (±10km), got {}m", width);
+}
+
+#[test]
+fn test_chunk_approximate_width_depth_14() {
+    // Depth-14 tile should be ~400m wide (±100m)
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    let chunk = gps_to_chunk_id(&brisbane, 14);
+    let width = chunk_approximate_width(&chunk);
+    
+    assert!(width > 300.0 && width < 900.0,
+        "Depth-14 tile width should be ~400m (±100m), got {}m", width);
+}
+
+#[test]
+fn test_chunk_center_on_sphere_surface() {
+    // Chunk centre should be on sphere surface (distance ≈ WGS84_A ± 100m)
+    let test_chunks = vec![
+        ChunkId::root(0),
+        ChunkId::root(3),
+        gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10),
+        gps_to_chunk_id(&GpsPos { lat_deg: 90.0, lon_deg: 0.0, elevation_m: 0.0 }, 5),
+    ];
+    
+    for chunk in test_chunks {
+        let center = chunk_center_ecef(&chunk);
+        let dist = (center.x * center.x + center.y * center.y + center.z * center.z).sqrt();
+        
+        assert!((dist - WGS84_A).abs() < 100.0,
+            "Chunk center should be on sphere surface, distance={}m from origin", dist);
+    }
+}
+
+#[test]
+fn test_chunk_corners_on_sphere_surface() {
+    // All 4 corners should be on sphere surface
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 8);
+    let corners = chunk_corners_ecef(&chunk);
+    
+    assert_eq!(corners.len(), 4, "Should have 4 corners");
+    
+    for (i, corner) in corners.iter().enumerate() {
+        let dist = (corner.x * corner.x + corner.y * corner.y + corner.z * corner.z).sqrt();
+        
+        assert!((dist - WGS84_A).abs() < 100.0,
+            "Corner {} should be on sphere surface, distance={}m", i, dist);
+    }
+}
+
+#[test]
+fn test_chunk_bounding_radius_positive() {
+    // Bounding radius should be positive for all tiles
+    let test_chunks = vec![
+        ChunkId::root(0),
+        gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 5),
+        gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 10),
+        gps_to_chunk_id(&GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 }, 15),
+    ];
+    
+    for chunk in test_chunks {
+        let radius = chunk_bounding_radius(&chunk);
+        assert!(radius > 0.0, "Bounding radius should be positive, got {}", radius);
+    }
+}
+
+#[test]
+fn test_chunk_bounding_radius_decreases_with_depth() {
+    // Bounding radius should decrease as depth increases
+    let brisbane = GpsPos { lat_deg: -27.4705, lon_deg: 153.0260, elevation_m: 0.0 };
+    
+    let r0 = chunk_bounding_radius(&gps_to_chunk_id(&brisbane, 0));
+    let r5 = chunk_bounding_radius(&gps_to_chunk_id(&brisbane, 5));
+    let r10 = chunk_bounding_radius(&gps_to_chunk_id(&brisbane, 10));
+    let r15 = chunk_bounding_radius(&gps_to_chunk_id(&brisbane, 15));
+    
+    assert!(r0 > r5, "Depth 0 radius should be > depth 5: {} vs {}", r0, r5);
+    assert!(r5 > r10, "Depth 5 radius should be > depth 10: {} vs {}", r5, r10);
+    assert!(r10 > r15, "Depth 10 radius should be > depth 15: {} vs {}", r10, r15);
+}
+
+#[test]
+fn test_chunk_corners_form_quadrilateral() {
+    // The 4 corners should form a reasonable quadrilateral (not all identical)
+    let chunk = gps_to_chunk_id(&GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 }, 10);
+    let corners = chunk_corners_ecef(&chunk);
+    
+    // Check that corners are distinct
+    for i in 0..4 {
+        for j in (i+1)..4 {
+            let dist = ((corners[i].x - corners[j].x).powi(2)
+                      + (corners[i].y - corners[j].y).powi(2)
+                      + (corners[i].z - corners[j].z).powi(2)).sqrt();
+            
+            assert!(dist > 1.0, 
+                "Corners {} and {} should be distinct, distance={}m", i, j, dist);
+        }
+    }
+}

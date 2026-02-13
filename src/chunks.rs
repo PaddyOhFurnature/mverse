@@ -368,3 +368,130 @@ pub fn gps_to_chunk_id(gps: &GpsPos, depth: u8) -> ChunkId {
     
     ChunkId { face, path }
 }
+
+/// Returns the ECEF coordinates of the center of a chunk tile
+///
+/// # Arguments
+/// * `id` - The ChunkId to get the center of
+///
+/// # Returns
+/// ECEF position of the tile center on the sphere surface
+pub fn chunk_center_ecef(id: &ChunkId) -> EcefPos {
+    // Get the UV bounds of this tile
+    let (u_min, u_max, v_min, v_max) = chunk_uv_bounds(id);
+    
+    // Center is at midpoint
+    let u_center = (u_min + u_max) / 2.0;
+    let v_center = (v_min + v_max) / 2.0;
+    
+    // Project to sphere
+    cube_to_sphere(id.face, u_center, v_center, crate::coordinates::WGS84_A)
+}
+
+/// Returns the ECEF coordinates of the 4 corners of a chunk tile
+///
+/// # Arguments
+/// * `id` - The ChunkId to get corners for
+///
+/// # Returns
+/// Array of 4 ECEF positions (corners in order: TL, TR, BL, BR)
+pub fn chunk_corners_ecef(id: &ChunkId) -> [EcefPos; 4] {
+    use crate::coordinates::WGS84_A;
+    
+    let (u_min, u_max, v_min, v_max) = chunk_uv_bounds(id);
+    
+    // Four corners: TL, TR, BL, BR
+    [
+        cube_to_sphere(id.face, u_min, v_min, WGS84_A), // Top-left
+        cube_to_sphere(id.face, u_max, v_min, WGS84_A), // Top-right
+        cube_to_sphere(id.face, u_min, v_max, WGS84_A), // Bottom-left
+        cube_to_sphere(id.face, u_max, v_max, WGS84_A), // Bottom-right
+    ]
+}
+
+/// Returns the radius of the smallest sphere that contains the entire tile
+///
+/// # Arguments
+/// * `id` - The ChunkId to compute bounding radius for
+///
+/// # Returns
+/// Radius in meters from the tile center that contains all corners
+pub fn chunk_bounding_radius(id: &ChunkId) -> f64 {
+    let center = chunk_center_ecef(id);
+    let corners = chunk_corners_ecef(id);
+    
+    // Find maximum distance from center to any corner
+    let mut max_dist: f64 = 0.0;
+    for corner in &corners {
+        let dist = ((corner.x - center.x).powi(2)
+                  + (corner.y - center.y).powi(2)
+                  + (corner.z - center.z).powi(2)).sqrt();
+        max_dist = max_dist.max(dist);
+    }
+    
+    max_dist
+}
+
+/// Returns approximate width of the tile in meters
+///
+/// # Arguments
+/// * `id` - The ChunkId to compute width for
+///
+/// # Returns
+/// Approximate edge length in meters (average of distances between adjacent corners)
+pub fn chunk_approximate_width(id: &ChunkId) -> f64 {
+    let corners = chunk_corners_ecef(id);
+    
+    // Measure distances between adjacent corners
+    // TL-TR, TR-BR, BR-BL, BL-TL
+    let d1 = ecef_distance(&corners[0], &corners[1]); // TL-TR (top edge)
+    let d2 = ecef_distance(&corners[1], &corners[3]); // TR-BR (right edge)
+    let d3 = ecef_distance(&corners[3], &corners[2]); // BR-BL (bottom edge)
+    let d4 = ecef_distance(&corners[2], &corners[0]); // BL-TL (left edge)
+    
+    // Return average edge length
+    (d1 + d2 + d3 + d4) / 4.0
+}
+
+/// Helper: compute UV bounds for a ChunkId
+///
+/// Returns (u_min, u_max, v_min, v_max) in the range [-1, 1]
+fn chunk_uv_bounds(id: &ChunkId) -> (f64, f64, f64, f64) {
+    let mut u_min = -1.0;
+    let mut u_max = 1.0;
+    let mut v_min = -1.0;
+    let mut v_max = 1.0;
+    
+    // Apply each quadrant subdivision in the path
+    for &quadrant in &id.path {
+        let u_mid = (u_min + u_max) / 2.0;
+        let v_mid = (v_min + v_max) / 2.0;
+        
+        match quadrant {
+            0 => { // Top-left
+                u_max = u_mid;
+                v_max = v_mid;
+            }
+            1 => { // Top-right
+                u_min = u_mid;
+                v_max = v_mid;
+            }
+            2 => { // Bottom-left
+                u_max = u_mid;
+                v_min = v_mid;
+            }
+            3 => { // Bottom-right
+                u_min = u_mid;
+                v_min = v_mid;
+            }
+            _ => {} // Invalid, ignore
+        }
+    }
+    
+    (u_min, u_max, v_min, v_max)
+}
+
+/// Helper: compute distance between two ECEF positions
+fn ecef_distance(a: &EcefPos, b: &EcefPos) -> f64 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
+}
