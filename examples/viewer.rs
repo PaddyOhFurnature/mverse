@@ -116,6 +116,57 @@ impl App {
         }
     }
     
+    /// Generate terrain patches with SRTM elevation data
+    fn generate_terrain_with_srtm(
+        srtm: &mut SrtmManager,
+        depth: u8,
+        subdivisions: u32,
+        color: glam::Vec3,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        use metaverse_core::chunks::ChunkId;
+        use metaverse_core::renderer::mesh::generate_chunk_patch_with_elevation;
+        
+        let mut all_vertices = Vec::new();
+        let mut all_indices = Vec::new();
+        
+        // Generate all chunk paths for this depth
+        let num_tiles = 4_usize.pow(depth as u32);
+        let mut paths = vec![vec![]];
+        
+        for _ in 0..depth {
+            let mut new_paths = Vec::new();
+            for path in &paths {
+                for quad in 0..4 {
+                    let mut new_path = path.clone();
+                    new_path.push(quad);
+                    new_paths.push(new_path);
+                }
+            }
+            paths = new_paths;
+        }
+        
+        // Generate terrain for each chunk
+        for face in 0..6 {
+            for path in &paths {
+                let chunk_id = ChunkId { face, path: path.clone() };
+                
+                // Create elevation query closure
+                let (vertices, indices) = generate_chunk_patch_with_elevation(
+                    &chunk_id,
+                    subdivisions,
+                    color,
+                    |lat, lon| srtm.get_elevation(lat, lon),
+                );
+                
+                let vertex_offset = all_vertices.len() as u32;
+                all_vertices.extend(vertices);
+                all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
+            }
+        }
+        
+        (all_vertices, all_indices)
+    }
+    
     fn handle_input(&mut self, delta_time: f64) {
         // Movement: WASD + QE for up/down
         let mut forward = 0.0;
@@ -223,12 +274,35 @@ impl ApplicationHandler for App {
                 usage: wgpu::BufferUsages::INDEX,
             });
             
-            // Generate terrain patches (green)
-            let (terrain_vertices, terrain_indices) = generate_terrain_patches(
-                self.tile_depth, 
-                16, // 16x16 subdivisions
-                glam::Vec3::new(0.2, 0.8, 0.2) // Green
+            // Initialize SRTM manager
+            let cache = DiskCache::new().unwrap();
+            let mut srtm = SrtmManager::new(cache);
+            
+            println!("Testing SRTM elevation queries:");
+            // Test Brisbane CBD
+            if let Some(elev) = srtm.get_elevation(-27.4698, 153.0251) {
+                println!("  Brisbane CBD: {}m elevation", elev);
+            } else {
+                println!("  Brisbane CBD: no data");
+            }
+            // Test hill location
+            if let Some(elev) = srtm.get_elevation(-27.5, 153.2) {
+                println!("  Test hill (-27.5, 153.2): {}m elevation", elev);
+            } else {
+                println!("  Test hill: no data");
+            }
+            
+            self.srtm = Some(srtm);
+            
+            // Generate terrain patches with SRTM elevation
+            println!("Generating terrain with SRTM elevation...");
+            let (terrain_vertices, terrain_indices) = Self::generate_terrain_with_srtm(
+                &mut self.srtm.as_mut().unwrap(),
+                self.tile_depth,
+                16,
+                glam::Vec3::new(0.2, 0.8, 0.2)
             );
+            println!("Generated {} vertices, {} indices", terrain_vertices.len(), terrain_indices.len());
             let terrain_num_indices = terrain_indices.len() as u32;
             
             let terrain_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -340,10 +414,12 @@ impl ApplicationHandler for App {
                                     self.tile_index_buffer = Some(index_buffer);
                                     self.tile_num_indices = indices.len() as u32;
                                     
-                                    // Regenerate terrain
-                                    let (terrain_verts, terrain_inds) = generate_terrain_patches(
-                                        self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2)
-                                    );
+                                    // Regenerate terrain with SRTM
+                                    let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
+                                        Self::generate_terrain_with_srtm(srtm, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    } else {
+                                        generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    };
                                     let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                         label: Some("Terrain Patch Vertex Buffer"),
                                         contents: bytemuck::cast_slice(&terrain_verts),
@@ -380,10 +456,12 @@ impl ApplicationHandler for App {
                                     self.tile_index_buffer = Some(index_buffer);
                                     self.tile_num_indices = indices.len() as u32;
                                     
-                                    // Regenerate terrain
-                                    let (terrain_verts, terrain_inds) = generate_terrain_patches(
-                                        self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2)
-                                    );
+                                    // Regenerate terrain with SRTM
+                                    let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
+                                        Self::generate_terrain_with_srtm(srtm, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    } else {
+                                        generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    };
                                     let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                         label: Some("Terrain Patch Vertex Buffer"),
                                         contents: bytemuck::cast_slice(&terrain_verts),
