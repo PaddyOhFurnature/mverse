@@ -192,6 +192,7 @@ impl ApplicationHandler for App {
             // Load OSM data and generate mesh using SVO pipeline
             println!("Loading OSM data from cache...");
             let cache = DiskCache::new().unwrap();
+            println!("[DEBUG] Cache created");
             
             // Try to load from wide area cache first, then fall back to CBD
             let cache_keys = ["brisbane_wide", "brisbane_cbd"];
@@ -200,7 +201,9 @@ impl ApplicationHandler for App {
             let (mesh_vertices, mesh_indices) = {
                 let mut result = (Vec::new(), Vec::new());
                 for cache_key in &cache_keys {
+                    println!("[DEBUG] Trying cache key: {}", cache_key);
                     if let Ok(cached_bytes) = cache.read_osm(cache_key) {
+                        println!("[DEBUG] Found {} bytes", cached_bytes.len());
                         if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
                             println!("Loaded {} buildings, {} roads, {} water features from cache ({})", 
                                    osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(), cache_key);
@@ -208,8 +211,13 @@ impl ApplicationHandler for App {
                             // Generate test mesh (simplified SVO rendering)
                             println!("Generating mesh from OSM data using SVO integration...");
                             result = generate_test_mesh_from_osm(&osm_data);
+                            println!("[DEBUG] Generated {} vertices, {} indices", result.0.len(), result.1.len());
                             break;
+                        } else {
+                            println!("[DEBUG] Failed to parse JSON");
                         }
+                    } else {
+                        println!("[DEBUG] Cache key not found");
                     }
                 }
                 if result.0.is_empty() {
