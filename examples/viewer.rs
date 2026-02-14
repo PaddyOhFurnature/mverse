@@ -170,17 +170,17 @@ impl App {
         if self.keys_pressed.contains(&KeyCode::KeyE) || self.keys_pressed.contains(&KeyCode::Space) {
             up += 1.0;
         }
-        if self.keys_pressed.contains(&KeyCode::KeyQ) || self.keys_pressed.contains(&KeyCode::ShiftLeft) {
+        if self.keys_pressed.contains(&KeyCode::KeyQ) {
             up -= 1.0;
         }
         
         // Speed modifiers
         let mut speed_mod = 1.0;
         if self.keys_pressed.contains(&KeyCode::ControlLeft) {
-            speed_mod *= 0.1; // Slow
+            speed_mod *= 0.1; // Slow (0.1x)
         }
-        if self.keys_pressed.contains(&KeyCode::ShiftRight) {
-            speed_mod *= 10.0; // Fast
+        if self.keys_pressed.contains(&KeyCode::ShiftLeft) || self.keys_pressed.contains(&KeyCode::ShiftRight) {
+            speed_mod *= 20.0; // Sprint (20x)
         }
         
         let original_multiplier = self.camera.speed_multiplier;
@@ -663,9 +663,10 @@ fn main() {
     println!("=== Metaverse Viewer ===");
     println!("Controls:");
     println!("  WASD - Move forward/left/back/right");
-    println!("  Q/E or Shift/Space - Move down/up");
-    println!("  Right Shift - 10x speed boost");
-    println!("  Left Ctrl - 0.1x speed (slow)");
+    println!("  Q/E or Space - Move down/up");
+    println!("  Shift (either) - 20x sprint speed");
+    println!("  Ctrl - 0.1x slow speed");
+    println!("  Mouse - Look around (click to capture)");
     println!("  [ ] - Decrease/increase tile depth (0-5)");
     println!("  1 - Toggle sphere visibility");
     println!("  2 - Toggle tile outlines");

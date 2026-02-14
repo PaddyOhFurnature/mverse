@@ -107,15 +107,17 @@ impl Camera {
     
     /// Rotate camera by pitch (up/down) and yaw (left/right)
     pub fn rotate(&mut self, pitch_delta: f64, yaw_delta: f64) {
-        // Yaw around world up axis (for horizon stability)
-        let yaw_rotation = DQuat::from_axis_angle(DVec3::Z, yaw_delta);
+        // Use local "up" direction (radial from Earth center) for yaw
+        // This gives intuitive rotation at any location on Earth
+        let local_up = self.position.normalize();
+        let yaw_rotation = DQuat::from_axis_angle(local_up, yaw_delta);
         
         // Pitch around camera's right axis
         let right = self.right();
         let pitch_rotation = DQuat::from_axis_angle(right, pitch_delta);
         
-        // Apply rotations
-        self.orientation = yaw_rotation * self.orientation * pitch_rotation;
+        // Apply rotations: pitch first (around right), then yaw (around local up)
+        self.orientation = yaw_rotation * pitch_rotation * self.orientation;
         self.orientation = self.orientation.normalize();
     }
     
