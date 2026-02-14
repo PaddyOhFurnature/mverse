@@ -10,7 +10,7 @@ use metaverse_core::renderer::{
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation_downloader::ElevationDownloader;
-use metaverse_core::svo_integration::generate_test_mesh_from_osm;
+use metaverse_core::svo_integration::generate_mesh_from_osm;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -208,9 +208,9 @@ impl ApplicationHandler for App {
                             println!("Loaded {} buildings, {} roads, {} water features from cache ({})", 
                                    osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(), cache_key);
                             
-                            // Generate test mesh (simplified SVO rendering)
-                            println!("Generating mesh from OSM data using SVO integration...");
-                            result = generate_test_mesh_from_osm(&osm_data);
+                            // Generate mesh using proper 3D geometry
+                            println!("Generating mesh from OSM data using proper 3D volumes...");
+                            result = generate_mesh_from_osm(&osm_data);
                             println!("[DEBUG] Generated {} vertices, {} indices", result.0.len(), result.1.len());
                             break;
                         } else {
