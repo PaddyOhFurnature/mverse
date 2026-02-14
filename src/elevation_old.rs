@@ -1,10 +1,7 @@
-/// SRTM elevation data parsing with procedural fallback.
+/// SRTM elevation data parsing.
 ///
 /// SRTM (Shuttle Radar Topography Mission) provides global elevation data.
 /// Data is stored in HGT files as 16-bit big-endian signed integers.
-/// When real data unavailable, falls back to procedural noise-based terrain.
-
-use noise::{NoiseFn, Perlin, Seedable};
 
 /// SRTM resolution variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,80 +199,42 @@ pub fn parse_hgt_filename(filename: &str) -> Result<(i16, i16), Box<dyn std::err
     Ok((lat, lon))
 }
 
-/// Simple SRTM elevation manager with procedural fallback
+/// Simple SRTM elevation manager with in-memory tile cache
 ///
 /// Loads SRTM tiles on demand and caches them for repeated queries.
-/// When tiles unavailable, generates procedural terrain using noise functions.
 pub struct SrtmManager {
     tiles: std::collections::HashMap<(i16, i16), SrtmTile>,
     cache: crate::cache::DiskCache,
     /// If true, only load from disk cache (no network fetches)
     cache_only: bool,
-    /// Perlin noise generator for procedural terrain fallback
-    noise: Perlin,
-    /// If true, use procedural terrain when real data unavailable
-    use_procedural: bool,
 }
 
 impl SrtmManager {
     /// Create a new SRTM manager with the given cache
     ///
     /// By default, cache_only is false and will attempt network downloads.
-    /// Always has procedural fallback enabled.
     pub fn new(cache: crate::cache::DiskCache) -> Self {
         Self {
             tiles: std::collections::HashMap::new(),
             cache,
             cache_only: false,
-            noise: Perlin::new(42),  // Fixed seed for determinism
-            use_procedural: true,
         }
     }
     
     /// Create a cache-only SRTM manager (no network fetches)
     ///
     /// Use this to avoid blocking on HTTP requests during initialization.
-    /// Always has procedural fallback enabled.
     pub fn cache_only(cache: crate::cache::DiskCache) -> Self {
         Self {
             tiles: std::collections::HashMap::new(),
             cache,
             cache_only: true,
-            noise: Perlin::new(42),  // Fixed seed for determinism
-            use_procedural: true,
         }
     }
     
     /// Enable or disable network fetching
     pub fn set_network_enabled(&mut self, enabled: bool) {
         self.cache_only = !enabled;
-    }
-    
-    /// Generate procedural elevation using multiple octaves of Perlin noise
-    ///
-    /// Creates realistic-looking terrain with:
-    /// - Large-scale features (mountains, valleys) - low frequency, high amplitude
-    /// - Medium features (hills) - medium frequency, medium amplitude  
-    /// - Small details (bumps) - high frequency, low amplitude
-    ///
-    /// Brisbane is at lat -27.5, lon 153.0, so this should create varied terrain.
-    fn generate_procedural_elevation(&self, lat: f64, lon: f64) -> f64 {
-        // Scale coordinates to noise space (smaller = larger features)
-        let scale = 0.02;  // Controls feature size
-        let x = lon * scale;
-        let y = lat * scale;
-        
-        // Multi-octave noise (fractal Brownian motion)
-        let octave1 = self.noise.get([x, y]) * 300.0;           // Large mountains/valleys
-        let octave2 = self.noise.get([x * 2.0, y * 2.0]) * 150.0;  // Hills
-        let octave3 = self.noise.get([x * 4.0, y * 4.0]) * 75.0;   // Small bumps
-        let octave4 = self.noise.get([x * 8.0, y * 8.0]) * 30.0;   // Fine detail
-        
-        let elevation = octave1 + octave2 + octave3 + octave4;
-        
-        // Clamp to reasonable range (-500m to +3000m)
-        // Most of Brisbane is 0-300m, but we want variety for testing
-        elevation.clamp(-500.0, 3000.0)
     }
     
     /// Get elevation at a GPS coordinate

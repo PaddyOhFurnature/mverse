@@ -14,6 +14,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Cache for OSM and SRTM data stored in ~/.metaverse/cache/
+#[derive(Clone)]
 pub struct DiskCache {
     root: PathBuf,
 }
