@@ -10,6 +10,7 @@ use metaverse_core::renderer::{
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation_downloader::ElevationDownloader;
+use metaverse_core::chunk_manager::ChunkManager;
 use metaverse_core::svo_integration::generate_mesh_from_osm;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -25,6 +26,8 @@ struct App {
     pipeline: Option<BasicPipeline>,
     camera: Camera,
     downloader: Option<ElevationDownloader>,
+    chunk_manager: Option<ChunkManager>,
+    full_osm_data: Option<OsmData>, // Keep full dataset for chunk partitioning
     buildings_vertex_buffer: Option<wgpu::Buffer>,
     buildings_index_buffer: Option<wgpu::Buffer>,
     buildings_num_indices: u32,
@@ -76,6 +79,8 @@ impl App {
             water_num_indices: 0,
             show_water: true,
             downloader: None, // Will be initialized with cache
+            chunk_manager: None, // Will be initialized when OSM data loads
+            full_osm_data: None, // Will be loaded from cache
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -189,7 +194,7 @@ impl ApplicationHandler for App {
                      stats.downloads_success,
                      stats.downloads_failed);
             
-            // Load OSM data and generate mesh using SVO pipeline
+            // Load OSM data and initialize chunk manager
             println!("Loading OSM data from cache...");
             let cache = DiskCache::new().unwrap();
             println!("[DEBUG] Cache created");
@@ -197,34 +202,44 @@ impl ApplicationHandler for App {
             // Try to load from wide area cache first, then fall back to CBD
             let cache_keys = ["brisbane_wide", "brisbane_cbd"];
             
-            // Generate unified mesh from OSM data using SVO test mesh for now
-            let (mesh_vertices, mesh_indices) = {
-                let mut result = (Vec::new(), Vec::new());
-                for cache_key in &cache_keys {
-                    println!("[DEBUG] Trying cache key: {}", cache_key);
-                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
-                        println!("[DEBUG] Found {} bytes", cached_bytes.len());
-                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
-                            println!("Loaded {} buildings, {} roads, {} water features from cache ({})", 
-                                   osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(), cache_key);
-                            
-                            // Generate mesh using proper 3D geometry
-                            println!("Generating mesh from OSM data using proper 3D volumes...");
-                            result = generate_mesh_from_osm(&osm_data);
-                            println!("[DEBUG] Generated {} vertices, {} indices", result.0.len(), result.1.len());
-                            break;
-                        } else {
-                            println!("[DEBUG] Failed to parse JSON");
-                        }
+            let mut full_osm_data: Option<OsmData> = None;
+            for cache_key in &cache_keys {
+                println!("[DEBUG] Trying cache key: {}", cache_key);
+                if let Ok(cached_bytes) = cache.read_osm(cache_key) {
+                    println!("[DEBUG] Found {} bytes", cached_bytes.len());
+                    if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+                        println!("Loaded {} buildings, {} roads, {} water, {} parks from cache ({})", 
+                               osm_data.buildings.len(), osm_data.roads.len(), 
+                               osm_data.water.len(), osm_data.parks.len(), cache_key);
+                        full_osm_data = Some(osm_data);
+                        break;
                     } else {
-                        println!("[DEBUG] Cache key not found");
+                        println!("[DEBUG] Failed to parse JSON");
                     }
+                } else {
+                    println!("[DEBUG] Cache key not found");
                 }
-                if result.0.is_empty() {
-                    println!("No cached OSM data available");
-                    println!("  Run: cargo run --example download_brisbane_data");
-                }
+            }
+            
+            // Initialize chunk manager
+            let chunk_manager = ChunkManager::new(
+                9,      // Depth 9 = ~60km chunks (city districts)
+                10000.0 // 10km render distance
+            );
+            
+            // Generate mesh from chunks around camera
+            let (mesh_vertices, mesh_indices) = if let Some(ref osm_data) = full_osm_data {
+                println!("Generating mesh from OSM data using chunked loading...");
+                
+                // For initial load, just use the full dataset
+                // TODO: In frame update loop, use chunk_manager.update() to load only nearby chunks
+                let result = generate_mesh_from_osm(osm_data);
+                println!("[DEBUG] Generated {} vertices, {} indices", result.0.len(), result.1.len());
                 result
+            } else {
+                println!("No cached OSM data available");
+                println!("  Run: cargo run --example download_brisbane_data");
+                (Vec::new(), Vec::new())
             };
             
             let buildings_num_indices = mesh_indices.len() as u32;
@@ -250,6 +265,10 @@ impl ApplicationHandler for App {
             } else {
                 println!("No mesh to render");
             }
+            
+            // Store full OSM data and chunk manager for dynamic loading
+            self.full_osm_data = full_osm_data;
+            self.chunk_manager = Some(chunk_manager);
             
             // Clear roads and water buffers (now unified in SVO mesh)
             self.roads_vertex_buffer = None;
