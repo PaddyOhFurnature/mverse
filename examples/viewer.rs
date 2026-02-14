@@ -11,7 +11,7 @@ use metaverse_core::renderer::{
 use metaverse_core::osm::{load_chunk_osm_data, OverpassClient, OsmData};
 use metaverse_core::chunks::ChunkId;
 use metaverse_core::cache::DiskCache;
-use metaverse_core::elevation::SrtmManager;
+use metaverse_core::elevation_downloader::ElevationDownloader;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -26,7 +26,7 @@ struct App {
     pipeline: Option<BasicPipeline>,
     line_pipeline: Option<BasicPipeline>,
     camera: Camera,
-    srtm: Option<SrtmManager>,
+    downloader: Option<ElevationDownloader>,
     sphere_vertex_buffer: Option<wgpu::Buffer>,
     sphere_index_buffer: Option<wgpu::Buffer>,
     sphere_num_indices: u32,
@@ -83,7 +83,7 @@ impl App {
             buildings_vertex_buffer: None,
             buildings_index_buffer: None,
             buildings_num_indices: 0,
-            srtm: None, // Will be initialized with cache
+            downloader: None, // Will be initialized with cache
             tile_depth: 2, // Start with depth 2 (96 tiles)
             show_sphere: false, // Hide sphere by default
             show_tiles: false, // Hide tiles by default
@@ -100,10 +100,10 @@ impl App {
     
     /// Generate terrain patches with SRTM elevation data around a GPS location
     fn generate_terrain_around_location(
-        srtm: &mut SrtmManager,
+        downloader: &mut ElevationDownloader,
         center_lat: f64,
         center_lon: f64,
-        radius_chunks: u8,
+        _radius_chunks: u8,
         depth: u8,
         subdivisions: u32,
         color: glam::Vec3,
@@ -149,11 +149,13 @@ impl App {
         println!("  Generating {} terrain chunks on face {}", chunks_to_generate.len(), face);
         
         for chunk_id in &chunks_to_generate {
+            // Queue downloads for this chunk
+            // (Will return procedural immediately, real data once downloaded)
             let (vertices, indices) = generate_chunk_patch_with_elevation(
                 chunk_id,
                 subdivisions,
                 color,
-                |lat, lon| srtm.get_elevation(lat, lon),
+                |lat, lon| downloader.get_elevation(lat, lon, 10).map(|e| e as f64), // zoom 10 for good detail
             );
             
             let vertex_offset = all_vertices.len() as u32;
@@ -167,7 +169,7 @@ impl App {
     /// Generate terrain patches with SRTM elevation data (DEPRECATED - generates whole globe)
     #[allow(dead_code)]
     fn generate_terrain_with_srtm(
-        srtm: &mut SrtmManager,
+        downloader: &mut ElevationDownloader,
         depth: u8,
         subdivisions: u32,
         color: glam::Vec3,
@@ -204,7 +206,7 @@ impl App {
                     &chunk_id,
                     subdivisions,
                     color,
-                    |lat, lon| srtm.get_elevation(lat, lon),
+                    |lat, lon| downloader.get_elevation(lat, lon, 10).map(|e| e as f64),
                 );
                 
                 let vertex_offset = all_vertices.len() as u32;
@@ -323,22 +325,35 @@ impl ApplicationHandler for App {
                 usage: wgpu::BufferUsages::INDEX,
             });
             
-            // Initialize SRTM manager (cache-only to avoid blocking on network)
+            // Initialize elevation downloader with multi-source support
             let cache = DiskCache::new().unwrap();
-            let srtm = SrtmManager::cache_only(cache);
+            let downloader = ElevationDownloader::new(cache);
             
-            println!("SRTM manager initialized (cache-only mode)");
-            println!("  Tiles will be loaded from .metaverse/cache/ if available");
-            println!("  To download tiles, use the standalone downloader script");
+            println!("Elevation downloader initialized");
+            println!("  Sources: AWS Terrarium (primary), USGS 3DEP, OpenTopography");
+            println!("  Parallel downloads: up to 8 concurrent");
+            println!("  Real-time downloading enabled!");
             
-            self.srtm = Some(srtm);
-            
-            // Generate terrain patches with SRTM elevation around Brisbane
-            println!("Generating terrain around Brisbane...");
+            // Queue Brisbane tiles for immediate download
             let brisbane_lat = -27.4698;
             let brisbane_lon = 153.0251;
+            for lat_offset in -1i32..=1 {
+                for lon_offset in -1i32..=1 {
+                    downloader.queue_download(
+                        brisbane_lat + lat_offset as f64 * 0.35,
+                        brisbane_lon + lon_offset as f64 * 0.35,
+                        10,
+                        ((lat_offset.abs() + lon_offset.abs()) as f32) / 2.0,
+                    );
+                }
+            }
+            
+            self.downloader = Some(downloader);
+            
+            // Generate terrain patches with elevation data around Brisbane
+            println!("Generating terrain around Brisbane...");
             let (terrain_vertices, terrain_indices) = Self::generate_terrain_around_location(
-                &mut self.srtm.as_mut().unwrap(),
+                &mut self.downloader.as_mut().unwrap(),
                 brisbane_lat,
                 brisbane_lon,
                 1, // radius in chunks
@@ -470,8 +485,8 @@ impl ApplicationHandler for App {
                                     self.tile_num_indices = indices.len() as u32;
                                     
                                     // Regenerate terrain with SRTM
-                                    let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
-                                        Self::generate_terrain_around_location(srtm, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    let (terrain_verts, terrain_inds) = if let Some(ref mut downloader) = self.downloader {
+                                        Self::generate_terrain_around_location(downloader, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     } else {
                                         generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     };
@@ -512,8 +527,8 @@ impl ApplicationHandler for App {
                                     self.tile_num_indices = indices.len() as u32;
                                     
                                     // Regenerate terrain with SRTM
-                                    let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
-                                        Self::generate_terrain_around_location(srtm, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                    let (terrain_verts, terrain_inds) = if let Some(ref mut downloader) = self.downloader {
+                                        Self::generate_terrain_around_location(downloader, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     } else {
                                         generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     };
@@ -602,6 +617,11 @@ impl ApplicationHandler for App {
                 
                 // Handle input
                 self.handle_input(delta_time);
+                
+                // Process elevation download queue
+                if let Some(downloader) = &self.downloader {
+                    downloader.process_queue();
+                }
                 
                 if let (Some(renderer), Some(window), Some(pipeline), Some(line_pipeline), Some(sphere_vb), Some(sphere_ib), Some(tile_vb), Some(tile_ib), Some(terrain_vb), Some(terrain_ib)) = 
                     (&mut self.renderer, &self.window, &self.pipeline, &self.line_pipeline, &self.sphere_vertex_buffer, &self.sphere_index_buffer, &self.tile_vertex_buffer, &self.tile_index_buffer, &self.terrain_vertex_buffer, &self.terrain_index_buffer) {
@@ -693,18 +713,30 @@ impl ApplicationHandler for App {
                         Err(e) => eprintln!("Render error: {:?}", e),
                     }
 
-                    // Update FPS counter
+                    // Update FPS counter and stats
                     self.frame_count += 1;
                     if now.duration_since(self.fps_update_time).as_secs_f32() >= 1.0 {
                         let fps =
                             self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
                         
-                        // Also show camera position and tile depth
+                        // Get download stats
+                        let stats = if let Some(downloader) = &self.downloader {
+                            let s = downloader.stats();
+                            format!(" | DL: {}↓ {}✓ {}✗ Q:{}", 
+                                downloader.active_downloads(),
+                                s.downloads_success,
+                                s.downloads_failed,
+                                downloader.queue_length())
+                        } else {
+                            String::new()
+                        };
+                        
+                        // Show camera position and tile depth
                         let pos = self.camera.position;
                         let alt = pos.length() - 6_371_000.0;
                         window.set_title(&format!(
-                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x | Tiles: Depth {}",
-                            fps, alt, self.camera.speed_multiplier, self.tile_depth
+                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x | Tiles: Depth {}{}",
+                            fps, alt, self.camera.speed_multiplier, self.tile_depth, stats
                         ));
                         
                         self.frame_count = 0;
