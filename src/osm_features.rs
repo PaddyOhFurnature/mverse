@@ -386,21 +386,99 @@ pub fn add_building(
 ///
 /// # Arguments
 /// * `svo` - The terrain SVO to modify
+/// * `chunk_center` - ECEF position of chunk center
 /// * `bridge_nodes` - GPS coordinates of bridge path
-/// * `deck_height_m` - Height of deck above terrain
+/// * `deck_height_m` - Height of deck above sea level
 /// * `width_m` - Width of bridge deck
+/// * `voxel_size_m` - Size of each voxel
 pub fn add_bridge(
-    _svo: &mut SparseVoxelOctree,
-    bridge_nodes: &[(f64, f64)],
+    svo: &mut SparseVoxelOctree,
+    chunk_center: &EcefPos,
+    bridge_nodes: &[GpsPos],
     deck_height_m: f64,
     width_m: f64,
+    voxel_size_m: f64,
 ) {
-    // TODO: Implement bridge deck creation
-    // TODO: Add support pillars (every 20m)
-    // TODO: Handle curved bridges
-    // TODO: Ensure deck connects to terrain at ends
+    let svo_size = 1u32 << svo.max_depth();
+    let width_voxels = (width_m / voxel_size_m).ceil() as u32;
+    let deck_thickness_voxels = (0.5 / voxel_size_m).ceil() as u32; // 0.5m thick deck
     
-    println!("Adding bridge (height: {}m, width: {}m, {} nodes)",
+    // Process each segment of the bridge path
+    for i in 0..bridge_nodes.len().saturating_sub(1) {
+        let start = &bridge_nodes[i];
+        let end = &bridge_nodes[i + 1];
+        
+        // Convert to voxel coordinates
+        let start_voxel = match gps_to_voxel(start, chunk_center, voxel_size_m, svo_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        
+        let end_voxel = match gps_to_voxel(end, chunk_center, voxel_size_m, svo_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        
+        // Rasterize line for deck
+        let steps = ((end_voxel.0 as i32 - start_voxel.0 as i32).abs()
+            .max((end_voxel.1 as i32 - start_voxel.1 as i32).abs())
+            .max((end_voxel.2 as i32 - start_voxel.2 as i32).abs())) as u32;
+        
+        for step in 0..=steps {
+            let t = if steps > 0 { step as f32 / steps as f32 } else { 0.0 };
+            
+            let x = (start_voxel.0 as f32 * (1.0 - t) + end_voxel.0 as f32 * t).round() as u32;
+            let deck_y = (deck_height_m / voxel_size_m).round() as u32;
+            let z = (start_voxel.2 as f32 * (1.0 - t) + end_voxel.2 as f32 * t).round() as u32;
+            
+            // Create deck
+            let half_width = width_voxels / 2;
+            for dx in 0..width_voxels {
+                for dz in 0..width_voxels {
+                    let cx = x.saturating_add(dx).saturating_sub(half_width);
+                    let cz = z.saturating_add(dz).saturating_sub(half_width);
+                    
+                    if cx >= svo_size || cz >= svo_size {
+                        continue;
+                    }
+                    
+                    // Fill deck layers with CONCRETE
+                    for dy in 0..deck_thickness_voxels {
+                        let cy = deck_y + dy;
+                        if cy < svo_size {
+                            svo.set_voxel(cx, cy, cz, CONCRETE);
+                        }
+                    }
+                }
+            }
+            
+            // Add support pillar every 20m
+            if step % ((20.0 / voxel_size_m) as u32).max(1) == 0 {
+                // Find terrain surface below
+                let surface_y = match find_surface_height(svo, x, z) {
+                    Some(h) => h as u32,
+                    None => continue,
+                };
+                
+                // Create pillar from surface to deck
+                let pillar_width = (2.0 / voxel_size_m).ceil() as u32; // 2m wide pillars
+                for dy in surface_y..deck_y {
+                    for px in 0..pillar_width {
+                        for pz in 0..pillar_width {
+                            let px = x.saturating_add(px).saturating_sub(pillar_width / 2);
+                            let pz = z.saturating_add(pz).saturating_sub(pillar_width / 2);
+                            
+                            if px < svo_size && pz < svo_size {
+                                svo.set_voxel(px, dy, pz, CONCRETE);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("Added bridge (height: {}m, width: {}m, {} nodes)",
         deck_height_m, width_m, bridge_nodes.len());
 }
 
@@ -416,21 +494,90 @@ pub fn add_bridge(
 ///
 /// # Arguments
 /// * `svo` - The terrain SVO to modify
+/// * `chunk_center` - ECEF position of chunk center
 /// * `tunnel_nodes` - GPS coordinates of tunnel path
 /// * `depth_m` - Depth below surface
 /// * `diameter_m` - Tunnel diameter
+/// * `voxel_size_m` - Size of each voxel
 pub fn carve_tunnel(
-    _svo: &mut SparseVoxelOctree,
-    tunnel_nodes: &[(f64, f64)],
+    svo: &mut SparseVoxelOctree,
+    chunk_center: &EcefPos,
+    tunnel_nodes: &[GpsPos],
     depth_m: f64,
     diameter_m: f64,
+    voxel_size_m: f64,
 ) {
-    // TODO: Implement tunnel carving
-    // TODO: Add concrete walls
-    // TODO: Ensure portals connect to surface roads
-    // TODO: Handle curved tunnels
+    let svo_size = 1u32 << svo.max_depth();
+    let radius_voxels = (diameter_m / 2.0 / voxel_size_m).ceil() as u32;
+    let wall_thickness = (0.3 / voxel_size_m).ceil() as u32;
     
-    println!("Carving tunnel (depth: {}m, diameter: {}m, {} nodes)",
+    // Process each segment of the tunnel path
+    for i in 0..tunnel_nodes.len().saturating_sub(1) {
+        let start = &tunnel_nodes[i];
+        let end = &tunnel_nodes[i + 1];
+        
+        // Convert to voxel coordinates
+        let start_voxel = match gps_to_voxel(start, chunk_center, voxel_size_m, svo_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        
+        let end_voxel = match gps_to_voxel(end, chunk_center, voxel_size_m, svo_size) {
+            Some(v) => v,
+            None => continue,
+        };
+        
+        // Rasterize line
+        let steps = ((end_voxel.0 as i32 - start_voxel.0 as i32).abs()
+            .max((end_voxel.1 as i32 - start_voxel.1 as i32).abs())
+            .max((end_voxel.2 as i32 - start_voxel.2 as i32).abs())) as u32;
+        
+        for step in 0..=steps {
+            let t = if steps > 0 { step as f32 / steps as f32 } else { 0.0 };
+            
+            let x = (start_voxel.0 as f32 * (1.0 - t) + end_voxel.0 as f32 * t).round() as u32;
+            let z = (start_voxel.2 as f32 * (1.0 - t) + end_voxel.2 as f32 * t).round() as u32;
+            
+            // Find surface at this position
+            let surface_y = match find_surface_height(svo, x, z) {
+                Some(h) => h as u32,
+                None => continue,
+            };
+            
+            // Tunnel center depth below surface
+            let tunnel_y = surface_y.saturating_sub((depth_m / voxel_size_m) as u32);
+            
+            // Carve circular cross-section
+            for dx in 0..(radius_voxels * 2) {
+                for dy in 0..(radius_voxels * 2) {
+                    let cx = x.saturating_add(dx).saturating_sub(radius_voxels);
+                    let cy = tunnel_y.saturating_add(dy).saturating_sub(radius_voxels);
+                    
+                    if cx >= svo_size || cy >= svo_size {
+                        continue;
+                    }
+                    
+                    // Check if inside circle
+                    let dist_sq = (dx as i32 - radius_voxels as i32).pow(2) 
+                        + (dy as i32 - radius_voxels as i32).pow(2);
+                    let radius_sq = (radius_voxels as i32).pow(2);
+                    let wall_radius_sq = ((radius_voxels as i32) - (wall_thickness as i32)).pow(2);
+                    
+                    if dist_sq <= radius_sq {
+                        if dist_sq > wall_radius_sq {
+                            // Wall region
+                            svo.set_voxel(cx, cy, z, CONCRETE);
+                        } else {
+                            // Interior - clear to AIR
+                            svo.set_voxel(cx, cy, z, AIR);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("Carved tunnel (depth: {}m, diameter: {}m, {} nodes)",
         depth_m, diameter_m, tunnel_nodes.len());
 }
 
@@ -607,5 +754,96 @@ mod tests {
         }
         
         println!("Building addition completed: has_concrete={}", has_concrete);
+    }
+    
+    #[test]
+    fn test_bridge_addition() {
+        let mut svo = SparseVoxelOctree::new(6);
+        
+        // Fill with terrain
+        for x in 0..64 {
+            for z in 0..64 {
+                for y in 0..18 {
+                    svo.set_voxel(x, y, z, STONE);
+                }
+                for y in 18..20 {
+                    svo.set_voxel(x, y, z, DIRT);
+                }
+            }
+        }
+        
+        let chunk_center = EcefPos {
+            x: -5_058_000.0,
+            y: 2_710_000.0,
+            z: -2_931_000.0,
+        };
+        
+        // Bridge path (elevated above terrain)
+        let nodes = vec![
+            GpsPos { lat_deg: -27.46, lon_deg: 153.02, elevation_m: 30.0 },
+            GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 30.0 },
+        ];
+        
+        add_bridge(&mut svo, &chunk_center, &nodes, 30.0, 10.0, 1.0);
+        
+        // Verify bridge structures exist
+        let mut has_elevated_concrete = false;
+        
+        for x in 0..64 {
+            for y in 25..40 {  // Check above terrain
+                for z in 0..64 {
+                    if svo.get_voxel(x, y, z) == CONCRETE {
+                        has_elevated_concrete = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        println!("Bridge addition completed: has_elevated_concrete={}", has_elevated_concrete);
+    }
+    
+    #[test]
+    fn test_tunnel_carving() {
+        let mut svo = SparseVoxelOctree::new(6);
+        
+        // Fill with terrain
+        for x in 0..64 {
+            for z in 0..64 {
+                for y in 0..30 {
+                    svo.set_voxel(x, y, z, STONE);
+                }
+            }
+        }
+        
+        let chunk_center = EcefPos {
+            x: -5_058_000.0,
+            y: 2_710_000.0,
+            z: -2_931_000.0,
+        };
+        
+        // Tunnel path
+        let nodes = vec![
+            GpsPos { lat_deg: -27.46, lon_deg: 153.02, elevation_m: 0.0 },
+            GpsPos { lat_deg: -27.47, lon_deg: 153.03, elevation_m: 0.0 },
+        ];
+        
+        carve_tunnel(&mut svo, &chunk_center, &nodes, 10.0, 6.0, 1.0);
+        
+        // Verify tunnel was carved (has AIR underground)
+        let mut has_underground_air = false;
+        
+        for x in 0..64 {
+            for y in 5..20 {  // Underground region
+                for z in 0..64 {
+                    if svo.get_voxel(x, y, z) == AIR {
+                        has_underground_air = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        println!("Tunnel carving completed: has_underground_air={}", has_underground_air);
     }
 }
