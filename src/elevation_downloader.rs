@@ -33,6 +33,8 @@ pub struct DownloaderStats {
     pub downloads_failed: u64,
     pub procedural_fallbacks: u64,
     pub total_bytes_downloaded: u64,
+    pub active_downloads: usize,
+    pub queued_downloads: usize,
 }
 
 /// Multi-source elevation data downloader
@@ -89,16 +91,28 @@ impl ElevationDownloader {
     
     /// Get elevation at GPS coordinate
     ///
-    /// Returns cached data immediately, or queues download and returns None.
-    /// On subsequent calls, returns downloaded data or procedural fallback.
+    /// Returns cached data (memory or disk), or queues download and returns procedural fallback.
     pub fn get_elevation(&mut self, lat: f64, lon: f64, zoom: u8) -> Option<f32> {
         let tile_key = self.latlon_to_tile_key(lat, lon, zoom);
         
-        // Check memory cache
+        // Check memory cache first
         {
             let tiles = self.tiles.lock().unwrap();
             if let Some(tile) = tiles.get(&tile_key) {
                 return tile.get_elevation(lat, lon);
+            }
+        }
+        
+        // Check disk cache before returning procedural fallback
+        let cache_key = format!("elevation_{}_{}_z{}", 
+            (lat * 100.0) as i32, (lon * 100.0) as i32, zoom);
+        if let Ok(cached_data) = self.cache.read_srtm(&cache_key) {
+            if let Ok(tile) = bincode::deserialize::<ElevationTile>(&cached_data) {
+                // Load into memory cache
+                let mut tiles = self.tiles.lock().unwrap();
+                let tile_arc = Arc::new(tile);
+                tiles.insert(tile_key, tile_arc.clone());
+                return tile_arc.get_elevation(lat, lon);
             }
         }
         
@@ -130,6 +144,14 @@ impl ElevationDownloader {
         
         let mut queue = self.queue.lock().unwrap();
         queue.push_back(task);
+    }
+    
+    /// Get current downloader statistics
+    pub fn get_stats(&self) -> DownloaderStats {
+        let mut stats = self.stats.lock().unwrap().clone();
+        stats.active_downloads = self.in_progress.lock().unwrap().len();
+        stats.queued_downloads = self.queue.lock().unwrap().len();
+        stats
     }
     
     /// Process download queue (call this regularly, e.g., once per frame)
@@ -210,7 +232,14 @@ impl ElevationDownloader {
                     stats_lock.downloads_success += 1;
                 }
                 Err(e) => {
-                    eprintln!("Failed to download tile at ({}, {}): {}", task.lat, task.lon, e);
+                    // Only log if not a known edge case (poles, antimeridian)
+                    let is_edge_case = task.lat.abs() > 85.0 || 
+                                      task.lon.abs() >= 179.9 ||
+                                      e.to_string().contains("Web Mercator range");
+                    
+                    if !is_edge_case {
+                        eprintln!("Failed to download tile at ({:.4}, {:.4}): {}", task.lat, task.lon, e);
+                    }
                     
                     // Generate procedural fallback and cache it
                     let tile = Self::generate_procedural_tile(task.lat, task.lon, task.zoom, &noise);
@@ -241,7 +270,7 @@ impl ElevationDownloader {
         min_interval: Duration,
     ) -> Result<ElevationTile, Box<dyn std::error::Error>> {
         // 1. Try cache first
-        let cache_key = format!("elevation_{}_{}_z{}.bin", 
+        let cache_key = format!("elevation_{}_{}_z{}", 
             (lat * 100.0) as i32, (lon * 100.0) as i32, zoom);
         
         if let Ok(bytes) = cache.read_srtm(&cache_key) {
@@ -360,21 +389,6 @@ impl ElevationDownloader {
         let tile_lat = (lat / tile_size).floor() as i32;
         let tile_lon = (lon / tile_size).floor() as i32;
         (tile_lat, tile_lon, zoom)
-    }
-    
-    /// Get current statistics
-    pub fn stats(&self) -> DownloaderStats {
-        self.stats.lock().unwrap().clone()
-    }
-    
-    /// Get queue length
-    pub fn queue_length(&self) -> usize {
-        self.queue.lock().unwrap().len()
-    }
-    
-    /// Get number of active downloads
-    pub fn active_downloads(&self) -> usize {
-        self.in_progress.lock().unwrap().len()
     }
 }
 

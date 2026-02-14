@@ -2,7 +2,7 @@
 
 **Purpose:** Complete context dump for onboarding a new developer or AI assistant.
 **Last Updated:** 2026-02-13
-**Current Phase:** 0 — Nothing exists yet. Starting from scratch.
+**Current Phase:** 6 — Rendering complete. Multi-source elevation system implemented. Working on roads and water features.
 
 ---
 
@@ -34,7 +34,7 @@ A 1:1 scale, spherical, volumetric digital twin of Earth. Not a game — infrast
 - Earth surface: 510 million km²
 - At 1m resolution: 510 trillion surface points
 - Volumetric: ~10²¹ cubic metres
-- Brisbane CBD alone: ~2,500 buildings in 2.25 km²
+- Brisbane CBD alone: ~55,000 buildings in 10km × 10km
 - Full Earth: billions of structures
 
 This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, procedural generation, and aggressive LOD are all necessary. No shortcuts.
@@ -43,11 +43,33 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 
 ## 2. WHAT CURRENTLY EXISTS
 
-**Nothing.**
+**Phase 6 — Rendering + Elevation System Complete**
 
-- No Rust code written
-- No Cargo.toml
-- No tests
+### Working Systems
+
+- ✅ **Coordinate System**: ECEF ↔ GPS conversions (WGS84 ellipsoid, sub-millimetre precision)
+- ✅ **Quad-sphere Chunks**: Cube-projected sphere, quadtree subdivision, face/path addressing
+- ✅ **wgpu Renderer**: Custom renderer (not Bevy), floating origin camera, basic pipeline
+- ✅ **OSM Buildings**: 55,319 Brisbane buildings rendering at 60 FPS
+- ✅ **Multi-source Elevation**: AWS Terrarium tiles (primary), USGS 3DEP (stub), OpenTopography (stub)
+- ✅ **Parallel Downloading**: Up to 8 concurrent tile downloads with smart caching
+- ✅ **Three-level Cache**: Memory → Disk (.metaverse/cache/) → Network
+- ✅ **Procedural Fallback**: Perlin noise for gap-filling only (not primary data)
+
+### Current State
+
+- **225 tests passing** (all tests green)
+- **60 FPS** at 1080p with 55k buildings
+- **Buildings-only rendering** (removed broken terrain/sphere meshes)
+- **121 elevation tiles cached** for Brisbane (11×11 grid at zoom 10)
+- **Real elevation data working** (16-49m range for Brisbane verified)
+- **Buildings use OSM elevation** (typically 0m = local ground level)
+
+### What Was Removed
+
+- Removed sphere mesh (white) - had rendering issues with coordinate system
+- Removed terrain mesh (green) - didn't follow elevation data correctly
+- Decision: Focus on roads/water next. Buildings are primary visual feature.
 - No renderer
 - No data pipelines
 - The project directory contains only documentation files (these docs)

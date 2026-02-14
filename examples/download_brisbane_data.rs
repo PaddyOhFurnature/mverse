@@ -135,23 +135,29 @@ fn extract_hgt_from_zip(zip_data: &[u8]) -> Option<Vec<u8>> {
 fn download_osm_data(cache: &DiskCache) {
     let client = OverpassClient::new(2); // 2-second cooldown
     
-    // Brisbane CBD chunk (depth 14)
-    // This is an approximation - adjust based on actual chunk system
+    // Brisbane area
     let brisbane_gps = GpsPos {
         lat_deg: -27.4698,
         lon_deg: 153.0251,
         elevation_m: 0.0,
     };
     
-    println!("Brisbane CBD: lat={}, lon={}", brisbane_gps.lat_deg, brisbane_gps.lon_deg);
+    println!("Brisbane area: lat={}, lon={}", brisbane_gps.lat_deg, brisbane_gps.lon_deg);
     
-    // For now, download a simple bounding box around Brisbane CBD
-    let min_lat = -27.50;
-    let max_lat = -27.44;
-    let min_lon = 153.00;
-    let max_lon = 153.06;
+    // Download a moderate-sized area around Brisbane
+    // Overpass has ~10km x 10km query limits
+    let min_lat = -27.52;
+    let max_lat = -27.42;
+    let min_lon = 152.98;
+    let max_lon = 153.08;
     
-    print!("Downloading OSM data for Brisbane CBD ... ");
+    println!("Downloading moderate area:");
+    println!("  Lat: {:.2}° to {:.2}° ({:.1}km N-S)",
+             min_lat, max_lat, (max_lat - min_lat) * 111.0);
+    println!("  Lon: {:.2}° to {:.2}° ({:.1}km E-W)",
+             min_lon, max_lon, (max_lon - min_lon) * 111.0 * (min_lat as f64).abs().to_radians().cos());
+    
+    print!("Downloading OSM data ... ");
     std::io::stdout().flush().unwrap();
     
     match client.query_bbox(min_lat, min_lon, max_lat, max_lon) {
@@ -164,7 +170,7 @@ fn download_osm_data(cache: &DiskCache) {
                     println!("  Buildings: {}", osm_data.buildings.len());
                     println!("  Roads: {}", osm_data.roads.len());
                     
-                    // Cache it with a simple key
+                    // Cache it
                     let cache_key = "brisbane_cbd";
                     match serde_json::to_vec(&osm_data) {
                         Ok(serialized) => {

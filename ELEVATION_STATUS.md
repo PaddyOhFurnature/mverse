@@ -20,6 +20,11 @@
 - Source fallback chain: Cache → Terrarium → USGS → OpenTopography → Procedural
 - Rate limiting (2-second cooldown between requests)
 - In-memory and disk caching - **VERIFIED**
+- **Edge case handling**:
+  - Longitude normalization for antimeridian (±180°)
+  - Latitude clamping for Web Mercator limits (±85.0511°)
+  - Tile coordinate clamping to valid ranges
+  - Suppressed error logging for expected failures
 
 ### Smart Procedural Fallback ✅
 - Multi-octave Perlin noise (4 octaves)

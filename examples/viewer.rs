@@ -5,7 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::{BasicPipeline, Vertex},
-    mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches, generate_chunk_patch_with_elevation, generate_buildings_from_osm},
+    mesh::generate_buildings_from_osm,
     Renderer
 };
 use metaverse_core::osm::{load_chunk_osm_data, OverpassClient, OsmData};
@@ -24,25 +24,11 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pipeline: Option<BasicPipeline>,
-    line_pipeline: Option<BasicPipeline>,
     camera: Camera,
     downloader: Option<ElevationDownloader>,
-    sphere_vertex_buffer: Option<wgpu::Buffer>,
-    sphere_index_buffer: Option<wgpu::Buffer>,
-    sphere_num_indices: u32,
-    tile_vertex_buffer: Option<wgpu::Buffer>,
-    tile_index_buffer: Option<wgpu::Buffer>,
-    tile_num_indices: u32,
-    terrain_vertex_buffer: Option<wgpu::Buffer>,
-    terrain_index_buffer: Option<wgpu::Buffer>,
-    terrain_num_indices: u32,
     buildings_vertex_buffer: Option<wgpu::Buffer>,
     buildings_index_buffer: Option<wgpu::Buffer>,
     buildings_num_indices: u32,
-    tile_depth: u8,
-    show_sphere: bool,
-    show_tiles: bool,
-    show_terrain: bool,
     show_buildings: bool,
     frame_count: usize,
     fps_update_time: std::time::Instant,
@@ -69,26 +55,12 @@ impl App {
             window: None,
             renderer: None,
             pipeline: None,
-            line_pipeline: None,
             camera,
-            sphere_vertex_buffer: None,
-            sphere_index_buffer: None,
-            sphere_num_indices: 0,
-            tile_vertex_buffer: None,
-            tile_index_buffer: None,
-            tile_num_indices: 0,
-            terrain_vertex_buffer: None,
-            terrain_index_buffer: None,
-            terrain_num_indices: 0,
             buildings_vertex_buffer: None,
             buildings_index_buffer: None,
             buildings_num_indices: 0,
-            downloader: None, // Will be initialized with cache
-            tile_depth: 2, // Start with depth 2 (96 tiles)
-            show_sphere: false, // Hide sphere by default
-            show_tiles: false, // Hide tiles by default
-            show_terrain: true,
             show_buildings: true,
+            downloader: None, // Will be initialized with cache
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -96,126 +68,6 @@ impl App {
             mouse_captured: false,
             last_mouse_pos: None,
         }
-    }
-    
-    /// Generate terrain patches with SRTM elevation data around a GPS location
-    fn generate_terrain_around_location(
-        downloader: &mut ElevationDownloader,
-        center_lat: f64,
-        center_lon: f64,
-        _radius_chunks: u8,
-        depth: u8,
-        subdivisions: u32,
-        color: glam::Vec3,
-    ) -> (Vec<Vertex>, Vec<u32>) {
-        use metaverse_core::chunks::{ChunkId, gps_to_chunk_id};
-        use metaverse_core::renderer::mesh::generate_chunk_patch_with_elevation;
-        use metaverse_core::coordinates::GpsPos;
-        
-        let mut all_vertices = Vec::new();
-        let mut all_indices = Vec::new();
-        
-        // Get the chunk ID for the center location
-        let center_gps = GpsPos {
-            lat_deg: center_lat,
-            lon_deg: center_lon,
-            elevation_m: 0.0,
-        };
-        let center_chunk = gps_to_chunk_id(&center_gps, depth);
-        
-        // Generate all tiles at this depth on Brisbane's face
-        let face = center_chunk.face;
-        
-        // Generate all path combinations for this depth on this face
-        let mut paths = vec![vec![]];
-        for _ in 0..depth {
-            let mut new_paths = Vec::new();
-            for path in &paths {
-                for quad in 0..4 {
-                    let mut new_path = path.clone();
-                    new_path.push(quad);
-                    new_paths.push(new_path);
-                }
-            }
-            paths = new_paths;
-        }
-        
-        // Generate chunks for all paths on Brisbane's face
-        let mut chunks_to_generate = Vec::new();
-        for path in paths {
-            chunks_to_generate.push(ChunkId { face, path });
-        }
-        
-        println!("  Generating {} terrain chunks on face {}", chunks_to_generate.len(), face);
-        
-        for chunk_id in &chunks_to_generate {
-            // Queue downloads for this chunk
-            // (Will return procedural immediately, real data once downloaded)
-            let (vertices, indices) = generate_chunk_patch_with_elevation(
-                chunk_id,
-                subdivisions,
-                color,
-                |lat, lon| downloader.get_elevation(lat, lon, 10).map(|e| e as f64), // zoom 10 for good detail
-            );
-            
-            let vertex_offset = all_vertices.len() as u32;
-            all_vertices.extend(vertices);
-            all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
-        }
-        
-        (all_vertices, all_indices)
-    }
-    
-    /// Generate terrain patches with SRTM elevation data (DEPRECATED - generates whole globe)
-    #[allow(dead_code)]
-    fn generate_terrain_with_srtm(
-        downloader: &mut ElevationDownloader,
-        depth: u8,
-        subdivisions: u32,
-        color: glam::Vec3,
-    ) -> (Vec<Vertex>, Vec<u32>) {
-        use metaverse_core::chunks::ChunkId;
-        use metaverse_core::renderer::mesh::generate_chunk_patch_with_elevation;
-        
-        let mut all_vertices = Vec::new();
-        let mut all_indices = Vec::new();
-        
-        // Generate all chunk paths for this depth
-        let _num_tiles = 4_usize.pow(depth as u32);
-        let mut paths = vec![vec![]];
-        
-        for _ in 0..depth {
-            let mut new_paths = Vec::new();
-            for path in &paths {
-                for quad in 0..4 {
-                    let mut new_path = path.clone();
-                    new_path.push(quad);
-                    new_paths.push(new_path);
-                }
-            }
-            paths = new_paths;
-        }
-        
-        // Generate terrain for each chunk
-        for face in 0..6 {
-            for path in &paths {
-                let chunk_id = ChunkId { face, path: path.clone() };
-                
-                // Create elevation query closure
-                let (vertices, indices) = generate_chunk_patch_with_elevation(
-                    &chunk_id,
-                    subdivisions,
-                    color,
-                    |lat, lon| downloader.get_elevation(lat, lon, 10).map(|e| e as f64),
-                );
-                
-                let vertex_offset = all_vertices.len() as u32;
-                all_vertices.extend(vertices);
-                all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
-            }
-        }
-        
-        (all_vertices, all_indices)
     }
     
     fn handle_input(&mut self, delta_time: f64) {
@@ -279,51 +131,9 @@ impl ApplicationHandler for App {
             // Create renderer
             let renderer = pollster::block_on(Renderer::new(window.clone()));
             
-            // Create pipelines
+            // Create pipeline
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
-            let line_pipeline = BasicPipeline::new_with_topology(
-                &renderer.device, 
-                renderer.config.format, 
-                wgpu::PrimitiveTopology::LineList
-            );
-            
-            // Generate Earth sphere
-            let (vertices, indices) = generate_earth_sphere();
-            let sphere_num_indices = indices.len() as u32;
-            
-            let sphere_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Earth Sphere Vertex Buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            
-            let sphere_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Earth Sphere Index Buffer"),
-                contents: bytemuck::cast_slice(&indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-            
-            self.sphere_vertex_buffer = Some(sphere_vertex_buffer);
-            self.sphere_index_buffer = Some(sphere_index_buffer);
-            self.sphere_num_indices = sphere_num_indices;
             self.pipeline = Some(pipeline);
-            self.line_pipeline = Some(line_pipeline);
-            
-            // Generate initial tiles and terrain
-            let (tile_vertices, tile_indices) = generate_tile_outlines(self.tile_depth, None);
-            let tile_num_indices = tile_indices.len() as u32;
-            
-            let tile_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Tile Outline Vertex Buffer"),
-                contents: bytemuck::cast_slice(&tile_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            
-            let tile_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Tile Outline Index Buffer"),
-                contents: bytemuck::cast_slice(&tile_indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
             
             // Initialize elevation downloader with multi-source support
             let cache = DiskCache::new().unwrap();
@@ -332,89 +142,65 @@ impl ApplicationHandler for App {
             println!("Elevation downloader initialized");
             println!("  Sources: AWS Terrarium (primary), USGS 3DEP, OpenTopography");
             println!("  Parallel downloads: up to 8 concurrent");
-            println!("  Real-time downloading enabled!");
-            
-            // Queue Brisbane tiles for immediate download
-            let brisbane_lat = -27.4698;
-            let brisbane_lon = 153.0251;
-            for lat_offset in -1i32..=1 {
-                for lon_offset in -1i32..=1 {
-                    downloader.queue_download(
-                        brisbane_lat + lat_offset as f64 * 0.35,
-                        brisbane_lon + lon_offset as f64 * 0.35,
-                        10,
-                        ((lat_offset.abs() + lon_offset.abs()) as f32) / 2.0,
-                    );
-                }
-            }
             
             self.downloader = Some(downloader);
             
-            // Generate terrain patches with elevation data around Brisbane
-            println!("Generating terrain around Brisbane...");
-            let (terrain_vertices, terrain_indices) = Self::generate_terrain_around_location(
-                &mut self.downloader.as_mut().unwrap(),
-                brisbane_lat,
-                brisbane_lon,
-                1, // radius in chunks
-                self.tile_depth,
-                16,
-                glam::Vec3::new(0.2, 0.8, 0.2)
-            );
-            println!("Generated {} vertices, {} indices for Brisbane area", terrain_vertices.len(), terrain_indices.len());
+            // Pre-download Brisbane elevation tiles for building elevation data
+            println!("Pre-downloading Brisbane elevation tiles...");
+            let brisbane_lat = -27.4698;
+            let brisbane_lon = 153.0251;
+            let start = std::time::Instant::now();
             
-            // Debug: Print first few vertex positions to verify ECEF coordinates
-            if !terrain_vertices.is_empty() {
-                println!("Sample terrain vertex positions (should be ~6.37M meters from origin):");
-                for i in 0..terrain_vertices.len().min(3) {
-                    let v = &terrain_vertices[i];
-                    let dist = (v.position[0]*v.position[0] + v.position[1]*v.position[1] + v.position[2]*v.position[2]).sqrt();
-                    println!("  Vertex {}: ({:.1}, {:.1}, {:.1}) - distance from origin: {:.1}m", 
-                        i, v.position[0], v.position[1], v.position[2], dist);
+            // Download tiles covering the OSM building area (11x11 grid)
+            for lat_offset in -5i32..=5 {
+                for lon_offset in -5i32..=5 {
+                    let lat = brisbane_lat + lat_offset as f64 * 0.1;
+                    let lon = brisbane_lon + lon_offset as f64 * 0.1;
+                    self.downloader.as_ref().unwrap().queue_download(lat, lon, 10, 0.0);
                 }
             }
-            let terrain_num_indices = terrain_indices.len() as u32;
             
-            let terrain_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Terrain Patch Vertex Buffer"),
-                contents: bytemuck::cast_slice(&terrain_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            // Process all queued downloads synchronously
+            while self.downloader.as_ref().unwrap().get_stats().active_downloads > 0 ||
+                  self.downloader.as_ref().unwrap().get_stats().queued_downloads > 0 {
+                self.downloader.as_ref().unwrap().process_queue();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
             
-            let terrain_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Terrain Patch Index Buffer"),
-                contents: bytemuck::cast_slice(&terrain_indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+            let stats = self.downloader.as_ref().unwrap().get_stats();
+            println!("  Downloaded {} tiles in {:.1}s ({} successful, {} failed)",
+                     stats.downloads_success + stats.downloads_failed,
+                     start.elapsed().as_secs_f32(),
+                     stats.downloads_success,
+                     stats.downloads_failed);
             
-            self.tile_vertex_buffer = Some(tile_vertex_buffer);
-            self.tile_index_buffer = Some(tile_index_buffer);
-            self.tile_num_indices = tile_num_indices;
-            self.terrain_vertex_buffer = Some(terrain_vertex_buffer);
-            self.terrain_index_buffer = Some(terrain_index_buffer);
-            self.terrain_num_indices = terrain_num_indices;
-            
-            // Load OSM buildings from cache (cache-only, no network)
+            // Load OSM buildings from cache
             println!("Loading OSM buildings from cache...");
             let cache = DiskCache::new().unwrap();
             
             let buildings_color = glam::Vec3::new(0.7, 0.7, 0.8); // Light gray/blue
             
-            // Try to load from simple cache key first (from download script)
-            let cache_key = "brisbane_cbd";
+            // Try to load from wide area cache first, then fall back to CBD
+            let cache_keys = ["brisbane_wide", "brisbane_cbd"];
             
-            let (buildings_vertices, buildings_indices) = if let Ok(cached_bytes) = cache.read_osm(cache_key) {
-                if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
-                    println!("Loaded {} buildings from cache", osm_data.buildings.len());
-                    generate_buildings_from_osm(&osm_data, buildings_color)
-                } else {
-                    println!("Failed to parse cached OSM data");
-                    (Vec::new(), Vec::new())
+            let (buildings_vertices, buildings_indices) = {
+                let mut result = (Vec::new(), Vec::new());
+                for cache_key in &cache_keys {
+                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
+                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+                            println!("Loaded {} buildings from cache ({})", osm_data.buildings.len(), cache_key);
+                            
+                            // Generate buildings using OSM elevation data
+                            result = generate_buildings_from_osm(&osm_data, buildings_color);
+                            break;
+                        }
+                    }
                 }
-            } else {
-                println!("No cached OSM data available");
-                println!("  Run: cargo run --example download_brisbane_data");
-                (Vec::new(), Vec::new())
+                if result.0.is_empty() {
+                    println!("No cached OSM data available");
+                    println!("  Run: cargo run --example download_brisbane_data");
+                }
+                result
             };
             
             let buildings_num_indices = buildings_indices.len() as u32;
@@ -464,104 +250,9 @@ impl ApplicationHandler for App {
                         ElementState::Pressed => {
                             self.keys_pressed.insert(keycode);
                             
-                            // Tile depth controls
-                            if keycode == KeyCode::BracketLeft && self.tile_depth > 0 {
-                                self.tile_depth -= 1;
-                                if let Some(renderer) = &self.renderer {
-                                    // Regenerate tiles
-                                    let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
-                                    let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Tile Outline Vertex Buffer"),
-                                        contents: bytemuck::cast_slice(&vertices),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    });
-                                    let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Tile Outline Index Buffer"),
-                                        contents: bytemuck::cast_slice(&indices),
-                                        usage: wgpu::BufferUsages::INDEX,
-                                    });
-                                    self.tile_vertex_buffer = Some(vertex_buffer);
-                                    self.tile_index_buffer = Some(index_buffer);
-                                    self.tile_num_indices = indices.len() as u32;
-                                    
-                                    // Regenerate terrain with SRTM
-                                    let (terrain_verts, terrain_inds) = if let Some(ref mut downloader) = self.downloader {
-                                        Self::generate_terrain_around_location(downloader, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
-                                    } else {
-                                        generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
-                                    };
-                                    let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Terrain Patch Vertex Buffer"),
-                                        contents: bytemuck::cast_slice(&terrain_verts),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    });
-                                    let terrain_ib = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Terrain Patch Index Buffer"),
-                                        contents: bytemuck::cast_slice(&terrain_inds),
-                                        usage: wgpu::BufferUsages::INDEX,
-                                    });
-                                    self.terrain_vertex_buffer = Some(terrain_vb);
-                                    self.terrain_index_buffer = Some(terrain_ib);
-                                    self.terrain_num_indices = terrain_inds.len() as u32;
-                                    
-                                    println!("Generated tiles at depth {} ({} tiles)", 
-                                        self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
-                                }
-                            } else if keycode == KeyCode::BracketRight && self.tile_depth < 5 {
-                                self.tile_depth += 1;
-                                if let Some(renderer) = &self.renderer {
-                                    // Regenerate tiles
-                                    let (vertices, indices) = generate_tile_outlines(self.tile_depth, None);
-                                    let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Tile Outline Vertex Buffer"),
-                                        contents: bytemuck::cast_slice(&vertices),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    });
-                                    let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Tile Outline Index Buffer"),
-                                        contents: bytemuck::cast_slice(&indices),
-                                        usage: wgpu::BufferUsages::INDEX,
-                                    });
-                                    self.tile_vertex_buffer = Some(vertex_buffer);
-                                    self.tile_index_buffer = Some(index_buffer);
-                                    self.tile_num_indices = indices.len() as u32;
-                                    
-                                    // Regenerate terrain with SRTM
-                                    let (terrain_verts, terrain_inds) = if let Some(ref mut downloader) = self.downloader {
-                                        Self::generate_terrain_around_location(downloader, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
-                                    } else {
-                                        generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
-                                    };
-                                    let terrain_vb = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Terrain Patch Vertex Buffer"),
-                                        contents: bytemuck::cast_slice(&terrain_verts),
-                                        usage: wgpu::BufferUsages::VERTEX,
-                                    });
-                                    let terrain_ib = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                                        label: Some("Terrain Patch Index Buffer"),
-                                        contents: bytemuck::cast_slice(&terrain_inds),
-                                        usage: wgpu::BufferUsages::INDEX,
-                                    });
-                                    self.terrain_vertex_buffer = Some(terrain_vb);
-                                    self.terrain_index_buffer = Some(terrain_ib);
-                                    self.terrain_num_indices = terrain_inds.len() as u32;
-                                    
-                                    println!("Generated tiles at depth {} ({} tiles)", 
-                                        self.tile_depth, 6 * 4_u32.pow(self.tile_depth as u32));
-                                }
-                            }
                             
-                            // Toggle visibility
+                            // Toggle buildings visibility
                             if keycode == KeyCode::Digit1 {
-                                self.show_sphere = !self.show_sphere;
-                                println!("Sphere: {}", if self.show_sphere { "ON" } else { "OFF" });
-                            } else if keycode == KeyCode::Digit2 {
-                                self.show_tiles = !self.show_tiles;
-                                println!("Tiles: {}", if self.show_tiles { "ON" } else { "OFF" });
-                            } else if keycode == KeyCode::Digit3 {
-                                self.show_terrain = !self.show_terrain;
-                                println!("Terrain: {}", if self.show_terrain { "ON" } else { "OFF" });
-                            } else if keycode == KeyCode::Digit4 {
                                 self.show_buildings = !self.show_buildings;
                                 println!("Buildings: {}", if self.show_buildings { "ON" } else { "OFF" });
                             }
@@ -623,8 +314,8 @@ impl ApplicationHandler for App {
                     downloader.process_queue();
                 }
                 
-                if let (Some(renderer), Some(window), Some(pipeline), Some(line_pipeline), Some(sphere_vb), Some(sphere_ib), Some(tile_vb), Some(tile_ib), Some(terrain_vb), Some(terrain_ib)) = 
-                    (&mut self.renderer, &self.window, &self.pipeline, &self.line_pipeline, &self.sphere_vertex_buffer, &self.sphere_index_buffer, &self.tile_vertex_buffer, &self.tile_index_buffer, &self.terrain_vertex_buffer, &self.terrain_index_buffer) {
+                if let (Some(renderer), Some(window), Some(pipeline)) = 
+                    (&mut self.renderer, &self.window, &self.pipeline) {
                     
                     // Update camera matrix with floating origin
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
@@ -644,7 +335,6 @@ impl ApplicationHandler for App {
                     let final_mvp = view_proj * origin_transform;
                     
                     pipeline.update_uniforms(&renderer.queue, final_mvp);
-                    line_pipeline.update_uniforms(&renderer.queue, final_mvp);
                     
                     // Sky blue color
                     let clear_color = wgpu::Color {
@@ -654,28 +344,13 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame with conditional geometry
-                    let sphere_num_indices = self.sphere_num_indices;
-                    let tile_num_indices = self.tile_num_indices;
-                    let terrain_num_indices = self.terrain_num_indices;
+                    // Render frame
                     let buildings_num_indices = self.buildings_num_indices;
-                    let show_sphere = self.show_sphere;
-                    let show_tiles = self.show_tiles;
-                    let show_terrain = self.show_terrain;
                     let show_buildings = self.show_buildings;
                     let buildings_vb = self.buildings_vertex_buffer.as_ref();
                     let buildings_ib = self.buildings_index_buffer.as_ref();
                     
                     let result = renderer.render(clear_color, |render_pass| {
-                        // Draw terrain patches first (behind everything)
-                        if show_terrain {
-                            render_pass.set_pipeline(&pipeline.pipeline);
-                            render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                            render_pass.set_vertex_buffer(0, terrain_vb.slice(..));
-                            render_pass.set_index_buffer(terrain_ib.slice(..), wgpu::IndexFormat::Uint32);
-                            render_pass.draw_indexed(0..terrain_num_indices, 0, 0..1);
-                        }
-                        
                         // Draw buildings
                         if show_buildings {
                             if let (Some(bvb), Some(bib)) = (buildings_vb, buildings_ib) {
@@ -685,24 +360,6 @@ impl ApplicationHandler for App {
                                 render_pass.set_index_buffer(bib.slice(..), wgpu::IndexFormat::Uint32);
                                 render_pass.draw_indexed(0..buildings_num_indices, 0, 0..1);
                             }
-                        }
-                        
-                        // Draw sphere
-                        if show_sphere {
-                            render_pass.set_pipeline(&pipeline.pipeline);
-                            render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                            render_pass.set_vertex_buffer(0, sphere_vb.slice(..));
-                            render_pass.set_index_buffer(sphere_ib.slice(..), wgpu::IndexFormat::Uint32);
-                            render_pass.draw_indexed(0..sphere_num_indices, 0, 0..1);
-                        }
-                        
-                        // Draw tile outlines (on top)
-                        if show_tiles {
-                            render_pass.set_pipeline(&line_pipeline.pipeline);
-                            render_pass.set_bind_group(0, &line_pipeline.uniform_bind_group, &[]);
-                            render_pass.set_vertex_buffer(0, tile_vb.slice(..));
-                            render_pass.set_index_buffer(tile_ib.slice(..), wgpu::IndexFormat::Uint32);
-                            render_pass.draw_indexed(0..tile_num_indices, 0, 0..1);
                         }
                     });
 
@@ -721,22 +378,22 @@ impl ApplicationHandler for App {
                         
                         // Get download stats
                         let stats = if let Some(downloader) = &self.downloader {
-                            let s = downloader.stats();
+                            let s = downloader.get_stats();
                             format!(" | DL: {}↓ {}✓ {}✗ Q:{}", 
-                                downloader.active_downloads(),
+                                s.active_downloads,
                                 s.downloads_success,
                                 s.downloads_failed,
-                                downloader.queue_length())
+                                s.queued_downloads)
                         } else {
                             String::new()
                         };
                         
-                        // Show camera position and tile depth
+                        // Show camera position
                         let pos = self.camera.position;
                         let alt = pos.length() - 6_371_000.0;
                         window.set_title(&format!(
-                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x | Tiles: Depth {}{}",
-                            fps, alt, self.camera.speed_multiplier, self.tile_depth, stats
+                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x{}",
+                            fps, alt, self.camera.speed_multiplier, stats
                         ));
                         
                         self.frame_count = 0;

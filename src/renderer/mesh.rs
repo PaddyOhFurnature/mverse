@@ -426,6 +426,13 @@ where
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
+    // Debug: Track elevation statistics
+    let mut elevation_count = 0;
+    let mut elevation_sum = 0.0;
+    let mut elevation_min = f64::MAX;
+    let mut elevation_max = f64::MIN;
+    let mut none_count = 0;
+    
     // Generate grid vertices
     for row in 0..=subdivisions {
         let v = row as f32 / subdivisions as f32; // 0 to 1
@@ -457,6 +464,18 @@ where
             
             // Query elevation and displace vertex outward
             let elevation = get_elevation_fn(gps.lat_deg, gps.lon_deg).unwrap_or(0.0);
+            
+            // Track statistics
+            if elevation != 0.0 {
+                elevation_count += 1;
+                elevation_sum += elevation;
+                elevation_min = elevation_min.min(elevation);
+                elevation_max = elevation_max.max(elevation);
+            } else {
+                none_count += 1;
+            }
+            
+            // Use real elevation (no exaggeration)
             let final_pos = base_pos.normalize() * (earth_radius + elevation as f32);
             
             let normal = final_pos.normalize();
@@ -467,6 +486,15 @@ where
                 color: [color.x, color.y, color.z, 1.0],
             });
         }
+    }
+    
+    // Debug output
+    if elevation_count > 0 {
+        let avg = elevation_sum / elevation_count as f64;
+        eprintln!("Chunk {:?}: {} vertices with elevation (avg: {:.1}m, min: {:.1}m, max: {:.1}m), {} at zero",
+                  chunk_id, elevation_count, avg, elevation_min, elevation_max, none_count);
+    } else {
+        eprintln!("Chunk {:?}: WARNING - ALL {} vertices have zero elevation!", chunk_id, none_count);
     }
     
     // Generate indices for triangles (same as before)
@@ -513,7 +541,7 @@ pub fn generate_building(
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
-    // Convert footprint to ECEF at base elevation
+    // Convert footprint to ECEF at base elevation (real scale)
     let base_positions: Vec<Vec3> = footprint
         .iter()
         .map(|&(lat, lon)| {
@@ -527,7 +555,7 @@ pub fn generate_building(
         })
         .collect();
     
-    // Convert footprint to ECEF at top elevation
+    // Convert footprint to ECEF at top elevation (real scale)
     let top_positions: Vec<Vec3> = footprint
         .iter()
         .map(|&(lat, lon)| {
@@ -604,13 +632,32 @@ pub fn generate_building(
 ///
 /// Returns combined (vertices, indices) for all buildings.
 pub fn generate_buildings_from_osm(osm_data: &crate::osm::OsmData, color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    generate_buildings_from_osm_with_elevation(osm_data, color, |_lat, _lon| None)
+}
+
+/// Generate building meshes from OSM data with terrain elevation lookup
+pub fn generate_buildings_from_osm_with_elevation<F>(
+    osm_data: &crate::osm::OsmData,
+    color: Vec3,
+    mut get_elevation_fn: F,
+) -> (Vec<Vertex>, Vec<u32>)
+where
+    F: FnMut(f64, f64) -> Option<f64>,
+{
     let mut all_vertices = Vec::new();
     let mut all_indices = Vec::new();
     
     for building in &osm_data.buildings {
-        // Use building centroid elevation as base
-        let elevation = building.polygon.first()
-            .map(|pos| pos.elevation_m)
+        // Get building centroid for terrain lookup
+        let (centroid_lat, centroid_lon) = if let Some(first) = building.polygon.first() {
+            (first.lat_deg, first.lon_deg)
+        } else {
+            continue;
+        };
+        
+        // Try terrain elevation first, fall back to OSM elevation, then 0
+        let elevation = get_elevation_fn(centroid_lat, centroid_lon)
+            .or_else(|| building.polygon.first().map(|pos| pos.elevation_m))
             .unwrap_or(0.0);
         
         let footprint: Vec<(f64, f64)> = building.polygon

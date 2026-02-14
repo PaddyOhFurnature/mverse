@@ -115,10 +115,21 @@ impl TerrariumSource {
     
     /// Convert GPS coordinate to tile coordinates at given zoom
     fn latlon_to_tile(lat: f64, lon: f64, zoom: u8) -> (u32, u32) {
+        // Normalize longitude to [-180, 180)
+        let lon_normalized = ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+        
+        // Clamp latitude to Web Mercator limits (~85.05°)
+        let lat_clamped = lat.clamp(-85.0511, 85.0511);
+        
         let n = 2_u32.pow(zoom as u32);
-        let x = ((lon + 180.0) / 360.0 * n as f64).floor() as u32;
-        let y = ((1.0 - (lat.to_radians().tan() + 1.0 / lat.to_radians().cos()).ln() / std::f64::consts::PI) / 2.0 * n as f64).floor() as u32;
-        (x, y)
+        let x = ((lon_normalized + 180.0) / 360.0 * n as f64).floor() as u32;
+        let y = ((1.0 - (lat_clamped.to_radians().tan() + 1.0 / lat_clamped.to_radians().cos()).ln() / std::f64::consts::PI) / 2.0 * n as f64).floor() as u32;
+        
+        // Clamp to valid tile range
+        let x_clamped = x.min(n - 1);
+        let y_clamped = y.min(n - 1);
+        
+        (x_clamped, y_clamped)
     }
     
     /// Convert tile coordinates to GPS bounds
@@ -141,16 +152,24 @@ impl TerrariumSource {
         let info = reader.info();
         let width = info.width as usize;
         let height = info.height as usize;
+        let color_type = info.color_type;
         
         let mut buf = vec![0u8; reader.output_buffer_size()];
         reader.next_frame(&mut buf)?;
+        
+        // Determine bytes per pixel from color type
+        let bytes_per_pixel = match color_type {
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            _ => return Err(format!("Unsupported PNG color type: {:?}", color_type).into()),
+        };
         
         // Decode RGB to elevation
         // Formula: elevation = (R * 256 + G + B / 256) - 32768
         let mut elevations = Vec::with_capacity(width * height);
         
         for i in 0..width * height {
-            let offset = i * 3;
+            let offset = i * bytes_per_pixel;
             if offset + 2 < buf.len() {
                 let r = buf[offset] as f32;
                 let g = buf[offset + 1] as f32;
@@ -180,6 +199,11 @@ impl ElevationSource for TerrariumSource {
     }
     
     fn fetch_tile(&self, lat: f64, lon: f64, zoom: u8) -> Result<ElevationTile, Box<dyn Error>> {
+        // Web Mercator doesn't cover poles - clamp latitude
+        if lat.abs() > 85.0511 {
+            return Err(format!("Latitude {} outside Web Mercator range (±85.05°)", lat).into());
+        }
+        
         let (x, y) = Self::latlon_to_tile(lat, lon, zoom);
         let (sw_lat, sw_lon, ne_lat, ne_lon) = Self::tile_to_bounds(x, y, zoom);
         
@@ -300,6 +324,30 @@ mod tests {
         let (x, y) = TerrariumSource::latlon_to_tile(-27.4698, 153.0251, 10);
         assert_eq!(x, 947);
         assert_eq!(y, 593);
+    }
+    
+    #[test]
+    fn test_terrarium_tile_antimeridian() {
+        // Test longitude 180 normalization
+        let (x1, y1) = TerrariumSource::latlon_to_tile(0.0, 180.0, 10);
+        let (x2, y2) = TerrariumSource::latlon_to_tile(0.0, -180.0, 10);
+        // Should map to same or adjacent tiles
+        assert!((x1 as i32 - x2 as i32).abs() <= 1);
+        assert_eq!(y1, y2);
+    }
+    
+    #[test]
+    fn test_terrarium_tile_poles() {
+        // Test pole clamping
+        let (x, y) = TerrariumSource::latlon_to_tile(89.0, 0.0, 10);
+        let n = 2_u32.pow(10);
+        assert!(x < n);
+        assert!(y < n);
+        
+        // Very high latitude should clamp
+        let (x2, y2) = TerrariumSource::latlon_to_tile(88.0, 0.0, 10);
+        assert!(x2 < n);
+        assert!(y2 < n);
     }
     
     #[test]
