@@ -259,8 +259,126 @@ pub fn generate_test_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, V
         }
     }
     
-    println!("Generated test mesh: {} buildings, {} vertices, {} indices",
-        osm_data.buildings.len(), vertices.len(), indices.len());
+    // Generate roads as simple ribbons
+    let road_color = [0.3, 0.3, 0.3]; // Dark gray
+    
+    for road in &osm_data.roads {
+        if road.nodes.len() < 2 {
+            continue;
+        }
+        
+        // Simple road width based on type
+        let width = match road.road_type {
+            crate::osm::RoadType::Motorway => 12.0,
+            crate::osm::RoadType::Trunk => 10.0,
+            crate::osm::RoadType::Primary => 8.0,
+            crate::osm::RoadType::Secondary => 6.0,
+            crate::osm::RoadType::Tertiary => 5.0,
+            crate::osm::RoadType::Residential => 4.0,
+            crate::osm::RoadType::Service => 3.0,
+            _ => 3.0,
+        };
+        
+        // Convert nodes to ECEF and create road segments
+        for i in 0..road.nodes.len() - 1 {
+            let node1 = &road.nodes[i];
+            let node2 = &road.nodes[i + 1];
+            
+            let pos1_ecef = gps_to_ecef(&GpsPos {
+                lat_deg: node1.lat_deg,
+                lon_deg: node1.lon_deg,
+                elevation_m: node1.elevation_m + 0.5, // Slightly above ground
+            });
+            
+            let pos2_ecef = gps_to_ecef(&GpsPos {
+                lat_deg: node2.lat_deg,
+                lon_deg: node2.lon_deg,
+                elevation_m: node2.elevation_m + 0.5,
+            });
+            
+            let p1 = glam::Vec3::new(pos1_ecef.x as f32, pos1_ecef.y as f32, pos1_ecef.z as f32);
+            let p2 = glam::Vec3::new(pos2_ecef.x as f32, pos2_ecef.y as f32, pos2_ecef.z as f32);
+            
+            // Create perpendicular vector for road width
+            let forward = (p2 - p1).normalize();
+            let up = p1.normalize(); // Radial direction from Earth center
+            let right = forward.cross(up).normalize();
+            
+            let half_width = width / 2.0;
+            let base_idx = vertices.len() as u32;
+            
+            // Four corners of road segment
+            vertices.push(ColoredVertex::new(
+                [(p1 - right * half_width).x, (p1 - right * half_width).y, (p1 - right * half_width).z],
+                [up.x, up.y, up.z],
+                road_color
+            ));
+            vertices.push(ColoredVertex::new(
+                [(p1 + right * half_width).x, (p1 + right * half_width).y, (p1 + right * half_width).z],
+                [up.x, up.y, up.z],
+                road_color
+            ));
+            vertices.push(ColoredVertex::new(
+                [(p2 + right * half_width).x, (p2 + right * half_width).y, (p2 + right * half_width).z],
+                [up.x, up.y, up.z],
+                road_color
+            ));
+            vertices.push(ColoredVertex::new(
+                [(p2 - right * half_width).x, (p2 - right * half_width).y, (p2 - right * half_width).z],
+                [up.x, up.y, up.z],
+                road_color
+            ));
+            
+            // Two triangles for the segment
+            indices.extend_from_slice(&[
+                base_idx, base_idx + 1, base_idx + 2,
+                base_idx, base_idx + 2, base_idx + 3,
+            ]);
+        }
+    }
+    
+    // Generate water as simple polygons
+    let water_color = [0.2, 0.5, 0.8]; // Blue
+    
+    for water in &osm_data.water {
+        if water.polygon.len() < 3 {
+            continue;
+        }
+        
+        // Simple fan triangulation from first vertex
+        let base_idx = vertices.len() as u32;
+        
+        // Convert all polygon points to ECEF
+        for point in &water.polygon {
+            let pos_ecef = gps_to_ecef(&GpsPos {
+                lat_deg: point.lat_deg,
+                lon_deg: point.lon_deg,
+                elevation_m: point.elevation_m, // At water level
+            });
+            
+            let p = glam::Vec3::new(pos_ecef.x as f32, pos_ecef.y as f32, pos_ecef.z as f32);
+            let up = p.normalize();
+            
+            vertices.push(ColoredVertex::new(
+                [p.x, p.y, p.z],
+                [up.x, up.y, up.z],
+                water_color
+            ));
+        }
+        
+        // Fan triangulation: connect all vertices to first vertex
+        for i in 1..water.polygon.len() - 1 {
+            indices.extend_from_slice(&[
+                base_idx,
+                base_idx + i as u32,
+                base_idx + i as u32 + 1,
+            ]);
+        }
+    }
+    
+    println!("Generated test mesh: {} buildings, {} roads, {} water features = {} vertices, {} indices",
+        osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(),
+        vertices.len(), indices.len());
     
     (vertices, indices)
 }
