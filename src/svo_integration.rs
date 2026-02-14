@@ -42,7 +42,11 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
     let water_color = glam::Vec3::new(0.2, 0.5, 0.8);
     
     // Generate buildings using ACTUAL polygons from OSM
-    for building in &osm_data.buildings {
+    // BUT: Limit detail to avoid GPU buffer overflow (268MB limit)
+    let mut buildings_added = 0;
+    let max_buildings = 20000; // Limit to avoid buffer overflow
+    
+    for building in osm_data.buildings.iter().take(max_buildings) {
         if building.polygon.len() < 3 {
             continue;
         }
@@ -62,6 +66,13 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
             building_color,
         );
         
+        // Skip if this would push us over GPU limits
+        let new_vertex_size = (vertices.len() + bldg_verts.len()) * 40; // 40 bytes per vertex
+        if new_vertex_size > 250_000_000 { // 250MB safety margin
+            println!("  Stopping at {} buildings (GPU buffer limit approaching)", buildings_added);
+            break;
+        }
+        
         // Convert Vertex to ColoredVertex
         let offset = vertices.len() as u32;
         for v in bldg_verts {
@@ -75,6 +86,8 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         for idx in bldg_indices {
             indices.push(idx + offset);
         }
+        
+        buildings_added += 1;
     }
     
     // Generate roads as 3D volumes (with thickness!)
@@ -157,8 +170,8 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         }
     }
     
-    println!("Generated mesh: {} buildings, {} roads, {} water = {} vertices, {} indices",
-        osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(),
+    println!("Generated mesh: {} buildings (of {}), {} roads, {} water = {} vertices, {} indices",
+        buildings_added, osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(),
         vertices.len(), indices.len());
     
     (vertices, indices)
