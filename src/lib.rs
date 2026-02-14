@@ -11,6 +11,8 @@ pub mod renderer;
 #[cfg(test)]
 mod tests;
 pub mod terrain;
+pub mod osm_features;
 pub mod marching_cubes;
 pub mod mesh_generation;
 pub mod materials;
+pub mod svo_integration;

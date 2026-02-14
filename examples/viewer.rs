@@ -5,12 +5,12 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::BasicPipeline,
-    mesh::{generate_buildings_from_osm, generate_roads_from_osm_with_elevation, generate_water_from_osm_with_elevation},
     Renderer
 };
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation_downloader::ElevationDownloader;
+use metaverse_core::svo_integration::generate_test_mesh_from_osm;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -189,24 +189,25 @@ impl ApplicationHandler for App {
                      stats.downloads_success,
                      stats.downloads_failed);
             
-            // Load OSM buildings from cache
-            println!("Loading OSM buildings from cache...");
+            // Load OSM data and generate mesh using SVO pipeline
+            println!("Loading OSM data from cache...");
             let cache = DiskCache::new().unwrap();
-            
-            let buildings_color = glam::Vec3::new(0.7, 0.7, 0.8); // Light gray/blue
             
             // Try to load from wide area cache first, then fall back to CBD
             let cache_keys = ["brisbane_wide", "brisbane_cbd"];
             
-            let (buildings_vertices, buildings_indices) = {
+            // Generate unified mesh from OSM data using SVO test mesh for now
+            let (mesh_vertices, mesh_indices) = {
                 let mut result = (Vec::new(), Vec::new());
                 for cache_key in &cache_keys {
                     if let Ok(cached_bytes) = cache.read_osm(cache_key) {
                         if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
-                            println!("Loaded {} buildings from cache ({})", osm_data.buildings.len(), cache_key);
+                            println!("Loaded {} buildings, {} roads, {} water features from cache ({})", 
+                                   osm_data.buildings.len(), osm_data.roads.len(), osm_data.water.len(), cache_key);
                             
-                            // Generate buildings using OSM elevation data
-                            result = generate_buildings_from_osm(&osm_data, buildings_color);
+                            // Generate test mesh (simplified SVO rendering)
+                            println!("Generating mesh from OSM data using SVO integration...");
+                            result = generate_test_mesh_from_osm(&osm_data);
                             break;
                         }
                     }
@@ -218,18 +219,18 @@ impl ApplicationHandler for App {
                 result
             };
             
-            let buildings_num_indices = buildings_indices.len() as u32;
+            let buildings_num_indices = mesh_indices.len() as u32;
             
-            if !buildings_vertices.is_empty() {
+            if !mesh_vertices.is_empty() {
                 let buildings_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Buildings Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&buildings_vertices),
+                    label: Some("SVO Mesh Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&mesh_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
                 
                 let buildings_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Buildings Index Buffer"),
-                    contents: bytemuck::cast_slice(&buildings_indices),
+                    label: Some("SVO Mesh Index Buffer"),
+                    contents: bytemuck::cast_slice(&mesh_indices),
                     usage: wgpu::BufferUsages::INDEX,
                 });
                 
@@ -237,108 +238,18 @@ impl ApplicationHandler for App {
                 self.buildings_index_buffer = Some(buildings_index_buffer);
                 self.buildings_num_indices = buildings_num_indices;
                 
-                println!("Generated {} building vertices, {} indices", buildings_vertices.len(), buildings_indices.len());
+                println!("Generated SVO mesh: {} vertices, {} indices", mesh_vertices.len(), mesh_indices.len());
             } else {
-                println!("No buildings to render");
+                println!("No mesh to render");
             }
             
-            // Load and generate roads from OSM cache
-            println!("Generating roads from OSM data...");
-            let roads_color = glam::Vec3::new(0.3, 0.3, 0.3); // Dark gray
-            
-            let (roads_vertices, roads_indices) = {
-                let mut result = (Vec::new(), Vec::new());
-                for cache_key in &cache_keys {
-                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
-                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
-                            println!("Loaded {} roads from cache ({})", osm_data.roads.len(), cache_key);
-                            
-                            // Generate roads with actual terrain elevation
-                            let downloader = self.downloader.as_mut().unwrap();
-                            result = generate_roads_from_osm_with_elevation(
-                                &osm_data.roads,
-                                roads_color,
-                                |lat, lon| downloader.get_elevation(lat, lon, 10),
-                            );
-                            break;
-                        }
-                    }
-                }
-                result
-            };
-            
-            let roads_num_indices = roads_indices.len() as u32;
-            
-            if !roads_vertices.is_empty() {
-                let roads_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Roads Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&roads_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                
-                let roads_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Roads Index Buffer"),
-                    contents: bytemuck::cast_slice(&roads_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                
-                self.roads_vertex_buffer = Some(roads_vertex_buffer);
-                self.roads_index_buffer = Some(roads_index_buffer);
-                self.roads_num_indices = roads_num_indices;
-                
-                println!("Generated {} road vertices, {} indices", roads_vertices.len(), roads_indices.len());
-            } else {
-                println!("No roads to render");
-            }
-            
-            // Load and generate water from OSM cache
-            println!("Generating water features from OSM data...");
-            let water_color = glam::Vec3::new(0.2, 0.5, 0.8); // River blue
-            
-            let (water_vertices, water_indices) = {
-                let mut result = (Vec::new(), Vec::new());
-                for cache_key in &cache_keys {
-                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
-                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
-                            println!("Loaded {} water features from cache ({})", osm_data.water.len(), cache_key);
-                            
-                            // Generate water with actual terrain elevation
-                            let downloader = self.downloader.as_mut().unwrap();
-                            result = generate_water_from_osm_with_elevation(
-                                &osm_data.water,
-                                water_color,
-                                |lat, lon| downloader.get_elevation(lat, lon, 10),
-                            );
-                            break;
-                        }
-                    }
-                }
-                result
-            };
-            
-            let water_num_indices = water_indices.len() as u32;
-            
-            if !water_vertices.is_empty() {
-                let water_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Water Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&water_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                
-                let water_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Water Index Buffer"),
-                    contents: bytemuck::cast_slice(&water_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                
-                self.water_vertex_buffer = Some(water_vertex_buffer);
-                self.water_index_buffer = Some(water_index_buffer);
-                self.water_num_indices = water_num_indices;
-                
-                println!("Generated {} water vertices, {} indices", water_vertices.len(), water_indices.len());
-            } else {
-                println!("No water to render");
-            }
+            // Clear roads and water buffers (now unified in SVO mesh)
+            self.roads_vertex_buffer = None;
+            self.roads_index_buffer = None;
+            self.roads_num_indices = 0;
+            self.water_vertex_buffer = None;
+            self.water_index_buffer = None;
+            self.water_num_indices = 0;
             
             self.renderer = Some(renderer);
             self.window = Some(window);
