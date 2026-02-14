@@ -1,6 +1,7 @@
 pub mod coordinates;
 pub mod chunks;
 pub mod chunk_manager;
+pub mod lod;
 pub mod svo;
 pub mod cache;
 pub mod osm;
