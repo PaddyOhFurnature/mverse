@@ -98,7 +98,7 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 
 ### Current State
 
-- **253 tests passing** (all tests green)
+- **251 tests passing** (4 ignored, all green)
 - **Complete SVO pipeline + renderer integration**: Data → Terrain → CSG → Mesh → Materials → GPU
 - **8 new modules**: svo.rs, terrain.rs, osm_features.rs, marching_cubes.rs, mesh_generation.rs, materials.rs, svo_integration.rs
 - **~2,800 lines** of new SVO code
@@ -202,7 +202,7 @@ GPU Rendering → Screen
 - generate_chunk_mesh_from_svo() entry point
 - Updated viewer.rs to use SVO pipeline
 - Removed 114 lines of old surface mesh code
-- All tests passing (253 total)
+- All tests passing (251 passed, 4 ignored)
 
 ### Obsolete Code (Mostly Removed)
 
