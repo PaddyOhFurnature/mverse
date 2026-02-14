@@ -5,7 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::BasicPipeline,
-    mesh::{generate_buildings_from_osm, generate_roads_from_osm, generate_water_from_osm},
+    mesh::{generate_buildings_from_osm, generate_roads_from_osm_with_elevation, generate_water_from_osm_with_elevation},
     Renderer
 };
 use metaverse_core::osm::OsmData;
@@ -252,7 +252,14 @@ impl ApplicationHandler for App {
                     if let Ok(cached_bytes) = cache.read_osm(cache_key) {
                         if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
                             println!("Loaded {} roads from cache ({})", osm_data.roads.len(), cache_key);
-                            result = generate_roads_from_osm(&osm_data.roads, roads_color);
+                            
+                            // Generate roads with actual terrain elevation
+                            let downloader = self.downloader.as_mut().unwrap();
+                            result = generate_roads_from_osm_with_elevation(
+                                &osm_data.roads,
+                                roads_color,
+                                |lat, lon| downloader.get_elevation(lat, lon, 10),
+                            );
                             break;
                         }
                     }
@@ -294,7 +301,14 @@ impl ApplicationHandler for App {
                     if let Ok(cached_bytes) = cache.read_osm(cache_key) {
                         if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
                             println!("Loaded {} water features from cache ({})", osm_data.water.len(), cache_key);
-                            result = generate_water_from_osm(&osm_data.water, water_color);
+                            
+                            // Generate water with actual terrain elevation
+                            let downloader = self.downloader.as_mut().unwrap();
+                            result = generate_water_from_osm_with_elevation(
+                                &osm_data.water,
+                                water_color,
+                                |lat, lon| downloader.get_elevation(lat, lon, 10),
+                            );
                             break;
                         }
                     }

@@ -1241,3 +1241,191 @@ pub fn generate_water_from_osm(water_features: &[crate::osm::OsmWater], color: V
     
     (all_vertices, all_indices)
 }
+
+/// Generate road mesh from OSM road data with elevation queries
+///
+/// Same as generate_roads_from_osm but queries terrain elevation for each point.
+/// Roads are offset slightly above terrain (0.1m) to ensure visibility.
+///
+/// # Arguments
+/// * `roads` - OSM road data
+/// * `color` - Base color for all roads
+/// * `elevation_fn` - Function to query terrain elevation at (lat, lon)
+///
+/// # Returns
+/// (vertices, indices) for rendering
+pub fn generate_roads_from_osm_with_elevation<F>(
+    roads: &[crate::osm::OsmRoad], 
+    color: Vec3,
+    mut elevation_fn: F,
+) -> (Vec<Vertex>, Vec<u32>) 
+where
+    F: FnMut(f64, f64) -> Option<f32>,
+{
+    use crate::coordinates::GpsPos;
+    
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for road in roads {
+        if road.nodes.len() < 2 {
+            continue;
+        }
+        
+        let vertex_offset = all_vertices.len() as u32;
+        let half_width = (road.width_m / 2.0) as f32;
+        
+        // Convert all nodes to ECEF with terrain elevation
+        let ecef_points: Vec<DVec3> = road.nodes
+            .iter()
+            .map(|gps| {
+                // Query actual terrain elevation, fallback to 20m if unavailable
+                let terrain_elevation = elevation_fn(gps.lat_deg, gps.lon_deg)
+                    .unwrap_or(20.0); // Brisbane average ~20-40m
+                
+                // Add small offset (0.1m) to ensure roads render above terrain
+                let elevated_gps = GpsPos {
+                    lat_deg: gps.lat_deg,
+                    lon_deg: gps.lon_deg,
+                    elevation_m: terrain_elevation as f64 + 0.1,
+                };
+                
+                let ecef = gps_to_ecef(&elevated_gps);
+                DVec3::new(ecef.x, ecef.y, ecef.z)
+            })
+            .collect();
+        
+        // Generate vertices along the road path
+        for i in 0..ecef_points.len() {
+            let point = ecef_points[i];
+            
+            let (_forward, perpendicular) = if i == 0 {
+                let next = ecef_points[i + 1];
+                let forward = (next - point).normalize();
+                let up = point.normalize();
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            } else if i == ecef_points.len() - 1 {
+                let prev = ecef_points[i - 1];
+                let forward = (point - prev).normalize();
+                let up = point.normalize();
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            } else {
+                let prev = ecef_points[i - 1];
+                let next = ecef_points[i + 1];
+                let forward = ((point - prev).normalize() + (next - point).normalize()).normalize();
+                let up = point.normalize();
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            };
+            
+            let left = point + perpendicular * half_width as f64;
+            let right = point - perpendicular * half_width as f64;
+            
+            let normal_left = left.normalize().as_vec3();
+            let normal_right = right.normalize().as_vec3();
+            
+            all_vertices.push(Vertex {
+                position: [left.x as f32, left.y as f32, left.z as f32],
+                normal: [normal_left.x, normal_left.y, normal_left.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+            
+            all_vertices.push(Vertex {
+                position: [right.x as f32, right.y as f32, right.z as f32],
+                normal: [normal_right.x, normal_right.y, normal_right.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+        
+        // Generate indices for triangle strip
+        for i in 0..(ecef_points.len() - 1) {
+            let base = vertex_offset + (i * 2) as u32;
+            
+            all_indices.push(base);
+            all_indices.push(base + 1);
+            all_indices.push(base + 2);
+            
+            all_indices.push(base + 1);
+            all_indices.push(base + 3);
+            all_indices.push(base + 2);
+        }
+    }
+    
+    (all_vertices, all_indices)
+}
+
+/// Generate water mesh from OSM water data with elevation queries
+///
+/// Same as generate_water_from_osm but queries terrain elevation for each point.
+/// Water is offset slightly above terrain (0.05m) for visibility.
+///
+/// # Arguments
+/// * `water_features` - OSM water polygon data
+/// * `color` - Base color for water
+/// * `elevation_fn` - Function to query terrain elevation at (lat, lon)
+///
+/// # Returns
+/// (vertices, indices) for rendering
+pub fn generate_water_from_osm_with_elevation<F>(
+    water_features: &[crate::osm::OsmWater],
+    color: Vec3,
+    mut elevation_fn: F,
+) -> (Vec<Vertex>, Vec<u32>)
+where
+    F: FnMut(f64, f64) -> Option<f32>,
+{
+    use crate::coordinates::GpsPos;
+    
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for water in water_features {
+        if water.polygon.len() < 3 {
+            continue;
+        }
+        
+        let vertex_offset = all_vertices.len() as u32;
+        
+        // Convert all polygon points to ECEF with terrain elevation
+        let ecef_points: Vec<DVec3> = water.polygon
+            .iter()
+            .map(|gps| {
+                // Query actual terrain elevation, fallback to 15m (rivers are lower)
+                let terrain_elevation = elevation_fn(gps.lat_deg, gps.lon_deg)
+                    .unwrap_or(15.0); // Rivers typically at lower elevation
+                
+                // Add small offset (0.05m) to ensure water renders above terrain
+                let elevated_gps = GpsPos {
+                    lat_deg: gps.lat_deg,
+                    lon_deg: gps.lon_deg,
+                    elevation_m: terrain_elevation as f64 + 0.05,
+                };
+                
+                let ecef = gps_to_ecef(&elevated_gps);
+                DVec3::new(ecef.x, ecef.y, ecef.z)
+            })
+            .collect();
+        
+        // Generate vertices
+        for point in &ecef_points {
+            let normal = point.normalize().as_vec3();
+            
+            all_vertices.push(Vertex {
+                position: [point.x as f32, point.y as f32, point.z as f32],
+                normal: [normal.x, normal.y, normal.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+        
+        // Triangulate using triangle fan from first vertex
+        for i in 1..(ecef_points.len() - 1) {
+            all_indices.push(vertex_offset);
+            all_indices.push(vertex_offset + i as u32);
+            all_indices.push(vertex_offset + (i + 1) as u32);
+        }
+    }
+    
+    (all_vertices, all_indices)
+}
