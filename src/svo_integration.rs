@@ -44,7 +44,7 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
     // Generate buildings using ACTUAL polygons from OSM
     // BUT: Limit detail to avoid GPU buffer overflow (268MB limit)
     let mut buildings_added = 0;
-    let max_buildings = 20000; // Limit to avoid buffer overflow
+    let max_buildings = 10000; // Limit to avoid buffer overflow (8M verts ≈ 320MB)
     
     for building in osm_data.buildings.iter().take(max_buildings) {
         if building.polygon.len() < 3 {
@@ -68,7 +68,7 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         
         // Skip if this would push us over GPU limits
         let new_vertex_size = (vertices.len() + bldg_verts.len()) * 40; // 40 bytes per vertex
-        if new_vertex_size > 250_000_000 { // 250MB safety margin
+        if new_vertex_size > 200_000_000 { // 200MB safety margin (wgpu limit is 268MB)
             println!("  Stopping at {} buildings (GPU buffer limit approaching)", buildings_added);
             break;
         }
@@ -90,20 +90,18 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         buildings_added += 1;
     }
     
-    // Generate roads as 3D volumes (with thickness!)
+    // Generate roads as simplified flat ribbons (GPU buffer constraints - will fix with LOD/chunking)
     for road in &osm_data.roads {
         if road.nodes.len() < 2 {
             continue;
         }
         
         let width = road.width_m as f32;
-        let thickness = 0.3; // 30cm road thickness
         
         for i in 0..road.nodes.len() - 1 {
             let node1 = &road.nodes[i];
             let node2 = &road.nodes[i + 1];
             
-            // Get ECEF positions with elevation
             let pos1_ecef = gps_to_ecef(&GpsPos {
                 lat_deg: node1.lat_deg,
                 lon_deg: node1.lon_deg,
@@ -119,18 +117,39 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
             let p1 = glam::Vec3::new(pos1_ecef.x as f32, pos1_ecef.y as f32, pos1_ecef.z as f32);
             let p2 = glam::Vec3::new(pos2_ecef.x as f32, pos2_ecef.y as f32, pos2_ecef.z as f32);
             
-            // Generate road segment as 3D box (not flat ribbon!)
-            let road_verts = generate_road_volume(p1, p2, width, thickness, road_color);
+            // Flat ribbon - 4 vertices, 2 triangles (1/6th the geometry of 3D volume)
+            let dir = (p2 - p1).normalize();
+            let up = p1.normalize(); // Radial from Earth center
+            let perp = dir.cross(up).normalize() * width * 0.5;
             
             let offset = vertices.len() as u32;
-            vertices.extend(road_verts);
             
-            // Indices for road volume (12 triangles = 36 indices)
-            for tri in 0..12 {
-                indices.push(offset + tri * 3);
-                indices.push(offset + tri * 3 + 1);
-                indices.push(offset + tri * 3 + 2);
-            }
+            vertices.push(ColoredVertex {
+                position: [(p1.x - perp.x), (p1.y - perp.y), (p1.z - perp.z)],
+                normal: [up.x, up.y, up.z],
+                color: [road_color.x, road_color.y, road_color.z, 1.0],
+            });
+            vertices.push(ColoredVertex {
+                position: [(p1.x + perp.x), (p1.y + perp.y), (p1.z + perp.z)],
+                normal: [up.x, up.y, up.z],
+                color: [road_color.x, road_color.y, road_color.z, 1.0],
+            });
+            vertices.push(ColoredVertex {
+                position: [(p2.x - perp.x), (p2.y - perp.y), (p2.z - perp.z)],
+                normal: [up.x, up.y, up.z],
+                color: [road_color.x, road_color.y, road_color.z, 1.0],
+            });
+            vertices.push(ColoredVertex {
+                position: [(p2.x + perp.x), (p2.y + perp.y), (p2.z + perp.z)],
+                normal: [up.x, up.y, up.z],
+                color: [road_color.x, road_color.y, road_color.z, 1.0],
+            });
+            
+            // 2 triangles
+            indices.extend_from_slice(&[
+                offset, offset + 1, offset + 2,
+                offset + 1, offset + 3, offset + 2,
+            ]);
         }
     }
     
