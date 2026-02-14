@@ -98,7 +98,62 @@ impl App {
         }
     }
     
-    /// Generate terrain patches with SRTM elevation data
+    /// Generate terrain patches with SRTM elevation data around a GPS location
+    fn generate_terrain_around_location(
+        srtm: &mut SrtmManager,
+        center_lat: f64,
+        center_lon: f64,
+        radius_chunks: u8,
+        depth: u8,
+        subdivisions: u32,
+        color: glam::Vec3,
+    ) -> (Vec<Vertex>, Vec<u32>) {
+        use metaverse_core::chunks::{ChunkId, gps_to_chunk_id};
+        use metaverse_core::renderer::mesh::generate_chunk_patch_with_elevation;
+        use metaverse_core::coordinates::GpsPos;
+        
+        let mut all_vertices = Vec::new();
+        let mut all_indices = Vec::new();
+        
+        // Get the chunk ID for the center location
+        let center_gps = GpsPos {
+            lat_deg: center_lat,
+            lon_deg: center_lon,
+            elevation_m: 0.0,
+        };
+        let center_chunk = gps_to_chunk_id(&center_gps, depth);
+        
+        // For now, just generate the center chunk and its immediate neighbors on the same face
+        // This gives us a 3x3 grid around Brisbane (9 chunks)
+        let face = center_chunk.face;
+        let base_path = &center_chunk.path;
+        
+        // Only generate chunks on the same face as Brisbane
+        // Generate a small grid around the center chunk
+        let mut chunks_to_generate = vec![center_chunk.clone()];
+        
+        // Add neighboring chunks by modifying the last few path components
+        // This is a simplified approach - just render the center chunk for now
+        // TODO: Implement proper neighbor finding
+        
+        for chunk_id in &chunks_to_generate {
+            let (vertices, indices) = generate_chunk_patch_with_elevation(
+                chunk_id,
+                subdivisions,
+                color,
+                |lat, lon| srtm.get_elevation(lat, lon),
+            );
+            
+            let vertex_offset = all_vertices.len() as u32;
+            all_vertices.extend(vertices);
+            all_indices.extend(indices.iter().map(|&i| i + vertex_offset));
+        }
+        
+        (all_vertices, all_indices)
+    }
+    
+    /// Generate terrain patches with SRTM elevation data (DEPRECATED - generates whole globe)
+    #[allow(dead_code)]
     fn generate_terrain_with_srtm(
         srtm: &mut SrtmManager,
         depth: u8,
@@ -112,7 +167,7 @@ impl App {
         let mut all_indices = Vec::new();
         
         // Generate all chunk paths for this depth
-        let num_tiles = 4_usize.pow(depth as u32);
+        let _num_tiles = 4_usize.pow(depth as u32);
         let mut paths = vec![vec![]];
         
         for _ in 0..depth {
@@ -266,15 +321,20 @@ impl ApplicationHandler for App {
             
             self.srtm = Some(srtm);
             
-            // Generate terrain patches with SRTM elevation
-            println!("Generating terrain with SRTM elevation...");
-            let (terrain_vertices, terrain_indices) = Self::generate_terrain_with_srtm(
+            // Generate terrain patches with SRTM elevation around Brisbane
+            println!("Generating terrain around Brisbane...");
+            let brisbane_lat = -27.4698;
+            let brisbane_lon = 153.0251;
+            let (terrain_vertices, terrain_indices) = Self::generate_terrain_around_location(
                 &mut self.srtm.as_mut().unwrap(),
+                brisbane_lat,
+                brisbane_lon,
+                1, // radius in chunks
                 self.tile_depth,
                 16,
                 glam::Vec3::new(0.2, 0.8, 0.2)
             );
-            println!("Generated {} vertices, {} indices", terrain_vertices.len(), terrain_indices.len());
+            println!("Generated {} vertices, {} indices for Brisbane area", terrain_vertices.len(), terrain_indices.len());
             
             // Debug: Print first few vertex positions to verify ECEF coordinates
             if !terrain_vertices.is_empty() {
@@ -399,7 +459,7 @@ impl ApplicationHandler for App {
                                     
                                     // Regenerate terrain with SRTM
                                     let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
-                                        Self::generate_terrain_with_srtm(srtm, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                        Self::generate_terrain_around_location(srtm, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     } else {
                                         generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     };
@@ -441,7 +501,7 @@ impl ApplicationHandler for App {
                                     
                                     // Regenerate terrain with SRTM
                                     let (terrain_verts, terrain_inds) = if let Some(ref mut srtm) = self.srtm {
-                                        Self::generate_terrain_with_srtm(srtm, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
+                                        Self::generate_terrain_around_location(srtm, -27.4698, 153.0251, 1, self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     } else {
                                         generate_terrain_patches(self.tile_depth, 16, glam::Vec3::new(0.2, 0.8, 0.2))
                                     };
