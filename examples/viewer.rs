@@ -4,12 +4,11 @@
 
 use metaverse_core::renderer::{
     camera::Camera, 
-    pipeline::{BasicPipeline, Vertex},
+    pipeline::BasicPipeline,
     mesh::generate_buildings_from_osm,
     Renderer
 };
-use metaverse_core::osm::{load_chunk_osm_data, OverpassClient, OsmData};
-use metaverse_core::chunks::ChunkId;
+use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation_downloader::ElevationDownloader;
 use std::sync::Arc;
