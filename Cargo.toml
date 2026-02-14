@@ -16,6 +16,7 @@ winit = "0.30"
 pollster = "0.4"
 glam = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
+zip = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

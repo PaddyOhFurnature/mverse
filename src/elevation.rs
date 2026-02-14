@@ -242,21 +242,90 @@ impl SrtmManager {
         get_elevation(tile, lat, lon)
     }
     
-    /// Load an SRTM tile from cache
+    /// Load an SRTM tile from cache or remote providers
     ///
-    /// Returns None if tile isn't in cache
+    /// Tries (in order):
+    /// 1) Project-local disk cache
+    /// 2) Several remote providers (attempts multiple URL patterns)
+    ///
+    /// Returns None if tile isn't available or can't be parsed.
     fn load_tile(&self, lat: i16, lon: i16) -> Option<SrtmTile> {
-        // Generate tile filename
+        use std::time::Duration;
+        use std::io::Cursor;
+
+        // Generate tile filename and base (without .hgt)
         let lat_dir = if lat >= 0 { 'N' } else { 'S' };
         let lon_dir = if lon >= 0 { 'E' } else { 'W' };
         let filename = format!("{}{:02}{}{:03}.hgt",
             lat_dir, lat.abs(), lon_dir, lon.abs());
-        
-        // Try to load from cache
-        let bytes = self.cache.read_srtm(&filename).ok()?;
-        
-        // Parse HGT file
-        parse_hgt(&filename, &bytes).ok()
+        let tile_base = filename.trim_end_matches(".hgt");
+
+        // 1) Try to load from cache
+        if let Ok(bytes) = self.cache.read_srtm(&filename) {
+            return parse_hgt(&filename, &bytes).ok();
+        }
+
+        // 2) Remote providers (multiple fallback URLs)
+        // Respect 2-second cooldown between external calls
+        let providers = vec![
+            "https://viewfinderpanoramas.org/dem3/".to_string(),
+            "https://srtm.csi.cgiar.org/wp-content/uploads/files/srtm_5x5/".to_string(),
+            "https://srtm.kurviger.de/SRTM3/".to_string(),
+        ];
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .ok()?;
+
+        for base in providers.iter() {
+            // Try several candidate URL patterns
+            let candidates = vec![
+                format!("{}{}.hgt", base, tile_base),
+                format!("{}{}.hgt.zip", base, tile_base),
+                format!("{}{}.zip", base, tile_base),
+                format!("{}{}", base, filename),
+            ];
+
+            for url in candidates {
+                // 2-second cooldown as per project rules
+                std::thread::sleep(Duration::from_secs(2));
+
+                let resp = client.get(&url).send();
+                if let Ok(resp) = resp {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            let data = bytes.to_vec();
+
+                            // If zip archive (PK..), try to extract .hgt inside
+                            if data.len() >= 4 && &data[0..2] == b"PK" {
+                                if let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(data)) {
+                                    for i in 0..archive.len() {
+                                        if let Ok(mut f) = archive.by_index(i) {
+                                            let name = f.name().to_string();
+                                            if name.to_lowercase().ends_with(".hgt") {
+                                                let mut buf = Vec::new();
+                                                if std::io::copy(&mut f, &mut buf).is_ok() {
+                                                    let _ = self.cache.write_srtm(&filename, &buf);
+                                                    return parse_hgt(&filename, &buf).ok();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Raw HGT bytes
+                                let _ = self.cache.write_srtm(&filename, &data);
+                                return parse_hgt(&filename, &data).ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // No tile available
+        None
     }
     
     /// Get elevation with a fallback value for missing data

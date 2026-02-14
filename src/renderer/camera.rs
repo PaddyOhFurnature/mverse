@@ -151,8 +151,9 @@ impl Camera {
             self.orientation.w as f32,
         ));
         
-        // View matrix is just the rotation (translation is handled by floating origin)
-        let view = rotation;
+        // View matrix is the INVERSE of the camera transform
+        // For an orthonormal rotation matrix, inverse = transpose
+        let view = rotation.transpose();
         
         (view, offset)
     }
