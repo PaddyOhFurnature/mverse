@@ -10,3 +10,4 @@ pub mod renderer;
 
 #[cfg(test)]
 mod tests;
+pub mod terrain;
