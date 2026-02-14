@@ -307,33 +307,26 @@ impl ApplicationHandler for App {
             self.terrain_index_buffer = Some(terrain_index_buffer);
             self.terrain_num_indices = terrain_num_indices;
             
-            // Load OSM buildings for Brisbane CBD (cache-only, no network)
+            // Load OSM buildings from cache (cache-only, no network)
             println!("Loading OSM buildings from cache...");
             let cache = DiskCache::new().unwrap();
             
-            // Brisbane CBD is roughly at chunk depth 14
-            let brisbane_chunk = ChunkId {
-                face: 0,
-                path: vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1], // Approx Brisbane location
-            };
-            
             let buildings_color = glam::Vec3::new(0.7, 0.7, 0.8); // Light gray/blue
             
-            // Try to load from cache only (no network fetch during init)
-            let path_str = brisbane_chunk.path.iter().map(|q| q.to_string()).collect::<Vec<_>>().join("");
-            let cache_key = format!("chunk_d{}_f{}_{}", 14, brisbane_chunk.face, path_str);
+            // Try to load from simple cache key first (from download script)
+            let cache_key = "brisbane_cbd";
             
-            let (buildings_vertices, buildings_indices) = if let Ok(cached_bytes) = cache.read_osm(&cache_key) {
+            let (buildings_vertices, buildings_indices) = if let Ok(cached_bytes) = cache.read_osm(cache_key) {
                 if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
                     println!("Loaded {} buildings from cache", osm_data.buildings.len());
                     generate_buildings_from_osm(&osm_data, buildings_color)
                 } else {
-                    println!("Failed to parse cached OSM data, using empty");
+                    println!("Failed to parse cached OSM data");
                     (Vec::new(), Vec::new())
                 }
             } else {
                 println!("No cached OSM data available");
-                println!("  To download OSM data, run: cargo run --example download_osm_data");
+                println!("  Run: cargo run --example download_brisbane_data");
                 (Vec::new(), Vec::new())
             };
             
