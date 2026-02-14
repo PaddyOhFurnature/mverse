@@ -98,11 +98,14 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 
 ### Current State
 
-- **251 tests passing** (4 ignored, all green)
-- **Complete SVO pipeline + renderer integration**: Data → Terrain → CSG → Mesh → Materials → GPU
-- **8 new modules**: svo.rs, terrain.rs, osm_features.rs, marching_cubes.rs, mesh_generation.rs, materials.rs, svo_integration.rs
-- **~2,800 lines** of new SVO code
-- **Viewer ready to render** (using test mesh path currently)
+- **252 tests passing** (4 ignored, all green)
+- **Marching cubes table populated**: Complete 256-entry canonical table (Paul Bourke)
+- **Viewer working**: Successfully renders without buffer overflow
+- **Buildings**: Use actual OSM polygon footprints (~10k rendered, 55k available)
+- **Roads**: Flat ribbons temporarily (will restore 3D volumes with LOD/chunking)
+- **Complete SVO pipeline**: Data → Terrain → CSG → Mesh → Materials → GPU (partially integrated)
+- **~3,000 lines** of SVO volumetric code
+- **GPU buffer limit fixed**: 1M vertices = 41MB (was 8.6M = 346MB)
 
 ### Architecture Flow
 
