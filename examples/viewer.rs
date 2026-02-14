@@ -477,12 +477,16 @@ impl ApplicationHandler for App {
                             String::new()
                         };
                         
-                        // Show camera position
+                        // Show camera position with GPS coordinates
+                        use metaverse_core::coordinates::{ecef_to_gps, EcefPos};
                         let pos = self.camera.position;
-                        let alt = pos.length() - 6_371_000.0;
+                        let ecef = EcefPos { x: pos.x, y: pos.y, z: pos.z };
+                        let gps = ecef_to_gps(&ecef);
+                        let alt = gps.elevation_m;
+                        
                         window.set_title(&format!(
-                            "Metaverse Viewer - {:.1} FPS | Alt: {:.0}m | Speed: {:.1}x{}",
-                            fps, alt, self.camera.speed_multiplier, stats
+                            "Metaverse Viewer - {:.1} FPS | GPS: ({:.6}, {:.6}) | Alt: {:.1}m | Speed: {:.1}x{}",
+                            fps, gps.lat_deg, gps.lon_deg, alt, self.camera.speed_multiplier, stats
                         ));
                         
                         self.frame_count = 0;
