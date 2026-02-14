@@ -359,7 +359,7 @@ pub fn calculate_surface_gradient(
 }
 
 /// Find the height of the surface at a given (x, z) position
-fn find_surface_height(svo: &SparseVoxelOctree, x: u32, z: u32) -> Option<f32> {
+pub fn find_surface_height(svo: &SparseVoxelOctree, x: u32, z: u32) -> Option<f32> {
     let size = 1u32 << svo.max_depth();
     
     // Search from top down for first solid voxel
