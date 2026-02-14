@@ -43,14 +43,16 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 
 ## 2. WHAT CURRENTLY EXISTS
 
-**Phase 6 — Rendering + Elevation System Complete**
+**Phase 6 — Rendering + Elevation System + OSM Features Complete**
 
 ### Working Systems
 
 - ✅ **Coordinate System**: ECEF ↔ GPS conversions (WGS84 ellipsoid, sub-millimetre precision)
 - ✅ **Quad-sphere Chunks**: Cube-projected sphere, quadtree subdivision, face/path addressing
 - ✅ **wgpu Renderer**: Custom renderer (not Bevy), floating origin camera, basic pipeline
-- ✅ **OSM Buildings**: 55,319 Brisbane buildings rendering at 60 FPS
+- ✅ **OSM Buildings**: 55,319 Brisbane buildings rendering (959k vertices)
+- ✅ **OSM Roads**: 46,659 roads with varying widths (521k vertices)
+- ✅ **OSM Water**: 90 water features - rivers, lakes (2.6k vertices)
 - ✅ **Multi-source Elevation**: AWS Terrarium tiles (primary), USGS 3DEP (stub), OpenTopography (stub)
 - ✅ **Parallel Downloading**: Up to 8 concurrent tile downloads with smart caching
 - ✅ **Three-level Cache**: Memory → Disk (.metaverse/cache/) → Network
@@ -59,17 +61,20 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 ### Current State
 
 - **225 tests passing** (all tests green)
-- **60 FPS** at 1080p with 55k buildings
-- **Buildings-only rendering** (removed broken terrain/sphere meshes)
+- **60 FPS** at 1080p with 1.48M vertices (buildings + roads + water)
+- **Three rendering layers** with independent toggles:
+  - Water (bottom) - river blue (0.2, 0.5, 0.8)
+  - Roads (middle) - dark gray (0.3, 0.3, 0.3)
+  - Buildings (top) - light gray (0.7, 0.7, 0.8)
 - **121 elevation tiles cached** for Brisbane (11×11 grid at zoom 10)
 - **Real elevation data working** (16-49m range for Brisbane verified)
-- **Buildings use OSM elevation** (typically 0m = local ground level)
+- **Interactive controls**: Keys 1/2/3 toggle buildings/roads/water
 
 ### What Was Removed
 
 - Removed sphere mesh (white) - had rendering issues with coordinate system
 - Removed terrain mesh (green) - didn't follow elevation data correctly
-- Decision: Focus on roads/water next. Buildings are primary visual feature.
+- Decision: Focus on OSM features. Buildings/roads/water are primary visual features.
 - No renderer
 - No data pipelines
 - The project directory contains only documentation files (these docs)
