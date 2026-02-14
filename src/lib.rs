@@ -13,3 +13,4 @@ mod tests;
 pub mod terrain;
 pub mod marching_cubes;
 pub mod mesh_generation;
+pub mod materials;
