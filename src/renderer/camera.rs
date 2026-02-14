@@ -72,14 +72,8 @@ impl Camera {
         let position_ecef = gps_to_ecef(&gps);
         let position = DVec3::new(position_ecef.x, position_ecef.y, position_ecef.z);
         
-        // Look at ground level
-        let look_at_gps = GpsPos {
-            lat_deg: gps.lat_deg,
-            lon_deg: gps.lon_deg,
-            elevation_m: 0.0,
-        };
-        let look_at_ecef = gps_to_ecef(&look_at_gps);
-        let look_at = DVec3::new(look_at_ecef.x, look_at_ecef.y, look_at_ecef.z);
+        // Look toward Earth center (down) - simplest approach that guarantees correct orientation
+        let look_at = DVec3::ZERO; // Earth center in ECEF
         
         Self::new(position, look_at)
     }
