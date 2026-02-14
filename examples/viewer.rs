@@ -5,7 +5,7 @@
 use metaverse_core::renderer::{
     camera::Camera, 
     pipeline::BasicPipeline,
-    mesh::generate_buildings_from_osm,
+    mesh::{generate_buildings_from_osm, generate_roads_from_osm, generate_water_from_osm},
     Renderer
 };
 use metaverse_core::osm::OsmData;
@@ -29,6 +29,14 @@ struct App {
     buildings_index_buffer: Option<wgpu::Buffer>,
     buildings_num_indices: u32,
     show_buildings: bool,
+    roads_vertex_buffer: Option<wgpu::Buffer>,
+    roads_index_buffer: Option<wgpu::Buffer>,
+    roads_num_indices: u32,
+    show_roads: bool,
+    water_vertex_buffer: Option<wgpu::Buffer>,
+    water_index_buffer: Option<wgpu::Buffer>,
+    water_num_indices: u32,
+    show_water: bool,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -59,6 +67,14 @@ impl App {
             buildings_index_buffer: None,
             buildings_num_indices: 0,
             show_buildings: true,
+            roads_vertex_buffer: None,
+            roads_index_buffer: None,
+            roads_num_indices: 0,
+            show_roads: true,
+            water_vertex_buffer: None,
+            water_index_buffer: None,
+            water_num_indices: 0,
+            show_water: true,
             downloader: None, // Will be initialized with cache
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
@@ -226,6 +242,90 @@ impl ApplicationHandler for App {
                 println!("No buildings to render");
             }
             
+            // Load and generate roads from OSM cache
+            println!("Generating roads from OSM data...");
+            let roads_color = glam::Vec3::new(0.3, 0.3, 0.3); // Dark gray
+            
+            let (roads_vertices, roads_indices) = {
+                let mut result = (Vec::new(), Vec::new());
+                for cache_key in &cache_keys {
+                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
+                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+                            println!("Loaded {} roads from cache ({})", osm_data.roads.len(), cache_key);
+                            result = generate_roads_from_osm(&osm_data.roads, roads_color);
+                            break;
+                        }
+                    }
+                }
+                result
+            };
+            
+            let roads_num_indices = roads_indices.len() as u32;
+            
+            if !roads_vertices.is_empty() {
+                let roads_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Roads Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&roads_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                
+                let roads_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Roads Index Buffer"),
+                    contents: bytemuck::cast_slice(&roads_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                
+                self.roads_vertex_buffer = Some(roads_vertex_buffer);
+                self.roads_index_buffer = Some(roads_index_buffer);
+                self.roads_num_indices = roads_num_indices;
+                
+                println!("Generated {} road vertices, {} indices", roads_vertices.len(), roads_indices.len());
+            } else {
+                println!("No roads to render");
+            }
+            
+            // Load and generate water from OSM cache
+            println!("Generating water features from OSM data...");
+            let water_color = glam::Vec3::new(0.2, 0.5, 0.8); // River blue
+            
+            let (water_vertices, water_indices) = {
+                let mut result = (Vec::new(), Vec::new());
+                for cache_key in &cache_keys {
+                    if let Ok(cached_bytes) = cache.read_osm(cache_key) {
+                        if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+                            println!("Loaded {} water features from cache ({})", osm_data.water.len(), cache_key);
+                            result = generate_water_from_osm(&osm_data.water, water_color);
+                            break;
+                        }
+                    }
+                }
+                result
+            };
+            
+            let water_num_indices = water_indices.len() as u32;
+            
+            if !water_vertices.is_empty() {
+                let water_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Water Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&water_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                
+                let water_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Water Index Buffer"),
+                    contents: bytemuck::cast_slice(&water_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+                
+                self.water_vertex_buffer = Some(water_vertex_buffer);
+                self.water_index_buffer = Some(water_index_buffer);
+                self.water_num_indices = water_num_indices;
+                
+                println!("Generated {} water vertices, {} indices", water_vertices.len(), water_indices.len());
+            } else {
+                println!("No water to render");
+            }
+            
             self.renderer = Some(renderer);
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
@@ -250,10 +350,16 @@ impl ApplicationHandler for App {
                             self.keys_pressed.insert(keycode);
                             
                             
-                            // Toggle buildings visibility
+                            // Toggle layer visibility
                             if keycode == KeyCode::Digit1 {
                                 self.show_buildings = !self.show_buildings;
                                 println!("Buildings: {}", if self.show_buildings { "ON" } else { "OFF" });
+                            } else if keycode == KeyCode::Digit2 {
+                                self.show_roads = !self.show_roads;
+                                println!("Roads: {}", if self.show_roads { "ON" } else { "OFF" });
+                            } else if keycode == KeyCode::Digit3 {
+                                self.show_water = !self.show_water;
+                                println!("Water: {}", if self.show_water { "ON" } else { "OFF" });
                             }
                             
                             // Toggle mouse capture on click
@@ -349,8 +455,40 @@ impl ApplicationHandler for App {
                     let buildings_vb = self.buildings_vertex_buffer.as_ref();
                     let buildings_ib = self.buildings_index_buffer.as_ref();
                     
+                    let roads_num_indices = self.roads_num_indices;
+                    let show_roads = self.show_roads;
+                    let roads_vb = self.roads_vertex_buffer.as_ref();
+                    let roads_ib = self.roads_index_buffer.as_ref();
+                    
+                    let water_num_indices = self.water_num_indices;
+                    let show_water = self.show_water;
+                    let water_vb = self.water_vertex_buffer.as_ref();
+                    let water_ib = self.water_index_buffer.as_ref();
+                    
                     let result = renderer.render(clear_color, |render_pass| {
-                        // Draw buildings
+                        // Draw water first (bottom layer)
+                        if show_water {
+                            if let (Some(wvb), Some(wib)) = (water_vb, water_ib) {
+                                render_pass.set_pipeline(&pipeline.pipeline);
+                                render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                                render_pass.set_vertex_buffer(0, wvb.slice(..));
+                                render_pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
+                                render_pass.draw_indexed(0..water_num_indices, 0, 0..1);
+                            }
+                        }
+                        
+                        // Draw roads (middle layer)
+                        if show_roads {
+                            if let (Some(rvb), Some(rib)) = (roads_vb, roads_ib) {
+                                render_pass.set_pipeline(&pipeline.pipeline);
+                                render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                                render_pass.set_vertex_buffer(0, rvb.slice(..));
+                                render_pass.set_index_buffer(rib.slice(..), wgpu::IndexFormat::Uint32);
+                                render_pass.draw_indexed(0..roads_num_indices, 0, 0..1);
+                            }
+                        }
+                        
+                        // Draw buildings (top layer)
                         if show_buildings {
                             if let (Some(bvb), Some(bib)) = (buildings_vb, buildings_ib) {
                                 render_pass.set_pipeline(&pipeline.pipeline);
@@ -427,11 +565,9 @@ fn main() {
     println!("  Shift (either) - 20x sprint speed");
     println!("  Ctrl - 0.1x slow speed");
     println!("  Mouse - Look around (click to capture)");
-    println!("  [ ] - Decrease/increase tile depth (0-5)");
-    println!("  1 - Toggle sphere visibility");
-    println!("  2 - Toggle tile outlines");
-    println!("  3 - Toggle terrain patches");
-    println!("  4 - Toggle OSM buildings");
+    println!("  1 - Toggle buildings");
+    println!("  2 - Toggle roads");
+    println!("  3 - Toggle water");
     println!("  Escape - Release mouse");
     println!();
 

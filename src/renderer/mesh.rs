@@ -3,8 +3,8 @@
 //! Functions for generating geometric meshes (spheres, cubes, etc.)
 
 use crate::renderer::pipeline::Vertex;
-use crate::coordinates::WGS84_A;
-use glam::Vec3;
+use crate::coordinates::{WGS84_A, gps_to_ecef};
+use glam::{Vec3, DVec3};
 
 /// Generate a UV sphere mesh
 ///
@@ -1083,4 +1083,161 @@ mod tests {
             assert!(val.is_finite(), "VP matrix at equator contains non-finite value");
         }
     }
+}
+
+/// Generate road mesh from OSM road data
+///
+/// Creates a ribbon mesh along the road path with the specified width.
+/// Roads are rendered as flat quads following the centerline.
+///
+/// # Arguments
+/// * `roads` - OSM road data
+/// * `color` - Base color for all roads (typically dark gray)
+///
+/// # Returns
+/// (vertices, indices) for rendering
+pub fn generate_roads_from_osm(roads: &[crate::osm::OsmRoad], color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for road in roads {
+        if road.nodes.len() < 2 {
+            continue; // Need at least 2 points to make a road segment
+        }
+        
+        let vertex_offset = all_vertices.len() as u32;
+        let half_width = (road.width_m / 2.0) as f32;
+        
+        // Convert all nodes to ECEF
+        let ecef_points: Vec<DVec3> = road.nodes
+            .iter()
+            .map(|gps| {
+                let ecef = gps_to_ecef(gps);
+                DVec3::new(ecef.x, ecef.y, ecef.z)
+            })
+            .collect();
+        
+        // Generate vertices along the road path
+        for i in 0..ecef_points.len() {
+            let point = ecef_points[i];
+            
+            // Calculate perpendicular direction for road width
+            let (forward, perpendicular) = if i == 0 {
+                // First point: use direction to next point
+                let next = ecef_points[i + 1];
+                let forward = (next - point).normalize();
+                let up = point.normalize(); // Radial direction from Earth center
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            } else if i == ecef_points.len() - 1 {
+                // Last point: use direction from previous point
+                let prev = ecef_points[i - 1];
+                let forward = (point - prev).normalize();
+                let up = point.normalize();
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            } else {
+                // Middle points: average of incoming and outgoing directions
+                let prev = ecef_points[i - 1];
+                let next = ecef_points[i + 1];
+                let forward = ((point - prev).normalize() + (next - point).normalize()).normalize();
+                let up = point.normalize();
+                let perpendicular = forward.cross(up).normalize();
+                (forward, perpendicular)
+            };
+            
+            // Create left and right vertices
+            let left = point + perpendicular * half_width as f64;
+            let right = point - perpendicular * half_width as f64;
+            
+            // Normal points up (radially outward from Earth)
+            let normal_left = left.normalize().as_vec3();
+            let normal_right = right.normalize().as_vec3();
+            
+            all_vertices.push(Vertex {
+                position: [left.x as f32, left.y as f32, left.z as f32],
+                normal: [normal_left.x, normal_left.y, normal_left.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+            
+            all_vertices.push(Vertex {
+                position: [right.x as f32, right.y as f32, right.z as f32],
+                normal: [normal_right.x, normal_right.y, normal_right.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+        
+        // Generate indices for triangle strip
+        for i in 0..(ecef_points.len() - 1) {
+            let base = vertex_offset + (i * 2) as u32;
+            
+            // Two triangles per segment
+            // Triangle 1: left[i], right[i], left[i+1]
+            all_indices.push(base);
+            all_indices.push(base + 1);
+            all_indices.push(base + 2);
+            
+            // Triangle 2: right[i], right[i+1], left[i+1]
+            all_indices.push(base + 1);
+            all_indices.push(base + 3);
+            all_indices.push(base + 2);
+        }
+    }
+    
+    (all_vertices, all_indices)
+}
+
+/// Generate water mesh from OSM water data
+///
+/// Creates filled polygon meshes for water features (rivers, lakes, etc).
+/// Uses simple triangle fan triangulation from the first vertex.
+///
+/// # Arguments
+/// * `water_features` - OSM water polygon data
+/// * `color` - Base color for water (typically blue)
+///
+/// # Returns
+/// (vertices, indices) for rendering
+pub fn generate_water_from_osm(water_features: &[crate::osm::OsmWater], color: Vec3) -> (Vec<Vertex>, Vec<u32>) {
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    
+    for water in water_features {
+        if water.polygon.len() < 3 {
+            continue; // Need at least 3 points to make a polygon
+        }
+        
+        let vertex_offset = all_vertices.len() as u32;
+        
+        // Convert all polygon points to ECEF
+        let ecef_points: Vec<DVec3> = water.polygon
+            .iter()
+            .map(|gps| {
+                let ecef = gps_to_ecef(gps);
+                DVec3::new(ecef.x, ecef.y, ecef.z)
+            })
+            .collect();
+        
+        // Generate vertices
+        for point in &ecef_points {
+            // Normal points up (radially outward from Earth)
+            let normal = point.normalize().as_vec3();
+            
+            all_vertices.push(Vertex {
+                position: [point.x as f32, point.y as f32, point.z as f32],
+                normal: [normal.x, normal.y, normal.z],
+                color: [color.x, color.y, color.z, 1.0],
+            });
+        }
+        
+        // Triangulate using triangle fan from first vertex
+        // This works for convex polygons and most simple concave ones
+        for i in 1..(ecef_points.len() - 1) {
+            all_indices.push(vertex_offset);
+            all_indices.push(vertex_offset + i as u32);
+            all_indices.push(vertex_offset + (i + 1) as u32);
+        }
+    }
+    
+    (all_vertices, all_indices)
 }
