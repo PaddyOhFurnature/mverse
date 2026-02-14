@@ -2,7 +2,7 @@
 
 **Purpose:** Complete context dump for onboarding a new developer or AI assistant.
 **Last Updated:** 2026-02-13
-**Current Phase:** 6 — Rendering complete. Multi-source elevation system implemented. Working on roads and water features.
+**Current Phase:** Pivoted to SVO volumetric architecture. Phase 2 complete (terrain generation). Phase 3 started (OSM features).
 
 ---
 
@@ -43,43 +43,86 @@ This is why Rust, spherical chunking, sparse voxel octrees, P2P networking, proc
 
 ## 2. WHAT CURRENTLY EXISTS
 
-**Phase 6 — Rendering + Elevation System + OSM Features Complete**
+**Phase 6 → SVO PIVOT: Surface mesh approach abandoned. Rebuilding with volumetric SVO architecture.**
 
 ### Working Systems
 
 - ✅ **Coordinate System**: ECEF ↔ GPS conversions (WGS84 ellipsoid, sub-millimetre precision)
 - ✅ **Quad-sphere Chunks**: Cube-projected sphere, quadtree subdivision, face/path addressing
-- ✅ **wgpu Renderer**: Custom renderer (not Bevy), floating origin camera, basic pipeline
-- ✅ **OSM Buildings**: 55,319 Brisbane buildings rendering (959k vertices)
-- ✅ **OSM Roads**: 46,659 roads with varying widths (521k vertices)
-- ✅ **OSM Water**: 90 water features - rivers, lakes (2.6k vertices)
+- ✅ **Sparse Voxel Octree (SVO)**: Complete implementation, 39 tests passing
+- ✅ **Terrain Generation**: Elevation data → volumetric terrain SVO, 9 tests passing
+- ✅ **Terrain Smoothing**: Chunk boundary matching, surface gradient calculation
 - ✅ **Multi-source Elevation**: AWS Terrarium tiles (primary), USGS 3DEP (stub), OpenTopography (stub)
 - ✅ **Parallel Downloading**: Up to 8 concurrent tile downloads with smart caching
 - ✅ **Three-level Cache**: Memory → Disk (.metaverse/cache/) → Network
-- ✅ **Procedural Fallback**: Perlin noise for gap-filling only (not primary data)
+- ✅ **OSM Data**: 55k buildings, 47k roads, 90 water features cached for Brisbane
 
 ### Current State
 
-- **225 tests passing** (all tests green)
-- **60 FPS** at 1080p with 1.48M vertices (buildings + roads + water)
-- **Three rendering layers** with independent toggles:
-  - Water (bottom) - river blue (0.2, 0.5, 0.8)
-  - Roads (middle) - dark gray (0.3, 0.3, 0.3)
-  - Buildings (top) - light gray (0.7, 0.7, 0.8)
-- **121 elevation tiles cached** for Brisbane (11×11 grid at zoom 10)
-- **Real elevation data working** (16-49m range for Brisbane verified)
-- **Interactive controls**: Keys 1/2/3 toggle buildings/roads/water
+- **236 tests passing** (all tests green)
+- **SVO architecture**: World as solid volume, CSG operations for features
+- **OSM features module**: Skeleton for rivers, roads, buildings, bridges, tunnels
+- **Obsolete code present**: Old surface mesh renderer (will be deleted in Phase 5)
+- **No rendering yet**: SVO → mesh extraction (marching cubes) not implemented
+
+### Why We Pivoted
+
+**Old approach:** Hollow sphere with meshes "painted" on surface
+- Roads/water underground or not visible
+- Backface culling broken (visible from below, not above)
+- No volumetric representation = can't show:
+  - Rivers cutting INTO terrain  
+  - Bridges spanning OVER valleys
+  - Tunnels through mountains
+  - Building interiors
+  - Multi-level roads
+  - Terrain modification
+
+**New approach:** World is SOLID volume from core (-6,371km) to atmosphere (100km+)
+- SVO stores only non-empty regions (sparse)
+- CSG operations (add/subtract/replace materials)
+- Marching cubes extracts renderable surface mesh
+- Supports all features: tunnels, caves, overhangs, building interiors
+
+### Implementation Plan
+
+See `.copilot/session-state/.../svo_plan.md` for full 16-task plan across 5 phases:
+
+**Phase 1: Core SVO** ✅ COMPLETE
+- SvoNode enum, MaterialId constants
+- set/get/clear voxel operations
+- Coordinate mapping
+- 39 tests passing
+
+**Phase 2: Terrain Generation** ✅ COMPLETE
+- Heightmap → SVO conversion
+- Chunk boundary smoothing
+- 9 tests passing
+
+**Phase 3: OSM Features via CSG** 🔄 IN PROGRESS
+- River carving (subtract channels)
+- Road placement (flatten + pave)
+- Building addition (fill volumes)
+- Bridge spans (elevated decks)
+- Tunnel carving (hollow passages)
+
+**Phase 4: Mesh Extraction** ⏳ TODO
+- Marching cubes algorithm
+- LOD mesh generation
+- Per-material meshes
+
+**Phase 5: Renderer Integration** ⏳ TODO
+- Remove old surface mesh code
+- Integrate SVO-based generation
+- Material rendering
+- 60 FPS target
 
 ### What Was Removed
 
-- Removed sphere mesh (white) - had rendering issues with coordinate system
-- Removed terrain mesh (green) - didn't follow elevation data correctly
-- Decision: Focus on OSM features. Buildings/roads/water are primary visual features.
-- No renderer
-- No data pipelines
-- The project directory contains only documentation files (these docs)
-
-The first task is Phase 1.1 in `docs/TODO.md`: run `cargo init --lib` and create the project skeleton.
+- Surface mesh approach (buildings/roads/water as flat ribbons)
+- Sphere mesh (white) - hollow shell
+- Terrain mesh (green) - heightmap only
+- Decision: These will be replaced by SVO volumetric mesh extraction in Phase 5
 
 ---
 
