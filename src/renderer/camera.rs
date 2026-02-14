@@ -52,8 +52,8 @@ impl Camera {
             position,
             orientation,
             fov_deg: 60.0,
-            near: 0.1,
-            far: 1_000_000.0, // 1000 km view distance
+            near: 1.0,        // 1 meter near plane
+            far: 100_000.0,   // 100 km far plane (sufficient for local view)
             base_speed: 10.0, // 10 m/s base
             speed_multiplier: 1.0,
         }

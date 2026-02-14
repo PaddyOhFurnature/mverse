@@ -275,6 +275,17 @@ impl ApplicationHandler for App {
                 glam::Vec3::new(0.2, 0.8, 0.2)
             );
             println!("Generated {} vertices, {} indices", terrain_vertices.len(), terrain_indices.len());
+            
+            // Debug: Print first few vertex positions to verify ECEF coordinates
+            if !terrain_vertices.is_empty() {
+                println!("Sample terrain vertex positions (should be ~6.37M meters from origin):");
+                for i in 0..terrain_vertices.len().min(3) {
+                    let v = &terrain_vertices[i];
+                    let dist = (v.position[0]*v.position[0] + v.position[1]*v.position[1] + v.position[2]*v.position[2]).sqrt();
+                    println!("  Vertex {}: ({:.1}, {:.1}, {:.1}) - distance from origin: {:.1}m", 
+                        i, v.position[0], v.position[1], v.position[2], dist);
+                }
+            }
             let terrain_num_indices = terrain_indices.len() as u32;
             
             let terrain_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
