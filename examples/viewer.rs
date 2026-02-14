@@ -123,18 +123,30 @@ impl App {
         };
         let center_chunk = gps_to_chunk_id(&center_gps, depth);
         
-        // For now, just generate the center chunk and its immediate neighbors on the same face
-        // This gives us a 3x3 grid around Brisbane (9 chunks)
+        // Generate all tiles at this depth on Brisbane's face
         let face = center_chunk.face;
-        let base_path = &center_chunk.path;
         
-        // Only generate chunks on the same face as Brisbane
-        // Generate a small grid around the center chunk
-        let mut chunks_to_generate = vec![center_chunk.clone()];
+        // Generate all path combinations for this depth on this face
+        let mut paths = vec![vec![]];
+        for _ in 0..depth {
+            let mut new_paths = Vec::new();
+            for path in &paths {
+                for quad in 0..4 {
+                    let mut new_path = path.clone();
+                    new_path.push(quad);
+                    new_paths.push(new_path);
+                }
+            }
+            paths = new_paths;
+        }
         
-        // Add neighboring chunks by modifying the last few path components
-        // This is a simplified approach - just render the center chunk for now
-        // TODO: Implement proper neighbor finding
+        // Generate chunks for all paths on Brisbane's face
+        let mut chunks_to_generate = Vec::new();
+        for path in paths {
+            chunks_to_generate.push(ChunkId { face, path });
+        }
+        
+        println!("  Generating {} terrain chunks on face {}", chunks_to_generate.len(), face);
         
         for chunk_id in &chunks_to_generate {
             let (vertices, indices) = generate_chunk_patch_with_elevation(
