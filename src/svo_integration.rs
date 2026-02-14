@@ -186,6 +186,20 @@ pub fn generate_test_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, V
         let center_lon = building.polygon.iter().map(|p| p.lon_deg).sum::<f64>() / building.polygon.len() as f64;
         let elevation = building.polygon.first().map(|p| p.elevation_m).unwrap_or(0.0);
         
+        // Calculate building footprint dimensions from polygon
+        let min_lat = building.polygon.iter().map(|p| p.lat_deg).fold(f64::INFINITY, f64::min);
+        let max_lat = building.polygon.iter().map(|p| p.lat_deg).fold(f64::NEG_INFINITY, f64::max);
+        let min_lon = building.polygon.iter().map(|p| p.lon_deg).fold(f64::INFINITY, f64::min);
+        let max_lon = building.polygon.iter().map(|p| p.lon_deg).fold(f64::NEG_INFINITY, f64::max);
+        
+        // Convert to approximate meters (rough estimate: 1 degree lat ≈ 111km, 1 degree lon ≈ 111km * cos(lat))
+        let lat_meters = (max_lat - min_lat).abs() * 111000.0;
+        let lon_meters = (max_lon - min_lon).abs() * 111000.0 * center_lat.to_radians().cos().abs();
+        
+        // Use half of the footprint dimensions (capped at reasonable sizes)
+        let half_width = (lon_meters / 2.0).max(2.0).min(50.0) as f32;  // East-West
+        let half_depth = (lat_meters / 2.0).max(2.0).min(50.0) as f32;  // North-South
+        
         // Convert center to ECEF (base)
         let base_ecef = gps_to_ecef(&GpsPos {
             lat_deg: center_lat,
@@ -201,7 +215,6 @@ pub fn generate_test_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, V
         });
         
         // Create local coordinate system around the building
-        // Use a small offset for the box (5 meters in each direction)
         let up = glam::Vec3::new(base_ecef.x as f32, base_ecef.y as f32, base_ecef.z as f32).normalize();
         let east = glam::Vec3::new(-base_ecef.y as f32, base_ecef.x as f32, 0.0).normalize();
         let north = up.cross(east).normalize();
@@ -209,20 +222,18 @@ pub fn generate_test_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, V
         let base_pos = glam::Vec3::new(base_ecef.x as f32, base_ecef.y as f32, base_ecef.z as f32);
         let top_pos = glam::Vec3::new(top_ecef.x as f32, top_ecef.y as f32, top_ecef.z as f32);
         
-        let half_size = 5.0;
-        
-        // 8 vertices for a box in ECEF coordinates
+        // 8 vertices for a box in ECEF coordinates with proper proportions
         let box_vertices = [
-            // Bottom 4 corners
-            base_pos + north * (-half_size) + east * (-half_size),
-            base_pos + north * (-half_size) + east * half_size,
-            base_pos + north * half_size + east * half_size,
-            base_pos + north * half_size + east * (-half_size),
+            // Bottom 4 corners (using calculated dimensions)
+            base_pos + north * (-half_depth) + east * (-half_width),
+            base_pos + north * (-half_depth) + east * half_width,
+            base_pos + north * half_depth + east * half_width,
+            base_pos + north * half_depth + east * (-half_width),
             // Top 4 corners
-            top_pos + north * (-half_size) + east * (-half_size),
-            top_pos + north * (-half_size) + east * half_size,
-            top_pos + north * half_size + east * half_size,
-            top_pos + north * half_size + east * (-half_size),
+            top_pos + north * (-half_depth) + east * (-half_width),
+            top_pos + north * (-half_depth) + east * half_width,
+            top_pos + north * half_depth + east * half_width,
+            top_pos + north * half_depth + east * (-half_width),
         ];
         
         for pos in &box_vertices {
