@@ -205,15 +205,36 @@ pub fn parse_hgt_filename(filename: &str) -> Result<(i16, i16), Box<dyn std::err
 pub struct SrtmManager {
     tiles: std::collections::HashMap<(i16, i16), SrtmTile>,
     cache: crate::cache::DiskCache,
+    /// If true, only load from disk cache (no network fetches)
+    cache_only: bool,
 }
 
 impl SrtmManager {
     /// Create a new SRTM manager with the given cache
+    ///
+    /// By default, cache_only is false and will attempt network downloads.
     pub fn new(cache: crate::cache::DiskCache) -> Self {
         Self {
             tiles: std::collections::HashMap::new(),
             cache,
+            cache_only: false,
         }
+    }
+    
+    /// Create a cache-only SRTM manager (no network fetches)
+    ///
+    /// Use this to avoid blocking on HTTP requests during initialization.
+    pub fn cache_only(cache: crate::cache::DiskCache) -> Self {
+        Self {
+            tiles: std::collections::HashMap::new(),
+            cache,
+            cache_only: true,
+        }
+    }
+    
+    /// Enable or disable network fetching
+    pub fn set_network_enabled(&mut self, enabled: bool) {
+        self.cache_only = !enabled;
     }
     
     /// Get elevation at a GPS coordinate
@@ -246,7 +267,7 @@ impl SrtmManager {
     ///
     /// Tries (in order):
     /// 1) Project-local disk cache
-    /// 2) Several remote providers (attempts multiple URL patterns)
+    /// 2) Several remote providers (if cache_only is false)
     ///
     /// Returns None if tile isn't available or can't be parsed.
     fn load_tile(&self, lat: i16, lon: i16) -> Option<SrtmTile> {
@@ -263,6 +284,11 @@ impl SrtmManager {
         // 1) Try to load from cache
         if let Ok(bytes) = self.cache.read_srtm(&filename) {
             return parse_hgt(&filename, &bytes).ok();
+        }
+
+        // If cache-only mode, stop here
+        if self.cache_only {
+            return None;
         }
 
         // 2) Remote providers (multiple fallback URLs)

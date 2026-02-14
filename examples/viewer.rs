@@ -8,7 +8,7 @@ use metaverse_core::renderer::{
     mesh::{generate_earth_sphere, generate_tile_outlines, generate_terrain_patches, generate_chunk_patch_with_elevation, generate_buildings_from_osm},
     Renderer
 };
-use metaverse_core::osm::{load_chunk_osm_data, OverpassClient};
+use metaverse_core::osm::{load_chunk_osm_data, OverpassClient, OsmData};
 use metaverse_core::chunks::ChunkId;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation::SrtmManager;
@@ -256,23 +256,13 @@ impl ApplicationHandler for App {
                 usage: wgpu::BufferUsages::INDEX,
             });
             
-            // Initialize SRTM manager
+            // Initialize SRTM manager (cache-only to avoid blocking on network)
             let cache = DiskCache::new().unwrap();
-            let mut srtm = SrtmManager::new(cache);
+            let srtm = SrtmManager::cache_only(cache);
             
-            println!("Testing SRTM elevation queries:");
-            // Test Brisbane CBD
-            if let Some(elev) = srtm.get_elevation(-27.4698, 153.0251) {
-                println!("  Brisbane CBD: {}m elevation", elev);
-            } else {
-                println!("  Brisbane CBD: no data");
-            }
-            // Test hill location
-            if let Some(elev) = srtm.get_elevation(-27.5, 153.2) {
-                println!("  Test hill (-27.5, 153.2): {}m elevation", elev);
-            } else {
-                println!("  Test hill: no data");
-            }
+            println!("SRTM manager initialized (cache-only mode)");
+            println!("  Tiles will be loaded from .metaverse/cache/ if available");
+            println!("  To download tiles, use the standalone downloader script");
             
             self.srtm = Some(srtm);
             
@@ -306,10 +296,9 @@ impl ApplicationHandler for App {
             self.terrain_index_buffer = Some(terrain_index_buffer);
             self.terrain_num_indices = terrain_num_indices;
             
-            // Load OSM buildings for Brisbane CBD
-            println!("Loading OSM buildings for Brisbane CBD...");
+            // Load OSM buildings for Brisbane CBD (cache-only, no network)
+            println!("Loading OSM buildings from cache...");
             let cache = DiskCache::new().unwrap();
-            let client = OverpassClient::new(2); // 2 second cooldown
             
             // Brisbane CBD is roughly at chunk depth 14
             let brisbane_chunk = ChunkId {
@@ -318,15 +307,23 @@ impl ApplicationHandler for App {
             };
             
             let buildings_color = glam::Vec3::new(0.7, 0.7, 0.8); // Light gray/blue
-            let (buildings_vertices, buildings_indices) = match load_chunk_osm_data(&brisbane_chunk, 14, &client, &cache) {
-                Ok(osm_data) => {
-                    println!("Loaded {} buildings from OSM", osm_data.buildings.len());
+            
+            // Try to load from cache only (no network fetch during init)
+            let path_str = brisbane_chunk.path.iter().map(|q| q.to_string()).collect::<Vec<_>>().join("");
+            let cache_key = format!("chunk_d{}_f{}_{}", 14, brisbane_chunk.face, path_str);
+            
+            let (buildings_vertices, buildings_indices) = if let Ok(cached_bytes) = cache.read_osm(&cache_key) {
+                if let Ok(osm_data) = serde_json::from_slice::<OsmData>(&cached_bytes) {
+                    println!("Loaded {} buildings from cache", osm_data.buildings.len());
                     generate_buildings_from_osm(&osm_data, buildings_color)
-                }
-                Err(e) => {
-                    println!("Failed to load OSM data: {}, using empty", e);
+                } else {
+                    println!("Failed to parse cached OSM data, using empty");
                     (Vec::new(), Vec::new())
                 }
+            } else {
+                println!("No cached OSM data available");
+                println!("  To download OSM data, run: cargo run --example download_osm_data");
+                (Vec::new(), Vec::new())
             };
             
             let buildings_num_indices = buildings_indices.len() as u32;
