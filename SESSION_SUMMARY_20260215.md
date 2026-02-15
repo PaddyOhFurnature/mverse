@@ -171,3 +171,44 @@ Now that visual feedback works, we can systematically improve quality:
 ---
 
 **Status:** Visual feedback system operational. Ready to improve rendering quality systematically.
+
+---
+
+## Update: Geometry Density System Implemented
+
+### Problem Solved:
+Rendering 55k buildings across 10km spread geometry too thin - camera saw only sparse shapes.
+
+### Solution:
+**Distance-based filtering with no artificial caps**
+
+Implementation:
+- `generate_mesh_from_osm_filtered()` - accepts camera position and radius
+- Filters buildings/roads by distance from camera
+- GPU buffer (268MB) is only hard limit, not arbitrary counts
+- Detailed logging shows what's rendered vs filtered
+
+### Results:
+
+**500m radius test:**
+```
+Buildings: 261 rendered, 55,058 skipped (distance)
+Roads: 2,298 segments, 211,556 skipped (distance)  
+Buffer: 3.6MB (55x headroom remaining)
+```
+
+**Visual improvement:**
+- Buildings show proper 3D depth from all angles
+- Geometry concentrated around camera (not spread across 10km)
+- Foundation ready for movement-based streaming
+
+### Files Modified:
+- `src/svo_integration.rs` - Added filtered mesh generation
+- `examples/capture_screenshots.rs` - Uses 500m radius filtering
+
+### Commit:
+```
+9a4fae9 feat(mesh): distance-based geometry filtering for dense local coverage
+```
+
+**Status:** Distance filtering working. Ready for frustum culling and detail improvements.
