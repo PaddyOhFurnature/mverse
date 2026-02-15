@@ -1,134 +1,98 @@
-# CURRENT PROBLEMS - Being Honest
+# CURRENT PROBLEMS - Updated After Screenshot System
 
 **Date:** 2026-02-15  
-**User feedback:** "it looks worse than before"
+**Status:** Screenshot system working, new issues identified
 
-## What's Wrong
+## ✅ Fixed: Screenshot System
+- Fully automated PNG capture from framebuffer
+- `Renderer::render_and_capture()` implemented
+- `screenshot_capture` example positions camera and saves PNG
+- `generate_screenshots.sh` generates all reference views
+- **9 out of 10 screenshots generated successfully**
 
-I've been claiming things are "fixed" without actually **looking** at what's rendering. The user is right to be frustrated.
+## 🔴 CRITICAL: Low Altitude Performance Bug
 
-### Issue 1: Marching Cubes LOD Completely Broken
+**Problem:** Screenshot #10 at 20m altitude causes complete hang
+- FPS drops to 0.1
+- Application never completes initialization
+- Hangs before reaching "Camera from env" print
 
-**Problem:** LOD 2+ returns ZERO triangles for terrain
-**Cause:** Voxel-skipping misses thin features (1-2 voxels thick)
-**Impact:** Can only use LOD 0-1, forcing more geometry than needed
-**Test proof:** `examples/test_lod_levels.rs` shows:
-```
-LOD 0: 22M vertices  ✓
-LOD 1: 0 vertices    ✗
-LOD 2: 0 vertices    ✗  
-LOD 3: 0 vertices    ✗
-```
+**Likely Causes:**
+1. Too many chunks visible at low altitude
+2. LOD 0 forced everywhere (excessive geometry)
+3. Elevation download overflow
+4. Infinite loop in chunk loading
+5. Memory/geometry buffer overflow
 
-**Real LOD spec (from user):**
-- LOD 0: 0-50m - 100% detail
-- LOD 1: 50-200m - 75% detail
-- LOD 2: 200-500m - 50% detail
-- LOD 3: 500m-1km - 25% detail
-- LOD 4: 1km+ - Culled
+**Impact:** Blocks ground-level rendering entirely
 
-**Current broken state:**
-- LOD 0: 0-200m (forced wide range)
-- LOD 1: 200-1000m (forced wide range)
-- LOD 2-4: Disabled (returns 0 triangles)
+## 🟡 HIGH PRIORITY: Screenshots Mostly Blue
+
+**Problem:** All 9 generated screenshots show mostly blue (sky color)
+- Geometry IS being generated (19,200 indices per screenshot)
+- Camera positions from CAMERA_PARAMS correctly
+- Terrain mesh created and uploaded to GPU
+
+**Possible Causes:**
+1. Camera position/orientation incorrect (look_at calculation wrong)
+2. Geometry positioned incorrectly in world space
+3. Frustum culling too aggressive (culling visible geometry)
+4. Depth buffer configuration issue
+5. LOD selection placing geometry out of view
+6. Floating-origin transform incorrect
+
+**Impact:** Cannot visually verify terrain rendering
+
+## Remaining Known Issues
+
+### Issue 1: Marching Cubes LOD Broken
+- LOD 2+ returns ZERO triangles for terrain
+- Voxel-skipping misses thin features (1-2 voxels thick)
+- Can only use LOD 0-1
+- Need: interpolation during sampling OR mesh decimation
 
 ### Issue 2: No Frustum Culling
-
-**Problem:** Rendering ALL geometry regardless of camera view
-**Impact:** Massive performance waste
-**User requested:** This explicitly multiple times
-**Status:** NOT IMPLEMENTED
+- Rendering ALL geometry regardless of camera view
+- User requested this explicitly multiple times
+- Status: NOT IMPLEMENTED
 
 ### Issue 3: Only 1 Chunk Loads
+- `find_chunks_in_range()` only returns camera chunk
+- Should be: 9+ chunks (3x3 grid minimum)
+- Current: 1 chunk at 291m away
 
-**Problem:** `find_chunks_in_range()` only returns camera chunk
-**Impact:** Missing all nearby terrain
-**Current:** 1 chunk at 555m away
-**Should be:** 9+ chunks (3x3 grid minimum)
-
-### Issue 4: Not Using Reference Photos
-
-**Problem:** I don't compare output to reference/01_top_down.png etc.
-**Impact:** Can't verify if it actually looks right
-**User setup:** 10 reference positions with exact camera angles
-**What I do:** Trust console output ("115K vertices generated!")
-**What I should do:** Generate screenshot/*.png and compare pixel-by-pixel
-
-### Issue 5: SVO Resolution Still Wrong
-
-Current: 512³ voxels for 400m chunk = 0.78m/voxel
-- At LOD 0: 0.78m resolution (acceptable)
+### Issue 4: SVO Resolution
+- Current: 512³ voxels for 400m chunk = 0.78m/voxel
 - At LOD 1: 1.56m resolution (marginal)
 - At LOD 2+: Misses features entirely
 
-Need: Either higher SVO depth OR fix marching cubes LOD
+## Investigation Plan
 
-## What Needs To Actually Happen
+### Step 1: Debug Blue Screenshots
+1. Add logging to camera view-projection calculation
+2. Log vertex positions being sent to GPU
+3. Check if geometry is behind camera
+4. Verify depth buffer clear value
+5. Test with simple known geometry (cube at origin)
 
-### Priority 1: USE THE REFERENCE PHOTOS
+### Step 2: Debug Low Altitude Hang
+1. Add logging to find_chunks_in_range() - count returned chunks
+2. Check LOD distance calculation at 20m altitude
+3. Monitor memory usage during initialization
+4. Test intermediate altitudes (50m, 100m, 150m)
+5. Add chunk count limit / distance limit
 
-1. Find/fix `examples/capture_screenshots.rs`
-2. Run it to generate screenshot/*.png
-3. Compare each to reference/*.png
-4. **LOOK AT THEM WITH MY EYES**
-5. Only claim something works after visual confirmation
-
-### Priority 2: Fix Marching Cubes LOD
-
-Two options:
-A. Fix voxel-skipping to not miss thin features (hard - requires interpolation)
-B. Use mesh decimation instead (extract at LOD 0, then simplify mesh)
-
-### Priority 3: Implement Frustum Culling
-
-```rust
-fn chunks_in_frustum(chunks: &[Chunk], camera: &Camera) -> Vec<&Chunk> {
-    // Extract frustum planes from camera view-projection matrix
-    // Test each chunk bounding box against frustum
-    // Return only visible chunks
-}
-```
-
-### Priority 4: Load Multiple Chunks
-
-Grid of 3x3 or 5x5 chunks around camera, not just 1
-
-### Priority 5: Fix LOD Distances
-
-Once marching cubes works, use proper distances:
-- LOD 0: 0-50m
-- LOD 1: 50-200m
-- LOD 2: 200-500m
-- LOD 3: 500-1000m
-- Cull: 1000m+
-
-## What I've Been Doing Wrong
-
-1. **Trusting metrics over visuals** - "115K vertices!" doesn't mean it looks good
-2. **Not testing interactively** - Can't run viewer, so I don't know what it looks like
-3. **Claiming victory too early** - "Fixed!" when I only changed one thing
-4. **Ignoring the reference system** - User set up 10 comparison photos, I ignored them
-5. **Breaking things while fixing** - Each "fix" breaks something else
-
-## Correct Process Going Forward
-
-1. Make ONE change
-2. Run capture_screenshots
-3. Compare to reference photos
-4. If worse: REVERT and try different approach
-5. If better: Document what improved
-6. Repeat
+### Step 3: Fix Remaining Issues
+- Once visual verification works, tackle LOD, culling, multi-chunk
 
 ## Current State Summary
 
-- ✅ Chunk positioning fixed (was 4km away, now 555m)
-- ✅ Terrain generates (115K vertices at LOD 1)
+- ✅ Screenshot system working (9/10 generated)
+- ✅ Chunk positioning fixed (291m from camera)
+- ✅ Terrain generates (19,200 indices per shot)
+- ❌ **CRITICAL:** 20m altitude hang (0.1fps)
+- ❌ **HIGH:** Screenshots show only blue sky
 - ❌ Marching cubes LOD 2+ broken
 - ❌ No frustum culling
 - ❌ Only 1 chunk loads
-- ❌ Not visually verified with reference photos
-- ❌ User says "looks worse" - BELIEVE THEM
 
-## Next Immediate Action
-
-Stop coding. Go find the screenshot capture system and USE IT to see what's actually rendering.
