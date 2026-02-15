@@ -9,7 +9,7 @@ pub mod elevation;
 pub mod elevation_sources;
 pub mod elevation_downloader;
 pub mod srtm_downloader;
-pub mod terrain_mesh;  // Terrain mesh generation from SRTM
+// pub mod terrain_mesh;  // REMOVED - bypassed SVO pipeline
 pub mod renderer;
 
 #[cfg(test)]
@@ -19,4 +19,4 @@ pub mod osm_features;
 pub mod marching_cubes;
 pub mod mesh_generation;
 pub mod materials;
-pub mod svo_integration;
+// pub mod svo_integration;  // REMOVED - bypassed SVO pipeline

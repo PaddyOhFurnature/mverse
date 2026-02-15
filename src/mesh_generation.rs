@@ -5,6 +5,7 @@
 
 use crate::svo::{SparseVoxelOctree, MaterialId, AIR};
 use crate::marching_cubes::{extract_mesh, Triangle, Vertex};
+use crate::materials::{MaterialColors, Color};
 use std::collections::HashMap;
 
 /// Renderable mesh with vertices and indices
@@ -13,6 +14,25 @@ pub struct Mesh {
     pub vertices: Vec<f32>,      // Packed: [x, y, z, nx, ny, nz, ...]
     pub indices: Vec<u32>,        // Triangle indices
     pub material: MaterialId,
+}
+
+/// GPU-ready vertex format with color
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ColoredVertex {
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub color: [f32; 4], // RGBA
+}
+
+impl ColoredVertex {
+    pub fn new(position: [f32; 3], normal: [f32; 3], color: [f32; 3]) -> Self {
+        Self {
+            position,
+            normal,
+            color: [color[0], color[1], color[2], 1.0],
+        }
+    }
 }
 
 /// Multi-LOD mesh set for a chunk
@@ -190,6 +210,57 @@ pub fn merge_coplanar_faces(mesh: &Mesh) -> Mesh {
     // TODO: Implement face merging
     // For now, return unmodified
     mesh.clone()
+}
+
+/// Convert SVO meshes to GPU-ready colored vertices
+///
+/// Unpacks packed f32 vertices and applies material colors.
+///
+/// # Arguments
+/// * `meshes` - Vector of SVO meshes (one per material)
+/// * `material_colors` - Material color palette
+///
+/// # Returns
+/// (vertices, indices) ready for GPU upload
+pub fn svo_meshes_to_colored_vertices(
+    meshes: &[Mesh],
+    material_colors: &MaterialColors,
+) -> (Vec<ColoredVertex>, Vec<u32>) {
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    let mut vertex_offset = 0u32;
+    
+    for mesh in meshes {
+        let color = material_colors.get_color(mesh.material);
+        let color_array = [color.r, color.g, color.b];
+        
+        // Unpack vertices: [x,y,z, nx,ny,nz, ...] -> ColoredVertex
+        let vertex_count = mesh.vertices.len() / 6;
+        for i in 0..vertex_count {
+            let base = i * 6;
+            let position = [
+                mesh.vertices[base],
+                mesh.vertices[base + 1],
+                mesh.vertices[base + 2],
+            ];
+            let normal = [
+                mesh.vertices[base + 3],
+                mesh.vertices[base + 4],
+                mesh.vertices[base + 5],
+            ];
+            
+            all_vertices.push(ColoredVertex::new(position, normal, color_array));
+        }
+        
+        // Offset indices and append
+        for &idx in &mesh.indices {
+            all_indices.push(idx + vertex_offset);
+        }
+        
+        vertex_offset += vertex_count as u32;
+    }
+    
+    (all_vertices, all_indices)
 }
 
 #[cfg(test)]

@@ -7,7 +7,11 @@ use metaverse_core::renderer::{camera::Camera, pipeline::BasicPipeline, Renderer
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation::SrtmManager;
-use metaverse_core::svo_integration::generate_mesh_from_osm_filtered;
+use metaverse_core::svo::SparseVoxelOctree;
+use metaverse_core::terrain::generate_terrain_from_elevation;
+use metaverse_core::mesh_generation::{generate_mesh, svo_meshes_to_colored_vertices};
+use metaverse_core::materials::MaterialColors;
+use metaverse_core::osm_features::carve_river;
 use metaverse_core::coordinates::{gps_to_ecef, GpsPos};
 use std::sync::Arc;
 use std::fs;
@@ -347,46 +351,72 @@ impl ApplicationHandler for ScreenshotApp {
             srtm.set_network_enabled(false); // Use cached tiles only (no network during capture)
             println!("SRTM manager initialized (procedural fallback enabled)");
             
-            // Generate terrain mesh from SRTM data
-            use metaverse_core::terrain_mesh::{generate_terrain_mesh, generate_water_plane};
-            println!("\nGenerating terrain mesh...");
-            let (terrain_verts, terrain_inds) = generate_terrain_mesh(
-                &TEST_GPS,
-                5000.0,  // 5km radius to match building render distance
-                100.0,   // 100m grid spacing (50x50 grid)
-                &mut srtm,
-            );
-            println!("  Terrain: {} vertices, {} indices", terrain_verts.len(), terrain_inds.len());
+            // === SVO PIPELINE APPROACH ===
+            println!("\n=== Building SVO World ===");
             
-            // Generate water plane at sea level (0m) for Brisbane River
-            let (water_verts, water_inds) = generate_water_plane(
-                &TEST_GPS,
-                5000.0,  // 5km radius
-                0.0,     // Sea level
-            );
-            println!("  Water: {} vertices, {} indices", water_verts.len(), water_inds.len());
+            // Create SVO (depth 8 = 256^3 for 5km area)
+            let depth = 8;
+            let mut svo = SparseVoxelOctree::new(depth);
+            let svo_size = 1u32 << depth;
+            println!("✓ SVO: {}^3 voxels", svo_size);
             
-            // Generate building/road mesh with distance filtering AND terrain elevation
-            // Use 5000m radius to match reference image detail level
-            let (mut vertices, mut indices) = generate_mesh_from_osm_filtered(
-                &osm_data,
-                Some(&TEST_GPS),
-                5000.0, // 5km radius - matches reference detail
-                Some(&mut srtm), // Enable terrain elevation
-            );
-            println!("  Buildings/roads: {} vertices, {} indices", vertices.len(), indices.len());
+            // Area size and voxel size
+            let area_size = 5000.0; // 5km radius to match reference
+            let voxel_size = area_size / svo_size as f64;
+            println!("  Voxel size: {:.2}m", voxel_size);
+            println!("  Coverage: {:.0}m × {:.0}m", area_size, area_size);
             
-            // Merge terrain mesh with building/road mesh
-            let index_offset = vertices.len() as u32;
-            vertices.extend_from_slice(&terrain_verts);
-            indices.extend(terrain_inds.iter().map(|i| i + index_offset));
+            // Voxelize terrain from SRTM
+            println!("\nVoxelizing terrain from SRTM...");
+            let elevation_fn = |lat: f64, lon: f64| -> Option<f32> {
+                srtm.get_elevation(lat, lon).map(|e| e as f32)
+            };
             
-            // Add water plane UNDER terrain (render first, terrain will occlude where needed)
-            let water_offset = vertices.len() as u32;
-            vertices.extend_from_slice(&water_verts);
-            indices.extend(water_inds.iter().map(|i| i + water_offset));
+            let coords_fn = |x: u32, y: u32, z: u32| -> GpsPos {
+                let half = svo_size as f64 / 2.0;
+                let dx = (x as f64 - half) * voxel_size;
+                let dy = (y as f64 - half) * voxel_size;
+                let dz = (z as f64 - half) * voxel_size;
+                
+                let lat_deg = TEST_GPS.lat_deg + (dz / 111_000.0);
+                let lon_deg = TEST_GPS.lon_deg + (dx / (111_000.0 * TEST_GPS.lat_deg.to_radians().cos()));
+                let elevation_m = dy;
+                
+                GpsPos { lat_deg, lon_deg, elevation_m }
+            };
             
-            println!("  Combined: {} vertices, {} indices\n", vertices.len(), indices.len());
+            generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
+            println!("✓ Terrain voxelized (STONE/DIRT/AIR)");
+            
+            // Carve rivers via CSG
+            if !osm_data.water.is_empty() {
+                println!("\nCarving {} water features...", osm_data.water.len());
+                let chunk_center = gps_to_ecef(&TEST_GPS);
+                
+                for (i, water) in osm_data.water.iter().enumerate().take(10) {
+                    if water.polygon.len() >= 2 {
+                        carve_river(&mut svo, &chunk_center, "river", &water.polygon, 30.0, voxel_size);
+                    }
+                    if (i + 1) % 5 == 0 {
+                        println!("  Carved {}/{} rivers", i+1, 10.min(osm_data.water.len()));
+                    }
+                }
+            }
+            
+            // Extract mesh via marching cubes
+            println!("\nExtracting mesh via marching cubes...");
+            let meshes = generate_mesh(&svo, 0);
+            
+            let total_verts: usize = meshes.iter().map(|m| m.vertices.len() / 6).sum();
+            let total_tris: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
+            println!("✓ Extracted {} material meshes:", meshes.len());
+            println!("  {} vertices, {} triangles", total_verts, total_tris);
+            
+            // Convert to ColoredVertex format
+            println!("\nConverting to GPU format...");
+            let material_colors = MaterialColors::default_palette();
+            let (vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
+            println!("✓ {} colored vertices, {} indices\n", vertices.len(), indices.len());
     
             // Create buffers
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
