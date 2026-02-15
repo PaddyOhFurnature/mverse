@@ -397,15 +397,16 @@ impl ApplicationHandler for ScreenshotApp {
             generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
             println!("✓ Terrain voxelized (STONE/DIRT/AIR)");
             
+            let center_ground = GpsPos {
+                lat_deg: TEST_GPS.lat_deg,
+                lon_deg: TEST_GPS.lon_deg,
+                elevation_m: 0.0,
+            };
+            let chunk_center = gps_to_ecef(&center_ground);
+            
             // Carve rivers via CSG
             if !osm_data.water.is_empty() {
                 println!("\nCarving {} water features...", osm_data.water.len());
-                let center_ground = GpsPos {
-                    lat_deg: TEST_GPS.lat_deg,
-                    lon_deg: TEST_GPS.lon_deg,
-                    elevation_m: 0.0,
-                };
-                let chunk_center = gps_to_ecef(&center_ground);
                 
                 for (i, water) in osm_data.water.iter().enumerate().take(10) {
                     if water.polygon.len() >= 2 {
@@ -415,6 +416,40 @@ impl ApplicationHandler for ScreenshotApp {
                         println!("  Carved {}/{} rivers", i+1, 10.min(osm_data.water.len()));
                     }
                 }
+            }
+            
+            // Add roads
+            use metaverse_core::osm_features::place_road;
+            if !osm_data.roads.is_empty() {
+                println!("\nPlacing {} roads...", osm_data.roads.len());
+                let mut roads_placed = 0;
+                for road in osm_data.roads.iter().take(1000) {
+                    if road.nodes.len() >= 2 {
+                        place_road(&mut svo, &chunk_center, "road", &road.nodes, voxel_size);
+                        roads_placed += 1;
+                        if roads_placed % 200 == 0 {
+                            println!("  Placed {}/1000 roads", roads_placed);
+                        }
+                    }
+                }
+                println!("✓ Placed {} roads", roads_placed);
+            }
+            
+            // Add buildings
+            use metaverse_core::osm_features::add_building;
+            if !osm_data.buildings.is_empty() {
+                println!("\nAdding {} buildings...", osm_data.buildings.len());
+                let mut buildings_added = 0;
+                for building in osm_data.buildings.iter().take(5000) {
+                    if building.polygon.len() >= 3 {
+                        add_building(&mut svo, &chunk_center, building, voxel_size);
+                        buildings_added += 1;
+                        if buildings_added % 1000 == 0 {
+                            println!("  Added {}/5000 buildings", buildings_added);
+                        }
+                    }
+                }
+                println!("✓ Added {} buildings", buildings_added);
             }
             
             // Extract mesh via marching cubes
