@@ -226,7 +226,7 @@ impl App {
             let mut all_vertices = Vec::new();
             let mut all_indices = Vec::new();
             
-            for (meshes, chunk_center) in chunk_meshes {
+            for (meshes, chunk_center, chunk_id) in chunk_meshes {
                 if meshes.is_empty() {
                     continue;
                 }
@@ -234,15 +234,22 @@ impl App {
                 // Convert meshes to colored vertices (still in voxel space)
                 let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
                 
+                // Get exact GPS bounds for this chunk
+                let (sw, ne) = metaverse_core::chunks::chunk_bounds_gps(&chunk_id).unwrap();
+                
+                // Calculate actual chunk size (same as world_manager.rs)
+                let lat_span = (ne.lat_deg - sw.lat_deg).abs() * 111_000.0;
+                let lon_span = (ne.lon_deg - sw.lon_deg).abs() * 111_000.0 * sw.lat_deg.to_radians().cos();
+                let area_size = lat_span.max(lon_span);
+                
                 // Transform from voxel space to ECEF
-                // Voxels are centered at chunk_center with voxel_size spacing
                 let svo_size = 1u32 << world_manager.svo_depth();
-                let voxel_size = 1000.0 / svo_size as f64; // ~1km chunk / 1024 voxels = ~1m voxels
+                let voxel_size = area_size / svo_size as f64; // Correct voxel size based on actual chunk area
                 let half = svo_size as f32 / 2.0;
                 let voxel_to_meters = voxel_size as f32;
                 
-                // Convert chunk center to GPS for ENU transform
                 let center_gps = ecef_to_gps(&chunk_center);
+                println!("[DEBUG] Chunk area: {:.0}m, voxel size: {:.2}m", area_size, voxel_size);
                 
                 for vertex in &mut vertices {
                     // Map voxel coords to ENU relative to chunk center

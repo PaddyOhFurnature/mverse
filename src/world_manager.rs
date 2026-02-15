@@ -52,6 +52,11 @@ impl WorldManager {
         self.svo_depth
     }
     
+    /// Get chunk depth (for coordinate transforms)
+    pub fn chunk_depth(&self) -> usize {
+        self.chunk_depth
+    }
+    
     /// Update loaded chunks based on camera position
     pub fn update(&mut self, camera_pos: &EcefPos, srtm: &mut SrtmManager, osm_data: &OsmData) -> usize {
         // Check if camera moved significantly
@@ -137,10 +142,11 @@ impl WorldManager {
     }
     
     /// Extract meshes for all loaded chunks at appropriate LOD
-    pub fn extract_meshes(&self, camera_pos: &EcefPos) -> Vec<(Vec<Mesh>, EcefPos)> {
+    /// Returns Vec of (meshes, chunk_center, chunk_id)
+    pub fn extract_meshes(&self, camera_pos: &EcefPos) -> Vec<(Vec<Mesh>, EcefPos, ChunkId)> {
         let mut results = Vec::new();
         
-        for (_id, chunk) in &self.chunks {
+        for (id, chunk) in &self.chunks {
             println!("[extract_meshes] Camera ECEF: ({:.1}, {:.1}, {:.1})", 
                 camera_pos.x, camera_pos.y, camera_pos.z);
             println!("[extract_meshes] Chunk center ECEF: ({:.1}, {:.1}, {:.1})", 
@@ -174,7 +180,7 @@ impl WorldManager {
             for (i, mesh) in meshes.iter().enumerate() {
                 println!("  Mesh {}: {} vertices", i, mesh.vertices.len());
             }
-            results.push((meshes, chunk.center));
+            results.push((meshes, chunk.center.clone(), id.clone()));
         }
         
         println!("[extract_meshes] Returning {} chunk results", results.len());
