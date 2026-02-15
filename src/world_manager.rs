@@ -205,17 +205,12 @@ impl WorldManager {
             println!("[extract_meshes] Delta: ({:.1}, {:.1}, {:.1})", dx, dy, dz);
             println!("[extract_meshes] Chunk distance: {:.1}m", distance);
             
-            // For now: only render LOD 0-1 (LOD 2+ has marching cubes bug with thin features)
-            // TODO: Fix marching cubes to handle LOD properly or use mesh decimation instead
-            let lod = if distance < 200.0 {
-                0  // LOD 0: 0-200m - Full detail
-            } else if distance < 1000.0 {
-                1  // LOD 1: 200-1000m - Half detail
+            let lod = if distance < 600.0 {
+                0  // LOD 0: 0-600m - Full detail (depth 7 = 128³ generates ~240k verts, acceptable)
             } else {
-                // Beyond 1km: Don't render
+                // Beyond 600m: Don't render for now (LOD 1+ has marching cubes stepping bug)
                 continue;
             };
-            
             println!("[extract_meshes] Using LOD {} for distance {:.1}m", lod, distance);
             
             // Extract mesh at selected LOD
