@@ -9,9 +9,15 @@ use metaverse_core::renderer::{
 };
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
+use metaverse_core::elevation::SrtmManager;
 use metaverse_core::elevation_downloader::ElevationDownloader;
 use metaverse_core::chunk_manager::ChunkManager;
-use metaverse_core::svo_integration::generate_mesh_from_osm;
+use metaverse_core::svo::SparseVoxelOctree;
+use metaverse_core::terrain::generate_terrain_from_elevation;
+use metaverse_core::mesh_generation::{generate_mesh, svo_meshes_to_colored_vertices};
+use metaverse_core::materials::MaterialColors;
+use metaverse_core::osm_features::carve_river;
+use metaverse_core::coordinates::{gps_to_ecef, GpsPos};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -227,15 +233,80 @@ impl ApplicationHandler for App {
                 10000.0 // 10km render distance
             );
             
-            // Generate mesh from chunks around camera
+            // Generate mesh using SVO pipeline
             let (mesh_vertices, mesh_indices) = if let Some(ref osm_data) = full_osm_data {
-                println!("Generating mesh from OSM data using chunked loading...");
+                println!("=== Building SVO World ===");
                 
-                // For initial load, just use the full dataset
-                // TODO: In frame update loop, use chunk_manager.update() to load only nearby chunks
-                let result = generate_mesh_from_osm(osm_data);
-                println!("[DEBUG] Generated {} vertices, {} indices", result.0.len(), result.1.len());
-                result
+                // Story Bridge area
+                let center = GpsPos {
+                    lat_deg: -27.463697,
+                    lon_deg: 153.035725,
+                    elevation_m: 0.0,
+                };
+                
+                // Initialize SRTM
+                let cache_for_srtm = DiskCache::new().expect("Failed to create cache");
+                let mut srtm = SrtmManager::new(cache_for_srtm);
+                srtm.set_network_enabled(false);
+                
+                // Create SVO (depth 8 = 256^3 for 5km area)
+                let depth = 8;
+                let mut svo = SparseVoxelOctree::new(depth);
+                let svo_size = 1u32 << depth;
+                println!("✓ SVO: {}^3 voxels", svo_size);
+                
+                let area_size = 5000.0; // 5km
+                let voxel_size = area_size / svo_size as f64;
+                println!("  Voxel size: {:.2}m", voxel_size);
+                
+                // Voxelize terrain
+                println!("Voxelizing terrain from SRTM...");
+                let elevation_fn = |lat: f64, lon: f64| -> Option<f32> {
+                    srtm.get_elevation(lat, lon).map(|e| e as f32)
+                };
+                
+                let coords_fn = |x: u32, y: u32, z: u32| -> GpsPos {
+                    let half = svo_size as f64 / 2.0;
+                    let dx = (x as f64 - half) * voxel_size;
+                    let dy = (y as f64 - half) * voxel_size;
+                    let dz = (z as f64 - half) * voxel_size;
+                    
+                    let lat_deg = center.lat_deg + (dz / 111_000.0);
+                    let lon_deg = center.lon_deg + (dx / (111_000.0 * center.lat_deg.to_radians().cos()));
+                    let elevation_m = dy;
+                    
+                    GpsPos { lat_deg, lon_deg, elevation_m }
+                };
+                
+                generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
+                println!("✓ Terrain voxelized");
+                
+                // Carve rivers
+                if !osm_data.water.is_empty() {
+                    println!("Carving {} water features...", osm_data.water.len());
+                    let chunk_center = gps_to_ecef(&center);
+                    
+                    for (_i, water) in osm_data.water.iter().enumerate().take(10) {
+                        if water.polygon.len() >= 2 {
+                            carve_river(&mut svo, &chunk_center, "river", &water.polygon, 30.0, voxel_size);
+                        }
+                    }
+                    println!("✓ Carved {} rivers", 10.min(osm_data.water.len()));
+                }
+                
+                // Extract mesh
+                println!("Extracting mesh via marching cubes...");
+                let meshes = generate_mesh(&svo, 0);
+                
+                let total_verts: usize = meshes.iter().map(|m| m.vertices.len() / 6).sum();
+                println!("✓ Extracted {} material meshes ({} vertices)", meshes.len(), total_verts);
+                
+                // Convert to GPU format
+                let material_colors = MaterialColors::default_palette();
+                let (vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
+                println!("✓ {} colored vertices ready for GPU\n", vertices.len());
+                
+                (vertices, indices)
             } else {
                 println!("No cached OSM data available");
                 println!("  Run: cargo run --example download_brisbane_data");
