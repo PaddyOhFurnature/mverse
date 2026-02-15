@@ -43,6 +43,11 @@ impl WorldManager {
         }
     }
     
+    /// Get SVO depth (for coordinate transforms)
+    pub fn svo_depth(&self) -> u8 {
+        self.svo_depth
+    }
+    
     /// Update loaded chunks based on camera position
     pub fn update(&mut self, camera_pos: &EcefPos, srtm: &mut SrtmManager, osm_data: &OsmData) -> usize {
         // Check if camera moved significantly

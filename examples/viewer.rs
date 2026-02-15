@@ -15,7 +15,7 @@ use metaverse_core::chunk_manager::ChunkManager;
 use metaverse_core::world_manager::WorldManager;
 use metaverse_core::mesh_generation::svo_meshes_to_colored_vertices;
 use metaverse_core::materials::MaterialColors;
-use metaverse_core::coordinates::{gps_to_ecef, enu_to_ecef, GpsPos, EnuPos};
+use metaverse_core::coordinates::{gps_to_ecef, enu_to_ecef, ecef_to_gps, GpsPos, EnuPos, EcefPos};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -121,6 +121,93 @@ impl App {
         
         self.camera.speed_multiplier = original_multiplier;
     }
+    
+    fn update_world_chunks(&mut self) {
+        // Update WorldManager and extract visible meshes
+        if let (Some(world_manager), Some(srtm), Some(osm_data), Some(renderer)) = 
+            (&mut self.world_manager, &mut self.srtm, &self.full_osm_data, &self.renderer) {
+            
+            // Convert camera to EcefPos
+            let camera_ecef = EcefPos {
+                x: self.camera.position.x,
+                y: self.camera.position.y,
+                z: self.camera.position.z,
+            };
+            
+            // Update chunks based on camera position
+            world_manager.update(&camera_ecef, srtm, osm_data);
+            
+            // Extract all visible chunks with their meshes
+            let chunk_meshes = world_manager.extract_meshes(&camera_ecef);
+            
+            if chunk_meshes.is_empty() {
+                return;
+            }
+            
+            // Convert all chunk meshes to GPU format and transform to ECEF
+            let material_colors = MaterialColors::default_palette();
+            let mut all_vertices = Vec::new();
+            let mut all_indices = Vec::new();
+            
+            for (meshes, chunk_center) in chunk_meshes {
+                if meshes.is_empty() {
+                    continue;
+                }
+                
+                // Convert meshes to colored vertices (still in voxel space)
+                let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
+                
+                // Transform from voxel space to ECEF
+                // Voxels are centered at chunk_center with voxel_size spacing
+                let svo_size = 1u32 << world_manager.svo_depth();
+                let voxel_size = 1000.0 / svo_size as f64; // ~1km chunk / 1024 voxels = ~1m voxels
+                let half = svo_size as f32 / 2.0;
+                let voxel_to_meters = voxel_size as f32;
+                
+                // Convert chunk center to GPS for ENU transform
+                let center_gps = ecef_to_gps(&chunk_center);
+                
+                for vertex in &mut vertices {
+                    // Map voxel coords to ENU relative to chunk center
+                    let enu = EnuPos {
+                        east: ((vertex.position[0] - half) * voxel_to_meters) as f64,
+                        north: ((vertex.position[2] - half) * voxel_to_meters) as f64,
+                        up: ((vertex.position[1] - half) * voxel_to_meters) as f64,
+                    };
+                    
+                    // Transform to ECEF
+                    let pos_ecef = enu_to_ecef(&enu, &chunk_center, &center_gps);
+                    vertex.position = [pos_ecef.x as f32, pos_ecef.y as f32, pos_ecef.z as f32];
+                }
+                
+                // Append to combined buffers (adjust indices for offset)
+                let vertex_offset = all_vertices.len() as u32;
+                all_vertices.extend(vertices);
+                all_indices.extend(indices.iter().map(|i| i + vertex_offset));
+            }
+            
+            if all_vertices.is_empty() || all_indices.is_empty() {
+                return;
+            }
+            
+            // Update GPU buffers
+            let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Mesh Vertex Buffer"),
+                contents: bytemuck::cast_slice(&all_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            
+            let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Chunk Mesh Index Buffer"),
+                contents: bytemuck::cast_slice(&all_indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+            
+            self.vertex_buffer = Some(vertex_buffer);
+            self.index_buffer = Some(index_buffer);
+            self.num_indices = all_indices.len() as u32;
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -141,7 +228,6 @@ impl ApplicationHandler for App {
             
             // Create pipeline
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
-            self.pipeline = Some(pipeline);
             
             // Initialize elevation downloader with multi-source support
             let cache = DiskCache::new().unwrap();
@@ -209,178 +295,47 @@ impl ApplicationHandler for App {
                 }
             }
             
-            // Initialize chunk manager
-            let chunk_manager = ChunkManager::new(
-                9,      // Depth 9 = ~60km chunks (city districts)
-                10000.0 // 10km render distance
-            );
+            // Initialize SRTM for terrain data
+            let cache_for_srtm = DiskCache::new().expect("Failed to create cache for SRTM");
+            let mut srtm = SrtmManager::new(cache_for_srtm);
+            srtm.set_network_enabled(false);
             
-            // Generate mesh using SVO pipeline
-            let (mesh_vertices, mesh_indices) = if let Some(ref osm_data) = full_osm_data {
-                println!("=== Building SVO World ===");
-                
-                // Story Bridge area
-                let center = GpsPos {
-                    lat_deg: -27.463697,
-                    lon_deg: 153.035725,
-                    elevation_m: 0.0,
-                };
-                
-                // Initialize SRTM
-                let cache_for_srtm = DiskCache::new().expect("Failed to create cache");
-                let mut srtm = SrtmManager::new(cache_for_srtm);
-                srtm.set_network_enabled(false);
-                
-                // Create SVO for LOD 0 (0-50m range, high detail)
-                let depth = 8;  // 256^3 - manageable memory
-                let mut svo = SparseVoxelOctree::new(depth);
-                let svo_size = 1u32 << depth;
-                
-                let area_size = 100.0; // 100m coverage (50m radius)
-                let voxel_size = area_size / svo_size as f64;
-                println!("✓ SVO: {}^3 voxels", svo_size);
-                println!("  LOD 0 (0-50m): {:.0}m coverage", area_size);
-                println!("  Voxel size: {:.2}cm", voxel_size * 100.0);
-                
-                // Voxelize terrain
-                println!("Voxelizing terrain from SRTM...");
-                let elevation_fn = |lat: f64, lon: f64| -> Option<f32> {
-                    srtm.get_elevation(lat, lon).map(|e| e as f32)
-                };
-                
-                let coords_fn = |x: u32, y: u32, z: u32| -> GpsPos {
-                    let half = svo_size as f64 / 2.0;
-                    let dx = (x as f64 - half) * voxel_size;
-                    let dy = (y as f64 - half) * voxel_size;
-                    let dz = (z as f64 - half) * voxel_size;
-                    
-                    let lat_deg = center.lat_deg + (dz / 111_000.0);
-                    let lon_deg = center.lon_deg + (dx / (111_000.0 * center.lat_deg.to_radians().cos()));
-                    let elevation_m = dy;
-                    
-                    GpsPos { lat_deg, lon_deg, elevation_m }
-                };
-                
-                generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
-                println!("✓ Terrain voxelized");
-                
-                let chunk_center = gps_to_ecef(&center);
-                
-                // Carve rivers
-                if !osm_data.water.is_empty() {
-                    println!("Carving {} water features...", osm_data.water.len());
-                    for (_i, water) in osm_data.water.iter().enumerate().take(10) {
-                        if water.polygon.len() >= 2 {
-                            carve_river(&mut svo, &chunk_center, "river", &water.polygon, 30.0, voxel_size);
-                        }
-                    }
-                    println!("✓ Carved {} rivers", 10.min(osm_data.water.len()));
-                }
-                
-                // Add roads (within LOD 0 range)
-                use metaverse_core::osm_features::place_road;
-                if !osm_data.roads.is_empty() {
-                    println!("Placing roads (LOD 0)...");
-                    let mut roads_placed = 0;
-                    for road in osm_data.roads.iter().take(50) {
-                        if road.nodes.len() >= 2 {
-                            place_road(&mut svo, &chunk_center, "road", &road.nodes, voxel_size);
-                            roads_placed += 1;
-                        }
-                    }
-                    println!("✓ Placed {} roads", roads_placed);
-                }
-                
-                // Add buildings (within LOD 0 range)
-                use metaverse_core::osm_features::add_building;
-                if !osm_data.buildings.is_empty() {
-                    println!("Adding buildings (LOD 0)...");
-                    let mut buildings_added = 0;
-                    for building in osm_data.buildings.iter().take(100) {
-                        if building.polygon.len() >= 3 {
-                            add_building(&mut svo, &chunk_center, building, voxel_size);
-                            buildings_added += 1;
-                        }
-                    }
-                    println!("✓ Added {} buildings", buildings_added);
-                }
-                
-                // Extract mesh
-                println!("Extracting mesh via marching cubes...");
-                let meshes = generate_mesh(&svo, 0);
-                
-                let total_verts: usize = meshes.iter().map(|m| m.vertices.len() / 6).sum();
-                println!("✓ Extracted {} material meshes ({} vertices)", meshes.len(), total_verts);
-                
-                // Convert to GPU format
-                let material_colors = MaterialColors::default_palette();
-                let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
-                
-                // Transform vertices from voxel space to ECEF space
-                use metaverse_core::coordinates::{enu_to_ecef, EnuPos};
-                let center_ecef = gps_to_ecef(&center);
-                let half = svo_size as f32 / 2.0;
-                let voxel_to_meters = voxel_size as f32;
-                
-                for vertex in &mut vertices {
-                    // Voxel coords: (0,0,0) to (256,256,256)
-                    // Center at (128, 128, 128)
-                    // Map to ENU: X=East, Y=Up, Z=North
-                    let enu = EnuPos {
-                        east: ((vertex.position[0] - half) * voxel_to_meters) as f64,
-                        north: ((vertex.position[2] - half) * voxel_to_meters) as f64,
-                        up: ((vertex.position[1] - half) * voxel_to_meters) as f64,
-                    };
-                    
-                    let pos_ecef = enu_to_ecef(&enu, &center_ecef, &center);
-                    vertex.position = [pos_ecef.x as f32, pos_ecef.y as f32, pos_ecef.z as f32];
-                }
-                
-                println!("✓ {} colored vertices (transformed to ECEF)\n", vertices.len());
-                
-                (vertices, indices)
+            // Initialize WorldManager for chunk streaming
+            let world_manager = if full_osm_data.is_some() {
+                println!("=== Initializing WorldManager ===");
+                Some(WorldManager::new(
+                    9,      // Depth 9 chunks (~60km at equator)
+                    1000.0, // 1km render distance
+                    10      // SVO depth 10 (1024³ = ~1m voxels)
+                ))
             } else {
-                println!("No cached OSM data available");
+                println!("No cached OSM data - WorldManager not initialized");
                 println!("  Run: cargo run --example download_brisbane_data");
-                (Vec::new(), Vec::new())
+                None
             };
             
-            let buildings_num_indices = mesh_indices.len() as u32;
+            // Initial mesh will be empty - updated each frame
+            let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Empty Vertex Buffer"),
+                contents: &[],
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
             
-            if !mesh_vertices.is_empty() {
-                let buildings_vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("SVO Mesh Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&mesh_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                
-                let buildings_index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("SVO Mesh Index Buffer"),
-                    contents: bytemuck::cast_slice(&mesh_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-                
-                self.buildings_vertex_buffer = Some(buildings_vertex_buffer);
-                self.buildings_index_buffer = Some(buildings_index_buffer);
-                self.buildings_num_indices = buildings_num_indices;
-                
-                println!("Generated SVO mesh: {} vertices, {} indices", mesh_vertices.len(), mesh_indices.len());
-            } else {
-                println!("No mesh to render");
-            }
+            let index_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Empty Index Buffer"),
+                contents: &[],
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
             
-            // Store full OSM data and chunk manager for dynamic loading
+            // Store for runtime updates
+            self.world_manager = world_manager;
+            self.srtm = Some(srtm);
             self.full_osm_data = full_osm_data;
-            self.chunk_manager = Some(chunk_manager);
+            self.vertex_buffer = Some(vertex_buffer);
+            self.index_buffer = Some(index_buffer);
+            self.num_indices = 0;
             
-            // Clear roads and water buffers (now unified in SVO mesh)
-            self.roads_vertex_buffer = None;
-            self.roads_index_buffer = None;
-            self.roads_num_indices = 0;
-            self.water_vertex_buffer = None;
-            self.water_index_buffer = None;
-            self.water_num_indices = 0;
-            
+            self.pipeline = Some(pipeline);
             self.renderer = Some(renderer);
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
@@ -404,20 +359,7 @@ impl ApplicationHandler for App {
                         ElementState::Pressed => {
                             self.keys_pressed.insert(keycode);
                             
-                            
-                            // Toggle layer visibility
-                            if keycode == KeyCode::Digit1 {
-                                self.show_buildings = !self.show_buildings;
-                                println!("Buildings: {}", if self.show_buildings { "ON" } else { "OFF" });
-                            } else if keycode == KeyCode::Digit2 {
-                                self.show_roads = !self.show_roads;
-                                println!("Roads: {}", if self.show_roads { "ON" } else { "OFF" });
-                            } else if keycode == KeyCode::Digit3 {
-                                self.show_water = !self.show_water;
-                                println!("Water: {}", if self.show_water { "ON" } else { "OFF" });
-                            }
-                            
-                            // Toggle mouse capture on click
+                            // Mouse capture toggle
                             if keycode == KeyCode::Escape {
                                 self.mouse_captured = false;
                                 if let Some(window) = &self.window {
@@ -504,53 +446,19 @@ impl ApplicationHandler for App {
                         a: 1.0,
                     };
 
-                    // Render frame
-                    let buildings_num_indices = self.buildings_num_indices;
-                    let show_buildings = self.show_buildings;
-                    let buildings_vb = self.buildings_vertex_buffer.as_ref();
-                    let buildings_ib = self.buildings_index_buffer.as_ref();
-                    
-                    let roads_num_indices = self.roads_num_indices;
-                    let show_roads = self.show_roads;
-                    let roads_vb = self.roads_vertex_buffer.as_ref();
-                    let roads_ib = self.roads_index_buffer.as_ref();
-                    
-                    let water_num_indices = self.water_num_indices;
-                    let show_water = self.show_water;
-                    let water_vb = self.water_vertex_buffer.as_ref();
-                    let water_ib = self.water_index_buffer.as_ref();
+                    // Render unified world mesh
+                    let num_indices = self.num_indices;
+                    let vertex_buffer = self.vertex_buffer.as_ref();
+                    let index_buffer = self.index_buffer.as_ref();
                     
                     let result = renderer.render(clear_color, |render_pass| {
-                        // Draw water first (bottom layer)
-                        if show_water {
-                            if let (Some(wvb), Some(wib)) = (water_vb, water_ib) {
+                        if let (Some(vb), Some(ib)) = (vertex_buffer, index_buffer) {
+                            if num_indices > 0 {
                                 render_pass.set_pipeline(&pipeline.pipeline);
                                 render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                                render_pass.set_vertex_buffer(0, wvb.slice(..));
-                                render_pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
-                                render_pass.draw_indexed(0..water_num_indices, 0, 0..1);
-                            }
-                        }
-                        
-                        // Draw roads (middle layer)
-                        if show_roads {
-                            if let (Some(rvb), Some(rib)) = (roads_vb, roads_ib) {
-                                render_pass.set_pipeline(&pipeline.pipeline);
-                                render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                                render_pass.set_vertex_buffer(0, rvb.slice(..));
-                                render_pass.set_index_buffer(rib.slice(..), wgpu::IndexFormat::Uint32);
-                                render_pass.draw_indexed(0..roads_num_indices, 0, 0..1);
-                            }
-                        }
-                        
-                        // Draw buildings (top layer)
-                        if show_buildings {
-                            if let (Some(bvb), Some(bib)) = (buildings_vb, buildings_ib) {
-                                render_pass.set_pipeline(&pipeline.pipeline);
-                                render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
-                                render_pass.set_vertex_buffer(0, bvb.slice(..));
-                                render_pass.set_index_buffer(bib.slice(..), wgpu::IndexFormat::Uint32);
-                                render_pass.draw_indexed(0..buildings_num_indices, 0, 0..1);
+                                render_pass.set_vertex_buffer(0, vb.slice(..));
+                                render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                                render_pass.draw_indexed(0..num_indices, 0, 0..1);
                             }
                         }
                     });
