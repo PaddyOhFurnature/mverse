@@ -16,12 +16,13 @@ use winit::window::{Window, WindowAttributes};
 use wgpu::util::DeviceExt;
 use glam::DVec3;
 
-// Test location: Actual center of loaded OSM data
-// (NOT Queen Street Mall - that's 444m west of data center)
+// Test location: Story Bridge and surroundings, Brisbane
+// Better test case: bridges, tunnels, elevation changes, parklands, water
+// Less dense than CBD - can actually see geometry without skyscrapers blocking view
 const TEST_GPS: GpsPos = GpsPos {
-    lat_deg: -27.469766,  // Actual OSM data center
-    lon_deg: 153.029608,   // Actual OSM data center
-    elevation_m: 50.0,
+    lat_deg: -27.4619,  // Story Bridge center
+    lon_deg: 153.0419,
+    elevation_m: 250.0,  // 250m altitude for overview
 };
 
 // 10 camera views matching REFERENCE_IMAGES.md exactly
@@ -33,16 +34,18 @@ struct CameraView {
 }
 
 const CAMERA_VIEWS: &[CameraView] = &[
-    CameraView { filename: "01_top_down.png", altitude_m: 50.0, heading_deg: 0.0, tilt_deg: 0.0 },
-    CameraView { filename: "02_north_horizontal.png", altitude_m: 50.0, heading_deg: 0.0, tilt_deg: 90.0 },
-    CameraView { filename: "03_east_horizontal.png", altitude_m: 50.0, heading_deg: 90.0, tilt_deg: 90.0 },
-    CameraView { filename: "04_south_horizontal.png", altitude_m: 50.0, heading_deg: 180.0, tilt_deg: 90.0 },
-    CameraView { filename: "05_west_horizontal.png", altitude_m: 50.0, heading_deg: 270.0, tilt_deg: 90.0 },
-    CameraView { filename: "06_northeast_angle.png", altitude_m: 50.0, heading_deg: 45.0, tilt_deg: 45.0 },
-    CameraView { filename: "07_southeast_angle.png", altitude_m: 50.0, heading_deg: 135.0, tilt_deg: 45.0 },
-    CameraView { filename: "08_southwest_angle.png", altitude_m: 50.0, heading_deg: 225.0, tilt_deg: 45.0 },
-    CameraView { filename: "09_northwest_angle.png", altitude_m: 50.0, heading_deg: 315.0, tilt_deg: 45.0 },
-    CameraView { filename: "10_ground_level_north.png", altitude_m: 5.0, heading_deg: 0.0, tilt_deg: 85.0 },
+    // 250m altitude - high enough to clear all features, low enough to see detail
+    CameraView { filename: "01_top_down.png", altitude_m: 250.0, heading_deg: 0.0, tilt_deg: 0.0 },
+    CameraView { filename: "02_north_horizontal.png", altitude_m: 250.0, heading_deg: 0.0, tilt_deg: 90.0 },
+    CameraView { filename: "03_east_horizontal.png", altitude_m: 250.0, heading_deg: 90.0, tilt_deg: 90.0 },
+    CameraView { filename: "04_south_horizontal.png", altitude_m: 250.0, heading_deg: 180.0, tilt_deg: 90.0 },
+    CameraView { filename: "05_west_horizontal.png", altitude_m: 250.0, heading_deg: 270.0, tilt_deg: 90.0 },
+    CameraView { filename: "06_northeast_angle.png", altitude_m: 250.0, heading_deg: 45.0, tilt_deg: 45.0 },
+    CameraView { filename: "07_southeast_angle.png", altitude_m: 250.0, heading_deg: 135.0, tilt_deg: 45.0 },
+    CameraView { filename: "08_southwest_angle.png", altitude_m: 250.0, heading_deg: 225.0, tilt_deg: 45.0 },
+    CameraView { filename: "09_northwest_angle.png", altitude_m: 250.0, heading_deg: 315.0, tilt_deg: 45.0 },
+    // Ground level at 20m (above street level, can see buildings)
+    CameraView { filename: "10_ground_level_north.png", altitude_m: 20.0, heading_deg: 0.0, tilt_deg: 85.0 },
 ];
 
 struct ScreenshotApp {
@@ -294,10 +297,10 @@ impl ApplicationHandler for ScreenshotApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             println!("\n=== AUTOMATED SCREENSHOT CAPTURE ===");
-            println!("Location: Brisbane CBD (actual OSM data center)");
+            println!("Location: Story Bridge, Brisbane (elevated bridge with surroundings)");
             println!("GPS: ({:.6}, {:.6})", TEST_GPS.lat_deg, TEST_GPS.lon_deg);
-            println!("NOTE: Queen St Mall (-27.469800, 153.025100) is 444m west of this");
-            println!("Capturing {} views to match REFERENCE_IMAGES.md\n", CAMERA_VIEWS.len());
+            println!("Features: Bridge, river, tunnels, roads, buildings, parklands");
+            println!("Capturing {} views at 250m altitude\n", CAMERA_VIEWS.len());
             
             // Create screenshot directory
             fs::create_dir_all("screenshot").expect("Failed to create screenshot directory");
