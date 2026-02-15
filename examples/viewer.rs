@@ -333,7 +333,7 @@ impl ApplicationHandler for App {
                 let wm = WorldManager::new(
                     14,     // Depth 14 chunks (~400m per tile as per GLOSSARY.md)
                     2000.0, // 2km render distance
-                    7       // SVO depth 7 (128³ voxels = ~5m voxels for 677m chunk)
+                    9       // SVO depth 9 (512³ voxels = ~0.78m voxels for 400m chunk, supports LOD 0-3)
                 );
                 println!("✓ WorldManager initialized");
                 Some(wm)

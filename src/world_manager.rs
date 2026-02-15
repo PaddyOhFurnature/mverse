@@ -122,7 +122,7 @@ impl WorldManager {
     
     /// Get chunks in render distance
     fn find_chunks_in_range(&self, camera_pos: &EcefPos) -> Vec<ChunkId> {
-        // Convert camera to GPS to get chunk
+        // Convert camera to GPS
         let camera_gps = crate::coordinates::ecef_to_gps(camera_pos);
         println!("[find_chunks_in_range] Camera GPS: ({:.6}, {:.6}, {:.1}m)", 
             camera_gps.lat_deg, camera_gps.lon_deg, camera_gps.elevation_m);
@@ -130,8 +130,9 @@ impl WorldManager {
         let camera_chunk = gps_to_chunk_id(&camera_gps, self.chunk_depth as u8);
         println!("[find_chunks_in_range] Camera chunk ID: {}", camera_chunk);
         
-        // For now, just return camera chunk + immediate neighbors
-        // TODO: Properly search all chunks within radius
+        // For now: Load camera chunk only
+        // TODO: Load neighbors within render distance
+        // (Requires implementing chunk neighbor traversal or GPS-based search)
         vec![camera_chunk]
     }
     
@@ -154,12 +155,15 @@ impl WorldManager {
             println!("[extract_meshes] Delta: ({:.1}, {:.1}, {:.1})", dx, dy, dz);
             println!("[extract_meshes] Chunk distance: {:.1}m", distance);
             
-            // Select LOD based on distance
-            // TEMP: Force LOD 1 (50% skip) - LOD 2-3 are too coarse for 128³ SVO
-            let lod = if distance < 2000.0 {
-                0  // Full detail nearby
+            // For now: only render LOD 0-1 (LOD 2+ has marching cubes bug with thin features)
+            // TODO: Fix marching cubes to handle LOD properly or use mesh decimation instead
+            let lod = if distance < 200.0 {
+                0  // LOD 0: 0-200m - Full detail
+            } else if distance < 1000.0 {
+                1  // LOD 1: 200-1000m - Half detail
             } else {
-                1  // Half detail far away
+                // Beyond 1km: Don't render
+                continue;
             };
             
             println!("[extract_meshes] Using LOD {} for distance {:.1}m", lod, distance);

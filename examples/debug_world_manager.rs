@@ -50,7 +50,7 @@ fn main() {
     let mut world_manager = WorldManager::new(
         14,     // chunk depth (400m chunks)
         2000.0, // render distance (2km)
-        7,      // SVO depth (128^3)
+        9,      // SVO depth (512^3 = ~0.78m voxels)
     );
     println!("  ✓ Done\n");
     
