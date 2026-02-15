@@ -10,12 +10,10 @@ use metaverse_core::renderer::{
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation::SrtmManager;
-use metaverse_core::elevation_downloader::ElevationDownloader;
-use metaverse_core::chunk_manager::ChunkManager;
 use metaverse_core::world_manager::WorldManager;
 use metaverse_core::mesh_generation::svo_meshes_to_colored_vertices;
 use metaverse_core::materials::MaterialColors;
-use metaverse_core::coordinates::{gps_to_ecef, enu_to_ecef, ecef_to_gps, GpsPos, EnuPos, EcefPos};
+use metaverse_core::coordinates::{enu_to_ecef, ecef_to_gps, EnuPos, EcefPos};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -29,7 +27,6 @@ struct App {
     renderer: Option<Renderer>,
     pipeline: Option<BasicPipeline>,
     camera: Camera,
-    downloader: Option<ElevationDownloader>,
     world_manager: Option<WorldManager>,
     srtm: Option<SrtmManager>,
     full_osm_data: Option<OsmData>,
@@ -66,7 +63,6 @@ impl App {
             vertex_buffer: None,
             index_buffer: None,
             num_indices: 0,
-            downloader: None,
             world_manager: None,
             srtm: None,
             full_osm_data: None,
@@ -163,7 +159,7 @@ impl App {
             let mut all_vertices = Vec::new();
             let mut all_indices = Vec::new();
             
-            for (meshes, chunk_center) in chunk_meshes {
+            for (meshes, chunk_center, chunk_id) in chunk_meshes {
                 if meshes.is_empty() {
                     continue;
                 }
@@ -171,10 +167,17 @@ impl App {
                 // Convert meshes to colored vertices (still in voxel space)
                 let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
                 
+                // Get exact GPS bounds for this chunk
+                let (sw, ne) = metaverse_core::chunks::chunk_bounds_gps(&chunk_id).unwrap();
+                
+                // Calculate actual chunk size (same as world_manager.rs)
+                let lat_span = (ne.lat_deg - sw.lat_deg).abs() * 111_000.0;
+                let lon_span = (ne.lon_deg - sw.lon_deg).abs() * 111_000.0 * sw.lat_deg.to_radians().cos();
+                let area_size = lat_span.max(lon_span);
+                
                 // Transform from voxel space to ECEF
-                // Voxels are centered at chunk_center with voxel_size spacing
                 let svo_size = 1u32 << world_manager.svo_depth();
-                let voxel_size = 1000.0 / svo_size as f64; // ~1km chunk / 1024 voxels = ~1m voxels
+                let voxel_size = area_size / svo_size as f64; // Correct voxel size based on actual chunk area
                 let half = svo_size as f32 / 2.0;
                 let voxel_to_meters = voxel_size as f32;
                 
@@ -251,49 +254,10 @@ impl ApplicationHandler for App {
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
             println!("✓ Pipeline created");
             
-            // Initialize elevation downloader with multi-source support
+            // Initialize elevation system
             println!("Creating cache...");
             let cache = DiskCache::new().unwrap();
             println!("✓ Cache created");
-            
-            println!("Creating elevation downloader...");
-            let downloader = ElevationDownloader::new(cache);
-            println!("✓ Downloader created");
-            
-            println!("Elevation downloader initialized");
-            println!("  Sources: AWS Terrarium (primary), USGS 3DEP, OpenTopography");
-            println!("  Parallel downloads: up to 8 concurrent");
-            
-            self.downloader = Some(downloader);
-            
-            // Pre-download Brisbane elevation tiles for building elevation data
-            println!("Pre-downloading Brisbane elevation tiles...");
-            let brisbane_lat = -27.4698;
-            let brisbane_lon = 153.0251;
-            let start = std::time::Instant::now();
-            
-            // Download tiles covering the OSM building area (11x11 grid)
-            for lat_offset in -5i32..=5 {
-                for lon_offset in -5i32..=5 {
-                    let lat = brisbane_lat + lat_offset as f64 * 0.1;
-                    let lon = brisbane_lon + lon_offset as f64 * 0.1;
-                    self.downloader.as_ref().unwrap().queue_download(lat, lon, 10, 0.0);
-                }
-            }
-            
-            // Process all queued downloads synchronously
-            while self.downloader.as_ref().unwrap().get_stats().active_downloads > 0 ||
-                  self.downloader.as_ref().unwrap().get_stats().queued_downloads > 0 {
-                self.downloader.as_ref().unwrap().process_queue();
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            
-            let stats = self.downloader.as_ref().unwrap().get_stats();
-            println!("  Downloaded {} tiles in {:.1}s ({} successful, {} failed)",
-                     stats.downloads_success + stats.downloads_failed,
-                     start.elapsed().as_secs_f32(),
-                     stats.downloads_success,
-                     stats.downloads_failed);
             
             // Load OSM data and initialize chunk manager
             println!("Loading OSM data from cache...");
@@ -325,14 +289,15 @@ impl ApplicationHandler for App {
             // Initialize SRTM for terrain data
             let cache_for_srtm = DiskCache::new().expect("Failed to create cache for SRTM");
             let mut srtm = SrtmManager::new(cache_for_srtm);
-            srtm.set_network_enabled(false);
+            // Enable network for SRTM tile downloads (2-second cooldown enforced)
+            srtm.set_network_enabled(true);
             
             // Initialize WorldManager for chunk streaming
             let world_manager = if full_osm_data.is_some() {
                 println!("=== Initializing WorldManager ===");
                 let wm = WorldManager::new(
                     14,     // Depth 14 chunks (~400m per tile as per GLOSSARY.md)
-                    2000.0, // 2km render distance
+                    1500.0, // 1.5km render distance (load ~3x3 grid of chunks)
                     9       // SVO depth 9 (512³ voxels = ~0.78m voxels for 400m chunk, supports LOD 0-3)
                 );
                 println!("✓ WorldManager initialized");
@@ -444,11 +409,6 @@ impl ApplicationHandler for App {
                 // Handle input
                 self.handle_input(delta_time);
                 
-                // Process elevation download queue
-                if let Some(downloader) = &self.downloader {
-                    downloader.process_queue();
-                }
-                
                 // Update world chunks based on camera position
                 // Update immediately on first frame, then every 30 frames after that
                 if self.frame_count == 0 || (self.frame_count - self.chunk_update_frame) >= 30 {
@@ -517,18 +477,6 @@ impl ApplicationHandler for App {
                         let fps =
                             self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
                         
-                        // Get download stats
-                        let stats = if let Some(downloader) = &self.downloader {
-                            let s = downloader.get_stats();
-                            format!(" | DL: {}↓ {}✓ {}✗ Q:{}", 
-                                s.active_downloads,
-                                s.downloads_success,
-                                s.downloads_failed,
-                                s.queued_downloads)
-                        } else {
-                            String::new()
-                        };
-                        
                         // Show camera position with GPS coordinates
                         use metaverse_core::coordinates::{ecef_to_gps, EcefPos};
                         let pos = self.camera.position;
@@ -537,8 +485,8 @@ impl ApplicationHandler for App {
                         let alt = gps.elevation_m;
                         
                         window.set_title(&format!(
-                            "Metaverse Viewer - {:.1} FPS | GPS: ({:.6}, {:.6}) | Alt: {:.1}m | Speed: {:.1}x{}",
-                            fps, gps.lat_deg, gps.lon_deg, alt, self.camera.speed_multiplier, stats
+                            "Metaverse Viewer - {:.1} FPS | GPS: ({:.6}, {:.6}) | Alt: {:.1}m | Speed: {:.1}x",
+                            fps, gps.lat_deg, gps.lon_deg, alt, self.camera.speed_multiplier
                         ));
                         
                         self.frame_count = 0;

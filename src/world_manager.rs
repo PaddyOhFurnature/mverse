@@ -133,49 +133,10 @@ impl WorldManager {
             camera_gps.lat_deg, camera_gps.lon_deg, camera_gps.elevation_m);
         
         let camera_chunk = gps_to_chunk_id(&camera_gps, self.chunk_depth as u8);
-        println!("[find_chunks_in_range] Camera chunk: {}", camera_chunk);
+        println!("[find_chunks_in_range] Loading camera chunk: {}", camera_chunk);
         
-        // Get camera chunk bounds to determine search grid
-        let (sw, ne) = match crate::chunks::chunk_bounds_gps(&camera_chunk) {
-            Ok(b) => b,
-            Err(_) => return vec![camera_chunk],
-        };
-        
-        let lat_span = (ne.lat_deg - sw.lat_deg).abs();
-        let lon_span = (ne.lon_deg - sw.lon_deg).abs();
-        
-        // Search in a 3x3 grid of chunks around camera
-        let mut chunks = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        
-        for dlat in -1..=1 {
-            for dlon in -1..=1 {
-                let search_gps = crate::coordinates::GpsPos {
-                    lat_deg: camera_gps.lat_deg + (dlat as f64 * lat_span),
-                    lon_deg: camera_gps.lon_deg + (dlon as f64 * lon_span),
-                    elevation_m: 0.0,
-                };
-                
-                let chunk_id = gps_to_chunk_id(&search_gps, self.chunk_depth as u8);
-                
-                // Only add if within render distance and not duplicate
-                if !seen.contains(&chunk_id) {
-                    let chunk_center = chunk_center_ecef(&chunk_id);
-                    let dx = chunk_center.x - camera_pos.x;
-                    let dy = chunk_center.y - camera_pos.y;
-                    let dz = chunk_center.z - camera_pos.z;
-                    let dist = (dx*dx + dy*dy + dz*dz).sqrt();
-                    
-                    if dist <= self.render_distance {
-                        chunks.push(chunk_id.clone());
-                        seen.insert(chunk_id);
-                    }
-                }
-            }
-        }
-        
-        println!("[find_chunks_in_range] Loading {} chunks within {}m", chunks.len(), self.render_distance);
-        chunks
+        // TEMPORARY: Just load camera chunk until we fix neighbor finding
+        vec![camera_chunk]
     }
     
     /// Get 8 immediate neighbors of a chunk (N, S, E, W, NE, NW, SE, SW)
