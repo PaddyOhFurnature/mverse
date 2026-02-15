@@ -142,24 +142,31 @@ impl WorldManager {
             let dz = camera_pos.z - chunk.center.z;
             let distance = (dx*dx + dy*dy + dz*dz).sqrt();
             
-            // Select LOD based on distance
-            let lod = if distance < 50.0 {
+            println!("[extract_meshes] Chunk distance: {:.1}m", distance);
+            
+            // Select LOD based on distance (much larger ranges for flying camera)
+            let lod = if distance < 500.0 {
                 0
-            } else if distance < 200.0 {
+            } else if distance < 2000.0 {
                 1
-            } else if distance < 500.0 {
+            } else if distance < 5000.0 {
                 2
-            } else if distance < 1000.0 {
+            } else if distance < 10000.0 {
                 3
             } else {
+                println!("[extract_meshes] Chunk too far ({:.1}m > 10km), skipping", distance);
                 continue; // Too far, don't render
             };
             
+            println!("[extract_meshes] Using LOD {} for distance {:.1}m", lod, distance);
+            
             // Extract mesh at selected LOD
             let meshes = generate_mesh(&chunk.svo, lod);
+            println!("[extract_meshes] Extracted {} material meshes", meshes.len());
             results.push((meshes, chunk.center));
         }
         
+        println!("[extract_meshes] Returning {} chunk results", results.len());
         results
     }
     
