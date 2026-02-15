@@ -1514,7 +1514,7 @@ dependencies = [
  "ravif",
  "rayon",
  "rgb",
- "tiff",
+ "tiff 0.10.3",
  "zune-core 0.5.1",
  "zune-jpeg 0.5.12",
 ]
@@ -1853,6 +1853,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tiff 0.11.3",
  "tokio",
  "wgpu",
  "winit",
@@ -3440,6 +3441,20 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "tiff"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
+dependencies = [
+ "fax",
+ "flate2",
+ "half",
+ "quick-error",
+ "weezl",
+ "zune-jpeg 0.5.12",
 ]
 
 [[package]]

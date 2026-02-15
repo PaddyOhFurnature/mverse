@@ -7,6 +7,7 @@
 /// - Priority queue based on distance from camera
 /// - Automatic retry with exponential backoff
 /// - Disk caching for downloaded tiles
+/// - GeoTIFF to .hgt conversion for AWS/OpenTopography sources
 
 use std::time::Duration;
 use std::io::Cursor;
@@ -112,6 +113,142 @@ impl SrtmDownloader {
         }
     }
     
+    /// Convert GeoTIFF elevation data to .hgt format
+    ///
+    /// GeoTIFF files contain elevation as floating-point or integer raster data.
+    /// We need to convert to standard SRTM .hgt format: 16-bit big-endian signed integers.
+    fn convert_geotiff_to_hgt(
+        geotiff_bytes: &[u8],
+        lat: i16,
+        lon: i16,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        use tiff::decoder::{Decoder, DecodingResult};
+        use std::io::Cursor;
+        
+        eprintln!("[SRTM] Converting GeoTIFF to .hgt format...");
+        
+        let cursor = Cursor::new(geotiff_bytes);
+        let mut decoder = Decoder::new(cursor)?;
+        
+        // Read image dimensions
+        let (width, height) = decoder.dimensions()?;
+        eprintln!("[SRTM] GeoTIFF dimensions: {}x{}", width, height);
+        
+        // Decode the image data
+        let image_data = decoder.read_image()?;
+        
+        // Convert to elevation values
+        let elevations: Vec<i16> = match image_data {
+            DecodingResult::U8(data) => {
+                eprintln!("[SRTM] GeoTIFF format: U8");
+                // U8 is unusual for elevation, treat as scaled
+                data.iter().map(|&v| v as i16).collect()
+            }
+            DecodingResult::U16(data) => {
+                eprintln!("[SRTM] GeoTIFF format: U16");
+                // U16 elevation data - convert to signed
+                data.iter().map(|&v| {
+                    if v == 0 || v == 65535 {
+                        -32768  // NoData value
+                    } else if v > 32767 {
+                        (v as i32 - 65536) as i16  // Handle values > 32767
+                    } else {
+                        v as i16
+                    }
+                }).collect()
+            }
+            DecodingResult::I16(data) => {
+                eprintln!("[SRTM] GeoTIFF format: I16 (native)");
+                // Already in correct format
+                data
+            }
+            DecodingResult::U32(data) => {
+                eprintln!("[SRTM] GeoTIFF format: U32");
+                // U32 elevation - clamp to i16 range
+                data.iter().map(|&v| {
+                    if v == 0 || v == u32::MAX {
+                        -32768  // NoData
+                    } else if v > 32767 {
+                        32767  // Clamp high values
+                    } else {
+                        v as i16
+                    }
+                }).collect()
+            }
+            DecodingResult::I32(data) => {
+                eprintln!("[SRTM] GeoTIFF format: I32");
+                // I32 elevation - clamp to i16 range
+                data.iter().map(|&v| {
+                    if v == i32::MIN {
+                        -32768  // NoData
+                    } else if v > 32767 {
+                        32767  // Clamp high
+                    } else if v < -32768 {
+                        -32768  // Clamp low
+                    } else {
+                        v as i16
+                    }
+                }).collect()
+            }
+            DecodingResult::F32(data) => {
+                eprintln!("[SRTM] GeoTIFF format: F32 (floating-point)");
+                // F32 elevation (common for high-precision DEMs)
+                data.iter().map(|&v| {
+                    if v.is_nan() || v == -9999.0 || v < -32000.0 {
+                        -32768  // NoData
+                    } else {
+                        v.round().clamp(-32768.0, 32767.0) as i16
+                    }
+                }).collect()
+            }
+            DecodingResult::F64(data) => {
+                eprintln!("[SRTM] GeoTIFF format: F64 (high-precision)");
+                // F64 elevation
+                data.iter().map(|&v| {
+                    if v.is_nan() || v == -9999.0 || v < -32000.0 {
+                        -32768  // NoData
+                    } else {
+                        v.round().clamp(-32768.0, 32767.0) as i16
+                    }
+                }).collect()
+            }
+            _ => {
+                return Err("Unsupported TIFF color type for elevation data".into());
+            }
+        };
+        
+        // Check if we need to resample to standard SRTM resolution
+        let target_size = if width >= 3000 && height >= 3000 {
+            3601  // SRTM1 (1 arc-second, ~30m)
+        } else {
+            1201  // SRTM3 (3 arc-second, ~90m)
+        };
+        
+        let resampled = if width == target_size && height == target_size {
+            // Perfect size, no resampling needed
+            eprintln!("[SRTM] Dimensions match SRTM{} ({}x{}), no resampling needed",
+                     if target_size == 3601 { "1" } else { "3" },
+                     target_size, target_size);
+            elevations
+        } else {
+            // Need to resample to standard SRTM grid
+            eprintln!("[SRTM] Resampling from {}x{} to {}x{} (SRTM{} grid)",
+                     width, height, target_size, target_size,
+                     if target_size == 3601 { "1" } else { "3" });
+            resample_elevation_grid(&elevations, width as usize, height as usize, target_size as usize)
+        };
+        
+        // Convert to big-endian bytes
+        let mut hgt_bytes = Vec::with_capacity(resampled.len() * 2);
+        for &elev in &resampled {
+            hgt_bytes.push((elev >> 8) as u8);   // High byte
+            hgt_bytes.push((elev & 0xFF) as u8); // Low byte
+        }
+        
+        eprintln!("[SRTM] Converted to .hgt format: {} bytes", hgt_bytes.len());
+        Ok(hgt_bytes)
+    }
+    
     /// Download a single SRTM tile asynchronously
     ///
     /// Tries all configured sources in priority order with 2-second cooldown.
@@ -140,11 +277,28 @@ impl SrtmDownloader {
                         eprintln!("[SRTM] Successfully downloaded {} bytes from {}", 
                                  bytes.len(), source.name);
                         
-                        // Parse the downloaded data
-                        match crate::elevation::parse_hgt(&filename, &bytes) {
+                        // Check if this is GeoTIFF format (needs conversion)
+                        let hgt_bytes = if bytes.len() < 10000 || bytes.starts_with(b"II") || bytes.starts_with(b"MM") {
+                            // GeoTIFF format (TIFF magic numbers: II=little-endian, MM=big-endian)
+                            eprintln!("[SRTM] Detected GeoTIFF format, converting to .hgt...");
+                            match Self::convert_geotiff_to_hgt(&bytes, lat, lon) {
+                                Ok(converted) => converted,
+                                Err(e) => {
+                                    eprintln!("[SRTM] GeoTIFF conversion failed: {}", e);
+                                    // Try next source
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Already .hgt format
+                            bytes
+                        };
+                        
+                        // Parse the .hgt data
+                        match crate::elevation::parse_hgt(&filename, &hgt_bytes) {
                             Ok(tile) => {
-                                // Save to disk cache for future use
-                                let _ = self.cache.write_srtm(&filename, &bytes);
+                                // Save converted .hgt to disk cache for future use
+                                let _ = self.cache.write_srtm(&filename, &hgt_bytes);
                                 eprintln!("[SRTM] Tile {} parsed and cached successfully", filename);
                                 return Some(tile);
                             }
@@ -345,6 +499,54 @@ impl SrtmDownloader {
         let y = ((1.0 - (lat.to_radians().tan() + 1.0 / lat.to_radians().cos()).ln() / std::f64::consts::PI) / 2.0 * n).floor() as u32;
         (x, y)
     }
+}
+
+/// Resample elevation grid using bilinear interpolation
+///
+/// Converts arbitrary resolution to standard SRTM grid (3601×3601 or 1201×1201)
+fn resample_elevation_grid(
+    src: &[i16],
+    src_width: usize,
+    src_height: usize,
+    target_size: usize,
+) -> Vec<i16> {
+    let mut result = Vec::with_capacity(target_size * target_size);
+    
+    for target_y in 0..target_size {
+        for target_x in 0..target_size {
+            // Map target coordinates to source coordinates
+            let src_x = (target_x as f64 / (target_size - 1) as f64) * (src_width - 1) as f64;
+            let src_y = (target_y as f64 / (target_size - 1) as f64) * (src_height - 1) as f64;
+            
+            // Bilinear interpolation
+            let x0 = src_x.floor() as usize;
+            let x1 = (x0 + 1).min(src_width - 1);
+            let y0 = src_y.floor() as usize;
+            let y1 = (y0 + 1).min(src_height - 1);
+            
+            let fx = src_x - x0 as f64;
+            let fy = src_y - y0 as f64;
+            
+            // Get four corner values
+            let v00 = src[y0 * src_width + x0];
+            let v10 = src[y0 * src_width + x1];
+            let v01 = src[y1 * src_width + x0];
+            let v11 = src[y1 * src_width + x1];
+            
+            // Check for void values
+            if v00 == -32768 || v10 == -32768 || v01 == -32768 || v11 == -32768 {
+                result.push(-32768);  // Propagate void
+            } else {
+                // Bilinear interpolation
+                let v0 = v00 as f64 * (1.0 - fx) + v10 as f64 * fx;
+                let v1 = v01 as f64 * (1.0 - fx) + v11 as f64 * fx;
+                let v = v0 * (1.0 - fy) + v1 * fy;
+                result.push(v.round() as i16);
+            }
+        }
+    }
+    
+    result
 }
 
 /// Download multiple tiles in parallel with priority ordering
