@@ -250,7 +250,7 @@ impl ApplicationHandler for App {
                 srtm.set_network_enabled(false);
                 
                 // Create SVO for LOD 0 (0-50m range, high detail)
-                let depth = 10;  // 1024^3
+                let depth = 8;  // 256^3 - manageable memory
                 let mut svo = SparseVoxelOctree::new(depth);
                 let svo_size = 1u32 << depth;
                 
