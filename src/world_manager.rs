@@ -206,13 +206,13 @@ fn generate_chunk_svo(
     println!("[generate_chunk_svo] Bounds: SW({:.6}, {:.6}) NE({:.6}, {:.6})", 
         sw.lat_deg, sw.lon_deg, ne.lat_deg, ne.lon_deg);
     
-    // Use proper chunk_center_ecef function instead of GPS average
-    let center = chunk_center_ecef(chunk_id);
+    // Calculate center from GPS bounds (cube_to_sphere is still broken)
     let center_gps = GpsPos {
         lat_deg: (sw.lat_deg + ne.lat_deg) / 2.0,
         lon_deg: (sw.lon_deg + ne.lon_deg) / 2.0,
         elevation_m: 0.0,
     };
+    let center = gps_to_ecef(&center_gps);
     
     println!("[generate_chunk_svo] Center GPS: ({:.6}, {:.6}, {:.1}m)", 
         center_gps.lat_deg, center_gps.lon_deg, center_gps.elevation_m);
