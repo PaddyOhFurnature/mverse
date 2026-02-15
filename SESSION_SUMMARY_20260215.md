@@ -212,3 +212,89 @@ Buffer: 3.6MB (55x headroom remaining)
 ```
 
 **Status:** Distance filtering working. Ready for frustum culling and detail improvements.
+
+---
+
+## Phase 2: Terrain Elevation Integration (Added Later)
+
+### Problem Identified
+After visual feedback revealed rendering, user noted:
+- Buildings still look flat (all at same base elevation)
+- Roads have no elevation changes (bridges not elevated)
+- Everything appears to be at sea level
+
+### Root Cause
+OSM elevation data is often 0 or inaccurate. Need real terrain from SRTM.
+
+### Solution Implemented ✅
+
+**Integrated SRTM terrain elevation into mesh generation:**
+
+1. **Modified src/svo_integration.rs:**
+   - Added `SrtmManager` parameter to `generate_mesh_from_osm_filtered()`
+   - Buildings query terrain elevation at center point
+   - Falls back to procedural elevation if SRTM unavailable
+
+2. **Updated examples/capture_screenshots.rs:**
+   - Creates SrtmManager with disk cache
+   - Enables procedural fallback
+   - Passes manager to mesh generator
+
+3. **Code changes:**
+```rust
+// New parameter in mesh generation
+pub fn generate_mesh_from_osm_filtered(
+    osm_data: &OsmData,
+    camera_pos: Option<&GpsPos>,
+    max_distance_m: f64,
+    mut srtm_manager: Option<&mut SrtmManager>, // NEW
+) -> (Vec<ColoredVertex>, Vec<u32>)
+
+// Query terrain elevation for each building
+let terrain_elevation = if let Some(srtm) = srtm_manager.as_deref_mut() {
+    srtm.get_elevation_or(center_gps.lat_deg, center_gps.lon_deg, 0.0)
+} else {
+    center_gps.elevation_m  // OSM fallback
+};
+```
+
+### Result
+✅ Buildings no longer all at elevation=0  
+⚠️ Using procedural elevation (~236m) pending SRTM tile download  
+✅ Integration complete and working  
+
+### Current Limitation
+- SRTM tile S28E153.hgt not cached
+- Network downloads not completing
+- Procedural generates ~236m at Story Bridge (should be ~5-30m)
+- Still need terrain mesh between buildings
+
+### Git Commit
+```
+a79bc0e feat(elevation): integrate SRTM terrain elevation into mesh generation
+```
+
+---
+
+## Summary
+
+**Two major systems implemented today:**
+
+1. **Visual Feedback System** ✅
+   - Can now SEE what's rendering via screenshots
+   - Compare against Google Earth reference images
+   - Iterative debugging with visual verification
+
+2. **Terrain Elevation Integration** ✅  
+   - Buildings query terrain height
+   - Procedural fallback working
+   - Foundation for realistic terrain rendering
+
+**Key Lesson:** Visual feedback is CRITICAL for rendering work.
+
+**Next Steps:**
+1. Download S28E153.hgt tile for accurate Brisbane elevation
+2. Generate terrain mesh (ground plane)
+3. Apply elevation to roads (bridge deck heights)
+4. Add elevation visualization for debugging
+
