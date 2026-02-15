@@ -436,7 +436,7 @@ impl ApplicationHandler for App {
                 println!("=== Initializing WorldManager ===");
                 let wm = WorldManager::new(
                     14,     // Depth 14 chunks (~400m per tile as per GLOSSARY.md)
-                    2000.0, // 2km render distance
+                    1500.0, // 1.5km render distance (load ~3x3 grid of chunks)
                     9       // SVO depth 9 (512³ voxels = ~0.78m voxels for 400m chunk, supports LOD 0-3)
                 );
                 println!("✓ WorldManager initialized");

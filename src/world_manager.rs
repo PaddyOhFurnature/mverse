@@ -133,12 +133,95 @@ impl WorldManager {
             camera_gps.lat_deg, camera_gps.lon_deg, camera_gps.elevation_m);
         
         let camera_chunk = gps_to_chunk_id(&camera_gps, self.chunk_depth as u8);
-        println!("[find_chunks_in_range] Camera chunk ID: {}", camera_chunk);
+        println!("[find_chunks_in_range] Camera chunk: {}", camera_chunk);
         
-        // For now: Load camera chunk only
-        // TODO: Load neighbors within render distance
-        // (Requires implementing chunk neighbor traversal or GPS-based search)
-        vec![camera_chunk]
+        // Get camera chunk bounds to determine search grid
+        let (sw, ne) = match crate::chunks::chunk_bounds_gps(&camera_chunk) {
+            Ok(b) => b,
+            Err(_) => return vec![camera_chunk],
+        };
+        
+        let lat_span = (ne.lat_deg - sw.lat_deg).abs();
+        let lon_span = (ne.lon_deg - sw.lon_deg).abs();
+        
+        // Search in a 3x3 grid of chunks around camera
+        let mut chunks = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        
+        for dlat in -1..=1 {
+            for dlon in -1..=1 {
+                let search_gps = crate::coordinates::GpsPos {
+                    lat_deg: camera_gps.lat_deg + (dlat as f64 * lat_span),
+                    lon_deg: camera_gps.lon_deg + (dlon as f64 * lon_span),
+                    elevation_m: 0.0,
+                };
+                
+                let chunk_id = gps_to_chunk_id(&search_gps, self.chunk_depth as u8);
+                
+                // Only add if within render distance and not duplicate
+                if !seen.contains(&chunk_id) {
+                    let chunk_center = chunk_center_ecef(&chunk_id);
+                    let dx = chunk_center.x - camera_pos.x;
+                    let dy = chunk_center.y - camera_pos.y;
+                    let dz = chunk_center.z - camera_pos.z;
+                    let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                    
+                    if dist <= self.render_distance {
+                        chunks.push(chunk_id.clone());
+                        seen.insert(chunk_id);
+                    }
+                }
+            }
+        }
+        
+        println!("[find_chunks_in_range] Loading {} chunks within {}m", chunks.len(), self.render_distance);
+        chunks
+    }
+    
+    /// Get 8 immediate neighbors of a chunk (N, S, E, W, NE, NW, SE, SW)
+    fn get_neighbor_chunks(&self, chunk_id: &ChunkId) -> Vec<ChunkId> {
+        use crate::chunks::chunk_bounds_gps;
+        
+        let bounds = match chunk_bounds_gps(chunk_id) {
+            Ok(b) => b,
+            Err(_) => return vec![],
+        };
+        
+        let (sw, ne) = bounds;
+        let center_lat = (sw.lat_deg + ne.lat_deg) / 2.0;
+        let center_lon = (sw.lon_deg + ne.lon_deg) / 2.0;
+        let lat_span = (ne.lat_deg - sw.lat_deg).abs();
+        let lon_span = (ne.lon_deg - sw.lon_deg).abs();
+        
+        // Generate neighbor centers (use same span to move to adjacent chunk centers)
+        let offsets = [
+            (0.0, lon_span),     // E
+            (0.0, -lon_span),    // W
+            (lat_span, 0.0),     // N
+            (-lat_span, 0.0),    // S
+            (lat_span, lon_span),   // NE
+            (lat_span, -lon_span),  // NW
+            (-lat_span, lon_span),  // SE
+            (-lat_span, -lon_span), // SW
+        ];
+        
+        let mut neighbors = Vec::new();
+        for (dlat, dlon) in &offsets {
+            let neighbor_gps = crate::coordinates::GpsPos {
+                lat_deg: center_lat + dlat,
+                lon_deg: center_lon + dlon,
+                elevation_m: 0.0,
+            };
+            
+            let neighbor_id = gps_to_chunk_id(&neighbor_gps, self.chunk_depth as u8);
+            
+            // Don't add duplicates or the original chunk
+            if neighbor_id != *chunk_id && !neighbors.contains(&neighbor_id) {
+                neighbors.push(neighbor_id);
+            }
+        }
+        
+        neighbors
     }
     
     /// Extract meshes for all loaded chunks at appropriate LOD
