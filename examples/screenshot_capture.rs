@@ -552,14 +552,16 @@ impl ApplicationHandler for App {
                     // Update FPS counter and stats
                     self.frame_count += 1;
                     
-                    // Screenshot mode: save PNG after 5 frames then exit
-                    if self.frame_count == 5 {
+                    // Screenshot mode: save PNG after enough frames for terrain to load
+                    // Wait at least 10 frames AND ensure we have geometry
+                    if self.frame_count >= 10 && self.num_indices > 0 {
                         if let Ok(params) = std::env::var("CAMERA_PARAMS") {
                             let parts: Vec<&str> = params.split_whitespace().collect();
                             if parts.len() >= 6 {
                                 let output_file = parts[5];
                                 println!("\n========== SAVING SCREENSHOT ==========");
                                 println!("Output file: {}", output_file);
+                                println!("Vertices: {}, Indices: {}", self.num_indices / 3, self.num_indices);
                                 
                                 // Capture the framebuffer
                                 let capture_result = renderer.render_and_capture(clear_color, |render_pass| {

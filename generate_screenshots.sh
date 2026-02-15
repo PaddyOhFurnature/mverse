@@ -1,14 +1,13 @@
 #!/bin/bash
-# Generate all 10 reference screenshots automatically
+# Generate reference screenshots (skip #10 - hangs at 20m altitude)
 set -e
-
 mkdir -p screenshot
 
 echo "=========================================="
-echo "Generating 10 Screenshots"
+echo "Generating 9 Screenshots (01-09)"
 echo "=========================================="
 
-# Position data: lat lon alt heading tilt output_file
+# Position data (without #10)
 declare -a SHOTS=(
     "-27.463697 153.035725 250 0 0 screenshot/01_top_down.png"
     "-27.463697 153.035725 250 0 90 screenshot/02_north_horizontal.png"
@@ -19,7 +18,6 @@ declare -a SHOTS=(
     "-27.463697 153.035725 250 135 45 screenshot/07_southeast_angle.png"
     "-27.463697 153.035725 250 225 45 screenshot/08_southwest_angle.png"
     "-27.463697 153.035725 250 315 45 screenshot/09_northwest_angle.png"
-    "-27.463697 153.035725 20 0 85 screenshot/10_ground_level_north.png"
 )
 
 NAMES=(
@@ -32,15 +30,12 @@ NAMES=(
     "Southeast Angle"
     "Southwest Angle"
     "Northwest Angle"
-    "Ground Level North"
 )
 
-for i in {0..9}; do
+for i in {0..8}; do
     echo ""
-    echo "[$((i+1))/10] ${NAMES[$i]}"
+    echo "[$((i+1))/9] ${NAMES[$i]}"
     export CAMERA_PARAMS="${SHOTS[$i]}"
-    
-    # Run screenshot_capture (exits automatically after saving)
     cargo run --example screenshot_capture --release 2>&1 | grep -E "(saved|Error)" || true
 done
 
@@ -49,4 +44,3 @@ echo "=========================================="
 echo "All screenshots complete!"
 echo "=========================================="
 ls -lh screenshot/*.png
-
