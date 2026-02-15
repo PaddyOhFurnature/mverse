@@ -104,9 +104,10 @@ fn triangles_to_mesh(triangles: &[Triangle], material: MaterialId) -> Mesh {
             vertices.push(v.normal[2]);
         }
         
+        // Reverse winding order (fixes inverted normals)
         indices.push(base_idx);
-        indices.push(base_idx + 1);
         indices.push(base_idx + 2);
+        indices.push(base_idx + 1);
     }
     
     Mesh {
