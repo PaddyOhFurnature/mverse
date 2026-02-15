@@ -75,6 +75,14 @@ pub struct OsmRoad {
     pub road_type: RoadType,
     pub width_m: f64,
     pub name: Option<String>,
+    /// OSM layer tag (-5 to +5, default 0). Bridges typically +1, tunnels -1
+    pub layer: i8,
+    /// True if this is a bridge
+    pub is_bridge: bool,
+    /// True if this is a tunnel  
+    pub is_tunnel: bool,
+    /// Bridge/tunnel vertical clearance in meters (if specified)
+    pub level_m: Option<f64>,
 }
 
 /// Parsed water feature from OSM
@@ -198,12 +206,43 @@ pub fn parse_overpass_response(json: &serde_json::Value) -> Result<OsmData, Box<
                 .and_then(|n| n.as_str())
                 .map(|s| s.to_string());
             
+            // Parse OSM layer tag (bridges +1, tunnels -1, default 0)
+            let layer = tags.get("layer")
+                .and_then(|l| l.as_str())
+                .and_then(|s| s.parse::<i8>().ok())
+                .unwrap_or(0);
+            
+            // Check if this is a bridge or tunnel
+            let is_bridge = tags.get("bridge")
+                .and_then(|b| b.as_str())
+                .map(|s| s == "yes" || s == "true" || s == "viaduct")
+                .unwrap_or(false);
+            
+            let is_tunnel = tags.get("tunnel")
+                .and_then(|t| t.as_str())
+                .map(|s| s == "yes" || s == "true")
+                .unwrap_or(false);
+            
+            // Parse level/height tags (height above ground for bridges)
+            let level_m = tags.get("level")
+                .and_then(|l| l.as_str())
+                .and_then(|s| s.parse::<f64>().ok())
+                .or_else(|| {
+                    tags.get("height")
+                        .and_then(|h| h.as_str())
+                        .and_then(|s| s.trim_end_matches(" m").parse::<f64>().ok())
+                });
+            
             data.roads.push(OsmRoad {
                 id,
                 nodes: coords,
                 road_type,
                 width_m,
                 name,
+                layer,
+                is_bridge,
+                is_tunnel,
+                level_m,
             });
         } else if tags.get("natural").and_then(|n| n.as_str()) == Some("water") {
             let name = tags.get("name")

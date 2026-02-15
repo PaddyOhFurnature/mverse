@@ -159,12 +159,33 @@ pub fn generate_mesh_from_osm_filtered(
             let node1 = &road.nodes[i];
             let node2 = &road.nodes[i + 1];
             
+            // Calculate elevation offset for bridges/tunnels
+            // SRTM gives ground elevation; we need to adjust for structure height
+            let elevation_offset = if road.is_bridge {
+                // Bridge deck above ground
+                // Use explicit level if available, otherwise estimate from layer
+                road.level_m.unwrap_or_else(|| {
+                    // Story Bridge deck is ~30m above river
+                    // Default bridges: 5m + 3m per layer above ground
+                    5.0 + (road.layer as f64).max(0.0) * 3.0
+                })
+            } else if road.is_tunnel {
+                // Tunnel below ground (negative offset)
+                road.level_m.map(|l| -l).unwrap_or_else(|| {
+                    // Default tunnels: -3m per layer below ground
+                    (road.layer as f64).min(0.0) * 3.0
+                })
+            } else {
+                // Regular road at ground level
+                0.0
+            };
+            
             // Distance filtering (if camera position provided)
             if let Some(cam_ecef) = camera_ecef {
                 // Use segment midpoint for distance check
                 let mid_lat = (node1.lat_deg + node2.lat_deg) / 2.0;
                 let mid_lon = (node1.lon_deg + node2.lon_deg) / 2.0;
-                let mid_elev = (node1.elevation_m + node2.elevation_m) / 2.0;
+                let mid_elev = (node1.elevation_m + node2.elevation_m) / 2.0 + elevation_offset;
                 
                 let mid_ecef = gps_to_ecef(&GpsPos {
                     lat_deg: mid_lat,
@@ -187,16 +208,17 @@ pub fn generate_mesh_from_osm_filtered(
                 continue; // Skip this segment but keep trying (maybe later roads are closer)
             }
             
+            // Apply elevation offset to convert ground elevation to structure elevation
             let pos1_ecef = gps_to_ecef(&GpsPos {
                 lat_deg: node1.lat_deg,
                 lon_deg: node1.lon_deg,
-                elevation_m: node1.elevation_m,
+                elevation_m: node1.elevation_m + elevation_offset,
             });
             
             let pos2_ecef = gps_to_ecef(&GpsPos {
                 lat_deg: node2.lat_deg,
                 lon_deg: node2.lon_deg,
-                elevation_m: node2.elevation_m,
+                elevation_m: node2.elevation_m + elevation_offset,
             });
             
             let p1 = glam::Vec3::new(pos1_ecef.x as f32, pos1_ecef.y as f32, pos1_ecef.z as f32);
