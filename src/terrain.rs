@@ -79,12 +79,30 @@ pub fn generate_terrain_from_elevation<F, G>(
                 let gps = coords_fn(x, y, z);
                 let voxel_elevation = gps.elevation_m;
                 
+                // DEBUG: Log first column
+                static mut LOGGED: bool = false;
+                unsafe {
+                    if !LOGGED && x == size/2 && z == size/2 && y % 64 == 0 {
+                        println!("[terrain] Voxel Y={}: voxel_elev={:.1}m, terrain_elev={:.1}m", 
+                                 y, voxel_elevation, elevation);
+                        if y == size - 64 { LOGGED = true; }
+                    }
+                }
+                
                 // Determine material at this voxel based on elevation
                 let material = if voxel_elevation < elevation - DIRT_DEPTH {
                     // Deep underground → rock
                     STONE
                 } else if voxel_elevation < elevation {
                     // Near surface → soil
+                    static mut DIRT_COUNT: usize = 0;
+                    unsafe {
+                        DIRT_COUNT += 1;
+                        if DIRT_COUNT <= 5 {
+                            println!("[terrain] DIRT voxel at Y={} (voxel_elev={:.1}m < terrain={:.1}m)", 
+                                     y, voxel_elevation, elevation);
+                        }
+                    }
                     DIRT
                 } else if voxel_elevation < SEA_LEVEL && elevation < SEA_LEVEL {
                     // Below sea level and terrain is underwater → water
