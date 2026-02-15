@@ -251,6 +251,14 @@ impl App {
                 let center_gps = ecef_to_gps(&chunk_center);
                 println!("[DEBUG] Chunk area: {:.0}m, voxel size: {:.2}m", area_size, voxel_size);
                 
+                // DEBUG: Print sample voxel coordinates BEFORE transform
+                if vertices.len() > 0 {
+                    println!("[DEBUG] Sample voxel coords (before transform):");
+                    println!("  First: ({:.1}, {:.1}, {:.1})", 
+                        vertices[0].position[0], vertices[0].position[1], vertices[0].position[2]);
+                    println!("  Half = {}, voxel_to_meters = {:.2}", half, voxel_to_meters);
+                }
+                
                 for vertex in &mut vertices {
                     // Map voxel coords to ENU relative to chunk center
                     let enu = EnuPos {
