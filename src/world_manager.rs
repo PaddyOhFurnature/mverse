@@ -154,18 +154,12 @@ impl WorldManager {
             println!("[extract_meshes] Delta: ({:.1}, {:.1}, {:.1})", dx, dy, dz);
             println!("[extract_meshes] Chunk distance: {:.1}m", distance);
             
-            // Select LOD based on distance (much larger ranges for flying camera)
-            let lod = if distance < 500.0 {
-                0
-            } else if distance < 2000.0 {
-                1
-            } else if distance < 5000.0 {
-                2
-            } else if distance < 10000.0 {
-                3
+            // Select LOD based on distance
+            // TEMP: Force LOD 1 (50% skip) - LOD 2-3 are too coarse for 128³ SVO
+            let lod = if distance < 2000.0 {
+                0  // Full detail nearby
             } else {
-                println!("[extract_meshes] Chunk too far ({:.1}m > 10km), skipping", distance);
-                continue; // Too far, don't render
+                1  // Half detail far away
             };
             
             println!("[extract_meshes] Using LOD {} for distance {:.1}m", lod, distance);
@@ -173,6 +167,9 @@ impl WorldManager {
             // Extract mesh at selected LOD
             let meshes = generate_mesh(&chunk.svo, lod);
             println!("[extract_meshes] Extracted {} material meshes", meshes.len());
+            for (i, mesh) in meshes.iter().enumerate() {
+                println!("  Mesh {}: {} vertices", i, mesh.vertices.len());
+            }
             results.push((meshes, chunk.center));
         }
         
@@ -235,9 +232,16 @@ fn generate_chunk_svo(
     println!("Generating chunk {}: {:.0}m area, {:.2}m voxels", chunk_id, area_size, voxel_size);
     
     // Voxelize terrain
+    let mut elevation_queries = 0;
+    let mut elevation_hits = 0;
     let elevation_fn = |lat: f64, lon: f64| -> Option<f32> {
+        elevation_queries += 1;
         if lat >= sw.lat_deg && lat <= ne.lat_deg && lon >= sw.lon_deg && lon <= ne.lon_deg {
-            srtm.get_elevation(lat, lon).map(|e| e as f32)
+            let result = srtm.get_elevation(lat, lon).map(|e| e as f32);
+            if result.is_some() {
+                elevation_hits += 1;
+            }
+            result
         } else {
             None
         }
@@ -257,6 +261,7 @@ fn generate_chunk_svo(
     };
     
     generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
+    println!("  Terrain: {}/{} elevation queries had data", elevation_hits, elevation_queries);
     
     // Add OSM features within chunk bounds
     let chunk_center = gps_to_ecef(&center_gps);
