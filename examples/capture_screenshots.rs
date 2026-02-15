@@ -348,11 +348,11 @@ impl ApplicationHandler for ScreenshotApp {
             println!("SRTM manager initialized (procedural fallback enabled)");
             
             // Generate mesh with distance filtering AND terrain elevation
-            // Use 500m radius to get dense urban coverage around camera
+            // Use 5000m radius to match reference image detail level
             let (vertices, indices) = generate_mesh_from_osm_filtered(
                 &osm_data,
                 Some(&TEST_GPS),
-                500.0, // 500m radius - dense coverage like walking mode
+                5000.0, // 5km radius - matches reference detail
                 Some(&mut srtm), // Enable terrain elevation
             );
             println!("Generated {} vertices, {} indices\n", vertices.len(), indices.len());

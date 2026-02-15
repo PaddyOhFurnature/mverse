@@ -8,7 +8,8 @@ pub mod osm;
 pub mod elevation;
 pub mod elevation_sources;
 pub mod elevation_downloader;
-pub mod srtm_downloader;  // New async multi-source downloader
+pub mod srtm_downloader;
+pub mod terrain_mesh;  // Terrain mesh generation from SRTM
 pub mod renderer;
 
 #[cfg(test)]
