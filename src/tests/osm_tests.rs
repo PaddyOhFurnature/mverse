@@ -209,6 +209,10 @@ fn test_road_crossing_chunk_boundary() {
         road_type: RoadType::Residential,
         width_m: 6.0,
         name: None,
+        layer: 0,
+        is_bridge: false,
+        is_tunnel: false,
+        level_m: None,
     });
     
     let chunks = assign_osm_to_chunks(&data, 10);
@@ -451,6 +455,10 @@ fn test_scale_gate_full_pipeline_integration() {
             road_type: RoadType::Primary,
             width_m: 8.0,
             name: Some("Main Street".to_string()),
+            layer: 0,
+            is_bridge: false,
+            is_tunnel: false,
+            level_m: None,
         }],
         water: vec![],
         parks: vec![],
