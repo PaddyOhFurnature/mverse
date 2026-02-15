@@ -249,15 +249,16 @@ impl ApplicationHandler for App {
                 let mut srtm = SrtmManager::new(cache_for_srtm);
                 srtm.set_network_enabled(false);
                 
-                // Create SVO (depth 11 = 2048^3 for higher resolution)
-                let depth = 11;
+                // Create SVO for LOD 0 (0-50m range, high detail)
+                let depth = 10;  // 1024^3
                 let mut svo = SparseVoxelOctree::new(depth);
                 let svo_size = 1u32 << depth;
-                println!("✓ SVO: {}^3 voxels", svo_size);
                 
-                let area_size = 5000.0; // 5km
+                let area_size = 100.0; // 100m coverage (50m radius)
                 let voxel_size = area_size / svo_size as f64;
-                println!("  Voxel size: {:.2}m (need ~1-2m for building detail)", voxel_size);
+                println!("✓ SVO: {}^3 voxels", svo_size);
+                println!("  LOD 0 (0-50m): {:.0}m coverage", area_size);
+                println!("  Voxel size: {:.2}cm", voxel_size * 100.0);
                 
                 // Voxelize terrain
                 println!("Voxelizing terrain from SRTM...");
@@ -294,12 +295,12 @@ impl ApplicationHandler for App {
                     println!("✓ Carved {} rivers", 10.min(osm_data.water.len()));
                 }
                 
-                // Add roads (limited for testing)
+                // Add roads (within LOD 0 range)
                 use metaverse_core::osm_features::place_road;
                 if !osm_data.roads.is_empty() {
-                    println!("Placing roads...");
+                    println!("Placing roads (LOD 0)...");
                     let mut roads_placed = 0;
-                    for road in osm_data.roads.iter().take(100) {
+                    for road in osm_data.roads.iter().take(50) {
                         if road.nodes.len() >= 2 {
                             place_road(&mut svo, &chunk_center, "road", &road.nodes, voxel_size);
                             roads_placed += 1;
@@ -308,18 +309,15 @@ impl ApplicationHandler for App {
                     println!("✓ Placed {} roads", roads_placed);
                 }
                 
-                // Add buildings (limited for testing)
+                // Add buildings (within LOD 0 range)
                 use metaverse_core::osm_features::add_building;
                 if !osm_data.buildings.is_empty() {
-                    println!("Adding buildings...");
+                    println!("Adding buildings (LOD 0)...");
                     let mut buildings_added = 0;
-                    for building in osm_data.buildings.iter().take(500) {
+                    for building in osm_data.buildings.iter().take(100) {
                         if building.polygon.len() >= 3 {
                             add_building(&mut svo, &chunk_center, building, voxel_size);
                             buildings_added += 1;
-                            if buildings_added % 100 == 0 {
-                                println!("  Added {}/500 buildings", buildings_added);
-                            }
                         }
                     }
                     println!("✓ Added {} buildings", buildings_added);
