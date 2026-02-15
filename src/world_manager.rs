@@ -34,13 +34,17 @@ pub struct WorldManager {
 impl WorldManager {
     /// Create new world manager
     pub fn new(chunk_depth: usize, render_distance: f64, svo_depth: u8) -> Self {
-        Self {
+        println!("[WorldManager::new] Creating with depth={}, render_distance={}, svo_depth={}", 
+            chunk_depth, render_distance, svo_depth);
+        let wm = Self {
             chunks: HashMap::new(),
             chunk_depth,
             render_distance,
             svo_depth,
             last_camera_pos: None,
-        }
+        };
+        println!("[WorldManager::new] ✓ Created successfully");
+        wm
     }
     
     /// Get SVO depth (for coordinate transforms)

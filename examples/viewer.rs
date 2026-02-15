@@ -226,14 +226,23 @@ impl ApplicationHandler for App {
             );
 
             // Create renderer
+            println!("Creating renderer...");
             let renderer = pollster::block_on(Renderer::new(window.clone()));
+            println!("✓ Renderer created");
             
             // Create pipeline
+            println!("Creating pipeline...");
             let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
+            println!("✓ Pipeline created");
             
             // Initialize elevation downloader with multi-source support
+            println!("Creating cache...");
             let cache = DiskCache::new().unwrap();
+            println!("✓ Cache created");
+            
+            println!("Creating elevation downloader...");
             let downloader = ElevationDownloader::new(cache);
+            println!("✓ Downloader created");
             
             println!("Elevation downloader initialized");
             println!("  Sources: AWS Terrarium (primary), USGS 3DEP, OpenTopography");
