@@ -291,10 +291,16 @@ impl SrtmManager {
         
         // Try to get tile from cache, or load it
         if !self.tiles.contains_key(&(tile_lat, tile_lon)) {
+            println!("[SrtmManager] Loading tile for ({}, {}) - file: {}{:02}{}{:03}.hgt",
+                     tile_lat, tile_lon,
+                     if tile_lat >= 0 { 'N' } else { 'S' }, tile_lat.abs(),
+                     if tile_lon >= 0 { 'E' } else { 'W' }, tile_lon.abs());
             if let Some(tile) = self.load_tile(tile_lat, tile_lon) {
+                println!("[SrtmManager] ✓ Tile loaded successfully");
                 self.tiles.insert((tile_lat, tile_lon), tile);
             } else if self.use_procedural {
                 // Fallback: generate procedural terrain
+                println!("[SrtmManager] ✗ Tile load failed - using procedural");
                 return Some(self.generate_procedural_elevation(lat, lon));
             } else {
                 // Tile not available and procedural disabled

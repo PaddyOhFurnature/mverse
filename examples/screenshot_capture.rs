@@ -428,7 +428,8 @@ impl ApplicationHandler for App {
             // Initialize SRTM for terrain data
             let cache_for_srtm = DiskCache::new().expect("Failed to create cache for SRTM");
             let mut srtm = SrtmManager::new(cache_for_srtm);
-            srtm.set_network_enabled(false);
+            // Enable network for SRTM tile downloads (2-second cooldown enforced)
+            srtm.set_network_enabled(true);
             
             // Initialize WorldManager for chunk streaming
             let world_manager = if full_osm_data.is_some() {
