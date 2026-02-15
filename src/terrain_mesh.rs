@@ -76,3 +76,58 @@ pub fn generate_terrain_mesh(
     eprintln!("[Terrain] {} vertices, {} triangles", vertices.len(), indices.len() / 3);
     (vertices, indices)
 }
+
+/// Generate water plane at sea level for rivers/ocean
+pub fn generate_water_plane(
+    center: &GpsPos,
+    radius_m: f64,
+    water_level_m: f64,
+) -> (Vec<ColoredVertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    
+    let lat_deg_per_m = 1.0 / 111_000.0;
+    let lon_deg_per_m = 1.0 / (111_000.0 * center.lat_deg.to_radians().cos());
+    
+    let lat_range = radius_m * lat_deg_per_m;
+    let lon_range = radius_m * lon_deg_per_m;
+    
+    // Create a simple quad for water surface
+    let corners = [
+        (center.lat_deg - lat_range, center.lon_deg - lon_range),
+        (center.lat_deg - lat_range, center.lon_deg + lon_range),
+        (center.lat_deg + lat_range, center.lon_deg + lon_range),
+        (center.lat_deg + lat_range, center.lon_deg - lon_range),
+    ];
+    
+    for (lat_deg, lon_deg) in &corners {
+        let pos = GpsPos { 
+            lat_deg: *lat_deg, 
+            lon_deg: *lon_deg, 
+            elevation_m: water_level_m 
+        };
+        let ecef = gps_to_ecef(&pos);
+        
+        let normal_len = (ecef.x * ecef.x + ecef.y * ecef.y + ecef.z * ecef.z).sqrt();
+        let normal = [
+            (ecef.x / normal_len) as f32,
+            (ecef.y / normal_len) as f32,
+            (ecef.z / normal_len) as f32,
+        ];
+        
+        // Water color: blue with semi-transparency
+        let color = [0.2, 0.4, 0.7, 0.7];
+        
+        vertices.push(ColoredVertex {
+            position: [ecef.x as f32, ecef.y as f32, ecef.z as f32],
+            normal,
+            color,
+        });
+    }
+    
+    // Two triangles to form a quad
+    indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    
+    eprintln!("[Water] Generated water plane at {:.1}m elevation", water_level_m);
+    (vertices, indices)
+}

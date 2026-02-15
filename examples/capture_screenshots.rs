@@ -348,7 +348,7 @@ impl ApplicationHandler for ScreenshotApp {
             println!("SRTM manager initialized (procedural fallback enabled)");
             
             // Generate terrain mesh from SRTM data
-            use metaverse_core::terrain_mesh::generate_terrain_mesh;
+            use metaverse_core::terrain_mesh::{generate_terrain_mesh, generate_water_plane};
             println!("\nGenerating terrain mesh...");
             let (terrain_verts, terrain_inds) = generate_terrain_mesh(
                 &TEST_GPS,
@@ -357,6 +357,14 @@ impl ApplicationHandler for ScreenshotApp {
                 &mut srtm,
             );
             println!("  Terrain: {} vertices, {} indices", terrain_verts.len(), terrain_inds.len());
+            
+            // Generate water plane at sea level (0m) for Brisbane River
+            let (water_verts, water_inds) = generate_water_plane(
+                &TEST_GPS,
+                5000.0,  // 5km radius
+                0.0,     // Sea level
+            );
+            println!("  Water: {} vertices, {} indices", water_verts.len(), water_inds.len());
             
             // Generate building/road mesh with distance filtering AND terrain elevation
             // Use 5000m radius to match reference image detail level
@@ -372,6 +380,11 @@ impl ApplicationHandler for ScreenshotApp {
             let index_offset = vertices.len() as u32;
             vertices.extend_from_slice(&terrain_verts);
             indices.extend(terrain_inds.iter().map(|i| i + index_offset));
+            
+            // Add water plane UNDER terrain (render first, terrain will occlude where needed)
+            let water_offset = vertices.len() as u32;
+            vertices.extend_from_slice(&water_verts);
+            indices.extend(water_inds.iter().map(|i| i + water_offset));
             
             println!("  Combined: {} vertices, {} indices\n", vertices.len(), indices.len());
     
