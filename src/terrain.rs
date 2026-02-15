@@ -62,6 +62,15 @@ pub fn generate_terrain_from_elevation<F, G>(
                 .map(|e| e as f64)
                 .unwrap_or(SEA_LEVEL);
             
+            // DEBUG: Log first few elevations
+            static mut COUNT: usize = 0;
+            unsafe {
+                if COUNT < 5 {
+                    println!("[terrain] Position ({}, {}): elevation = {:.1}m", lat, lon, elevation);
+                    COUNT += 1;
+                }
+            }
+            
             // Determine material boundaries in voxel coordinates
             // We need to figure out which y-voxels are rock, soil, air, or water
             
