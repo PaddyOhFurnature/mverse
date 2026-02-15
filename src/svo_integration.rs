@@ -8,6 +8,7 @@ use crate::coordinates::{EcefPos, GpsPos, gps_to_ecef};
 use crate::osm::OsmData;
 use crate::renderer::mesh::generate_building;
 use crate::renderer::pipeline::Vertex;
+use crate::elevation::SrtmManager;
 
 /// Vertex format for colored meshes [x, y, z, nx, ny, nz, r, g, b, a]
 /// Matches the renderer's Vertex format for compatibility
@@ -34,23 +35,26 @@ impl ColoredVertex {
 ///
 /// Uses ACTUAL building polygons (not boxes), 3D road volumes, and water surfaces
 pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u32>) {
-    // Default: use large radius to get all data (for testing/screenshots)
-    generate_mesh_from_osm_filtered(osm_data, None, f64::INFINITY)
+    // Default: use large radius, no elevation service (flat at sea level for backwards compat)
+    generate_mesh_from_osm_filtered(osm_data, None, f64::INFINITY, None)
 }
 
-/// Generate mesh from OSM data with distance filtering
+/// Generate mesh from OSM data with distance filtering and terrain elevation
 ///
 /// Only includes geometry within `max_distance_m` from `camera_pos`.
 /// Uses GPU buffer limit as hard stop, not arbitrary building count.
+/// If elevation_service provided, places buildings on terrain.
 ///
 /// # Arguments
 /// * `osm_data` - OSM data to render
 /// * `camera_pos` - Camera position in GPS coords (for distance filtering). None = no filtering
-/// * `max_distance_m` - Maximum distance from camera to include geometry
+/// * `max_distance_m` - Maximum distance from camera to include geometry  
+/// * `srtm_manager` - Optional SRTM manager for terrain heights. None = flat at sea level
 pub fn generate_mesh_from_osm_filtered(
     osm_data: &OsmData,
     camera_pos: Option<&GpsPos>,
     max_distance_m: f64,
+    mut srtm_manager: Option<&mut SrtmManager>,
 ) -> (Vec<ColoredVertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -95,12 +99,20 @@ pub fn generate_mesh_from_osm_filtered(
             .map(|pos| (pos.lat_deg, pos.lon_deg))
             .collect();
         
-        let elevation = building.polygon.first().map(|p| p.elevation_m).unwrap_or(0.0);
+        // Get terrain elevation at building center for proper placement
+        let center_gps = building.polygon.first().unwrap();
+        let terrain_elevation = if let Some(srtm) = srtm_manager.as_deref_mut() {
+            // Use terrain elevation if available
+            srtm.get_elevation_or(center_gps.lat_deg, center_gps.lon_deg, 0.0)
+        } else {
+            // Fall back to OSM elevation (often 0 or wrong)
+            center_gps.elevation_m
+        };
         
         // Use the existing proper building generator that creates 3D volumes
         let (bldg_verts, bldg_indices) = generate_building(
             &footprint,
-            elevation,
+            terrain_elevation,  // Place on terrain!
             building.height_m,
             building_color,
         );
