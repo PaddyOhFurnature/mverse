@@ -347,15 +347,33 @@ impl ApplicationHandler for ScreenshotApp {
             srtm.set_network_enabled(false); // Use cached tiles only (no network during capture)
             println!("SRTM manager initialized (procedural fallback enabled)");
             
-            // Generate mesh with distance filtering AND terrain elevation
+            // Generate terrain mesh from SRTM data
+            use metaverse_core::terrain_mesh::generate_terrain_mesh;
+            println!("\nGenerating terrain mesh...");
+            let (terrain_verts, terrain_inds) = generate_terrain_mesh(
+                &TEST_GPS,
+                5000.0,  // 5km radius to match building render distance
+                100.0,   // 100m grid spacing (50x50 grid)
+                &mut srtm,
+            );
+            println!("  Terrain: {} vertices, {} indices", terrain_verts.len(), terrain_inds.len());
+            
+            // Generate building/road mesh with distance filtering AND terrain elevation
             // Use 5000m radius to match reference image detail level
-            let (vertices, indices) = generate_mesh_from_osm_filtered(
+            let (mut vertices, mut indices) = generate_mesh_from_osm_filtered(
                 &osm_data,
                 Some(&TEST_GPS),
                 5000.0, // 5km radius - matches reference detail
                 Some(&mut srtm), // Enable terrain elevation
             );
-            println!("Generated {} vertices, {} indices\n", vertices.len(), indices.len());
+            println!("  Buildings/roads: {} vertices, {} indices", vertices.len(), indices.len());
+            
+            // Merge terrain mesh with building/road mesh
+            let index_offset = vertices.len() as u32;
+            vertices.extend_from_slice(&terrain_verts);
+            indices.extend(terrain_inds.iter().map(|i| i + index_offset));
+            
+            println!("  Combined: {} vertices, {} indices\n", vertices.len(), indices.len());
     
             // Create buffers
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
