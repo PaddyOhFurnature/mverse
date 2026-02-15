@@ -87,6 +87,9 @@ impl ScreenshotApp {
         let pos_ecef = gps_to_ecef(&camera_gps);
         let position = DVec3::new(pos_ecef.x, pos_ecef.y, pos_ecef.z);
         
+        println!("  Camera ECEF: ({:.1}, {:.1}, {:.1})", position.x, position.y, position.z);
+        println!("  Camera altitude: {:.1}m", view.altitude_m);
+        
         // Calculate local coordinate frame at camera position
         // Up = radial direction away from Earth center
         let up = position.normalize();
@@ -372,14 +375,20 @@ impl ApplicationHandler for ScreenshotApp {
                 srtm.get_elevation(lat, lon).map(|e| e as f32)
             };
             
+            let center_ground = GpsPos {
+                lat_deg: TEST_GPS.lat_deg,
+                lon_deg: TEST_GPS.lon_deg,
+                elevation_m: 0.0,
+            };
+            
             let coords_fn = |x: u32, y: u32, z: u32| -> GpsPos {
                 let half = svo_size as f64 / 2.0;
                 let dx = (x as f64 - half) * voxel_size;
                 let dy = (y as f64 - half) * voxel_size;
                 let dz = (z as f64 - half) * voxel_size;
                 
-                let lat_deg = TEST_GPS.lat_deg + (dz / 111_000.0);
-                let lon_deg = TEST_GPS.lon_deg + (dx / (111_000.0 * TEST_GPS.lat_deg.to_radians().cos()));
+                let lat_deg = center_ground.lat_deg + (dz / 111_000.0);
+                let lon_deg = center_ground.lon_deg + (dx / (111_000.0 * center_ground.lat_deg.to_radians().cos()));
                 let elevation_m = dy;
                 
                 GpsPos { lat_deg, lon_deg, elevation_m }
@@ -391,7 +400,12 @@ impl ApplicationHandler for ScreenshotApp {
             // Carve rivers via CSG
             if !osm_data.water.is_empty() {
                 println!("\nCarving {} water features...", osm_data.water.len());
-                let chunk_center = gps_to_ecef(&TEST_GPS);
+                let center_ground = GpsPos {
+                    lat_deg: TEST_GPS.lat_deg,
+                    lon_deg: TEST_GPS.lon_deg,
+                    elevation_m: 0.0,
+                };
+                let chunk_center = gps_to_ecef(&center_ground);
                 
                 for (i, water) in osm_data.water.iter().enumerate().take(10) {
                     if water.polygon.len() >= 2 {
@@ -415,8 +429,51 @@ impl ApplicationHandler for ScreenshotApp {
             // Convert to ColoredVertex format
             println!("\nConverting to GPU format...");
             let material_colors = MaterialColors::default_palette();
-            let (vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
-            println!("✓ {} colored vertices, {} indices\n", vertices.len(), indices.len());
+            let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
+            
+            // Transform vertices from voxel space to ECEF space
+            use metaverse_core::coordinates::{enu_to_ecef, EnuPos};
+            let center_ground = GpsPos {
+                lat_deg: TEST_GPS.lat_deg,
+                lon_deg: TEST_GPS.lon_deg,
+                elevation_m: 0.0,  // Mesh at ground level
+            };
+            let center_ecef = gps_to_ecef(&center_ground);
+            let half = svo_size as f32 / 2.0;
+            let voxel_to_meters = voxel_size as f32;
+            
+            println!("  Center ECEF: ({:.1}, {:.1}, {:.1})", center_ecef.x, center_ecef.y, center_ecef.z);
+            println!("  Voxel range: 0-{}, centered at {}", svo_size, half);
+            println!("  Voxel to meters: {:.2}", voxel_to_meters);
+            
+            let mut min_pos = [f32::MAX; 3];
+            let mut max_pos = [f32::MIN; 3];
+            
+            for vertex in &mut vertices {
+                // Voxel coords: (0,0,0) to (256,256,256)
+                // Center at (128, 128, 128)
+                // Map to ENU: X=East, Y=Up, Z=North
+                let enu = EnuPos {
+                    east: ((vertex.position[0] - half) * voxel_to_meters) as f64,
+                    north: ((vertex.position[2] - half) * voxel_to_meters) as f64,
+                    up: ((vertex.position[1] - half) * voxel_to_meters) as f64,
+                };
+                
+                let pos_ecef = enu_to_ecef(&enu, &center_ecef, &center_ground);
+                vertex.position = [pos_ecef.x as f32, pos_ecef.y as f32, pos_ecef.z as f32];
+                
+                for i in 0..3 {
+                    min_pos[i] = min_pos[i].min(vertex.position[i]);
+                    max_pos[i] = max_pos[i].max(vertex.position[i]);
+                }
+            }
+            
+            println!("  Mesh ECEF bounds:");
+            println!("    X: {:.1} to {:.1}", min_pos[0], max_pos[0]);
+            println!("    Y: {:.1} to {:.1}", min_pos[1], max_pos[1]);
+            println!("    Z: {:.1} to {:.1}", min_pos[2], max_pos[2]);
+            
+            println!("✓ {} colored vertices (transformed to ECEF), {} indices\n", vertices.len(), indices.len());
     
             // Create buffers
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
