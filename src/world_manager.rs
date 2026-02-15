@@ -162,7 +162,7 @@ impl WorldManager {
             } else if distance < 5000.0 {
                 2
             } else if distance < 10000.0 {
-                0  // TEMP: Force LOD 0 for debugging
+                3
             } else {
                 println!("[extract_meshes] Chunk too far ({:.1}m > 10km), skipping", distance);
                 continue; // Too far, don't render

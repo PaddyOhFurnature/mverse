@@ -331,8 +331,8 @@ impl ApplicationHandler for App {
             let world_manager = if full_osm_data.is_some() {
                 println!("=== Initializing WorldManager ===");
                 let wm = WorldManager::new(
-                    9,      // Depth 9 chunks (~60km at equator)
-                    1000.0, // 1km render distance
+                    14,     // Depth 14 chunks (~400m per tile as per GLOSSARY.md)
+                    2000.0, // 2km render distance
                     10      // SVO depth 10 (1024³ = ~1m voxels)
                 );
                 println!("✓ WorldManager initialized");
