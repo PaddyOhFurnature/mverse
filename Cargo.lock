@@ -1803,6 +1803,7 @@ dependencies = [
  "dirs",
  "env_logger",
  "glam",
+ "image",
  "noise",
  "png 0.17.16",
  "pollster",
