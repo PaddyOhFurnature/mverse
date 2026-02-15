@@ -52,12 +52,21 @@ impl WorldManager {
     pub fn update(&mut self, camera_pos: &EcefPos, srtm: &mut SrtmManager, osm_data: &OsmData) -> usize {
         // Check if camera moved significantly
         let needs_update = match self.last_camera_pos {
-            None => true,
+            None => {
+                println!("[WorldManager] First update - initializing chunks");
+                true
+            }
             Some(ref last) => {
                 let dx = camera_pos.x - last.x;
                 let dy = camera_pos.y - last.y;
                 let dz = camera_pos.z - last.z;
-                (dx*dx + dy*dy + dz*dz).sqrt() > 100.0
+                let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                if dist > 100.0 {
+                    println!("[WorldManager] Camera moved {:.1}m - updating chunks", dist);
+                    true
+                } else {
+                    false
+                }
             }
         };
         
@@ -88,15 +97,20 @@ impl WorldManager {
         let mut loaded = 0;
         for chunk_id in target_chunks {
             if !self.chunks.contains_key(&chunk_id) {
+                println!("[WorldManager] Generating chunk {:?}...", chunk_id);
                 if let Some(chunk) = generate_chunk_svo(&chunk_id, self.svo_depth, srtm, osm_data) {
+                    let voxel_count = 1u64 << (self.svo_depth * 3);
+                    println!("[WorldManager] ✓ Chunk generated (max {} voxels)", voxel_count);
                     self.chunks.insert(chunk_id.clone(), chunk);
                     loaded += 1;
+                } else {
+                    println!("[WorldManager] ✗ Failed to generate chunk");
                 }
             }
         }
         
         if loaded > 0 {
-            println!("Loaded {} new chunks", loaded);
+            println!("[WorldManager] Loaded {} new chunks (total: {})", loaded, self.chunks.len());
         }
         
         self.chunks.len()

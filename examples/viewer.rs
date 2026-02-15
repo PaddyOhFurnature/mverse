@@ -39,6 +39,7 @@ struct App {
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
+    chunk_update_frame: usize, // Frame number when chunks were last updated
     
     // Input state
     keys_pressed: std::collections::HashSet<KeyCode>,
@@ -72,6 +73,7 @@ impl App {
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
+            chunk_update_frame: 0,
             keys_pressed: std::collections::HashSet::new(),
             mouse_captured: false,
             last_mouse_pos: None,
@@ -303,17 +305,20 @@ impl ApplicationHandler for App {
             // Initialize WorldManager for chunk streaming
             let world_manager = if full_osm_data.is_some() {
                 println!("=== Initializing WorldManager ===");
-                Some(WorldManager::new(
+                let wm = WorldManager::new(
                     9,      // Depth 9 chunks (~60km at equator)
                     1000.0, // 1km render distance
                     10      // SVO depth 10 (1024³ = ~1m voxels)
-                ))
+                );
+                println!("✓ WorldManager initialized");
+                Some(wm)
             } else {
                 println!("No cached OSM data - WorldManager not initialized");
                 println!("  Run: cargo run --example download_brisbane_data");
                 None
             };
             
+            println!("Creating GPU buffers...");
             // Initial mesh will be empty - updated each frame
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Empty Vertex Buffer"),
@@ -326,8 +331,10 @@ impl ApplicationHandler for App {
                 contents: &[],
                 usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             });
+            println!("✓ GPU buffers created");
             
             // Store for runtime updates
+            println!("Storing state...");
             self.world_manager = world_manager;
             self.srtm = Some(srtm);
             self.full_osm_data = full_osm_data;
@@ -340,6 +347,7 @@ impl ApplicationHandler for App {
             self.window = Some(window);
             self.fps_update_time = std::time::Instant::now();
             self.last_frame_time = std::time::Instant::now();
+            println!("✓ Initialization complete - ready to render!");
         }
     }
 
