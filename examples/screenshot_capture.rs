@@ -65,27 +65,52 @@ impl App {
                 let camera_pos = glam::DVec3::new(camera_ecef.x, camera_ecef.y, camera_ecef.z);
                 
                 // Calculate look direction from heading and tilt
+                // Heading: 0=North, 90=East, 180=South, 270=West
+                // Tilt: 0=straight down, 90=horizontal, 180=straight up
                 let heading_rad = heading.to_radians();
                 let tilt_rad = tilt.to_radians();
                 
-                // ENU coordinates: East, North, Up
-                let forward_enu = glam::DVec3::new(
-                    heading_rad.sin(),  // East
-                    heading_rad.cos(),  // North
-                    -(90.0 - tilt).to_radians().tan(), // Up (negative because tilt 0 = down)
+                // In ENU frame: E=x, N=y, U=z
+                // Horizontal direction from heading
+                let h_east = heading_rad.sin();
+                let h_north = heading_rad.cos();
+                
+                // Apply tilt (0° = down, 90° = horizontal)
+                let horizontal_mag = tilt_rad.sin();
+                let vertical = -tilt_rad.cos(); // negative because tilt 0° = down (negative up)
+                
+                let dir_enu = glam::DVec3::new(
+                    h_east * horizontal_mag,
+                    h_north * horizontal_mag,
+                    vertical,
                 ).normalize();
                 
-                // Convert ENU direction to ECEF
-                let enu_pos = EnuPos {
-                    east: forward_enu.x,
-                    north: forward_enu.y,
-                    up: forward_enu.z,
-                };
-                let look_ecef = enu_to_ecef(&enu_pos, &camera_ecef, &camera_gps);
+                println!("[DEBUG] ENU direction: ({:.3}, {:.3}, {:.3})", dir_enu.x, dir_enu.y, dir_enu.z);
                 
-                let look_at = camera_pos + glam::DVec3::new(look_ecef.x, look_ecef.y, look_ecef.z) * 100.0;
+                // Convert ENU direction to ECEF
+                // We need to rotate the ENU vector into ECEF frame
+                let lat_rad = lat.to_radians();
+                let lon_rad = lon.to_radians();
+                
+                // Rotation matrix from ENU to ECEF at this lat/lon
+                // ECEF direction = R * ENU direction
+                let sin_lat = lat_rad.sin();
+                let cos_lat = lat_rad.cos();
+                let sin_lon = lon_rad.sin();
+                let cos_lon = lon_rad.cos();
+                
+                // Apply rotation: https://gssc.esa.int/navipedia/index.php/Transformations_between_ECEF_and_ENU_coordinates
+                let dir_ecef_x = -sin_lon * dir_enu.x - sin_lat * cos_lon * dir_enu.y + cos_lat * cos_lon * dir_enu.z;
+                let dir_ecef_y =  cos_lon * dir_enu.x - sin_lat * sin_lon * dir_enu.y + cos_lat * sin_lon * dir_enu.z;
+                let dir_ecef_z =                        cos_lat * dir_enu.y + sin_lat * dir_enu.z;
+                
+                let dir_ecef = glam::DVec3::new(dir_ecef_x, dir_ecef_y, dir_ecef_z).normalize();
+                println!("[DEBUG] ECEF direction: ({:.3}, {:.3}, {:.3})", dir_ecef.x, dir_ecef.y, dir_ecef.z);
+                
+                let look_at = camera_pos + dir_ecef * 100.0;
                 
                 println!("Camera from env: lat={} lon={} alt={} heading={} tilt={}", lat, lon, alt, heading, tilt);
+                println!("[DEBUG] Look at: ({:.1}, {:.1}, {:.1})", look_at.x, look_at.y, look_at.z);
                 Camera::new(camera_pos, look_at)
             } else {
                 println!("Invalid CAMERA_PARAMS, using default Brisbane");
@@ -245,6 +270,31 @@ impl App {
             
             println!("[update_world_chunks] Generated {} vertices, {} indices", 
                 all_vertices.len(), all_indices.len());
+            
+            // DEBUG: Print sample vertex positions and camera info
+            if all_vertices.len() >= 3 {
+                let first = &all_vertices[0];
+                let mid = &all_vertices[all_vertices.len() / 2];
+                let last = &all_vertices[all_vertices.len() - 1];
+                println!("[DEBUG] Sample vertex positions (ECEF):");
+                println!("  First:  ({:.1}, {:.1}, {:.1})", first.position[0], first.position[1], first.position[2]);
+                println!("  Middle: ({:.1}, {:.1}, {:.1})", mid.position[0], mid.position[1], mid.position[2]);
+                println!("  Last:   ({:.1}, {:.1}, {:.1})", last.position[0], last.position[1], last.position[2]);
+                
+                println!("[DEBUG] Camera info:");
+                println!("  Position: ({:.1}, {:.1}, {:.1})", camera_ecef.x, camera_ecef.y, camera_ecef.z);
+                println!("  Forward:  ({:.3}, {:.3}, {:.3})", 
+                    self.camera.forward().x, self.camera.forward().y, self.camera.forward().z);
+                println!("  Up:       ({:.3}, {:.3}, {:.3})", 
+                    self.camera.up().x, self.camera.up().y, self.camera.up().z);
+                
+                // Calculate distance from camera to first vertex
+                let dx = first.position[0] - camera_ecef.x as f32;
+                let dy = first.position[1] - camera_ecef.y as f32;
+                let dz = first.position[2] - camera_ecef.z as f32;
+                let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                println!("  Distance to first vertex: {:.1}m", dist);
+            }
             
             // Update GPU buffers
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
