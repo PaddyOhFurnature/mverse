@@ -133,23 +133,23 @@ pub fn ecef_to_cube_face(ecef: &EcefPos) -> (u8, f64, f64) {
 ///
 /// Uses Snyder's equal-area cube-to-sphere projection to minimize distortion.
 pub fn cube_to_sphere(face: u8, u: f64, v: f64, radius: f64) -> EcefPos {
-    // Snyder's equal-area projection formulas
-    let x_prime = u * (1.0 - v * v / 2.0).sqrt();
-    let y_prime = v * (1.0 - u * u / 2.0).sqrt();
-    let z_prime = (0.0_f64.max(1.0 - u * u / 2.0 - v * v / 2.0)).sqrt();
+    // Gnomonic (planar) projection inverse - must match ecef_to_cube_face
+    // ecef_to_cube_face does: u = y / |x|, v = z / |x| for face 0 (+X)
+    // So inverse is: (|x|, u*|x|, v*|x|) normalized
+    // Since we're on unit cube, |x| = 1, so: (1, u, v) normalized
     
-    // Apply face-specific permutation and signs
+    // Create unnormalized cube coordinates based on face
     let (x, y, z) = match face {
-        0 => (z_prime, -x_prime, -y_prime),  // +X face
-        1 => (-z_prime, x_prime, -y_prime),  // -X face
-        2 => (x_prime, z_prime, -y_prime),   // +Y face
-        3 => (-x_prime, -z_prime, -y_prime), // -Y face
-        4 => (x_prime, y_prime, z_prime),    // +Z face
-        5 => (-x_prime, y_prime, -z_prime),  // -Z face
+        0 => (1.0, u, v),      // +X face: u=y/x, v=z/x
+        1 => (-1.0, -u, v),    // -X face: u=-y/|x|, v=z/|x| → y=-u, z=v
+        2 => (u, 1.0, v),      // +Y face: u=x/y, v=z/y
+        3 => (-u, -1.0, v),    // -Y face: u=x/|y|, v=z/|y|
+        4 => (v, u, 1.0),      // +Z face: u=y/z, v=-x/z → x=-v, y=u
+        5 => (-v, u, -1.0),    // -Z face: u=y/|z|, v=x/|z| → x=v, y=u
         _ => panic!("Invalid face index: {}", face),
     };
     
-    // Normalize to unit sphere (required for accurate projection)
+    // Normalize to unit sphere
     let magnitude = (x * x + y * y + z * z).sqrt();
     let x_norm = x / magnitude;
     let y_norm = y / magnitude;
