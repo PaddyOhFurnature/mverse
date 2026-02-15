@@ -8,6 +8,7 @@ pub mod osm;
 pub mod elevation;
 pub mod elevation_sources;
 pub mod elevation_downloader;
+pub mod srtm_downloader;  // New async multi-source downloader
 pub mod renderer;
 
 #[cfg(test)]
