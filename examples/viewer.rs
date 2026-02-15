@@ -281,17 +281,45 @@ impl ApplicationHandler for App {
                 generate_terrain_from_elevation(&mut svo, elevation_fn, coords_fn, voxel_size);
                 println!("✓ Terrain voxelized");
                 
+                let chunk_center = gps_to_ecef(&center);
+                
                 // Carve rivers
                 if !osm_data.water.is_empty() {
                     println!("Carving {} water features...", osm_data.water.len());
-                    let chunk_center = gps_to_ecef(&center);
-                    
                     for (_i, water) in osm_data.water.iter().enumerate().take(10) {
                         if water.polygon.len() >= 2 {
                             carve_river(&mut svo, &chunk_center, "river", &water.polygon, 30.0, voxel_size);
                         }
                     }
                     println!("✓ Carved {} rivers", 10.min(osm_data.water.len()));
+                }
+                
+                // Add roads
+                use metaverse_core::osm_features::place_road;
+                if !osm_data.roads.is_empty() {
+                    println!("Placing {} roads...", osm_data.roads.len());
+                    let mut roads_placed = 0;
+                    for road in osm_data.roads.iter().take(1000) {
+                        if road.nodes.len() >= 2 {
+                            place_road(&mut svo, &chunk_center, "road", &road.nodes, voxel_size);
+                            roads_placed += 1;
+                        }
+                    }
+                    println!("✓ Placed {} roads", roads_placed);
+                }
+                
+                // Add buildings
+                use metaverse_core::osm_features::add_building;
+                if !osm_data.buildings.is_empty() {
+                    println!("Adding {} buildings...", osm_data.buildings.len());
+                    let mut buildings_added = 0;
+                    for building in osm_data.buildings.iter().take(5000) {
+                        if building.polygon.len() >= 3 {
+                            add_building(&mut svo, &chunk_center, building, voxel_size);
+                            buildings_added += 1;
+                        }
+                    }
+                    println!("✓ Added {} buildings", buildings_added);
                 }
                 
                 // Extract mesh
