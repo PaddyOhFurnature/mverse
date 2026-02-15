@@ -16,10 +16,11 @@ use winit::window::{Window, WindowAttributes};
 use wgpu::util::DeviceExt;
 use glam::DVec3;
 
-// Test location: Queen Street Mall, Brisbane
+// Test location: Actual center of loaded OSM data
+// (NOT Queen Street Mall - that's 444m west of data center)
 const TEST_GPS: GpsPos = GpsPos {
-    lat_deg: -27.469800,
-    lon_deg: 153.025100,
+    lat_deg: -27.469766,  // Actual OSM data center
+    lon_deg: 153.029608,   // Actual OSM data center
     elevation_m: 50.0,
 };
 
@@ -79,34 +80,35 @@ impl ScreenshotApp {
         let pos_ecef = gps_to_ecef(&camera_gps);
         let position = DVec3::new(pos_ecef.x, pos_ecef.y, pos_ecef.z);
         
+        // Calculate local coordinate frame at camera position
+        // Up = radial direction away from Earth center
+        let up = position.normalize();
+        
+        // East = perpendicular to up and north pole
+        let north_pole = DVec3::new(0.0, 0.0, 1.0);
+        let east = north_pole.cross(up).normalize();
+        
+        // North = perpendicular to up and east (completes right-handed frame)
+        let north = up.cross(east);
+        
         // Convert heading and tilt to look direction
         // heading: 0=N, 90=E, 180=S, 270=W
-        // tilt: 0=down, 90=horizontal, 180=up
+        // tilt: 0=straight down, 90=horizontal, 180=straight up
         
         let heading_rad = view.heading_deg.to_radians();
-        let tilt_rad = (90.0 - view.tilt_deg).to_radians(); // Convert to pitch (0=horizontal, 90=up, -90=down)
+        let tilt_rad = view.tilt_deg.to_radians();
         
-        // Direction vector in local NED frame
-        let north = tilt_rad.cos() * heading_rad.cos();
-        let east = tilt_rad.cos() * heading_rad.sin();
-        let down = -tilt_rad.sin();
+        // Horizontal component (in north/east plane)
+        let horizontal = north * heading_rad.cos() + east * heading_rad.sin();
         
-        // Get local ENU frame at camera position
-        let lat_rad = camera_gps.lat_deg.to_radians();
-        let lon_rad = camera_gps.lon_deg.to_radians();
+        // Add vertical component based on tilt
+        // tilt=0 -> look down, tilt=90 -> look horizontal, tilt=180 -> look up
+        let tilt_from_down = tilt_rad; // 0=down, 90=horizontal, 180=up
+        let vertical_component = -up * tilt_from_down.cos(); // Down when tilt=0
+        let horizontal_component = horizontal * tilt_from_down.sin(); // 0 when tilt=0
         
-        // ENU basis vectors in ECEF
-        let up_ecef = DVec3::new(
-            lon_rad.cos() * lat_rad.cos(),
-            lon_rad.sin() * lat_rad.cos(),
-            lat_rad.sin(),
-        );
-        let east_ecef = DVec3::new(-lon_rad.sin(), lon_rad.cos(), 0.0);
-        let north_ecef = up_ecef.cross(east_ecef);
-        
-        // Transform local direction to ECEF
-        let look_dir = north_ecef * north + east_ecef * east - up_ecef * down;
-        let target = position + look_dir.normalize() * 100.0;
+        let look_dir = (vertical_component + horizontal_component).normalize();
+        let target = position + look_dir * 100.0;
         
         Camera::new(position, target)
     }
@@ -292,8 +294,9 @@ impl ApplicationHandler for ScreenshotApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             println!("\n=== AUTOMATED SCREENSHOT CAPTURE ===");
-            println!("Location: Queen Street Mall, Brisbane");
+            println!("Location: Brisbane CBD (actual OSM data center)");
             println!("GPS: ({:.6}, {:.6})", TEST_GPS.lat_deg, TEST_GPS.lon_deg);
+            println!("NOTE: Queen St Mall (-27.469800, 153.025100) is 444m west of this");
             println!("Capturing {} views to match REFERENCE_IMAGES.md\n", CAMERA_VIEWS.len());
             
             // Create screenshot directory
