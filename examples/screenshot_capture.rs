@@ -49,14 +49,51 @@ struct App {
 
 impl App {
     fn new() -> Self {
-        // Start camera at Brisbane at 500m altitude looking straight down
-        let camera = Camera::brisbane();
-        
-        println!("Camera initialized at Brisbane");
-        println!("  Position ECEF: ({:.1}, {:.1}, {:.1})",
-            camera.position.x, camera.position.y, camera.position.z);
-        println!("  Altitude: {:.2} m", camera.position.length() - 6_371_000.0);
-        println!("  Looking straight down at ground");
+        // Read camera position from env CAMERA_PARAMS
+        let camera = if let Ok(params) = std::env::var("CAMERA_PARAMS") {
+            let parts: Vec<&str> = params.split_whitespace().collect();
+            if parts.len() >= 5 {
+                let lat: f64 = parts[0].parse().unwrap();
+                let lon: f64 = parts[1].parse().unwrap();
+                let alt: f64 = parts[2].parse().unwrap();
+                let heading: f64 = parts[3].parse().unwrap();
+                let tilt: f64 = parts[4].parse().unwrap();
+                
+                let camera_gps = GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: alt };
+                let camera_ecef = gps_to_ecef(&camera_gps);
+                let camera_pos = glam::DVec3::new(camera_ecef.x, camera_ecef.y, camera_ecef.z);
+                
+                // Calculate look direction from heading and tilt
+                let heading_rad = heading.to_radians();
+                let tilt_rad = tilt.to_radians();
+                
+                // ENU coordinates: East, North, Up
+                let forward_enu = glam::DVec3::new(
+                    heading_rad.sin(),  // East
+                    heading_rad.cos(),  // North
+                    -(90.0 - tilt).to_radians().tan(), // Up (negative because tilt 0 = down)
+                ).normalize();
+                
+                // Convert ENU direction to ECEF
+                let enu_pos = EnuPos {
+                    east: forward_enu.x,
+                    north: forward_enu.y,
+                    up: forward_enu.z,
+                };
+                let look_ecef = enu_to_ecef(&enu_pos, &camera_ecef, &camera_gps);
+                
+                let look_at = camera_pos + glam::DVec3::new(look_ecef.x, look_ecef.y, look_ecef.z) * 100.0;
+                
+                println!("Camera from env: lat={} lon={} alt={} heading={} tilt={}", lat, lon, alt, heading, tilt);
+                Camera::new(camera_pos, look_at)
+            } else {
+                println!("Invalid CAMERA_PARAMS, using default Brisbane");
+                Camera::brisbane()
+            }
+        } else {
+            println!("No CAMERA_PARAMS, using default Brisbane");
+            Camera::brisbane()
+        };
         
         Self {
             window: None,
@@ -513,6 +550,20 @@ impl ApplicationHandler for App {
 
                     // Update FPS counter and stats
                     self.frame_count += 1;
+                    
+                    // Screenshot mode: print READY after 5 frames
+                    if self.frame_count == 5 {
+                        println!("\n========== READY FOR SCREENSHOT ==========");
+                        println!("Window is showing frame {} with camera at specified position", self.frame_count);
+                        if let Ok(params) = std::env::var("CAMERA_PARAMS") {
+                            let parts: Vec<&str> = params.split_whitespace().collect();
+                            if parts.len() >= 6 {
+                                println!("Output file: {}", parts[5]);
+                            }
+                        }
+                        println!("==========================================\n");
+                    }
+                    
                     if now.duration_since(self.fps_update_time).as_secs_f32() >= 1.0 {
                         let fps =
                             self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
