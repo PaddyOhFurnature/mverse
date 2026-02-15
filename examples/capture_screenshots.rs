@@ -6,7 +6,7 @@
 use metaverse_core::renderer::{camera::Camera, pipeline::BasicPipeline, Renderer};
 use metaverse_core::osm::OsmData;
 use metaverse_core::cache::DiskCache;
-use metaverse_core::svo_integration::generate_mesh_from_osm;
+use metaverse_core::svo_integration::generate_mesh_from_osm_filtered;
 use metaverse_core::coordinates::{gps_to_ecef, GpsPos};
 use std::sync::Arc;
 use std::fs;
@@ -338,8 +338,13 @@ impl ApplicationHandler for ScreenshotApp {
             println!("  {} buildings", osm_data.buildings.len());
             println!("  {} roads\n", osm_data.roads.len());
             
-            // Generate mesh
-            let (vertices, indices) = generate_mesh_from_osm(&osm_data);
+            // Generate mesh with distance filtering
+            // Use 500m radius to get dense urban coverage around camera
+            let (vertices, indices) = generate_mesh_from_osm_filtered(
+                &osm_data,
+                Some(&TEST_GPS),
+                500.0, // 500m radius - dense coverage like walking mode
+            );
             println!("Generated {} vertices, {} indices\n", vertices.len(), indices.len());
     
             // Create buffers

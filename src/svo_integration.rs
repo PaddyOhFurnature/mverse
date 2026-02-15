@@ -34,6 +34,24 @@ impl ColoredVertex {
 ///
 /// Uses ACTUAL building polygons (not boxes), 3D road volumes, and water surfaces
 pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u32>) {
+    // Default: use large radius to get all data (for testing/screenshots)
+    generate_mesh_from_osm_filtered(osm_data, None, f64::INFINITY)
+}
+
+/// Generate mesh from OSM data with distance filtering
+///
+/// Only includes geometry within `max_distance_m` from `camera_pos`.
+/// Uses GPU buffer limit as hard stop, not arbitrary building count.
+///
+/// # Arguments
+/// * `osm_data` - OSM data to render
+/// * `camera_pos` - Camera position in GPS coords (for distance filtering). None = no filtering
+/// * `max_distance_m` - Maximum distance from camera to include geometry
+pub fn generate_mesh_from_osm_filtered(
+    osm_data: &OsmData,
+    camera_pos: Option<&GpsPos>,
+    max_distance_m: f64,
+) -> (Vec<ColoredVertex>, Vec<u32>) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     
@@ -41,14 +59,35 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
     let road_color = glam::Vec3::new(0.3, 0.3, 0.3);
     let water_color = glam::Vec3::new(0.2, 0.5, 0.8);
     
-    // Generate buildings using ACTUAL polygons from OSM
-    // Limit to stay under GPU buffer (268MB max)
-    let mut buildings_added = 0;
-    let max_buildings = 5000; // Reduced to make room for 3D roads
+    // Convert camera position to ECEF for distance calculations
+    let camera_ecef = camera_pos.map(|gps| {
+        let ecef = gps_to_ecef(gps);
+        glam::DVec3::new(ecef.x, ecef.y, ecef.z)
+    });
     
-    for building in osm_data.buildings.iter().take(max_buildings) {
+    // Generate buildings using ACTUAL polygons from OSM
+    // NO arbitrary limit - only GPU buffer capacity matters
+    let mut buildings_added = 0;
+    let mut buildings_skipped_distance = 0;
+    let mut buildings_skipped_buffer = 0;
+    
+    for building in &osm_data.buildings {
         if building.polygon.len() < 3 {
             continue;
+        }
+        
+        // Distance filtering (if camera position provided)
+        if let Some(cam_ecef) = camera_ecef {
+            // Use building center for distance check
+            let center_gps = building.polygon.first().unwrap();
+            let building_ecef = gps_to_ecef(center_gps);
+            let building_pos = glam::DVec3::new(building_ecef.x, building_ecef.y, building_ecef.z);
+            
+            let distance = (building_pos - cam_ecef).length();
+            if distance > max_distance_m {
+                buildings_skipped_distance += 1;
+                continue;
+            }
         }
         
         let footprint: Vec<(f64, f64)> = building.polygon
@@ -66,10 +105,10 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
             building_color,
         );
         
-        // Skip if this would push us over GPU limits
+        // Skip if this would push us over GPU limits (268MB max per buffer)
         let new_vertex_size = (vertices.len() + bldg_verts.len()) * 40; // 40 bytes per vertex
-        if new_vertex_size > 200_000_000 { // 200MB safety margin (wgpu limit is 268MB)
-            println!("  Stopping at {} buildings (GPU buffer limit approaching)", buildings_added);
+        if new_vertex_size > 200_000_000 { // 200MB safety margin
+            buildings_skipped_buffer += 1;
             break;
         }
         
@@ -91,9 +130,10 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
     }
     
     // Generate roads as 3D volumes (30cm thick boxes with 6 faces)
-    // Limit road segments to stay under GPU buffer
-    let max_road_segments = 50000; // ~1.8M vertices (72MB) for roads
-    let mut segments_added = 0;
+    // NO arbitrary segment limit - only GPU buffer capacity matters
+    let mut road_segments_added = 0;
+    let mut road_segments_skipped_distance = 0;
+    let mut road_segments_skipped_buffer = 0;
     
     for road in &osm_data.roads {
         if road.nodes.len() < 2 {
@@ -104,11 +144,36 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         let thickness = 0.3; // 30cm road thickness
         
         for i in 0..road.nodes.len() - 1 {
-            if segments_added >= max_road_segments {
-                break;
-            }
             let node1 = &road.nodes[i];
             let node2 = &road.nodes[i + 1];
+            
+            // Distance filtering (if camera position provided)
+            if let Some(cam_ecef) = camera_ecef {
+                // Use segment midpoint for distance check
+                let mid_lat = (node1.lat_deg + node2.lat_deg) / 2.0;
+                let mid_lon = (node1.lon_deg + node2.lon_deg) / 2.0;
+                let mid_elev = (node1.elevation_m + node2.elevation_m) / 2.0;
+                
+                let mid_ecef = gps_to_ecef(&GpsPos {
+                    lat_deg: mid_lat,
+                    lon_deg: mid_lon,
+                    elevation_m: mid_elev,
+                });
+                let mid_pos = glam::DVec3::new(mid_ecef.x, mid_ecef.y, mid_ecef.z);
+                
+                let distance = (mid_pos - cam_ecef).length();
+                if distance > max_distance_m {
+                    road_segments_skipped_distance += 1;
+                    continue;
+                }
+            }
+            
+            // Check GPU buffer limit before adding
+            let new_vertex_size = (vertices.len() + 36) * 40; // 36 vertices per road segment
+            if new_vertex_size > 200_000_000 {
+                road_segments_skipped_buffer += 1;
+                continue; // Skip this segment but keep trying (maybe later roads are closer)
+            }
             
             let pos1_ecef = gps_to_ecef(&GpsPos {
                 lat_deg: node1.lat_deg,
@@ -138,11 +203,7 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
                 indices.push(offset + tri * 3 + 2);
             }
             
-            segments_added += 1;
-        }
-        
-        if segments_added >= max_road_segments {
-            break;
+            road_segments_added += 1;
         }
     }
     
@@ -182,9 +243,28 @@ pub fn generate_mesh_from_osm(osm_data: &OsmData) -> (Vec<ColoredVertex>, Vec<u3
         }
     }
     
-    println!("Generated mesh: {} buildings (of {}), {} road segments, {} water = {} vertices, {} indices",
-        buildings_added, osm_data.buildings.len(), segments_added, osm_data.water.len(),
-        vertices.len(), indices.len());
+    // Logging
+    let total_buildings = osm_data.buildings.len();
+    let total_roads = osm_data.roads.len();
+    let total_water = osm_data.water.len();
+    
+    if camera_pos.is_some() && max_distance_m < f64::INFINITY {
+        println!("Generated mesh with distance filtering ({}m radius):", max_distance_m);
+        println!("  Buildings: {} rendered, {} skipped (distance), {} skipped (buffer), {} total",
+            buildings_added, buildings_skipped_distance, buildings_skipped_buffer, total_buildings);
+        println!("  Roads: {} segments, {} skipped (distance), {} skipped (buffer)",
+            road_segments_added, road_segments_skipped_distance, road_segments_skipped_buffer);
+        println!("  Water: {} features", total_water);
+    } else {
+        println!("Generated mesh (no distance filtering):");
+        println!("  Buildings: {} rendered, {} skipped (buffer), {} total",
+            buildings_added, buildings_skipped_buffer, total_buildings);
+        println!("  Roads: {} segments, {} skipped (buffer)",
+            road_segments_added, road_segments_skipped_buffer);
+        println!("  Water: {} features", total_water);
+    }
+    println!("  Result: {} vertices, {} indices ({:.1}MB vertex buffer)",
+        vertices.len(), indices.len(), (vertices.len() * 40) as f32 / 1_000_000.0);
     
     (vertices, indices)
 }
