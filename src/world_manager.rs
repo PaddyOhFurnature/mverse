@@ -124,7 +124,11 @@ impl WorldManager {
     fn find_chunks_in_range(&self, camera_pos: &EcefPos) -> Vec<ChunkId> {
         // Convert camera to GPS to get chunk
         let camera_gps = crate::coordinates::ecef_to_gps(camera_pos);
+        println!("[find_chunks_in_range] Camera GPS: ({:.6}, {:.6}, {:.1}m)", 
+            camera_gps.lat_deg, camera_gps.lon_deg, camera_gps.elevation_m);
+        
         let camera_chunk = gps_to_chunk_id(&camera_gps, self.chunk_depth as u8);
+        println!("[find_chunks_in_range] Camera chunk ID: {}", camera_chunk);
         
         // For now, just return camera chunk + immediate neighbors
         // TODO: Properly search all chunks within radius
@@ -136,12 +140,18 @@ impl WorldManager {
         let mut results = Vec::new();
         
         for (_id, chunk) in &self.chunks {
+            println!("[extract_meshes] Camera ECEF: ({:.1}, {:.1}, {:.1})", 
+                camera_pos.x, camera_pos.y, camera_pos.z);
+            println!("[extract_meshes] Chunk center ECEF: ({:.1}, {:.1}, {:.1})", 
+                chunk.center.x, chunk.center.y, chunk.center.z);
+            
             // Calculate distance from camera to chunk center
             let dx = camera_pos.x - chunk.center.x;
             let dy = camera_pos.y - chunk.center.y;
             let dz = camera_pos.z - chunk.center.z;
             let distance = (dx*dx + dy*dy + dz*dz).sqrt();
             
+            println!("[extract_meshes] Delta: ({:.1}, {:.1}, {:.1})", dx, dy, dz);
             println!("[extract_meshes] Chunk distance: {:.1}m", distance);
             
             // Select LOD based on distance (much larger ranges for flying camera)
@@ -183,6 +193,8 @@ fn generate_chunk_svo(
     srtm: &mut SrtmManager,
     osm_data: &OsmData,
 ) -> Option<Chunk> {
+    println!("[generate_chunk_svo] Chunk ID: {}", chunk_id);
+    
     // Get chunk bounds
     let bounds = match chunk_bounds_gps(chunk_id) {
         Ok(b) => b,
@@ -193,12 +205,22 @@ fn generate_chunk_svo(
     };
     
     let (sw, ne) = bounds;
+    
+    println!("[generate_chunk_svo] Bounds: SW({:.6}, {:.6}) NE({:.6}, {:.6})", 
+        sw.lat_deg, sw.lon_deg, ne.lat_deg, ne.lon_deg);
+    
+    // Use proper chunk_center_ecef function instead of GPS average
+    let center = chunk_center_ecef(chunk_id);
     let center_gps = GpsPos {
         lat_deg: (sw.lat_deg + ne.lat_deg) / 2.0,
         lon_deg: (sw.lon_deg + ne.lon_deg) / 2.0,
         elevation_m: 0.0,
     };
-    let center = gps_to_ecef(&center_gps);
+    
+    println!("[generate_chunk_svo] Center GPS: ({:.6}, {:.6}, {:.1}m)", 
+        center_gps.lat_deg, center_gps.lon_deg, center_gps.elevation_m);
+    println!("[generate_chunk_svo] Center ECEF: ({:.1}, {:.1}, {:.1})", 
+        center.x, center.y, center.z);
     
     // Calculate chunk size
     let lat_span = (ne.lat_deg - sw.lat_deg).abs() * 111_000.0; // ~111km per degree
