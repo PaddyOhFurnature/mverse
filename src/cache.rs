@@ -99,7 +99,14 @@ impl DiskCache {
 
     /// Reads SRTM data from cache
     pub fn read_srtm(&self, tile_name: &str) -> io::Result<Vec<u8>> {
-        let path = self.root.join("srtm").join(format!("{}.hgt", tile_name));
+        // Don't add .hgt extension if already present
+        let filename = if tile_name.ends_with(".hgt") {
+            tile_name.to_string()
+        } else {
+            format!("{}.hgt", tile_name)
+        };
+        
+        let path = self.root.join("srtm").join(filename);
         let mut file = File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
@@ -110,7 +117,15 @@ impl DiskCache {
     pub fn write_srtm(&self, tile_name: &str, data: &[u8]) -> io::Result<()> {
         let dir = self.root.join("srtm");
         fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.hgt", tile_name));
+        
+        // Don't add .hgt extension if already present
+        let filename = if tile_name.ends_with(".hgt") {
+            tile_name.to_string()
+        } else {
+            format!("{}.hgt", tile_name)
+        };
+        
+        let path = dir.join(filename);
         let mut file = File::create(path)?;
         file.write_all(data)?;
         file.sync_all()?;
