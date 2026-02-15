@@ -125,9 +125,13 @@ impl App {
     }
     
     fn update_world_chunks(&mut self) {
+        println!("[update_world_chunks] Starting...");
+        
         // Update WorldManager and extract visible meshes
         if let (Some(world_manager), Some(srtm), Some(osm_data), Some(renderer)) = 
             (&mut self.world_manager, &mut self.srtm, &self.full_osm_data, &self.renderer) {
+            
+            println!("[update_world_chunks] All components present");
             
             // Convert camera to EcefPos
             let camera_ecef = EcefPos {
@@ -136,15 +140,23 @@ impl App {
                 z: self.camera.position.z,
             };
             
+            println!("[update_world_chunks] Camera ECEF: ({:.1}, {:.1}, {:.1})", 
+                camera_ecef.x, camera_ecef.y, camera_ecef.z);
+            
             // Update chunks based on camera position
-            world_manager.update(&camera_ecef, srtm, osm_data);
+            let num_chunks = world_manager.update(&camera_ecef, srtm, osm_data);
+            println!("[update_world_chunks] After update: {} chunks loaded", num_chunks);
             
             // Extract all visible chunks with their meshes
             let chunk_meshes = world_manager.extract_meshes(&camera_ecef);
+            println!("[update_world_chunks] Extracted {} chunk meshes", chunk_meshes.len());
             
             if chunk_meshes.is_empty() {
+                println!("[update_world_chunks] No chunk meshes - nothing to render");
                 return;
             }
+            
+            println!("[update_world_chunks] Processing {} chunks", chunk_meshes.len());
             
             // Convert all chunk meshes to GPU format and transform to ECEF
             let material_colors = MaterialColors::default_palette();
@@ -189,8 +201,12 @@ impl App {
             }
             
             if all_vertices.is_empty() || all_indices.is_empty() {
+                println!("[update_world_chunks] No vertices/indices generated");
                 return;
             }
+            
+            println!("[update_world_chunks] Generated {} vertices, {} indices", 
+                all_vertices.len(), all_indices.len());
             
             // Update GPU buffers
             let vertex_buffer = renderer.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -431,6 +447,14 @@ impl ApplicationHandler for App {
                 // Process elevation download queue
                 if let Some(downloader) = &self.downloader {
                     downloader.process_queue();
+                }
+                
+                // Update world chunks based on camera position
+                // Update immediately on first frame, then every 30 frames after that
+                if self.frame_count == 0 || (self.frame_count - self.chunk_update_frame) >= 30 {
+                    println!("[Frame {}] Updating world chunks...", self.frame_count);
+                    self.update_world_chunks();
+                    self.chunk_update_frame = self.frame_count;
                 }
                 
                 if let (Some(renderer), Some(window), Some(pipeline)) = 
