@@ -1,6 +1,6 @@
-//! Metaverse viewer
+//! Screenshot capture tool
 //!
-//! Opens a window and renders the metaverse world.
+//! Renders 10 views matching reference photos and saves them
 
 use metaverse_core::renderer::{
     camera::Camera, 
@@ -17,6 +17,7 @@ use metaverse_core::mesh_generation::svo_meshes_to_colored_vertices;
 use metaverse_core::materials::MaterialColors;
 use metaverse_core::coordinates::{gps_to_ecef, enu_to_ecef, ecef_to_gps, GpsPos, EnuPos, EcefPos};
 use std::sync::Arc;
+use std::path::Path;
 use winit::application::ApplicationHandler;
 use winit::event::*;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -551,17 +552,63 @@ impl ApplicationHandler for App {
                     // Update FPS counter and stats
                     self.frame_count += 1;
                     
-                    // Screenshot mode: print READY after 5 frames
+                    // Screenshot mode: save PNG after 5 frames then exit
                     if self.frame_count == 5 {
-                        println!("\n========== READY FOR SCREENSHOT ==========");
-                        println!("Window is showing frame {} with camera at specified position", self.frame_count);
                         if let Ok(params) = std::env::var("CAMERA_PARAMS") {
                             let parts: Vec<&str> = params.split_whitespace().collect();
                             if parts.len() >= 6 {
-                                println!("Output file: {}", parts[5]);
+                                let output_file = parts[5];
+                                println!("\n========== SAVING SCREENSHOT ==========");
+                                println!("Output file: {}", output_file);
+                                
+                                // Capture the framebuffer
+                                let capture_result = renderer.render_and_capture(clear_color, |render_pass| {
+                                    if let (Some(vb), Some(ib)) = (vertex_buffer, index_buffer) {
+                                        if num_indices > 0 {
+                                            render_pass.set_pipeline(&pipeline.pipeline);
+                                            render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                                            render_pass.set_vertex_buffer(0, vb.slice(..));
+                                            render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                                            render_pass.draw_indexed(0..num_indices, 0, 0..1);
+                                        }
+                                    }
+                                });
+                                
+                                match capture_result {
+                                    Ok((mut pixels, width, height)) => {
+                                        // Convert BGRA to RGBA if needed
+                                        // wgpu typically uses Bgra8UnormSrgb format
+                                        for chunk in pixels.chunks_exact_mut(4) {
+                                            chunk.swap(0, 2); // Swap B and R channels
+                                        }
+                                        
+                                        // Save as PNG using image crate
+                                        match image::save_buffer(
+                                            output_file,
+                                            &pixels,
+                                            width,
+                                            height,
+                                            image::ColorType::Rgba8
+                                        ) {
+                                            Ok(_) => {
+                                                println!("✓ Screenshot saved to {}", output_file);
+                                                println!("  Size: {}x{}", width, height);
+                                                println!("==========================================\n");
+                                                event_loop.exit();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("✗ Failed to save PNG: {}", e);
+                                                event_loop.exit();
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("✗ Failed to capture frame: {}", e);
+                                        event_loop.exit();
+                                    }
+                                }
                             }
                         }
-                        println!("==========================================\n");
                     }
                     
                     if now.duration_since(self.fps_update_time).as_secs_f32() >= 1.0 {

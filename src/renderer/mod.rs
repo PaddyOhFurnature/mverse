@@ -305,4 +305,144 @@ impl Renderer {
         
         Ok((pixels, self.size.width, self.size.height))
     }
+    
+    /// Render a frame to an offscreen texture and capture it as RGBA8 data
+    pub fn render_and_capture<F>(
+        &mut self, 
+        clear_color: wgpu::Color, 
+        render_fn: F
+    ) -> Result<(Vec<u8>, u32, u32), Box<dyn std::error::Error>>
+    where
+        F: FnOnce(&mut wgpu::RenderPass),
+    {
+        // Create a texture to render into (with COPY_SRC so we can read it back)
+        let texture_desc = wgpu::TextureDescriptor {
+            label: Some("Screenshot Texture"),
+            size: wgpu::Extent3d {
+                width: self.size.width,
+                height: self.size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format, // Use same format as surface
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        };
+        
+        let screenshot_texture = self.device.create_texture(&texture_desc);
+        let view = screenshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        // Create depth texture for this render
+        let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Screenshot Depth Texture"),
+            size: wgpu::Extent3d {
+                width: self.size.width,
+                height: self.size.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        
+        // Create buffer to copy pixels into
+        let bytes_per_pixel = 4; // RGBA8
+        let unpadded_bytes_per_row = self.size.width * bytes_per_pixel;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let buffer_size = (padded_bytes_per_row * self.size.height) as u64;
+        
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Screenshot Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        
+        // Render to our screenshot texture
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Screenshot Encoder"),
+        });
+        
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Screenshot Render Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            
+            // Call the render function to draw geometry
+            render_fn(&mut render_pass);
+        }
+        
+        // Copy texture to buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &screenshot_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(self.size.height),
+                },
+            },
+            texture_desc.size,
+        );
+        
+        self.queue.submit(std::iter::once(encoder.finish()));
+        
+        // Read buffer back to CPU
+        let buffer_slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).unwrap();
+        });
+        
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()??;
+        
+        let data = buffer_slice.get_mapped_range();
+        
+        // Copy and un-pad the data
+        let mut pixels = vec![0u8; (unpadded_bytes_per_row * self.size.height) as usize];
+        for row in 0..self.size.height {
+            let src_start = (row * padded_bytes_per_row) as usize;
+            let src_end = src_start + unpadded_bytes_per_row as usize;
+            let dst_start = (row * unpadded_bytes_per_row) as usize;
+            let dst_end = dst_start + unpadded_bytes_per_row as usize;
+            pixels[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+        }
+        
+        drop(data);
+        buffer.unmap();
+        
+        Ok((pixels, self.size.width, self.size.height))
+    }
 }

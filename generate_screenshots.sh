@@ -1,30 +1,12 @@
 #!/bin/bash
-# Generate all 10 reference screenshots
-# Run this on a machine with a display
-
+# Generate all 10 reference screenshots automatically
 set -e
+
 mkdir -p screenshot
 
 echo "=========================================="
-echo "Screenshot Generation Instructions"
+echo "Generating 10 Screenshots"
 echo "=========================================="
-echo "This script will run the viewer 10 times with different camera positions."
-echo "When you see 'READY FOR SCREENSHOT', take a screenshot and save it."
-echo "Press Ctrl+C in the viewer window to move to the next position."
-echo ""
-echo "Positions from REFERENCE_IMAGES.md:"
-echo "  1. Top-down (0° heading, 0° tilt)"
-echo "  2. North horizontal (0° heading, 90° tilt)"
-echo "  3. East horizontal (90° heading, 90° tilt)"
-echo "  4. South horizontal (180° heading, 90° tilt)"
-echo "  5. West horizontal (270° heading, 90° tilt)"
-echo "  6. NE angle (45° heading, 45° tilt)"
-echo "  7. SE angle (135° heading, 45° tilt)"
-echo "  8. SW angle (225° heading, 45° tilt)"
-echo "  9. NW angle (315° heading, 45° tilt)"
-echo "  10. Ground level north (0° heading, 85° tilt, 20m alt)"
-echo ""
-read -p "Press Enter to start..."
 
 # Position data: lat lon alt heading tilt output_file
 declare -a SHOTS=(
@@ -41,35 +23,30 @@ declare -a SHOTS=(
 )
 
 NAMES=(
-    "01 - Top Down"
-    "02 - North Horizontal"
-    "03 - East Horizontal"
-    "04 - South Horizontal"
-    "05 - West Horizontal"
-    "06 - Northeast Angle"
-    "07 - Southeast Angle"
-    "08 - Southwest Angle"
-    "09 - Northwest Angle"
-    "10 - Ground Level North"
+    "Top Down"
+    "North Horizontal"
+    "East Horizontal"
+    "South Horizontal"
+    "West Horizontal"
+    "Northeast Angle"
+    "Southeast Angle"
+    "Southwest Angle"
+    "Northwest Angle"
+    "Ground Level North"
 )
 
 for i in {0..9}; do
     echo ""
-    echo "=========================================="
-    echo "Screenshot $((i+1))/10: ${NAMES[$i]}"
-    echo "=========================================="
+    echo "[$((i+1))/10] ${NAMES[$i]}"
     export CAMERA_PARAMS="${SHOTS[$i]}"
     
-    # Run viewer - user takes screenshot when READY appears
-    cargo run --example screenshot_capture --release || true
-    
-    echo "Screenshot $((i+1)) complete"
-    sleep 1
+    # Run screenshot_capture (exits automatically after saving)
+    cargo run --example screenshot_capture --release 2>&1 | grep -E "(saved|Error)" || true
 done
 
 echo ""
 echo "=========================================="
-echo "All screenshots generated!"
-echo "Check the screenshot/ directory"
+echo "All screenshots complete!"
 echo "=========================================="
-ls -lh screenshot/*.png 2>/dev/null || echo "No PNGs found - did you save them?"
+ls -lh screenshot/*.png
+
