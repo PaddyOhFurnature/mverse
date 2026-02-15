@@ -303,8 +303,29 @@ impl ApplicationHandler for App {
                 
                 // Convert to GPU format
                 let material_colors = MaterialColors::default_palette();
-                let (vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
-                println!("✓ {} colored vertices ready for GPU\n", vertices.len());
+                let (mut vertices, indices) = svo_meshes_to_colored_vertices(&meshes, &material_colors);
+                
+                // Transform vertices from voxel space to ECEF space
+                use metaverse_core::coordinates::{enu_to_ecef, EnuPos};
+                let center_ecef = gps_to_ecef(&center);
+                let half = svo_size as f32 / 2.0;
+                let voxel_to_meters = voxel_size as f32;
+                
+                for vertex in &mut vertices {
+                    // Voxel coords: (0,0,0) to (256,256,256)
+                    // Center at (128, 128, 128)
+                    // Map to ENU: X=East, Y=Up, Z=North
+                    let enu = EnuPos {
+                        east: ((vertex.position[0] - half) * voxel_to_meters) as f64,
+                        north: ((vertex.position[2] - half) * voxel_to_meters) as f64,
+                        up: ((vertex.position[1] - half) * voxel_to_meters) as f64,
+                    };
+                    
+                    let pos_ecef = enu_to_ecef(&enu, &center_ecef, &center);
+                    vertex.position = [pos_ecef.x as f32, pos_ecef.y as f32, pos_ecef.z as f32];
+                }
+                
+                println!("✓ {} colored vertices (transformed to ECEF)\n", vertices.len());
                 
                 (vertices, indices)
             } else {
