@@ -16,12 +16,11 @@ use winit::window::{Window, WindowAttributes};
 use wgpu::util::DeviceExt;
 use glam::DVec3;
 
-// Test location: Story Bridge and surroundings, Brisbane
-// Better test case: bridges, tunnels, elevation changes, parklands, water
-// Less dense than CBD - can actually see geometry without skyscrapers blocking view
+// Test location: Story Bridge center (actual bridge structure)
+// Coordinates from Google Earth: 27°27'49.31"S 153°02'08.61"E
 const TEST_GPS: GpsPos = GpsPos {
-    lat_deg: -27.4619,  // Story Bridge center
-    lon_deg: 153.0419,
+    lat_deg: -27.463697,  // Story Bridge center (exact)
+    lon_deg: 153.035725,
     elevation_m: 250.0,  // 250m altitude for overview
 };
 
