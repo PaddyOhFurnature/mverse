@@ -19,4 +19,5 @@ pub mod osm_features;
 pub mod marching_cubes;
 pub mod mesh_generation;
 pub mod materials;
+pub mod world_manager;
 // pub mod svo_integration;  // REMOVED - bypassed SVO pipeline

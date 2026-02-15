@@ -12,12 +12,10 @@ use metaverse_core::cache::DiskCache;
 use metaverse_core::elevation::SrtmManager;
 use metaverse_core::elevation_downloader::ElevationDownloader;
 use metaverse_core::chunk_manager::ChunkManager;
-use metaverse_core::svo::SparseVoxelOctree;
-use metaverse_core::terrain::generate_terrain_from_elevation;
-use metaverse_core::mesh_generation::{generate_mesh, svo_meshes_to_colored_vertices};
+use metaverse_core::world_manager::WorldManager;
+use metaverse_core::mesh_generation::svo_meshes_to_colored_vertices;
 use metaverse_core::materials::MaterialColors;
-use metaverse_core::osm_features::carve_river;
-use metaverse_core::coordinates::{gps_to_ecef, GpsPos};
+use metaverse_core::coordinates::{gps_to_ecef, enu_to_ecef, GpsPos, EnuPos};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -32,20 +30,12 @@ struct App {
     pipeline: Option<BasicPipeline>,
     camera: Camera,
     downloader: Option<ElevationDownloader>,
-    chunk_manager: Option<ChunkManager>,
-    full_osm_data: Option<OsmData>, // Keep full dataset for chunk partitioning
-    buildings_vertex_buffer: Option<wgpu::Buffer>,
-    buildings_index_buffer: Option<wgpu::Buffer>,
-    buildings_num_indices: u32,
-    show_buildings: bool,
-    roads_vertex_buffer: Option<wgpu::Buffer>,
-    roads_index_buffer: Option<wgpu::Buffer>,
-    roads_num_indices: u32,
-    show_roads: bool,
-    water_vertex_buffer: Option<wgpu::Buffer>,
-    water_index_buffer: Option<wgpu::Buffer>,
-    water_num_indices: u32,
-    show_water: bool,
+    world_manager: Option<WorldManager>,
+    srtm: Option<SrtmManager>,
+    full_osm_data: Option<OsmData>,
+    vertex_buffer: Option<wgpu::Buffer>,
+    index_buffer: Option<wgpu::Buffer>,
+    num_indices: u32,
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -72,21 +62,13 @@ impl App {
             renderer: None,
             pipeline: None,
             camera,
-            buildings_vertex_buffer: None,
-            buildings_index_buffer: None,
-            buildings_num_indices: 0,
-            show_buildings: true,
-            roads_vertex_buffer: None,
-            roads_index_buffer: None,
-            roads_num_indices: 0,
-            show_roads: true,
-            water_vertex_buffer: None,
-            water_index_buffer: None,
-            water_num_indices: 0,
-            show_water: true,
-            downloader: None, // Will be initialized with cache
-            chunk_manager: None, // Will be initialized when OSM data loads
-            full_osm_data: None, // Will be loaded from cache
+            vertex_buffer: None,
+            index_buffer: None,
+            num_indices: 0,
+            downloader: None,
+            world_manager: None,
+            srtm: None,
+            full_osm_data: None,
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
