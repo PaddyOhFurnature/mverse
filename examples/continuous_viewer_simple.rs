@@ -2,6 +2,7 @@
 //! Working viewer for continuous world system
 
 use metaverse_core::renderer::{Renderer, pipeline::BasicPipeline};
+use metaverse_core::renderer::greedy_mesh::greedy_mesh_block;
 use metaverse_core::continuous_world::ContinuousWorld;
 use metaverse_core::spatial_index::AABB;
 use metaverse_core::renderer::camera::Camera;
@@ -123,65 +124,34 @@ impl App {
         
         println!("  Queried {} blocks with LOD in 100m radius", blocks_with_distance.len());
         
-        // Render with block-level LOD
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        let mut voxel_count = 0;
+        // Render with block-level LOD + Greedy Meshing
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
         let mut near_blocks = 0;
         let mut far_blocks = 0;
+        let mut voxel_count = 0;
+        
+        println!("[Mesh Update - With Greedy Meshing]");
         
         for (block, lod_level) in &blocks_with_distance {
             if *lod_level <= 1 {
-                // NEAR (LOD 0-1): Render individual 1m voxels
+                // NEAR (LOD 0-1): Use greedy meshing
                 near_blocks += 1;
-                for x in 0..8 {
-                    for y in 0..8 {
-                        for z in 0..8 {
-                            let voxel_idx = z * 64 + y * 8 + x;
-                            let voxel = block.voxels[voxel_idx];
-                            
-                            if voxel == AIR { continue; }
-                            voxel_count += 1;
-                            
-                            // Calculate voxel position (1m cubes)
-                            let min_x = (block.ecef_min[0] + x as f64) as f32;
-                            let min_y = (block.ecef_min[1] + y as f64) as f32;
-                            let min_z = (block.ecef_min[2] + z as f64) as f32;
-                            let size = 1.0;
-                            
-                            let base_idx = vertices.len() as u32;
-                            
-                            // Color based on material type
-                            let color = material_color(voxel);
-            
-                        // 8 cube vertices
-                        vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-                        vertices.push(Vertex { position: [min_x + size, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-                        vertices.push(Vertex { position: [min_x + size, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-                        vertices.push(Vertex { position: [min_x, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-                        vertices.push(Vertex { position: [min_x, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                        vertices.push(Vertex { position: [min_x + size, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                        vertices.push(Vertex { position: [min_x + size, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                        vertices.push(Vertex { position: [min_x, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                        
-                        // 12 triangles (6 faces × 2 triangles)
-                        let faces = [
-                            [0, 1, 2, 0, 2, 3], // Bottom
-                            [4, 6, 5, 4, 7, 6], // Top
-                            [0, 4, 5, 0, 5, 1], // Front
-                            [1, 5, 6, 1, 6, 2], // Right
-                            [2, 6, 7, 2, 7, 3], // Back
-                            [3, 7, 4, 3, 4, 0], // Left
-                        ];
-                        
-                        for face in &faces {
-                            for &idx in face {
-                                indices.push(base_idx + idx);
-                            }
-                        }
-                    }
-                }
-            }
+                
+                // Count non-air voxels for stats
+                let block_voxels = block.voxels.iter().filter(|&&v| v != AIR).count();
+                voxel_count += block_voxels;
+                
+                // Use greedy meshing to generate mesh for this block
+                let (block_verts, block_inds) = greedy_mesh_block(
+                    &block.voxels,
+                    block.ecef_min,
+                );
+                
+                // Offset indices to account for existing vertices
+                let base_idx = vertices.len() as u32;
+                vertices.extend(block_verts);
+                indices.extend(block_inds.iter().map(|idx| idx + base_idx));
             } else {
                 // FAR (LOD 2-3): Render entire block as single 8m cube
                 far_blocks += 1;
