@@ -133,7 +133,7 @@ impl ContinuousWorld {
         
         let generator = ProceduralGenerator::new(generator_config)?;
         
-        let mut world = Self {
+        let world = Self {
             index: SpatialIndex::new(bounds),
             cache: AdaptiveCache::new(hot_capacity, warm_capacity, block_cache_path, block_size),
             generator,

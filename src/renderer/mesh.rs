@@ -221,7 +221,7 @@ pub fn generate_tile_outlines(depth: u8, face_colors: Option<[Vec3; 6]>) -> (Vec
     let mut indices = Vec::new();
     
     // Generate all chunk IDs at this depth
-    let tiles_per_face = 4_usize.pow(depth as u32);
+    let _tiles_per_face = 4_usize.pow(depth as u32);
     
     for face in 0..6 {
         let face_color = colors[face as usize];
@@ -1122,7 +1122,7 @@ pub fn generate_roads_from_osm(roads: &[crate::osm::OsmRoad], color: Vec3) -> (V
             let point = ecef_points[i];
             
             // Calculate perpendicular direction for road width
-            let (forward, perpendicular) = if i == 0 {
+            let (_forward, perpendicular) = if i == 0 {
                 // First point: use direction to next point
                 let next = ecef_points[i + 1];
                 let forward = (next - point).normalize();

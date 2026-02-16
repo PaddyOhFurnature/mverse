@@ -3,10 +3,10 @@
 /// Downloads and caches SRTM tiles covering test area.
 /// Simple blocking HTTP download - no async complexity for prototype.
 
-use crate::elevation::{SrtmTile, parse_hgt, parse_hgt_filename};
+use crate::elevation::{SrtmTile, parse_hgt};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::io::{Write, Cursor};
+use std::path::PathBuf;
+use std::io::Cursor;
 use std::thread;
 use std::time::Duration;
 

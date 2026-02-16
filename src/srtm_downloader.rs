@@ -119,8 +119,8 @@ impl SrtmDownloader {
     /// We need to convert to standard SRTM .hgt format: 16-bit big-endian signed integers.
     fn convert_geotiff_to_hgt(
         geotiff_bytes: &[u8],
-        lat: i16,
-        lon: i16,
+        _lat: i16,
+        _lon: i16,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         use tiff::decoder::{Decoder, DecodingResult};
         use std::io::Cursor;

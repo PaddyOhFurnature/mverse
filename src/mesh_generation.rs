@@ -4,8 +4,8 @@
 /// Separates by material, optimizes geometry, supports multiple LODs.
 
 use crate::svo::{SparseVoxelOctree, MaterialId, AIR};
-use crate::marching_cubes::{extract_mesh, Triangle, Vertex};
-use crate::materials::{MaterialColors, Color};
+use crate::marching_cubes::{extract_mesh, Triangle};
+use crate::materials::MaterialColors;
 use std::collections::HashMap;
 
 /// Renderable mesh with vertices and indices

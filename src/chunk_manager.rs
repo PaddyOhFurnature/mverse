@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use glam::DVec3;
 
-use crate::chunks::{ChunkId, ecef_to_cube_face, gps_to_chunk_id};
-use crate::coordinates::{EcefPos, gps_to_ecef, GpsPos, ecef_to_gps};
+use crate::chunks::{ChunkId, gps_to_chunk_id};
+use crate::coordinates::{EcefPos, GpsPos, ecef_to_gps};
 use crate::osm::{OsmData, OsmBuilding, OsmRoad, OsmWater};
 
 /// Manages loading and unloading of world chunks based on camera position
@@ -112,7 +112,7 @@ impl ChunkManager {
     }
     
     /// Gets neighboring chunks at the same depth
-    fn get_neighbor_chunks(&self, chunk_id: &ChunkId) -> Vec<ChunkId> {
+    fn get_neighbor_chunks(&self, _chunk_id: &ChunkId) -> Vec<ChunkId> {
         // TODO: Implement proper neighbor finding
         // For now, return empty - we'll just load the camera chunk
         Vec::new()

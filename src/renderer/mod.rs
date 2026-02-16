@@ -234,7 +234,7 @@ impl Renderer {
         });
         
         // Copy surface to our texture (blit)
-        let surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let _surface_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         
         // We need to re-render the frame - just clear for now
         {

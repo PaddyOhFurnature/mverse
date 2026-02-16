@@ -320,7 +320,7 @@ pub fn gps_to_chunk_id(gps: &GpsPos, depth: u8) -> ChunkId {
     let ecef = gps_to_ecef(gps);
     
     // Get cube face and UV coordinates
-    let (face, mut u, mut v) = ecef_to_cube_face(&ecef);
+    let (face, u, v) = ecef_to_cube_face(&ecef);
     
     // UV coordinates are in [-1, 1], subdivide into quadtree
     let mut path = Vec::with_capacity(depth as usize);

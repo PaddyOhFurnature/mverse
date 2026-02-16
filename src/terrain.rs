@@ -3,7 +3,7 @@
 //! Converts 2D elevation data (SRTM heightmaps) into 3D volumetric SVO representation.
 //! The terrain is solid below the surface (rock/soil) and air above.
 
-use crate::svo::{SparseVoxelOctree, MaterialId, STONE, DIRT, AIR, WATER};
+use crate::svo::{SparseVoxelOctree, STONE, DIRT, AIR, WATER};
 use crate::coordinates::GpsPos;
 
 /// Sea level in meters (WGS84 reference)
@@ -42,7 +42,7 @@ pub fn generate_terrain_from_elevation<F, G>(
     svo: &mut SparseVoxelOctree,
     mut elevation_fn: F,
     coords_fn: G,
-    voxel_size: f64,
+    _voxel_size: f64,
 ) where
     F: FnMut(f64, f64) -> Option<f32>,
     G: Fn(u32, u32, u32) -> GpsPos,

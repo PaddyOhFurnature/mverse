@@ -4,13 +4,13 @@
 /// Each chunk is a small area (~1km) with high voxel resolution (~1m).
 
 use std::collections::HashMap;
-use crate::chunks::{ChunkId, gps_to_chunk_id, chunk_bounds_gps, chunk_center_ecef};
+use crate::chunks::{ChunkId, gps_to_chunk_id, chunk_bounds_gps};
 use crate::svo::SparseVoxelOctree;
 use crate::terrain::generate_terrain_from_elevation;
 use crate::osm_features::{carve_river, place_road, add_building};
 use crate::mesh_generation::{generate_mesh, Mesh};
 use crate::elevation::SrtmManager;
-use crate::osm::{OsmData, OsmBuilding, OsmRoad, OsmWater};
+use crate::osm::OsmData;
 use crate::coordinates::{EcefPos, GpsPos, gps_to_ecef};
 
 /// A single world chunk with its SVO

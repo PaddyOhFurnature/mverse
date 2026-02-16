@@ -265,8 +265,8 @@ impl ElevationSource for Usgs3DepSource {
         let tile_size = 1.0 / (2_u32.pow((zoom as u32).min(8)) as f64);
         let sw_lat = (lat / tile_size).floor() * tile_size;
         let sw_lon = (lon / tile_size).floor() * tile_size;
-        let ne_lat = sw_lat + tile_size;
-        let ne_lon = sw_lon + tile_size;
+        let _ne_lat = sw_lat + tile_size;
+        let _ne_lon = sw_lon + tile_size;
         
         // Query USGS ImageServer
         // TODO: Implement actual ImageServer query

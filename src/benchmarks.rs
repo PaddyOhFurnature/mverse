@@ -137,7 +137,7 @@ pub fn run_all_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
     let avg_move = move_times.iter().sum::<f64>() / move_times.len() as f64;
     
     // Query sizes
-    let size_results = bench_query_sizes()?;
+    let _size_results = bench_query_sizes()?;
     
     // Memory
     let memory_kb = bench_memory_usage()?;

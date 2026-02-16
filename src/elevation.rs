@@ -4,7 +4,7 @@
 /// Data is stored in HGT files as 16-bit big-endian signed integers.
 /// When real data unavailable, falls back to procedural noise-based terrain.
 
-use noise::{NoiseFn, Perlin, Seedable};
+use noise::{NoiseFn, Perlin};
 
 /// SRTM resolution variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,7 +4,7 @@
 //! The floating origin technique subtracts the camera position from all world coordinates
 //! before converting to f32 for GPU rendering.
 
-use glam::{DVec3, DQuat, Mat4, Vec3};
+use glam::{DVec3, DQuat, Mat4};
 
 /// Camera with floating-origin support
 ///

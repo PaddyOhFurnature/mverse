@@ -11,7 +11,6 @@
 /// 4. Generate operation logs for P2P synchronization
 
 use crate::coordinates::{GpsPos, EcefPos, gps_to_ecef};
-use crate::chunks::{ChunkId, chunk_center_ecef};
 use crate::osm::OsmBuilding;
 use crate::svo::{SparseVoxelOctree, AIR, WATER, CONCRETE, WOOD, ASPHALT, DIRT, STONE};
 use crate::terrain::find_surface_height;

@@ -4,10 +4,10 @@
 /// Designed for arbitrary query bounds (not constrained to chunk grid).
 
 use crate::coordinates::{GpsPos, EcefPos, ecef_to_gps, gps_to_ecef};
-use crate::spatial_index::{VoxelBlock, AABB};
-use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, GRASS as BEDROCK, WATER, ASPHALT, CONCRETE};
+use crate::spatial_index::VoxelBlock;
+use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, WATER, ASPHALT, CONCRETE};
 use crate::elevation::{SrtmTile, get_elevation};
-use crate::osm::{OsmBuilding, OsmRoad, OsmWater, OsmData};
+use crate::osm::{OsmBuilding, OsmRoad, OsmWater};
 use crate::srtm_cache::SrtmCache;
 use crate::osm_cache::OsmCache;
 use std::collections::HashMap;
