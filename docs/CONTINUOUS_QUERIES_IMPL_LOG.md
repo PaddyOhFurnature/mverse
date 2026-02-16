@@ -615,3 +615,45 @@ Will answer during Phase 2 implementation.
 
 **Next:** p2-voxelization - Implement terrain and feature voxelization
 
+
+---
+
+## Phase 2, Day 1 (continued) - Voxelization - 2026-02-16
+
+**Status:** ✅ COMPLETE
+
+**Modified:** src/procedural_generator.rs (+185 lines, 7 tests passing)
+
+**Features:**
+- Road voxelization: ASPHALT for regular roads, CONCRETE for bridges
+- Water voxelization: WATER material with 2m depth
+- Point-in-polygon test for water features (ray casting algorithm)
+- Road sampling every 0.5m along path with width-based filling
+- Ground-level detection for proper road/water placement
+- Material selection: ASPHALT, CONCRETE, WATER added
+
+**Implementation details:**
+- Roads: Sample points along segments, fill voxels within road width
+- Water: Calculate centroid, determine water level, fill polygon area
+- Bridges vs tunnels: Bridges use concrete, tunnels skipped (Phase 4)
+- Ground elevation queries for proper material placement
+- Simple geometric intersection tests
+
+**Tests (7/7 passing):**
+1. test_generator_creation
+2. test_generate_block_no_data  
+3. test_voxel_index
+4. test_block_size_constants
+5. test_load_srtm_tiles_empty
+6. test_load_osm_features_empty
+7. test_point_in_polygon - NEW (tests ray casting algorithm)
+
+**Known limitations:**
+- Road voxelization is simplified (basic width-based filling)
+- Buildings remain placeholder (Phase 4: Interior Spaces)
+- Tunnels not implemented (Phase 4)
+- Water depth fixed at 2m (could use bathymetry data)
+- No road banking or elevation changes
+
+**Next:** p2-integration - Replace placeholder generation in continuous_world.rs
+

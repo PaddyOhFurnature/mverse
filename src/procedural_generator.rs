@@ -5,7 +5,7 @@
 
 use crate::coordinates::{GpsPos, EcefPos, ecef_to_gps, gps_to_ecef};
 use crate::spatial_index::{VoxelBlock, AABB};
-use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, GRASS as BEDROCK};
+use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, GRASS as BEDROCK, WATER, ASPHALT, CONCRETE};
 use crate::elevation::{SrtmTile, get_elevation};
 use crate::osm::{OsmBuilding, OsmRoad, OsmWater, OsmData};
 use crate::srtm_cache::SrtmCache;
@@ -269,17 +269,186 @@ impl ProceduralGenerator {
     }
 
     /// Voxelize road into block
-    fn voxelize_road(&self, _voxels: &mut [MaterialId; 512], _road: &OsmRoad, _ecef_min: [f64; 3]) {
-        // TODO: Implement proper road voxelization
-        // For Phase 2, this is a placeholder
-        // Will add road surface material in p2-voxelization
+    fn voxelize_road(&self, voxels: &mut [MaterialId; 512], road: &OsmRoad, ecef_min: [f64; 3]) {
+        // For each road segment, fill voxels along the path
+        if road.nodes.len() < 2 {
+            return; // Need at least 2 points for a road
+        }
+
+        // Get road material based on type
+        let road_material = if road.is_tunnel {
+            return; // Skip tunnels for now (Phase 4)
+        } else if road.is_bridge {
+            CONCRETE // Bridges use concrete
+        } else {
+            ASPHALT // Regular roads use asphalt
+        };
+
+        // For simplicity, voxelize road as a series of thick lines
+        // This is a basic implementation - Phase 4 will add proper road geometry
+        for i in 0..(road.nodes.len() - 1) {
+            let start_gps = road.nodes[i];
+            let end_gps = road.nodes[i + 1];
+            
+            let start_ecef = gps_to_ecef(&start_gps);
+            let end_ecef = gps_to_ecef(&end_gps);
+            
+            // Check if segment intersects this block
+            let block_max = [
+                ecef_min[0] + BLOCK_SIZE_M,
+                ecef_min[1] + BLOCK_SIZE_M,
+                ecef_min[2] + BLOCK_SIZE_M,
+            ];
+            
+            // Simple AABB intersection test
+            let seg_min_x = start_ecef.x.min(end_ecef.x);
+            let seg_max_x = start_ecef.x.max(end_ecef.x);
+            let seg_min_y = start_ecef.y.min(end_ecef.y);
+            let seg_max_y = start_ecef.y.max(end_ecef.y);
+            let seg_min_z = start_ecef.z.min(end_ecef.z);
+            let seg_max_z = start_ecef.z.max(end_ecef.z);
+            
+            if seg_max_x < ecef_min[0] || seg_min_x > block_max[0] ||
+               seg_max_y < ecef_min[1] || seg_min_y > block_max[1] ||
+               seg_max_z < ecef_min[2] || seg_min_z > block_max[2] {
+                continue; // Segment doesn't intersect block
+            }
+            
+            // Sample points along the road segment
+            let length = ((end_ecef.x - start_ecef.x).powi(2) +
+                         (end_ecef.y - start_ecef.y).powi(2) +
+                         (end_ecef.z - start_ecef.z).powi(2)).sqrt();
+            
+            // Sample every 0.5m along the road
+            let num_samples = (length / 0.5).ceil() as usize + 1;
+            
+            for j in 0..num_samples {
+                let t = j as f64 / (num_samples - 1).max(1) as f64;
+                
+                // Interpolate position
+                let sample_ecef = EcefPos {
+                    x: start_ecef.x + t * (end_ecef.x - start_ecef.x),
+                    y: start_ecef.y + t * (end_ecef.y - start_ecef.y),
+                    z: start_ecef.z + t * (end_ecef.z - start_ecef.z),
+                };
+                
+                // Get ground elevation at this point
+                let sample_gps = ecef_to_gps(&sample_ecef);
+                let ground_elevation = self.get_ground_elevation(sample_gps).unwrap_or(sample_gps.elevation_m);
+                
+                // Fill voxels at road surface level
+                // Road width based on road type
+                let half_width = road.width_m / 2.0;
+                
+                // Fill voxels within road width (simplified - just fills nearby voxels)
+                for x in 0..VOXELS_PER_BLOCK {
+                    for y in 0..VOXELS_PER_BLOCK {
+                        for z in 0..VOXELS_PER_BLOCK {
+                            let voxel_ecef = EcefPos {
+                                x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
+                                y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
+                                z: ecef_min[2] + (z as f64 + 0.5) * VOXEL_SIZE_M,
+                            };
+                            
+                            // Distance from voxel to road sample point
+                            let dx = voxel_ecef.x - sample_ecef.x;
+                            let dy = voxel_ecef.y - sample_ecef.y;
+                            let dz = voxel_ecef.z - sample_ecef.z;
+                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                            
+                            // If within road width, set to road material
+                            if dist <= half_width {
+                                let voxel_gps = ecef_to_gps(&voxel_ecef);
+                                
+                                // Only place road at/near ground level
+                                if (voxel_gps.elevation_m - ground_elevation).abs() < 0.5 {
+                                    let voxel_idx = Self::voxel_index(x, y, z);
+                                    voxels[voxel_idx] = road_material;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Voxelize water feature into block
-    fn voxelize_water(&self, _voxels: &mut [MaterialId; 512], _water: &OsmWater, _ecef_min: [f64; 3]) {
-        // TODO: Implement proper water voxelization
-        // For Phase 2, this is a placeholder
-        // Will add water material in p2-voxelization
+    fn voxelize_water(&self, voxels: &mut [MaterialId; 512], water: &OsmWater, ecef_min: [f64; 3]) {
+        // Water features are typically polygons representing rivers, lakes, etc.
+        if water.polygon.len() < 3 {
+            return; // Need at least 3 points for a water polygon
+        }
+
+        // Calculate centroid and approximate water level
+        let mut centroid_lat = 0.0;
+        let mut centroid_lon = 0.0;
+        for point in &water.polygon {
+            centroid_lat += point.lat_deg;
+            centroid_lon += point.lon_deg;
+        }
+        centroid_lat /= water.polygon.len() as f64;
+        centroid_lon /= water.polygon.len() as f64;
+        
+        let centroid = GpsPos {
+            lat_deg: centroid_lat,
+            lon_deg: centroid_lon,
+            elevation_m: 0.0,
+        };
+        
+        // Get approximate water surface elevation
+        let water_elevation = self.get_ground_elevation(centroid).unwrap_or(0.0);
+        
+        // For each voxel in the block, check if it's inside the water polygon
+        for x in 0..VOXELS_PER_BLOCK {
+            for y in 0..VOXELS_PER_BLOCK {
+                for z in 0..VOXELS_PER_BLOCK {
+                    let voxel_ecef = EcefPos {
+                        x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
+                        y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
+                        z: ecef_min[2] + (z as f64 + 0.5) * VOXEL_SIZE_M,
+                    };
+                    
+                    let voxel_gps = ecef_to_gps(&voxel_ecef);
+                    
+                    // Simple point-in-polygon test (ray casting)
+                    if self.point_in_polygon(&voxel_gps, &water.polygon) {
+                        // Fill with water if at/below water surface level
+                        // Water depth: 2m default
+                        if voxel_gps.elevation_m >= water_elevation - 2.0 &&
+                           voxel_gps.elevation_m <= water_elevation {
+                            let voxel_idx = Self::voxel_index(x, y, z);
+                            voxels[voxel_idx] = WATER;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Simple point-in-polygon test using ray casting
+    fn point_in_polygon(&self, point: &GpsPos, polygon: &[GpsPos]) -> bool {
+        if polygon.len() < 3 {
+            return false;
+        }
+
+        let mut inside = false;
+        let mut j = polygon.len() - 1;
+        
+        for i in 0..polygon.len() {
+            let vi = &polygon[i];
+            let vj = &polygon[j];
+            
+            if ((vi.lat_deg > point.lat_deg) != (vj.lat_deg > point.lat_deg)) &&
+               (point.lon_deg < (vj.lon_deg - vi.lon_deg) * (point.lat_deg - vi.lat_deg) / 
+                                (vj.lat_deg - vi.lat_deg) + vi.lon_deg) {
+                inside = !inside;
+            }
+            
+            j = i;
+        }
+        
+        inside
     }
 
     /// Convert 3D voxel coordinates to linear array index
@@ -452,5 +621,36 @@ mod tests {
         // Should succeed even with no features on disk
         let result = generator.load_osm_features();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_point_in_polygon() {
+        let config = test_config();
+        let generator = ProceduralGenerator::new(config).unwrap();
+        
+        // Create a simple square polygon
+        let polygon = vec![
+            GpsPos { lat_deg: 0.0, lon_deg: 0.0, elevation_m: 0.0 },
+            GpsPos { lat_deg: 0.0, lon_deg: 1.0, elevation_m: 0.0 },
+            GpsPos { lat_deg: 1.0, lon_deg: 1.0, elevation_m: 0.0 },
+            GpsPos { lat_deg: 1.0, lon_deg: 0.0, elevation_m: 0.0 },
+        ];
+        
+        // Test points inside
+        assert!(generator.point_in_polygon(
+            &GpsPos { lat_deg: 0.5, lon_deg: 0.5, elevation_m: 0.0 },
+            &polygon
+        ));
+        
+        // Test points outside
+        assert!(!generator.point_in_polygon(
+            &GpsPos { lat_deg: 2.0, lon_deg: 2.0, elevation_m: 0.0 },
+            &polygon
+        ));
+        
+        assert!(!generator.point_in_polygon(
+            &GpsPos { lat_deg: -1.0, lon_deg: 0.5, elevation_m: 0.0 },
+            &polygon
+        ));
     }
 }
