@@ -12,6 +12,9 @@ pub mod srtm_downloader;
 // pub mod terrain_mesh;  // REMOVED - bypassed SVO pipeline
 pub mod renderer;
 
+// Continuous query system (Phase 1)
+pub mod spatial_index;
+
 #[cfg(test)]
 mod tests;
 pub mod terrain;

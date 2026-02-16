@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "rustcon-js": "^1.1.1"
+  }
+}

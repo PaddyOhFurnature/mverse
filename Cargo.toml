@@ -24,6 +24,10 @@ noise = { version = "0.9.0", features = ["images"] }
 png = "0.17"
 image = "0.25"
 
+# Continuous query system (Phase 1)
+rstar = { version = "0.12", features = ["serde"] }  # R*-tree spatial index
+lru = "0.12"  # LRU cache for warm cache tier
+
 [dev-dependencies]
 tempfile = "3"
 env_logger = "0.11"
