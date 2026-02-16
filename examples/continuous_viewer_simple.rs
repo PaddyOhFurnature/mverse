@@ -96,74 +96,76 @@ impl App {
         
         println!("\n[Mesh Update]");
         
-        // Query 100m radius around camera (larger to catch terrain)
+        // Query 50m radius around camera (conservative to avoid GPU limits)
         let cam_pos = [
             self.camera.position.x,
             self.camera.position.y,
             self.camera.position.z,
         ];
-        let query = AABB::from_center(cam_pos, 100.0);
+        let query = AABB::from_center(cam_pos, 50.0);
         let blocks = world.query_range(query);
         
-        println!("  Queried {} blocks", blocks.len());
+        println!("  Queried {} blocks in 50m radius", blocks.len());
         
-        // Convert blocks to simple cube meshes
+        // Convert blocks to individual voxel cubes
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
+        let mut voxel_count = 0;
         
         for block in &blocks {
-            // Count non-air voxels
-            let mut has_voxels = false;
-            for voxel in block.voxels.iter() {
-                if *voxel != AIR {
-                    has_voxels = true;
-                    break;
-                }
-            }
+            // Render individual voxels, not whole blocks
+            for x in 0..8 {
+                for y in 0..8 {
+                    for z in 0..8 {
+                        let voxel_idx = z * 64 + y * 8 + x;
+                        let voxel = block.voxels[voxel_idx];
+                        
+                        if voxel == AIR { continue; }
+                        voxel_count += 1;
+                        
+                        // Calculate voxel position (1m cubes)
+                        let voxel_size = 1.0;
+                        let min_x = (block.ecef_min[0] + x as f64) as f32;
+                        let min_y = (block.ecef_min[1] + y as f64) as f32;
+                        let min_z = (block.ecef_min[2] + z as f64) as f32;
+                        let size = voxel_size;
+                        
+                        let base_idx = vertices.len() as u32;
+                        
+                        // Color: dark gray for now (material colors come later)
+                        let color = [0.3, 0.3, 0.3, 1.0];
             
-            if !has_voxels { continue; }
-            
-            // Simple visualization: one cube per block with voxels
-            let min_x = block.ecef_min[0] as f32;
-            let min_y = block.ecef_min[1] as f32;
-            let min_z = block.ecef_min[2] as f32;
-            let size = block.size as f32;
-            
-            let base_idx = vertices.len() as u32;
-            
-            // Cube vertices (red color for roads/asphalt)
-            let color = [1.0, 0.0, 0.0, 1.0]; // Red for visibility
-            
-            // Bottom face
-            vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-            vertices.push(Vertex { position: [min_x + size, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-            vertices.push(Vertex { position: [min_x + size, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-            vertices.push(Vertex { position: [min_x, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-            
-            // Top face
-            vertices.push(Vertex { position: [min_x, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-            vertices.push(Vertex { position: [min_x + size, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-            vertices.push(Vertex { position: [min_x + size, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-            vertices.push(Vertex { position: [min_x, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-            
-            // Indices for cube (12 triangles)
-            let faces = [
-                [0, 1, 2, 0, 2, 3], // Bottom
-                [4, 6, 5, 4, 7, 6], // Top
-                [0, 4, 5, 0, 5, 1], // Front
-                [1, 5, 6, 1, 6, 2], // Right
-                [2, 6, 7, 2, 7, 3], // Back
-                [3, 7, 4, 3, 4, 0], // Left
-            ];
-            
-            for face in &faces {
-                for &idx in face {
-                    indices.push(base_idx + idx);
+                        // 8 cube vertices
+                        vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
+                        vertices.push(Vertex { position: [min_x + size, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
+                        vertices.push(Vertex { position: [min_x + size, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
+                        vertices.push(Vertex { position: [min_x, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
+                        vertices.push(Vertex { position: [min_x, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                        vertices.push(Vertex { position: [min_x + size, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                        vertices.push(Vertex { position: [min_x + size, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                        vertices.push(Vertex { position: [min_x, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                        
+                        // 12 triangles (6 faces × 2 triangles)
+                        let faces = [
+                            [0, 1, 2, 0, 2, 3], // Bottom
+                            [4, 6, 5, 4, 7, 6], // Top
+                            [0, 4, 5, 0, 5, 1], // Front
+                            [1, 5, 6, 1, 6, 2], // Right
+                            [2, 6, 7, 2, 7, 3], // Back
+                            [3, 7, 4, 3, 4, 0], // Left
+                        ];
+                        
+                        for face in &faces {
+                            for &idx in face {
+                                indices.push(base_idx + idx);
+                            }
+                        }
+                    }
                 }
             }
         }
         
-        println!("  Generated {} vertices, {} indices", vertices.len(), indices.len());
+        println!("  {} voxels → {} vertices, {} indices", voxel_count, vertices.len(), indices.len());
         
         if vertices.is_empty() {
             println!("  No geometry to render!");
@@ -284,6 +286,8 @@ impl ApplicationHandler for App {
             let center_ecef = gps_to_ecef(&gps_center);
             let center = [center_ecef.x, center_ecef.y, center_ecef.z];
             
+            println!("\nInitializing continuous world (this takes ~5 seconds)...");
+            println!("  Pre-generating 10,404 terrain blocks...");
             let world = match ContinuousWorld::new(center, 100.0) {
                 Ok(w) => {
                     println!("✓ World created");
@@ -300,9 +304,9 @@ impl ApplicationHandler for App {
             self.pipeline = Some(pipeline);
             self.continuous_world = Some(world);
             
-            println!("\n Generating initial mesh...");
+            println!("\nGenerating initial mesh (50m radius)...");
             self.update_mesh();
-            println!("\n✓ Ready to render!\n");
+            println!("\n✓ Ready! Use WASD to move, mouse to look around.\n");
         }
     }
     
