@@ -105,10 +105,11 @@ impl ContinuousWorld {
         let hot_capacity = 1000;   // ~1 MB
         let warm_capacity = 5000;  // ~5 MB
         
-        // Cache directory
-        let cache_base = dirs::cache_dir()
+        // Cache directory - use ~/.metaverse/cache for consistency
+        let cache_base = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("metaverse");
+            .join(".metaverse")
+            .join("cache");
         
         let block_cache_path = cache_base.join("blocks");
         let srtm_cache_path = cache_base.join("srtm");

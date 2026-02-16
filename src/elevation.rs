@@ -53,11 +53,13 @@ pub fn parse_hgt(filename: &str, bytes: &[u8]) -> Result<SrtmTile, Box<dyn std::
     // Detect resolution from file size
     let resolution = if bytes.len() == SrtmResolution::Srtm1.file_size() {
         SrtmResolution::Srtm1
+    } else if bytes.len() == 25920000 {  // 3600x3600 OpenTopography variant
+        SrtmResolution::Srtm1  // Treat as SRTM1
     } else if bytes.len() == SrtmResolution::Srtm3.file_size() {
         SrtmResolution::Srtm3
     } else {
         return Err(format!(
-            "Invalid HGT file size: {} bytes (expected {} for SRTM1 or {} for SRTM3)",
+            "Invalid HGT file size: {} bytes (expected {} for SRTM1, 25920000 for OpenTopo, or {} for SRTM3)",
             bytes.len(),
             SrtmResolution::Srtm1.file_size(),
             SrtmResolution::Srtm3.file_size()
@@ -65,7 +67,11 @@ pub fn parse_hgt(filename: &str, bytes: &[u8]) -> Result<SrtmTile, Box<dyn std::
     };
     
     // Parse elevation data (16-bit big-endian signed integers)
-    let sample_count = resolution.samples() * resolution.samples();
+    let sample_count = if bytes.len() == 25920000 {
+        3600 * 3600  // OpenTopography 3600x3600
+    } else {
+        resolution.samples() * resolution.samples()
+    };
     let mut elevations = Vec::with_capacity(sample_count);
     
     for i in 0..sample_count {
