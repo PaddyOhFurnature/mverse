@@ -1,126 +1,49 @@
-# Terrain Generation - Root Cause Analysis
+# Missing Terrain Data Analysis
 
-**Date:** 2026-02-16  
-**Status:** Terrain generation works, retrieval broken
+## Current Surface Detection
+- Range: -2.0m to +1.0m from SRTM elevation
+- Surface layer: -0.5m to +1.0m (GRASS)
+- Sub-layer 1: -1.5m to -0.5m (DIRT)  
+- Sub-layer 2: -2.0m to -1.5m (STONE)
 
----
+## Potential Issues
 
-## What Works ✅
+### 1. Block Boundary Gaps
+If terrain elevation is between two 8m blocks, surface might fall through gap:
+- Block A: 0-8m elevation
+- Block B: 8-16m elevation
+- Terrain at 7.8m might miss both blocks
 
-1. **Terrain generation itself** - generates 505 voxels (10 GRASS, 52 DIRT, 443 STONE)
-2. **Spatial index storage/retrieval** - tested: 11 GRASS in → 11 GRASS out
-3. **Roads** - 753 ASPHALT voxels render correctly
-4. **Block key matching** - ECEF positions align perfectly
+### 2. Surface Detection Too Narrow
+Current: Only fills voxels within 3m vertical range
+- Voxel size: 1m
+- Block size: 8m vertical
+- If surface crosses block at edge, might miss entirely
 
-## What's Broken ❌
-
-**Terrain blocks don't appear in queries** despite being pre-generated.
-
----
-
-## Tests Run
-
-### Test 1: Direct Generation
+### 3. Elevation Sampling Position
+Currently sampling at block center (Z=4m):
+```rust
+z: ecef_min[2] + 4.0, // Middle of block
 ```
-Block at ECEF (-5046878, 2567787, -2925490)
-Elevation span: 3.7m to 11.7m
-Ground level: 5.0m
-Result: 505 terrain voxels ✓
-```
+This might not represent the actual surface position in that block.
 
-### Test 2: Index Storage
-```
-Generate block → insert into index → query from index
-Result: 11 GRASS in, 11 GRASS out ✓
-```
+## Proposed Fixes
 
-### Test 3: Pre-generation
-```
-ContinuousWorld::new() generates 10,404 blocks
-Inserts into spatial index
-Result: Blocks inserted ✓
-```
+### Option A: Sample elevation per voxel XYZ (expensive but accurate)
+- Revert to per-voxel elevation query
+- But only fill surface ±2m range
 
-### Test 4: Query After Pre-generation
-```
-Query 50m radius
-Returns 2,366 blocks
-Result: ALL AIR (0 GRASS, 0 DIRT, 0 STONE) ✗
-```
+### Option B: Expand surface range to ±4m
+- Ensures overlap between adjacent blocks
+- More conservative, won't miss surfaces
 
----
+### Option C: Sample multiple heights per XY column
+- Check elevation at min, mid, max Z of block
+- Fill if ANY sample is near surface
 
-## Root Cause Hypothesis
+### Option D: Add hysteresis - thicker surface layer
+- Make surface detection more forgiving: -3m to +2m range
+- 5 layers thick instead of 3
 
-**Cache pollution during first query:**
-
-1. Pre-generation creates blocks with terrain, inserts into index
-2. First `query_range()` calls `get_or_generate_block()` for many keys
-3. Some blocks not in index (e.g., elevations outside pre-gen range)
-4. Those blocks regenerate as AIR, go into cache
-5. Cache now has mix of index blocks (with terrain) + regenerated blocks (without terrain)
-6. Subsequent queries return cached ALL-AIR blocks
-
-**Alternative:** Blocks in index ARE empty because generation during pre-gen didn't work for some reason.
-
----
-
-## Debug Evidence
-
-### Query returns blocks from index:
-```
-Expected ECEF: (-5046880.000000, 2567784.000000, -2925488.000000)
-Retrieved ECEF: (-5046880.000000, 2567784.000000, -2925488.000000)
-Match: ✓
-```
-
-### But blocks are empty:
-```
-Retrieved 1 blocks
-Block: 512 AIR, 0 GRASS
-```
-
-### Yet same ECEF generates terrain when tested directly:
-```
-Direct generation at same ECEF:
-505 terrain voxels (10 GRASS, 52 DIRT, 443 STONE)
-```
-
----
-
-## Possible Fixes
-
-### Option 1: Disable cache during pre-generation queries
-Only use index, don't cache until after terrain is confirmed
-
-### Option 2: Generate ALL blocks upfront, don't use on-demand
-Pre-generate complete grid, disable dynamic generation
-
-### Option 3: Fix cache/index interaction
-Ensure cached blocks come from index, not regeneration
-
-### Option 4: Separate terrain from features
-Generate terrain layer separately from OSM features
-
----
-
-## Current Workaround
-
-Roads render (753 voxels) but no terrain underneath.
-
-Viewer command:
-```bash
-cargo run --example continuous_viewer_simple
-```
-
-Shows: Grey lines (roads) floating in green space (no ground).
-
----
-
-## Next Steps
-
-1. Add cache bypass flag for terrain blocks
-2. OR: Simplify to single-source (index OR cache, not both)
-3. OR: Architectural redesign (terrain-first, features-second)
-
-**Priority:** Fix before proceeding to Phase 3. Terrain is foundation.
+## Recommended: Option D (simple + effective)
+Change thresholds to catch more edge cases without expensive queries.

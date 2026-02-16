@@ -119,17 +119,18 @@ impl ProceduralGenerator {
                         // Distance from surface (negative = below, positive = above)
                         let dist_from_surface = voxel_altitude - ground_elevation;
                         
-                        // Only fill surface and 2 voxels below (3 layers total for visible surface)
-                        if dist_from_surface >= -2.0 && dist_from_surface < 1.0 {
+                        // Expanded range: -4m to +2m (6 layers) to avoid gaps at block boundaries
+                        // More forgiving detection prevents missing terrain at edges
+                        if dist_from_surface >= -4.0 && dist_from_surface < 2.0 {
                             let voxel_idx = Self::voxel_index(x, y, z);
                             
-                            // Surface layer gets grass, subsurface gets dirt/stone
+                            // Material selection based on depth below surface
                             voxels[voxel_idx] = if dist_from_surface >= -0.5 {
-                                GRASS  // Top layer
-                            } else if dist_from_surface >= -1.5 {
-                                DIRT   // 1 layer below
+                                GRASS  // Top layer: -0.5m to +2m
+                            } else if dist_from_surface >= -2.0 {
+                                DIRT   // Sub-layer 1: -2m to -0.5m
                             } else {
-                                STONE  // 2 layers below
+                                STONE  // Sub-layer 2: -4m to -2m
                             };
                         }
                     }
