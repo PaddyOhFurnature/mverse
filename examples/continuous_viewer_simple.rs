@@ -3,6 +3,7 @@
 
 use metaverse_core::renderer::{Renderer, pipeline::BasicPipeline};
 use metaverse_core::renderer::greedy_mesh::greedy_mesh_block;
+use metaverse_core::renderer::frustum::Frustum;
 use metaverse_core::continuous_world::ContinuousWorld;
 use metaverse_core::spatial_index::AABB;
 use metaverse_core::renderer::camera::Camera;
@@ -16,6 +17,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 use wgpu;
+use glam::Vec3;
 
 // Kangaroo Point, Brisbane
 const TEST_LAT: f64 = -27.479769;
@@ -132,15 +134,20 @@ impl App {
         let mut near_blocks = 0;
         let mut far_blocks = 0;
         let mut voxel_count = 0;
+        let mut culled_blocks = 0;
         
-        println!("[Mesh Update - With Greedy Meshing]");
+        // Build frustum for culling
+        let renderer = self.renderer.as_ref().unwrap();
+        let aspect = renderer.size.width as f32 / renderer.size.height as f32;
+        let (view_proj, _offset) = self.camera.view_projection_matrix(aspect);
+        let frustum = Frustum::from_view_projection(&view_proj);
+        
+        println!("[Mesh Update - With Greedy Meshing + Frustum Culling]");
         
         for (block, lod_level) in &blocks_with_distance {
             // Count non-air voxels for stats
             let block_voxels = block.voxels.iter().filter(|&&v| v != AIR).count();
             if block_voxels == 0 { continue; } // Skip empty blocks
-            
-            voxel_count += block_voxels;
             
             // CRITICAL FIX: Render relative to camera (f64 precision)
             // Convert ECEF block offset to camera-relative coordinates BEFORE f32 conversion
@@ -149,6 +156,21 @@ impl App {
                 block.ecef_min[1] - cam_pos[1],
                 block.ecef_min[2] - cam_pos[2],
             ];
+            
+            // Frustum culling: check if block AABB is visible
+            let block_min = Vec3::new(
+                block_relative_to_cam[0] as f32,
+                block_relative_to_cam[1] as f32,
+                block_relative_to_cam[2] as f32,
+            );
+            let block_max = block_min + Vec3::splat(8.0); // 8m block size
+            
+            if !frustum.intersects_aabb(block_min, block_max) {
+                culled_blocks += 1;
+                continue; // Skip off-screen blocks
+            }
+            
+            voxel_count += block_voxels;
             
             // Use greedy meshing with camera-relative offset
             let (block_verts, block_inds) = greedy_mesh_block(
@@ -169,7 +191,7 @@ impl App {
             }
         }
         
-        println!("  Near blocks: {}, Far blocks: {}", near_blocks, far_blocks);
+        println!("  Near blocks: {}, Far blocks: {}, Culled: {}", near_blocks, far_blocks, culled_blocks);
         println!("  {} primitives → {} vertices, {} indices", voxel_count, vertices.len(), indices.len());
         
         if vertices.is_empty() {

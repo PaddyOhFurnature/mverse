@@ -8,6 +8,7 @@ pub mod camera;
 pub mod shaders;
 pub mod mesh;
 pub mod greedy_mesh;
+pub mod frustum;
 
 use wgpu;
 use winit::window::Window;
