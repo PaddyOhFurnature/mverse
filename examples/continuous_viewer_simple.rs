@@ -134,80 +134,31 @@ impl App {
         println!("[Mesh Update - With Greedy Meshing]");
         
         for (block, lod_level) in &blocks_with_distance {
+            // Apply greedy meshing to ALL blocks (no LOD distinction for now)
+            // This eliminates "popping" when blocks transition between LOD levels
+            
+            // Count non-air voxels for stats
+            let block_voxels = block.voxels.iter().filter(|&&v| v != AIR).count();
+            if block_voxels == 0 { continue; } // Skip empty blocks
+            
+            voxel_count += block_voxels;
+            
+            // Use greedy meshing to generate mesh for this block
+            let (block_verts, block_inds) = greedy_mesh_block(
+                &block.voxels,
+                block.ecef_min,
+            );
+            
+            // Offset indices to account for existing vertices
+            let base_idx = vertices.len() as u32;
+            vertices.extend(block_verts);
+            indices.extend(block_inds.iter().map(|idx| idx + base_idx));
+            
+            // Track LOD for stats
             if *lod_level <= 1 {
-                // NEAR (LOD 0-1): Use greedy meshing
                 near_blocks += 1;
-                
-                // Count non-air voxels for stats
-                let block_voxels = block.voxels.iter().filter(|&&v| v != AIR).count();
-                voxel_count += block_voxels;
-                
-                // Use greedy meshing to generate mesh for this block
-                let (block_verts, block_inds) = greedy_mesh_block(
-                    &block.voxels,
-                    block.ecef_min,
-                );
-                
-                // Offset indices to account for existing vertices
-                let base_idx = vertices.len() as u32;
-                vertices.extend(block_verts);
-                indices.extend(block_inds.iter().map(|idx| idx + base_idx));
             } else {
-                // FAR (LOD 2-3): Render entire block as single 8m cube
                 far_blocks += 1;
-                
-                // Find dominant material in block (most common non-AIR material)
-                let mut material_counts: std::collections::HashMap<MaterialId, usize> = std::collections::HashMap::new();
-                for &voxel in block.voxels.iter() {
-                    if voxel != AIR {
-                        *material_counts.entry(voxel).or_insert(0) += 1;
-                    }
-                }
-                
-                let dominant_material = material_counts.iter()
-                    .max_by_key(|(_, count)| *count)
-                    .map(|(mat, _)| *mat);
-                
-                let Some(material) = dominant_material else { continue; };
-                
-                voxel_count += 1; // Count as 1 "voxel" for stats
-                
-                // Render entire block as one cube
-                let min_x = block.ecef_min[0] as f32;
-                let min_y = block.ecef_min[1] as f32;
-                let min_z = block.ecef_min[2] as f32;
-                let size = 8.0; // Full block size
-                
-                let base_idx = vertices.len() as u32;
-                
-                // Color based on dominant material
-                let color = material_color(material);
-    
-                // 8 cube vertices
-                vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-                vertices.push(Vertex { position: [min_x + size, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
-                vertices.push(Vertex { position: [min_x + size, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-                vertices.push(Vertex { position: [min_x, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
-                vertices.push(Vertex { position: [min_x, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                vertices.push(Vertex { position: [min_x + size, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                vertices.push(Vertex { position: [min_x + size, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                vertices.push(Vertex { position: [min_x, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
-                
-                // 12 triangles (6 faces × 2 triangles)
-                let faces = [
-                    [0, 1, 2, 0, 2, 3], // Bottom
-                    [4, 6, 5, 4, 7, 6], // Top
-                    [0, 4, 5, 0, 5, 1], // Front
-                    [1, 5, 6, 1, 6, 2], // Right
-                    [2, 6, 7, 2, 7, 3], // Back
-                    [3, 7, 4, 3, 4, 0], // Left
-                ];
-                
-                for face in &faces {
-                    for &idx in face {
-                        indices.push(base_idx + idx);
-                    }
-                }
             }
         }
         
