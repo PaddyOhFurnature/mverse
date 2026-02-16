@@ -5,6 +5,8 @@
 
 use crate::spatial_index::{AABB, VoxelBlock, SpatialIndex};
 use crate::adaptive_cache::{AdaptiveCache, BlockKey, CacheStats};
+use crate::procedural_generator::{ProceduralGenerator, GeneratorConfig};
+use crate::coordinates::EcefPos;
 use crate::svo::MaterialId;
 use std::path::PathBuf;
 use dirs;
@@ -65,6 +67,9 @@ pub struct ContinuousWorld {
     /// Adaptive cache (hot/warm/cold)
     cache: AdaptiveCache,
     
+    /// Procedural generator
+    generator: ProceduralGenerator,
+    
     /// Test area bounds (for prototype)
     bounds: AABB,
     
@@ -86,14 +91,14 @@ impl ContinuousWorld {
     /// 
     /// // Kangaroo Point test location
     /// let center = [-5047081.96, 2567891.19, -2925600.68];
-    /// let world = ContinuousWorld::new(center, 100.0);
+    /// let world = ContinuousWorld::new(center, 100.0).unwrap();
     /// ```
-    pub fn new(center_ecef: [f64; 3], extent: f64) -> Self {
+    pub fn new(center_ecef: [f64; 3], extent: f64) -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_block_size(center_ecef, extent, 8.0)
     }
     
     /// Create with custom block size (for testing different granularities)
-    pub fn with_block_size(center_ecef: [f64; 3], extent: f64, block_size: f64) -> Self {
+    pub fn with_block_size(center_ecef: [f64; 3], extent: f64, block_size: f64) -> Result<Self, Box<dyn std::error::Error>> {
         let bounds = AABB::from_center(center_ecef, extent);
         
         // Cache configuration for test area
@@ -101,17 +106,35 @@ impl ContinuousWorld {
         let warm_capacity = 5000;  // ~5 MB
         
         // Cache directory
-        let cache_path = dirs::cache_dir()
+        let cache_base = dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("metaverse")
-            .join("blocks");
+            .join("metaverse");
         
-        Self {
+        let block_cache_path = cache_base.join("blocks");
+        let srtm_cache_path = cache_base.join("srtm");
+        let osm_cache_path = cache_base.join("osm");
+        
+        // Create procedural generator
+        let generator_config = GeneratorConfig {
+            srtm_cache_path,
+            osm_cache_path,
+            area_center: EcefPos {
+                x: center_ecef[0],
+                y: center_ecef[1],
+                z: center_ecef[2],
+            },
+            area_radius: extent,
+        };
+        
+        let generator = ProceduralGenerator::new(generator_config)?;
+        
+        Ok(Self {
             index: SpatialIndex::new(bounds),
-            cache: AdaptiveCache::new(hot_capacity, warm_capacity, cache_path, block_size),
+            cache: AdaptiveCache::new(hot_capacity, warm_capacity, block_cache_path, block_size),
+            generator,
             bounds,
             block_size,
-        }
+        })
     }
     
     /// Query voxel blocks in arbitrary AABB
@@ -212,9 +235,7 @@ impl ContinuousWorld {
         }
         
         // Cache miss - generate block
-        // TODO Phase 2: Implement actual generation from SRTM + OSM
-        // For now, create empty block as placeholder
-        let block = self.generate_block_placeholder(ecef);
+        let block = self.generator.generate_block(ecef);
         
         // Insert into cache
         self.cache.insert(block.clone());
@@ -222,11 +243,15 @@ impl ContinuousWorld {
         Some(block)
     }
     
-    /// Generate block (placeholder - will implement in Phase 2)
-    fn generate_block_placeholder(&self, ecef_min: [f64; 3]) -> VoxelBlock {
-        // TODO: Replace with actual procedural generation
-        // Will query SRTM + OSM and voxelize terrain
-        VoxelBlock::new(ecef_min, self.block_size)
+    
+    /// Pre-load SRTM elevation data for test area
+    pub fn load_elevation_data(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.generator.load_srtm_tiles()
+    }
+    
+    /// Pre-load OSM features for test area
+    pub fn load_osm_features(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.generator.load_osm_features()
     }
     
     /// Find all block keys that intersect given bounds
@@ -287,7 +312,7 @@ mod tests {
     
     #[test]
     fn test_continuous_world_creation() {
-        let world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         let bounds = world.bounds();
         assert_eq!(bounds.min[0], TEST_CENTER[0] - 100.0);
@@ -297,7 +322,7 @@ mod tests {
     
     #[test]
     fn test_query_range_single_block() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Query small region (1m cube - should fit in 1 block)
         let query = AABB::from_center(TEST_CENTER, 0.5); // 1m cube
@@ -309,7 +334,7 @@ mod tests {
     
     #[test]
     fn test_query_range_multiple_blocks() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Query larger region (should span multiple blocks)
         let query = AABB::from_center(TEST_CENTER, 20.0); // 40m cube
@@ -323,7 +348,7 @@ mod tests {
     
     #[test]
     fn test_sample_point_inside_bounds() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Sample point inside bounds
         let material = world.sample_point(TEST_CENTER);
@@ -334,7 +359,7 @@ mod tests {
     
     #[test]
     fn test_sample_point_outside_bounds() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Sample point far outside bounds
         let far_point = [TEST_CENTER[0] + 1000.0, TEST_CENTER[1], TEST_CENTER[2]];
@@ -346,7 +371,7 @@ mod tests {
     
     #[test]
     fn test_cache_hit_on_second_query() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         let query = AABB::from_center(TEST_CENTER, 5.0);
         
@@ -385,7 +410,7 @@ mod tests {
     
     #[test]
     fn test_query_frustum() {
-        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let mut world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         let frustum = Frustum::from_camera(
             TEST_CENTER,
@@ -402,7 +427,7 @@ mod tests {
     
     #[test]
     fn test_block_keys_in_bounds() {
-        let world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Query exact 8m cube (should span 1 block if perfectly aligned)
         // But since center may not align with grid, could be up to 2³=8 blocks
@@ -419,7 +444,7 @@ mod tests {
     
     #[test]
     fn test_clamp_to_bounds() {
-        let world = ContinuousWorld::new(TEST_CENTER, 100.0);
+        let world = ContinuousWorld::new(TEST_CENTER, 100.0).unwrap();
         
         // Query partially outside world bounds
         let outside = AABB::from_center(
@@ -436,7 +461,7 @@ mod tests {
     
     #[test]
     fn test_custom_block_size() {
-        let mut world = ContinuousWorld::with_block_size(TEST_CENTER, 100.0, 16.0);
+        let mut world = ContinuousWorld::with_block_size(TEST_CENTER, 100.0, 16.0).unwrap();
         
         assert_eq!(world.block_size(), 16.0);
         
