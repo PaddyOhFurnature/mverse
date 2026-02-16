@@ -134,19 +134,24 @@ impl App {
         println!("[Mesh Update - With Greedy Meshing]");
         
         for (block, lod_level) in &blocks_with_distance {
-            // Apply greedy meshing to ALL blocks (no LOD distinction for now)
-            // This eliminates "popping" when blocks transition between LOD levels
-            
             // Count non-air voxels for stats
             let block_voxels = block.voxels.iter().filter(|&&v| v != AIR).count();
             if block_voxels == 0 { continue; } // Skip empty blocks
             
             voxel_count += block_voxels;
             
-            // Use greedy meshing to generate mesh for this block
+            // CRITICAL FIX: Render relative to camera (f64 precision)
+            // Convert ECEF block offset to camera-relative coordinates BEFORE f32 conversion
+            let block_relative_to_cam = [
+                block.ecef_min[0] - cam_pos[0],
+                block.ecef_min[1] - cam_pos[1],
+                block.ecef_min[2] - cam_pos[2],
+            ];
+            
+            // Use greedy meshing with camera-relative offset
             let (block_verts, block_inds) = greedy_mesh_block(
                 &block.voxels,
-                block.ecef_min,
+                block_relative_to_cam, // NOW small numbers (~0-100m), safe for f32
             );
             
             // Offset indices to account for existing vertices
@@ -198,15 +203,11 @@ impl App {
         
         // Update camera uniforms
         let aspect = renderer.size.width as f32 / renderer.size.height as f32;
-        let (view_proj, camera_offset) = self.camera.view_projection_matrix(aspect);
-        let camera_offset_f32 = glam::Vec3::new(
-            camera_offset.x as f32,
-            camera_offset.y as f32,
-            camera_offset.z as f32,
-        );
-        let origin_transform = glam::Mat4::from_translation(-camera_offset_f32);
-        let final_mvp = view_proj * origin_transform;
-        pipeline.update_uniforms(&renderer.queue, final_mvp);
+        let (view_proj, _camera_offset) = self.camera.view_projection_matrix(aspect);
+        
+        // NOTE: Vertices are already camera-relative (subtracted camera pos in update_mesh)
+        // So we don't need origin_transform here - just use view_proj directly
+        pipeline.update_uniforms(&renderer.queue, view_proj);
         
         // Render to texture and capture
         let clear_color = wgpu::Color { r: 0.53, g: 0.81, b: 0.92, a: 1.0 };
@@ -394,15 +395,10 @@ impl ApplicationHandler for App {
                     
                     // Update camera uniforms
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
-                    let (view_proj, camera_offset) = self.camera.view_projection_matrix(aspect);
-                    let camera_offset_f32 = glam::Vec3::new(
-                        camera_offset.x as f32,
-                        camera_offset.y as f32,
-                        camera_offset.z as f32,
-                    );
-                    let origin_transform = glam::Mat4::from_translation(-camera_offset_f32);
-                    let final_mvp = view_proj * origin_transform;
-                    pipeline.update_uniforms(&renderer.queue, final_mvp);
+                    let (view_proj, _camera_offset) = self.camera.view_projection_matrix(aspect);
+                    
+                    // NOTE: Vertices are already camera-relative (subtracted in update_mesh)
+                    pipeline.update_uniforms(&renderer.queue, view_proj);
                     
                     // Render
                     let clear_color = wgpu::Color { r: 0.53, g: 0.81, b: 0.92, a: 1.0 };
