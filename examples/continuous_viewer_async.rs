@@ -229,6 +229,9 @@ impl ApplicationHandler for App {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if event.state.is_pressed() {
                         self.keys_pressed.insert(code);
+                        if code == KeyCode::Escape {
+                            event_loop.exit();
+                        }
                     } else {
                         self.keys_pressed.remove(&code);
                     }
@@ -243,13 +246,6 @@ impl ApplicationHandler for App {
                 }
             }
             
-            WindowEvent::CursorMoved { .. } => {
-                if !self.mouse_captured {
-                    return;
-                }
-                // Mouse motion handled via DeviceEvent in window_event
-            }
-            
             WindowEvent::Resized(new_size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(new_size);
@@ -260,6 +256,9 @@ impl ApplicationHandler for App {
                 let now = std::time::Instant::now();
                 let delta_time = now.duration_since(self.last_frame_time).as_secs_f64();
                 self.last_frame_time = now;
+                
+                // ALWAYS handle input and move camera (NEVER skip this!)
+                self.handle_input(delta_time);
                 
                 self.handle_input(delta_time);
                 
@@ -327,6 +326,16 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+    
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device_id: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        if !self.mouse_captured {
+            return;
+        }
+        
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            self.camera.rotate(-delta.1 * 0.004, delta.0 * 0.004);
         }
     }
     
