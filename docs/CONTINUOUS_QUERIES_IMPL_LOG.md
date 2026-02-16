@@ -495,3 +495,41 @@ Will answer during Phase 2 implementation.
 
 **Next:** Phase 2 - Procedural Generation (Week 2)
 
+
+---
+
+## Phase 2, Day 1 - ProceduralGenerator Module - 2026-02-16
+
+**Status:** ✅ COMPLETE
+
+**Created:** src/procedural_generator.rs (440 lines, 6 tests passing)
+
+**Features:**
+- `ProceduralGenerator` struct with configurable cache paths
+- Block generation from SRTM elevation + OSM features
+- Terrain voxelization with material layers (grass/dirt/stone)
+- OSM feature intersection tests (buildings/roads/water)
+- SRTM tile loading infrastructure
+- Block size constants: 8m³ blocks, 1m voxels, 8×8×8 = 512 voxels per block
+
+**Architecture:**
+- Cached SRTM tiles in HashMap (keyed by lat/lon)
+- Cached OSM features in Vec (buildings, roads, water)
+- Thread-safe with Arc<Mutex<>> for shared caches
+- Placeholder voxelization (real implementation in next tasks)
+
+**Tests (6/6 passing):**
+1. test_generator_creation - Initializes with empty caches
+2. test_generate_block_no_data - Generates AIR-filled block when no data loaded
+3. test_voxel_index - Linear array indexing (0-511)
+4. test_block_size_constants - Validates 8m/1m constants
+5. test_load_srtm_tiles_empty - Handles missing tiles gracefully
+6. test_load_osm_features_empty - Handles missing features gracefully
+
+**Issues resolved:**
+- Coordinate type mismatches (EcefPos struct vs [f64; 3] array) - VoxelBlock uses arrays
+- Material constant imports (MaterialId::AIR vs AIR) - Must import from svo module
+- Function signature references (gps_to_ecef expects &GpsPos not GpsPos)
+
+**Next:** p2-srtm-cache - Download and cache SRTM tiles for test area
+
