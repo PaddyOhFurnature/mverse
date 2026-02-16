@@ -51,10 +51,11 @@ struct App {
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
     num_indices: u32,
-    frame_count: usize,
+    frame_count: usize,      // Frames since last FPS update (resets every second)
+    total_frames: usize,     // Total frames ever (for mesh updates)
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
-    mesh_update_frame: usize,
+    last_mesh_update: usize, // Total frame count when mesh was last updated
     keys_pressed: std::collections::HashSet<KeyCode>,
     mouse_captured: bool,
     last_mouse_pos: Option<(f64, f64)>,
@@ -90,9 +91,10 @@ impl App {
             index_buffer: None,
             num_indices: 0,
             frame_count: 0,
+            total_frames: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
-            mesh_update_frame: 0,
+            last_mesh_update: 0,
             keys_pressed: std::collections::HashSet::new(),
             mouse_captured: false,
             last_mouse_pos: None,
@@ -338,7 +340,7 @@ impl ApplicationHandler for App {
             
             println!("\nGenerating initial mesh (50m radius)...");
             self.update_mesh();
-            self.mesh_update_frame = 1; // Mark mesh as updated (allow future updates)
+            // Don't set last_mesh_update - let first frame set it
             println!("\n✓ Ready!");
             
             // If screenshot mode, take screenshot immediately
@@ -403,7 +405,7 @@ impl ApplicationHandler for App {
                     if let Some(last_pos) = self.last_mouse_pos {
                         let dx = position.x - last_pos.0;
                         let dy = position.y - last_pos.1;
-                        let sensitivity = 0.002;
+                        let sensitivity = 0.004; // Doubled from 0.002
                         self.camera.rotate(-dy * sensitivity, -dx * sensitivity);
                     }
                     self.last_mouse_pos = Some((position.x, position.y));
@@ -425,10 +427,13 @@ impl ApplicationHandler for App {
                 self.last_frame_time = now;
                 self.handle_input(delta_time);
                 
-                // Update mesh every 30 frames (but not on frame 0, only after initial mesh)
-                if self.mesh_update_frame > 0 && self.frame_count >= self.mesh_update_frame + 30 {
+                // Update mesh every 60 frames (1 second at 60fps, 2 seconds at 30fps)
+                // Only after first frame sets the baseline
+                if self.last_mesh_update == 0 {
+                    self.last_mesh_update = self.total_frames; // Set baseline on first frame
+                } else if self.total_frames >= self.last_mesh_update + 60 {
                     self.update_mesh();
-                    self.mesh_update_frame = self.frame_count;
+                    self.last_mesh_update = self.total_frames;
                 }
                 
                 // Render
@@ -467,17 +472,19 @@ impl ApplicationHandler for App {
                         Err(e) => eprintln!("Render error: {:?}", e),
                     }
                     
-                    // FPS counter
+                    // FPS counter and frame tracking
                     self.frame_count += 1;
+                    self.total_frames += 1;
+                    
                     if now.duration_since(self.fps_update_time).as_secs_f32() >= 1.0 {
                         let fps = self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
                         let pos = self.camera.position;
                         let gps = ecef_to_gps(&EcefPos { x: pos.x, y: pos.y, z: pos.z });
                         window.set_title(&format!(
-                            "Continuous Viewer - {:.0} FPS | ({:.6}°, {:.6}°) {:.0}m",
+                            "Continuous Viewer - {:.1} FPS | ({:.6}°, {:.6}°) {:.0}m",
                             fps, gps.lat_deg, gps.lon_deg, gps.elevation_m
                         ));
-                        // DON'T reset frame_count - keep incrementing for mesh update tracking
+                        self.frame_count = 0; // Reset for next FPS calculation
                         self.fps_update_time = now;
                     }
                     
