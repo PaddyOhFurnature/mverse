@@ -182,15 +182,30 @@ impl ProceduralGenerator {
         let tile_lat = lat.floor() as i16;
         let tile_lon = lon.floor() as i16;
         
-        // Try to get cached tile
-        let tiles = self.srtm_tiles.lock().unwrap();
+        // Try to get or load tile
+        let mut tiles = self.srtm_tiles.lock().unwrap();
+        
+        // Check if already loaded
+        if !tiles.contains_key(&(tile_lat, tile_lon)) {
+            // Load from cache
+            match self.srtm_cache.get_tile(tile_lat, tile_lon) {
+                Ok(tile) => {
+                    println!("[SRTM] Loaded tile ({}, {})", tile_lat, tile_lon);
+                    tiles.insert((tile_lat, tile_lon), Arc::new(tile));
+                }
+                Err(e) => {
+                    eprintln!("[SRTM] Failed to load tile ({}, {}): {}", tile_lat, tile_lon, e);
+                    return None;
+                }
+            }
+        }
+        
+        // Query elevation from loaded tile
         if let Some(tile) = tiles.get(&(tile_lat, tile_lon)) {
-            // Query elevation from tile with bilinear interpolation
             return get_elevation(tile, lat, lon);
         }
         
-        // NO FALLBACK: If we have no elevation data, leave as AIR
-        // Don't generate fake terrain - wait for real data
+        // No elevation data available
         None
     }
 

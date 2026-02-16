@@ -1,4 +1,5 @@
 pub mod coordinates;
+pub mod geotiff_converter;
 pub mod chunks;
 pub mod chunk_manager;
 pub mod lod;
