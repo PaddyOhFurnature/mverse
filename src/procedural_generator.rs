@@ -7,8 +7,9 @@ use crate::coordinates::{GpsPos, EcefPos, ecef_to_gps, gps_to_ecef};
 use crate::spatial_index::{VoxelBlock, AABB};
 use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, GRASS as BEDROCK};
 use crate::elevation::{SrtmTile, get_elevation};
-use crate::osm::{OsmBuilding, OsmRoad, OsmWater};
+use crate::osm::{OsmBuilding, OsmRoad, OsmWater, OsmData};
 use crate::srtm_cache::SrtmCache;
+use crate::osm_cache::OsmCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -40,6 +41,8 @@ pub struct ProceduralGenerator {
     config: GeneratorConfig,
     /// SRTM tile cache
     srtm_cache: SrtmCache,
+    /// OSM feature cache
+    osm_cache: OsmCache,
     /// Cached SRTM tiles (keyed by lat/lon)
     srtm_tiles: Arc<Mutex<HashMap<(i16, i16), Arc<SrtmTile>>>>,
     /// Cached OSM buildings
@@ -54,10 +57,12 @@ impl ProceduralGenerator {
     /// Create a new procedural generator
     pub fn new(config: GeneratorConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let srtm_cache = SrtmCache::new(config.srtm_cache_path.clone())?;
+        let osm_cache = OsmCache::new(config.osm_cache_path.clone())?;
         
         Ok(Self {
             config,
             srtm_cache,
+            osm_cache,
             srtm_tiles: Arc::new(Mutex::new(HashMap::new())),
             osm_buildings: Arc::new(Mutex::new(Vec::new())),
             osm_roads: Arc::new(Mutex::new(Vec::new())),
@@ -335,9 +340,22 @@ impl ProceduralGenerator {
 
     /// Load OSM features for test area
     pub fn load_osm_features(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // TODO: Implement in p2-osm-cache
-        // For now, keep empty vectors
-        println!("OSM features loading not yet implemented");
+        // Convert test area center to GPS
+        let center_gps = ecef_to_gps(&self.config.area_center);
+        
+        // Fetch OSM features for area
+        let data = self.osm_cache.get_area_features(center_gps, self.config.area_radius)?;
+        
+        // Store in caches
+        *self.osm_buildings.lock().unwrap() = data.buildings;
+        *self.osm_roads.lock().unwrap() = data.roads;
+        *self.osm_water.lock().unwrap() = data.water;
+        
+        println!("Loaded OSM features:");
+        println!("  Buildings: {}", self.osm_buildings.lock().unwrap().len());
+        println!("  Roads: {}", self.osm_roads.lock().unwrap().len());
+        println!("  Water: {}", self.osm_water.lock().unwrap().len());
+        
         Ok(())
     }
 }

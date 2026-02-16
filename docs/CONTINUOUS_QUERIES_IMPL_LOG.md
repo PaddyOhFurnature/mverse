@@ -574,3 +574,44 @@ Will answer during Phase 2 implementation.
 
 **Next:** p2-osm-cache - Download and cache OSM features
 
+
+---
+
+## Phase 2, Day 1 (continued) - OSM Cache - 2026-02-16
+
+**Status:** ✅ COMPLETE
+
+**Created:** src/osm_cache.rs (230 lines, 5 tests passing)
+
+**Features:**
+- `OsmCache` for querying Overpass API and caching features
+- Bounding box queries with automatic caching
+- `get_area_features()` for radius-based queries around center point
+- `prefetch_area()` for batch downloading test area features
+- Integrated with `ProceduralGenerator`
+
+**Architecture:**
+- Blocking HTTP with reqwest (simple for prototype)
+- 2-second cooldown built into OverpassClient (project rule compliance)
+- JSON caching with filename from bounds: osm_s-27.480_w153.030_n-27.470_e153.040.json
+- Cache directory: configurable path in GeneratorConfig
+
+**Tests (5/5 passing):**
+1. test_cache_path - Validates filename generation
+2. test_cache_creation - Creates cache directory
+3. test_area_bounds_calculation - Lat/lon degree calculations
+4. test_cache_persistence - Cache load/save roundtrip
+5. test_query_kangaroo_point - Manual network test (ignored)
+
+**Integration:**
+- ProceduralGenerator now uses OsmCache
+- load_osm_features() fetches real Overpass API data
+- Successfully fetched Kangaroo Point area: 10 buildings, 12 roads, 1 water feature!
+
+**Real data validated:**
+- Overpass API query successful for test area
+- Features cached to disk
+- Buildings, roads, water features all parsed correctly
+
+**Next:** p2-voxelization - Implement terrain and feature voxelization
+

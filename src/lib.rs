@@ -18,6 +18,7 @@ pub mod adaptive_cache;
 pub mod continuous_world;
 pub mod procedural_generator;
 pub mod srtm_cache;
+pub mod osm_cache;
 
 #[cfg(test)]
 mod tests;
