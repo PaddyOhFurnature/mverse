@@ -199,14 +199,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start at Kangaroo Point, various altitudes
     let test_positions = vec![
-        ("ground_level_5m", 5.0),
-        ("low_altitude_20m", 20.0),
-        ("medium_altitude_50m", 50.0),
-        ("high_altitude_100m", 100.0),
-        ("very_high_200m", 200.0),
+        ("ground_level_from_5m", 5.0, 200.0),  // At ground level, wide radius
+        ("low_altitude_20m", 20.0, 100.0),
+        ("medium_altitude_50m", 50.0, 150.0),
+        ("high_altitude_100m", 100.0, 200.0),
+        ("very_high_200m", 200.0, 400.0),
     ];
     
-    for (name, altitude) in test_positions {
+    for (name, altitude, query_radius) in test_positions {
         println!("\n=== {} ===", name);
         
         let gps = GpsPos { lat_deg: TEST_LAT, lon_deg: TEST_LON, elevation_m: altitude };
@@ -217,8 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let look_at = glam::DVec3::ZERO;
         let camera = Camera::new(position, look_at);
         
-        // Update mesh with appropriate query radius
-        let query_radius = altitude * 2.0;
+        // Update mesh
         capture.update_mesh([pos_ecef.x, pos_ecef.y, pos_ecef.z], query_radius);
         
         // Capture

@@ -128,13 +128,61 @@ impl ContinuousWorld {
         
         let generator = ProceduralGenerator::new(generator_config)?;
         
-        Ok(Self {
+        let mut world = Self {
             index: SpatialIndex::new(bounds),
             cache: AdaptiveCache::new(hot_capacity, warm_capacity, block_cache_path, block_size),
             generator,
             bounds,
             block_size,
-        })
+        };
+        
+        // Pre-generate terrain blocks for entire test area
+        println!("Pre-generating terrain blocks...");
+        world.generate_terrain_blocks()?;
+        println!("✓ Terrain blocks generated");
+        
+        Ok(world)
+    }
+    
+    /// Pre-generate terrain blocks for the entire test area
+    fn generate_terrain_blocks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Generate a grid of blocks covering the test area
+        // Focus on ground level altitude range
+        let center_x = (self.bounds.min[0] + self.bounds.max[0]) / 2.0;
+        let center_y = (self.bounds.min[1] + self.bounds.max[1]) / 2.0;
+        let center_z = (self.bounds.min[2] + self.bounds.max[2]) / 2.0;
+        
+        let extent_xy = self.bounds.max[0] - self.bounds.min[0];
+        let blocks_per_side = (extent_xy / self.block_size).ceil() as i32;
+        
+        // Generate blocks at multiple Z levels around center
+        // -2 to +1 gives us blocks from -16m to +8m relative to center
+        let z_levels = vec![-2, -1, 0, 1];
+        
+        let mut generated = 0;
+        
+        for xi in -blocks_per_side..=blocks_per_side {
+            for yi in -blocks_per_side..=blocks_per_side {
+                for &z_offset in &z_levels {
+                    let block_x = center_x + (xi as f64 * self.block_size);
+                    let block_y = center_y + (yi as f64 * self.block_size);
+                    let block_z = center_z + (z_offset as f64 * self.block_size);
+                    
+                    let ecef_min = [block_x, block_y, block_z];
+                    
+                    // Generate block
+                    let block = self.generator.generate_block(ecef_min);
+                    
+                    // Insert into spatial index
+                    self.index.insert(block.clone());
+                    
+                    generated += 1;
+                }
+            }
+        }
+        
+        println!("  Generated {} terrain blocks", generated);
+        Ok(())
     }
     
     /// Query voxel blocks in arbitrary AABB
@@ -234,7 +282,36 @@ impl ContinuousWorld {
             return Some(block);
         }
         
-        // Cache miss - generate block
+        // Try spatial index (pre-generated blocks)
+        let query_aabb = AABB {
+            min: ecef,
+            max: [ecef[0] + self.block_size, ecef[1] + self.block_size, ecef[2] + self.block_size],
+        };
+        let index_blocks = self.index.query_range(query_aabb);
+        
+        if !index_blocks.is_empty() {
+            // Found in index - add to cache and return
+            let block = &index_blocks[0];
+            
+            // DEBUG: Check if block has terrain
+            let mut non_air = 0;
+            for voxel in block.voxels.iter() {
+                if *voxel != crate::svo::AIR {
+                    non_air += 1;
+                }
+            }
+            if non_air > 0 {
+                eprintln!("DEBUG: Index returned block with {} non-AIR voxels", non_air);
+            } else {
+                eprintln!("DEBUG: Index returned EMPTY block!");
+            }
+            
+            self.cache.insert(block.clone());
+            return Some(block.clone());
+        }
+        
+        // Cache miss AND not in index - generate block
+        eprintln!("DEBUG: Block not in index, regenerating");
         let block = self.generator.generate_block(ecef);
         
         // Insert into cache
