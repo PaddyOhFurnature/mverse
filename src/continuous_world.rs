@@ -75,6 +75,10 @@ pub struct ContinuousWorld {
     
     /// Block size in meters
     block_size: f64,
+    
+    /// LOD state tracking for hysteresis (prevents popping)
+    /// Maps block key to last rendered LOD level
+    lod_state: std::collections::HashMap<BlockKey, u8>,
 }
 
 impl ContinuousWorld {
@@ -135,6 +139,7 @@ impl ContinuousWorld {
             generator,
             bounds,
             block_size,
+            lod_state: std::collections::HashMap::new(),
         };
         
         // Pre-generate terrain blocks for entire test area
@@ -211,40 +216,51 @@ impl ContinuousWorld {
     
     /// Query blocks with LOD (Level of Detail) based on distance from camera
     ///
-    /// Returns blocks at different detail levels based on distance.
-    /// Near blocks get full detail, far blocks get lower detail.
+    /// Uses hysteresis to prevent "popping" when blocks cross LOD boundaries.
+    /// Blocks require significant distance change before switching LOD levels.
     ///
     /// # Arguments
     /// - `camera_pos` - Camera position in ECEF
     /// - `max_radius` - Maximum query radius in meters
     ///
     /// # Returns
-    /// Vector of (block, lod_level) pairs where lod_level indicates voxel size multiplier
-    /// - lod_level 0: 1m voxels (0-25m from camera)
-    /// - lod_level 1: 2m voxels (25-50m from camera) 
-    /// - lod_level 2: 4m voxels (50-100m from camera)
-    /// - lod_level 3: 8m voxels (100m+ from camera)
+    /// Vector of (block, lod_level) pairs where lod_level indicates detail:
+    /// - lod_level 0: Full detail (greedy meshed voxels)
+    /// - lod_level 1: Medium detail (greedy meshed, farther)
+    /// - lod_level 2: Low detail (could use simpler rendering)
+    ///
+    /// # Hysteresis
+    /// Prevents rapid LOD switching by using different thresholds for entering vs exiting:
+    /// - Enter LOD 0: distance < 23m, Exit LOD 0: distance > 27m (4m gap)
+    /// - Enter LOD 1: distance < 48m, Exit LOD 1: distance > 52m (4m gap)
+    /// Query blocks with LOD (Level of Detail) based on distance from camera
+    ///
+    /// Uses hysteresis to prevent "popping" when blocks cross LOD boundaries.
+    /// Blocks require significant distance change before switching LOD levels.
+    ///
+    /// # Hysteresis
+    /// Prevents rapid LOD switching by using different thresholds for entering vs exiting:
+    /// - Enter LOD 0: distance < 20m, Exit LOD 0: distance > 30m (10m gap)
+    /// - Enter LOD 1: distance < 45m, Exit LOD 1: distance > 55m (10m gap)
     pub fn query_lod(&mut self, camera_pos: [f64; 3], max_radius: f64) -> Vec<(VoxelBlock, u8)> {
-        // Define LOD distance thresholds
-        let lod_distances = [
-            (25.0, 0u8),   // 0-25m: full detail (1m voxels)
-            (50.0, 1u8),   // 25-50m: half detail (2m voxels)
-            (100.0, 2u8),  // 50-100m: quarter detail (4m voxels)
-            (f64::MAX, 3u8), // 100m+: eighth detail (8m voxels)
+        // LOD thresholds with hysteresis (enter_dist, exit_dist, lod_level)
+        let lod_hysteresis = [
+            (20.0, 30.0, 0u8),   // LOD 0: enter <20m, exit >30m
+            (45.0, 55.0, 1u8),   // LOD 1: enter <45m, exit >55m  
         ];
         
-        // Query all blocks in range
-        let query_bounds = AABB::from_center(camera_pos, max_radius);
-        let blocks = self.query_range(query_bounds);
+        // Query frustum to get potentially visible blocks
+        let frustum = Frustum::from_camera(camera_pos, [1.0, 0.0, 0.0], 60.0, 16.0/9.0);
+        let blocks = self.query_frustum(&frustum);
         
-        // Assign LOD level based on distance from camera
+        // Assign LOD level based on distance with hysteresis
         blocks.into_iter()
-            .map(|block| {
+            .filter_map(|block| {
                 // Calculate distance from camera to block center
                 let block_center = [
-                    block.ecef_min[0] + block.size / 2.0,
-                    block.ecef_min[1] + block.size / 2.0,
-                    block.ecef_min[2] + block.size / 2.0,
+                    block.ecef_min[0] + self.block_size / 2.0,
+                    block.ecef_min[1] + self.block_size / 2.0,
+                    block.ecef_min[2] + self.block_size / 2.0,
                 ];
                 
                 let dx = block_center[0] - camera_pos[0];
@@ -252,13 +268,36 @@ impl ContinuousWorld {
                 let dz = block_center[2] - camera_pos[2];
                 let distance = (dx * dx + dy * dy + dz * dz).sqrt();
                 
-                // Find appropriate LOD level
-                let lod_level = lod_distances.iter()
-                    .find(|(threshold, _)| distance < *threshold)
-                    .map(|(_, level)| *level)
-                    .unwrap_or(3); // Default to lowest detail
+                // Skip blocks beyond max radius
+                if distance > max_radius {
+                    return None;
+                }
                 
-                (block, lod_level)
+                // Get block key for state tracking (use existing BlockKey::from_ecef)
+                let block_key = BlockKey::from_ecef(block.ecef_min, self.block_size);
+                
+                // Get previous LOD level (default to highest detail - conservative)
+                let prev_lod = self.lod_state.get(&block_key).copied().unwrap_or(0);
+                
+                // Determine new LOD level with hysteresis
+                let mut new_lod = 2; // Default to lowest detail (far away)
+                
+                for (enter_dist, exit_dist, lod_level) in &lod_hysteresis {
+                    if distance < *enter_dist {
+                        // Close enough to enter this LOD level
+                        new_lod = *lod_level;
+                        break;
+                    } else if prev_lod == *lod_level && distance < *exit_dist {
+                        // Already at this LOD, haven't crossed exit threshold yet
+                        new_lod = *lod_level;
+                        break;
+                    }
+                }
+                
+                // Update state
+                self.lod_state.insert(block_key, new_lod);
+                
+                Some((block, new_lod))
             })
             .collect()
     }
