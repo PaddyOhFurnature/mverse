@@ -533,3 +533,44 @@ Will answer during Phase 2 implementation.
 
 **Next:** p2-srtm-cache - Download and cache SRTM tiles for test area
 
+
+---
+
+## Phase 2, Day 1 (continued) - SRTM Cache - 2026-02-16
+
+**Status:** ✅ COMPLETE
+
+**Created:** src/srtm_cache.rs (275 lines, 4 tests passing)
+
+**Features:**
+- `SrtmCache` for downloading and caching SRTM tiles
+- Multi-source fallback: USGS → OpenTopography → NASA
+- Automatic .hgt file extraction from ZIP archives
+- Disk caching to avoid repeated downloads
+- `prefetch_area()` for batch downloading test area tiles
+- Integrated with `ProceduralGenerator` for elevation queries
+
+**Architecture:**
+- Blocking HTTP with reqwest (simple for prototype)
+- 2-second cooldown between requests (project rule compliance)
+- Tile filename format: S28E153.hgt (standard SRTM naming)
+- Cache directory: configurable path in GeneratorConfig
+
+**Tests (4/4 passing):**
+1. test_tile_path - Validates filename generation
+2. test_cache_creation - Creates cache directory
+3. test_prefetch_area_bounds - Batch download logic
+4. test_download_brisbane_tile - Manual network test (ignored)
+
+**Integration:**
+- ProceduralGenerator now uses SrtmCache
+- load_srtm_tile_from_disk() fetches tiles on demand
+- Graceful fallback when tiles unavailable (empty terrain)
+
+**Known limitations:**
+- USGS downloads fail without authentication (expected)
+- OpenTopography requires API key (not set in tests)
+- GeoTIFF conversion not implemented yet (returns .hgt only)
+
+**Next:** p2-osm-cache - Download and cache OSM features
+

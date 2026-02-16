@@ -17,6 +17,7 @@ pub mod spatial_index;
 pub mod adaptive_cache;
 pub mod continuous_world;
 pub mod procedural_generator;
+pub mod srtm_cache;
 
 #[cfg(test)]
 mod tests;

@@ -8,6 +8,7 @@ use crate::spatial_index::{VoxelBlock, AABB};
 use crate::svo::{MaterialId, AIR, GRASS, DIRT, STONE, GRASS as BEDROCK};
 use crate::elevation::{SrtmTile, get_elevation};
 use crate::osm::{OsmBuilding, OsmRoad, OsmWater};
+use crate::srtm_cache::SrtmCache;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,8 @@ pub struct GeneratorConfig {
 /// Procedural generator for voxel blocks
 pub struct ProceduralGenerator {
     config: GeneratorConfig,
+    /// SRTM tile cache
+    srtm_cache: SrtmCache,
     /// Cached SRTM tiles (keyed by lat/lon)
     srtm_tiles: Arc<Mutex<HashMap<(i16, i16), Arc<SrtmTile>>>>,
     /// Cached OSM buildings
@@ -49,14 +52,17 @@ pub struct ProceduralGenerator {
 
 impl ProceduralGenerator {
     /// Create a new procedural generator
-    pub fn new(config: GeneratorConfig) -> Self {
-        Self {
+    pub fn new(config: GeneratorConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let srtm_cache = SrtmCache::new(config.srtm_cache_path.clone())?;
+        
+        Ok(Self {
             config,
+            srtm_cache,
             srtm_tiles: Arc::new(Mutex::new(HashMap::new())),
             osm_buildings: Arc::new(Mutex::new(Vec::new())),
             osm_roads: Arc::new(Mutex::new(Vec::new())),
             osm_water: Arc::new(Mutex::new(Vec::new())),
-        }
+        })
     }
 
     /// Generate a voxel block for the given ECEF bounds
@@ -317,10 +323,14 @@ impl ProceduralGenerator {
     }
 
     /// Load SRTM tile from disk cache
-    fn load_srtm_tile_from_disk(&self, _lat: i16, _lon: i16) -> Result<Option<SrtmTile>, Box<dyn std::error::Error>> {
-        // TODO: Implement in p2-srtm-cache
-        // For now, return None
-        Ok(None)
+    fn load_srtm_tile_from_disk(&self, lat: i16, lon: i16) -> Result<Option<SrtmTile>, Box<dyn std::error::Error>> {
+        match self.srtm_cache.get_tile(lat, lon) {
+            Ok(tile) => Ok(Some(tile)),
+            Err(e) => {
+                println!("Failed to load SRTM tile ({}, {}): {}", lat, lon, e);
+                Ok(None)
+            }
+        }
     }
 
     /// Load OSM features for test area
@@ -355,7 +365,7 @@ mod tests {
     #[test]
     fn test_generator_creation() {
         let config = test_config();
-        let generator = ProceduralGenerator::new(config);
+        let generator = ProceduralGenerator::new(config).unwrap();
         
         // Generator should initialize with empty caches
         assert_eq!(generator.srtm_tiles.lock().unwrap().len(), 0);
@@ -367,7 +377,7 @@ mod tests {
     #[test]
     fn test_generate_block_no_data() {
         let config = test_config();
-        let generator = ProceduralGenerator::new(config);
+        let generator = ProceduralGenerator::new(config).unwrap();
         
         // Generate block at test area center
         let ecef_min = [-5_047_100.0, 2_567_900.0, -2_925_600.0];
@@ -409,7 +419,7 @@ mod tests {
     #[test]
     fn test_load_srtm_tiles_empty() {
         let config = test_config();
-        let generator = ProceduralGenerator::new(config);
+        let generator = ProceduralGenerator::new(config).unwrap();
         
         // Should succeed even with no tiles on disk
         let result = generator.load_srtm_tiles();
@@ -419,7 +429,7 @@ mod tests {
     #[test]
     fn test_load_osm_features_empty() {
         let config = test_config();
-        let generator = ProceduralGenerator::new(config);
+        let generator = ProceduralGenerator::new(config).unwrap();
         
         // Should succeed even with no features on disk
         let result = generator.load_osm_features();
