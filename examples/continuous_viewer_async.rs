@@ -38,6 +38,7 @@ struct App {
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
     num_indices: u32,
+    mesh_origin: [f64; 3],  // Position mesh was generated at
     frame_count: usize,
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
@@ -72,6 +73,7 @@ impl App {
             vertex_buffer: None,
             index_buffer: None,
             num_indices: 0,
+            mesh_origin: [position.x, position.y, position.z],
             frame_count: 0,
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
@@ -96,7 +98,16 @@ impl App {
         if self.keys_pressed.contains(&KeyCode::Space) { up += 1.0; }
         if self.keys_pressed.contains(&KeyCode::ShiftLeft) { up -= 1.0; }
         
-        self.camera.move_relative(forward, right, up, delta_time);
+        // Debug movement
+        if forward != 0.0 || right != 0.0 || up != 0.0 {
+            let pos_before = self.camera.position;
+            self.camera.move_relative(forward, right, up, delta_time);
+            let pos_after = self.camera.position;
+            let dist = (pos_after - pos_before).length();
+            println!("[Movement] delta_time={:.4}s, moved={:.2}m", delta_time, dist);
+        } else {
+            self.camera.move_relative(forward, right, up, delta_time);
+        }
     }
     
     fn request_mesh_update(&self, camera_pos: [f64; 3]) {
@@ -133,12 +144,19 @@ impl App {
         });
     }
     
-    fn check_and_upload_mesh(&mut self) {
+    fn check_and_upload_mesh(&mut self, current_camera_pos: [f64; 3]) {
         let mut status = self.mesh_status.lock().unwrap();
         
         if let MeshStatus::Ready { vertices, indices } = &*status {
             let start = std::time::Instant::now();
-            println!("[Upload] {} vertices to GPU", vertices.len());
+            
+            if let MeshStatus::Generating { position, .. } = &*status {
+                // Update mesh origin to where it was generated
+                self.mesh_origin = *position;
+            }
+            
+            println!("[Upload] {} vertices to GPU (origin: {:.1}, {:.1}, {:.1})", 
+                     vertices.len(), self.mesh_origin[0], self.mesh_origin[1], self.mesh_origin[2]);
             
             if let Some(renderer) = &self.renderer {
                 self.vertex_buffer = Some(renderer.device.create_buffer_init(
@@ -264,11 +282,13 @@ impl ApplicationHandler for App {
                 // ALWAYS handle input and move camera (NEVER skip this!)
                 self.handle_input(delta_time);
                 
+                // Get current camera position
+                let cam_pos = [self.camera.position.x, self.camera.position.y, self.camera.position.z];
+                
                 // Check if mesh is ready and upload (THIS MIGHT BLOCK - the problem!)
-                self.check_and_upload_mesh();
+                self.check_and_upload_mesh(cam_pos);
                 
                 // Request new mesh if moved significantly
-                let cam_pos = [self.camera.position.x, self.camera.position.y, self.camera.position.z];
                 let dist = (
                     (cam_pos[0] - self.last_mesh_camera_pos[0]).powi(2) +
                     (cam_pos[1] - self.last_mesh_camera_pos[1]).powi(2) +
@@ -288,7 +308,27 @@ impl ApplicationHandler for App {
                     (&self.window, &mut self.renderer, &self.pipeline, &self.skybox) {
                     
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
+                    
+                    // CRITICAL: Account for mesh origin vs current camera position
+                    // Mesh vertices are relative to mesh_origin, but camera has moved
+                    let offset_from_mesh = [
+                        cam_pos[0] - self.mesh_origin[0],
+                        cam_pos[1] - self.mesh_origin[1],
+                        cam_pos[2] - self.mesh_origin[2],
+                    ];
+                    
+                    // Create camera offset by the difference
+                    let adjusted_camera_pos = glam::DVec3::new(
+                        offset_from_mesh[0],
+                        offset_from_mesh[1],
+                        offset_from_mesh[2],
+                    );
+                    
+                    // Temporarily move camera for view matrix
+                    let original_pos = self.camera.position;
+                    self.camera.position = adjusted_camera_pos;
                     let (view_proj, _) = self.camera.view_projection_matrix(aspect);
+                    self.camera.position = original_pos; // Restore
                     
                     pipeline.update_uniforms(&renderer.queue, view_proj);
                     
