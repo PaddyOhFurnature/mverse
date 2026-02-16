@@ -8,7 +8,7 @@ use crate::spatial_index::AABB;
 use std::time::Instant;
 
 // Test location: Kangaroo Point, Brisbane (-27.479769°, 153.033586°)
-const KANGAROO_POINT: [f64; 3] = [-5047081.96, 2567891.19, -2925600.68];
+const KANGAROO_POINT: [f64; 3] = [-5046877.97, 2567787.42, -2925481.59];
 
 /// Benchmark single query performance (cache cold)
 pub fn bench_cold_query() -> Result<f64, Box<dyn std::error::Error>> {

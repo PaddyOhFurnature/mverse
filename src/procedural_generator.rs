@@ -196,17 +196,17 @@ impl ProceduralGenerator {
 
     /// Check if building intersects block bounds
     fn building_intersects_block(&self, building: &OsmBuilding, ecef_min: [f64; 3]) -> bool {
-        // TODO: Implement proper polygon-AABB intersection test
-        // For now, simple AABB test
         let block_max = [
             ecef_min[0] + BLOCK_SIZE_M,
             ecef_min[1] + BLOCK_SIZE_M,
             ecef_min[2] + BLOCK_SIZE_M,
         ];
         
-        // Convert building polygon to ECEF and check bounds
-        for point in &building.polygon {
-            let ecef = gps_to_ecef(point);
+        // Convert all polygon points to ECEF once
+        let ecef_points: Vec<_> = building.polygon.iter().map(|p| gps_to_ecef(p)).collect();
+        
+        // Check if any point is inside block
+        for ecef in &ecef_points {
             if ecef.x >= ecef_min[0] && ecef.x <= block_max[0] &&
                ecef.y >= ecef_min[1] && ecef.y <= block_max[1] &&
                ecef.z >= ecef_min[2] && ecef.z <= block_max[2] {
@@ -214,24 +214,88 @@ impl ProceduralGenerator {
             }
         }
         
+        // Check if any polygon edge intersects block
+        for i in 0..ecef_points.len() {
+            let p1 = &ecef_points[i];
+            let p2 = &ecef_points[(i + 1) % ecef_points.len()]; // Wrap around for closed polygon
+            
+            // Bounding box of edge
+            let seg_min = [
+                p1.x.min(p2.x),
+                p1.y.min(p2.y),
+                p1.z.min(p2.z),
+            ];
+            let seg_max = [
+                p1.x.max(p2.x),
+                p1.y.max(p2.y),
+                p1.z.max(p2.z),
+            ];
+            
+            // AABB overlap test
+            if seg_max[0] >= ecef_min[0] && seg_min[0] <= block_max[0] &&
+               seg_max[1] >= ecef_min[1] && seg_min[1] <= block_max[1] &&
+               seg_max[2] >= ecef_min[2] && seg_min[2] <= block_max[2] {
+                return true;
+            }
+        }
+        
+        // Check if block center is inside building polygon
+        let block_center = [
+            ecef_min[0] + BLOCK_SIZE_M / 2.0,
+            ecef_min[1] + BLOCK_SIZE_M / 2.0,
+            ecef_min[2] + BLOCK_SIZE_M / 2.0,
+        ];
+        
+        if Self::point_in_polygon_3d(&block_center, &ecef_points) {
+            return true;
+        }
+        
         false
     }
 
     /// Check if road intersects block bounds
+    /// Check if road intersects block bounds
     fn road_intersects_block(&self, road: &OsmRoad, ecef_min: [f64; 3]) -> bool {
-        // TODO: Implement proper line-AABB intersection test
-        // For now, simple point-in-AABB test
         let block_max = [
             ecef_min[0] + BLOCK_SIZE_M,
             ecef_min[1] + BLOCK_SIZE_M,
             ecef_min[2] + BLOCK_SIZE_M,
         ];
         
-        for point in &road.nodes {
-            let ecef = gps_to_ecef(point);
+        // Convert all nodes to ECEF once
+        let ecef_nodes: Vec<_> = road.nodes.iter().map(|p| gps_to_ecef(p)).collect();
+        
+        // Check if any node is inside block
+        for ecef in &ecef_nodes {
             if ecef.x >= ecef_min[0] && ecef.x <= block_max[0] &&
                ecef.y >= ecef_min[1] && ecef.y <= block_max[1] &&
                ecef.z >= ecef_min[2] && ecef.z <= block_max[2] {
+                return true;
+            }
+        }
+        
+        // Check if any line segment intersects block (segment-AABB test)
+        // Use simple conservative test: expand block slightly and check if segment AABB overlaps
+        for i in 0..ecef_nodes.len().saturating_sub(1) {
+            let p1 = &ecef_nodes[i];
+            let p2 = &ecef_nodes[i + 1];
+            
+            // Bounding box of line segment
+            let seg_min = [
+                p1.x.min(p2.x),
+                p1.y.min(p2.y),
+                p1.z.min(p2.z),
+            ];
+            let seg_max = [
+                p1.x.max(p2.x),
+                p1.y.max(p2.y),
+                p1.z.max(p2.z),
+            ];
+            
+            // AABB overlap test
+            if seg_max[0] >= ecef_min[0] && seg_min[0] <= block_max[0] &&
+               seg_max[1] >= ecef_min[1] && seg_min[1] <= block_max[1] &&
+               seg_max[2] >= ecef_min[2] && seg_min[2] <= block_max[2] {
                 return true;
             }
         }
@@ -241,16 +305,17 @@ impl ProceduralGenerator {
 
     /// Check if water feature intersects block bounds
     fn water_intersects_block(&self, water: &OsmWater, ecef_min: [f64; 3]) -> bool {
-        // TODO: Implement proper polygon-AABB intersection test
-        // For now, simple point-in-AABB test
         let block_max = [
             ecef_min[0] + BLOCK_SIZE_M,
             ecef_min[1] + BLOCK_SIZE_M,
             ecef_min[2] + BLOCK_SIZE_M,
         ];
         
-        for point in &water.polygon {
-            let ecef = gps_to_ecef(point);
+        // Convert all polygon points to ECEF once
+        let ecef_points: Vec<_> = water.polygon.iter().map(|p| gps_to_ecef(p)).collect();
+        
+        // Check if any point is inside block
+        for ecef in &ecef_points {
             if ecef.x >= ecef_min[0] && ecef.x <= block_max[0] &&
                ecef.y >= ecef_min[1] && ecef.y <= block_max[1] &&
                ecef.z >= ecef_min[2] && ecef.z <= block_max[2] {
@@ -258,7 +323,68 @@ impl ProceduralGenerator {
             }
         }
         
+        // Check if any polygon edge intersects block
+        for i in 0..ecef_points.len() {
+            let p1 = &ecef_points[i];
+            let p2 = &ecef_points[(i + 1) % ecef_points.len()]; // Wrap around for closed polygon
+            
+            // Bounding box of edge
+            let seg_min = [
+                p1.x.min(p2.x),
+                p1.y.min(p2.y),
+                p1.z.min(p2.z),
+            ];
+            let seg_max = [
+                p1.x.max(p2.x),
+                p1.y.max(p2.y),
+                p1.z.max(p2.z),
+            ];
+            
+            // AABB overlap test
+            if seg_max[0] >= ecef_min[0] && seg_min[0] <= block_max[0] &&
+               seg_max[1] >= ecef_min[1] && seg_min[1] <= block_max[1] &&
+               seg_max[2] >= ecef_min[2] && seg_min[2] <= block_max[2] {
+                return true;
+            }
+        }
+        
+        // Check if block center is inside polygon (polygon contains block)
+        let block_center = [
+            ecef_min[0] + BLOCK_SIZE_M / 2.0,
+            ecef_min[1] + BLOCK_SIZE_M / 2.0,
+            ecef_min[2] + BLOCK_SIZE_M / 2.0,
+        ];
+        
+        if Self::point_in_polygon_3d(&block_center, &ecef_points) {
+            return true;
+        }
+        
         false
+    }
+    
+    /// Check if point is inside 3D polygon (projects to 2D for ray casting)
+    fn point_in_polygon_3d(point: &[f64; 3], polygon: &[EcefPos]) -> bool {
+        // Simple ray casting in XY plane (good enough for Earth surface features)
+        let mut inside = false;
+        let px = point[0];
+        let py = point[1];
+        
+        for i in 0..polygon.len() {
+            let j = (i + 1) % polygon.len();
+            let xi = polygon[i].x;
+            let yi = polygon[i].y;
+            let xj = polygon[j].x;
+            let yj = polygon[j].y;
+            
+            let intersect = ((yi > py) != (yj > py)) &&
+                (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+            
+            if intersect {
+                inside = !inside;
+            }
+        }
+        
+        inside
     }
 
     /// Voxelize building into block
