@@ -125,15 +125,15 @@ impl App {
         
         println!("\n[Mesh Update]");
         
-        // Query 100m radius with LOD
+        // Query 50m radius with LOD (reduced from 100m for better performance)
         let cam_pos = [
             self.camera.position.x,
             self.camera.position.y,
             self.camera.position.z,
         ];
-        let blocks_with_distance = world.query_lod(cam_pos, 100.0);
+        let blocks_with_distance = world.query_lod(cam_pos, 50.0);
         
-        println!("  Queried {} blocks with LOD in 100m radius", blocks_with_distance.len());
+        println!("  Queried {} blocks with LOD in 50m radius", blocks_with_distance.len());
         
         // Render with block-level LOD + Greedy Meshing
         let mut vertices: Vec<Vertex> = Vec::new();
