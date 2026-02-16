@@ -426,7 +426,7 @@ impl ApplicationHandler for App {
                 self.handle_input(delta_time);
                 
                 // Update mesh every 30 frames (but not on frame 0, only after initial mesh)
-                if self.mesh_update_frame > 0 && (self.frame_count - self.mesh_update_frame) >= 30 {
+                if self.mesh_update_frame > 0 && self.frame_count >= self.mesh_update_frame + 30 {
                     self.update_mesh();
                     self.mesh_update_frame = self.frame_count;
                 }
@@ -467,7 +467,7 @@ impl ApplicationHandler for App {
                         Err(e) => eprintln!("Render error: {:?}", e),
                     }
                     
-                    // FPS
+                    // FPS counter
                     self.frame_count += 1;
                     if now.duration_since(self.fps_update_time).as_secs_f32() >= 1.0 {
                         let fps = self.frame_count as f32 / now.duration_since(self.fps_update_time).as_secs_f32();
@@ -477,7 +477,7 @@ impl ApplicationHandler for App {
                             "Continuous Viewer - {:.0} FPS | ({:.6}°, {:.6}°) {:.0}m",
                             fps, gps.lat_deg, gps.lon_deg, gps.elevation_m
                         ));
-                        self.frame_count = 0;
+                        // DON'T reset frame_count - keep incrementing for mesh update tracking
                         self.fps_update_time = now;
                     }
                     
