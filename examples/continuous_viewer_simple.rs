@@ -96,44 +96,46 @@ impl App {
         
         println!("\n[Mesh Update]");
         
-        // Query 50m radius around camera (conservative to avoid GPU limits)
+        // Query 100m radius with LOD
         let cam_pos = [
             self.camera.position.x,
             self.camera.position.y,
             self.camera.position.z,
         ];
-        let query = AABB::from_center(cam_pos, 50.0);
-        let blocks = world.query_range(query);
+        let blocks_with_distance = world.query_lod(cam_pos, 100.0);
         
-        println!("  Queried {} blocks in 50m radius", blocks.len());
+        println!("  Queried {} blocks with LOD in 100m radius", blocks_with_distance.len());
         
-        // Convert blocks to individual voxel cubes
+        // Render with block-level LOD
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut voxel_count = 0;
+        let mut near_blocks = 0;
+        let mut far_blocks = 0;
         
-        for block in &blocks {
-            // Render individual voxels, not whole blocks
-            for x in 0..8 {
-                for y in 0..8 {
-                    for z in 0..8 {
-                        let voxel_idx = z * 64 + y * 8 + x;
-                        let voxel = block.voxels[voxel_idx];
-                        
-                        if voxel == AIR { continue; }
-                        voxel_count += 1;
-                        
-                        // Calculate voxel position (1m cubes)
-                        let voxel_size = 1.0;
-                        let min_x = (block.ecef_min[0] + x as f64) as f32;
-                        let min_y = (block.ecef_min[1] + y as f64) as f32;
-                        let min_z = (block.ecef_min[2] + z as f64) as f32;
-                        let size = voxel_size;
-                        
-                        let base_idx = vertices.len() as u32;
-                        
-                        // Color: dark gray for now (material colors come later)
-                        let color = [0.3, 0.3, 0.3, 1.0];
+        for (block, lod_level) in &blocks_with_distance {
+            if *lod_level <= 1 {
+                // NEAR (LOD 0-1): Render individual 1m voxels
+                near_blocks += 1;
+                for x in 0..8 {
+                    for y in 0..8 {
+                        for z in 0..8 {
+                            let voxel_idx = z * 64 + y * 8 + x;
+                            let voxel = block.voxels[voxel_idx];
+                            
+                            if voxel == AIR { continue; }
+                            voxel_count += 1;
+                            
+                            // Calculate voxel position (1m cubes)
+                            let min_x = (block.ecef_min[0] + x as f64) as f32;
+                            let min_y = (block.ecef_min[1] + y as f64) as f32;
+                            let min_z = (block.ecef_min[2] + z as f64) as f32;
+                            let size = 1.0;
+                            
+                            let base_idx = vertices.len() as u32;
+                            
+                            // Color: dark for near (0.3)
+                            let color = [0.3, 0.3, 0.3, 1.0];
             
                         // 8 cube vertices
                         vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
@@ -163,9 +165,57 @@ impl App {
                     }
                 }
             }
+            } else {
+                // FAR (LOD 2-3): Render entire block as single 8m cube
+                far_blocks += 1;
+                
+                // Check if block has any solid voxels
+                let has_solid = block.voxels.iter().any(|&v| v != AIR);
+                if !has_solid { continue; }
+                
+                voxel_count += 1; // Count as 1 "voxel" for stats
+                
+                // Render entire block as one cube
+                let min_x = block.ecef_min[0] as f32;
+                let min_y = block.ecef_min[1] as f32;
+                let min_z = block.ecef_min[2] as f32;
+                let size = 8.0; // Full block size
+                
+                let base_idx = vertices.len() as u32;
+                
+                // Color: light for far (0.5)
+                let color = [0.5, 0.5, 0.5, 1.0];
+    
+                // 8 cube vertices
+                vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
+                vertices.push(Vertex { position: [min_x + size, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
+                vertices.push(Vertex { position: [min_x + size, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
+                vertices.push(Vertex { position: [min_x, min_y + size, min_z], normal: [0.0, 0.0, -1.0], color });
+                vertices.push(Vertex { position: [min_x, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                vertices.push(Vertex { position: [min_x + size, min_y, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                vertices.push(Vertex { position: [min_x + size, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                vertices.push(Vertex { position: [min_x, min_y + size, min_z + size], normal: [0.0, 0.0, 1.0], color });
+                
+                // 12 triangles (6 faces × 2 triangles)
+                let faces = [
+                    [0, 1, 2, 0, 2, 3], // Bottom
+                    [4, 6, 5, 4, 7, 6], // Top
+                    [0, 4, 5, 0, 5, 1], // Front
+                    [1, 5, 6, 1, 6, 2], // Right
+                    [2, 6, 7, 2, 7, 3], // Back
+                    [3, 7, 4, 3, 4, 0], // Left
+                ];
+                
+                for face in &faces {
+                    for &idx in face {
+                        indices.push(base_idx + idx);
+                    }
+                }
+            }
         }
         
-        println!("  {} voxels → {} vertices, {} indices", voxel_count, vertices.len(), indices.len());
+        println!("  Near blocks: {}, Far blocks: {}", near_blocks, far_blocks);
+        println!("  {} primitives → {} vertices, {} indices", voxel_count, vertices.len(), indices.len());
         
         if vertices.is_empty() {
             println!("  No geometry to render!");
