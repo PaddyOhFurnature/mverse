@@ -102,49 +102,38 @@ impl App {
             self.camera.position.y,
             self.camera.position.z,
         ];
-        // Query with LOD (100m radius now possible!)
-        let blocks_with_lod = world.query_lod(cam_pos, 100.0);
+        let query = AABB::from_center(cam_pos, 50.0);
+        let blocks = world.query_range(query);
         
-        println!("  Queried {} blocks with LOD in 100m radius", blocks_with_lod.len());
+        println!("  Queried {} blocks in 50m radius", blocks.len());
         
         // Convert blocks to individual voxel cubes
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let mut voxel_count = 0;
         
-        for (block, lod_level) in &blocks_with_lod {
-            // LOD: bigger voxels for distant blocks
-            let skip = 1 << lod_level;  // 1, 2, 4, 8
-            let voxel_size = skip as f64; // 1m, 2m, 4m, 8m
-            
-            // Color by LOD for debugging
-            let lod_brightness = 0.3 + (*lod_level as f32 * 0.1);
-            let lod_color = [lod_brightness, lod_brightness, lod_brightness, 1.0];
-            
-            // Sample voxels with LOD stride
-            let mut x = 0;
-            while x < 8 {
-                let mut y = 0;
-                while y < 8 {
-                    let mut z = 0;
-                    while z < 8 {
+        for block in &blocks {
+            // Render individual voxels, not whole blocks
+            for x in 0..8 {
+                for y in 0..8 {
+                    for z in 0..8 {
                         let voxel_idx = z * 64 + y * 8 + x;
                         let voxel = block.voxels[voxel_idx];
                         
-                        if voxel == AIR { 
-                            z += skip;
-                            continue; 
-                        }
+                        if voxel == AIR { continue; }
                         voxel_count += 1;
                         
-                        // Calculate voxel position (size varies by LOD)
-                        let min_x = (block.ecef_min[0] + (x as f64) * voxel_size) as f32;
-                        let min_y = (block.ecef_min[1] + (y as f64) * voxel_size) as f32;
-                        let min_z = (block.ecef_min[2] + (z as f64) * voxel_size) as f32;
-                        let size = voxel_size as f32;
+                        // Calculate voxel position (1m cubes)
+                        let voxel_size = 1.0;
+                        let min_x = (block.ecef_min[0] + x as f64) as f32;
+                        let min_y = (block.ecef_min[1] + y as f64) as f32;
+                        let min_z = (block.ecef_min[2] + z as f64) as f32;
+                        let size = voxel_size;
                         
                         let base_idx = vertices.len() as u32;
-                        let color = lod_color;
+                        
+                        // Color: dark gray for now (material colors come later)
+                        let color = [0.3, 0.3, 0.3, 1.0];
             
                         // 8 cube vertices
                         vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
@@ -171,12 +160,8 @@ impl App {
                                 indices.push(base_idx + idx);
                             }
                         }
-                        
-                        z += skip;
                     }
-                    y += skip;
                 }
-                x += skip;
             }
         }
         
