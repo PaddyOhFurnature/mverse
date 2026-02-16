@@ -91,47 +91,48 @@ impl ProceduralGenerator {
     }
 
     /// Fill terrain voxels from SRTM elevation data
+    /// CRITICAL: Only generate SURFACE voxels, not solid filled blocks!
     fn fill_terrain(&self, voxels: &mut [MaterialId; 512], ecef_min: [f64; 3]) {
-        // For each voxel in the block, check if it's below ground
+        // Only iterate XY plane (horizontal), find surface Z for each column
         for x in 0..VOXELS_PER_BLOCK {
             for y in 0..VOXELS_PER_BLOCK {
-                for z in 0..VOXELS_PER_BLOCK {
-                    let voxel_idx = Self::voxel_index(x, y, z);
-                    
-                    // Calculate voxel center in ECEF
-                    let voxel_ecef = EcefPos {
-                        x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
-                        y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
-                        z: ecef_min[2] + (z as f64 + 0.5) * VOXEL_SIZE_M,
-                    };
-
-                    // Convert to GPS to query elevation
-                    let gps = ecef_to_gps(&voxel_ecef);
-                    
-                    // Get ground elevation at this position
-                    if let Some(ground_elevation) = self.get_ground_elevation(gps) {
-                        // Get altitude of this voxel (height above ellipsoid)
-                        let voxel_altitude = gps.elevation_m;
+                // Sample elevation at this XY position (center of column)
+                let sample_ecef = EcefPos {
+                    x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
+                    y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
+                    z: ecef_min[2] + 4.0, // Middle of block for elevation query
+                };
+                let sample_gps = ecef_to_gps(&sample_ecef);
+                
+                if let Some(ground_elevation) = self.get_ground_elevation(sample_gps) {
+                    // Find which Z voxels intersect the surface
+                    // Generate surface + 1-2 layers below for thickness
+                    for z in 0..VOXELS_PER_BLOCK {
+                        let voxel_ecef = EcefPos {
+                            x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
+                            y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
+                            z: ecef_min[2] + (z as f64 + 0.5) * VOXEL_SIZE_M,
+                        };
+                        let voxel_gps = ecef_to_gps(&voxel_ecef);
+                        let voxel_altitude = voxel_gps.elevation_m;
                         
-                        // If voxel is below ground, fill with appropriate material
-                        if voxel_altitude < ground_elevation {
-                            // Depth below surface
-                            let depth = ground_elevation - voxel_altitude;
+                        // Distance from surface (negative = below, positive = above)
+                        let dist_from_surface = voxel_altitude - ground_elevation;
+                        
+                        // Only fill surface and 2 voxels below (3 layers total for visible surface)
+                        if dist_from_surface >= -2.0 && dist_from_surface < 1.0 {
+                            let voxel_idx = Self::voxel_index(x, y, z);
                             
-                            // Material selection based on depth
-                            voxels[voxel_idx] = if depth < 0.5 {
-                                GRASS
-                            } else if depth < 2.0 {
-                                DIRT
-                            } else if depth < 10.0 {
-                                STONE
+                            // Surface layer gets grass, subsurface gets dirt/stone
+                            voxels[voxel_idx] = if dist_from_surface >= -0.5 {
+                                GRASS  // Top layer
+                            } else if dist_from_surface >= -1.5 {
+                                DIRT   // 1 layer below
                             } else {
-                                BEDROCK
+                                STONE  // 2 layers below
                             };
                         }
-                        // else: voxel is above ground, leave as AIR
                     }
-                    // If no elevation data, leave as AIR
                 }
             }
         }
