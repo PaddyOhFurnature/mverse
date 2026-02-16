@@ -142,16 +142,16 @@ impl ContinuousWorld {
             lod_state: std::collections::HashMap::new(),
         };
         
-        // Pre-generate terrain blocks for entire test area
-        println!("Pre-generating terrain blocks...");
-        world.generate_terrain_blocks()?;
-        println!("✓ Terrain blocks generated");
+        // Don't pre-generate! Blocks are generated on-demand in query methods
+        // This allows fast startup and lazy loading
+        println!("✓ Continuous world ready (lazy generation)");
         
         Ok(world)
     }
     
-    /// Pre-generate terrain blocks for the entire test area
-    fn generate_terrain_blocks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Pre-generate terrain blocks for the entire test area (optional, for benchmarking)
+    #[allow(dead_code)]
+    fn generate_terrain_blocks_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Generate a grid of blocks covering the test area
         // Focus on ground level altitude range
         let center_x = (self.bounds.min[0] + self.bounds.max[0]) / 2.0;

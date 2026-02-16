@@ -320,8 +320,6 @@ impl ApplicationHandler for App {
             let center_ecef = gps_to_ecef(&gps_center);
             let center = [center_ecef.x, center_ecef.y, center_ecef.z];
             
-            println!("\nInitializing continuous world (this takes ~5 seconds)...");
-            println!("  Pre-generating 10,404 terrain blocks...");
             let world = match ContinuousWorld::new(center, 100.0) {
                 Ok(w) => {
                     println!("✓ World created");
@@ -340,6 +338,7 @@ impl ApplicationHandler for App {
             
             println!("\nGenerating initial mesh (50m radius)...");
             self.update_mesh();
+            self.mesh_update_frame = 1; // Mark mesh as updated (allow future updates)
             println!("\n✓ Ready!");
             
             // If screenshot mode, take screenshot immediately
@@ -426,8 +425,8 @@ impl ApplicationHandler for App {
                 self.last_frame_time = now;
                 self.handle_input(delta_time);
                 
-                // Update mesh every 30 frames
-                if self.frame_count == 0 || (self.frame_count - self.mesh_update_frame) >= 30 {
+                // Update mesh every 30 frames (but not on frame 0, only after initial mesh)
+                if self.mesh_update_frame > 0 && (self.frame_count - self.mesh_update_frame) >= 30 {
                     self.update_mesh();
                     self.mesh_update_frame = self.frame_count;
                 }
@@ -486,6 +485,13 @@ impl ApplicationHandler for App {
                 }
             }
             _ => {}
+        }
+    }
+    
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Request continuous rendering
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 }
