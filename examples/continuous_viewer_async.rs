@@ -25,7 +25,7 @@ const TEST_LON: f64 = 153.033586;
 enum MeshStatus {
     Idle,
     Generating { position: [f64; 3], started_at: std::time::Instant },
-    Ready { vertices: Vec<Vertex>, indices: Vec<u32> },
+    Ready { vertices: Vec<Vertex>, indices: Vec<u32>, origin: [f64; 3] },
 }
 
 struct App {
@@ -140,20 +140,22 @@ impl App {
             let elapsed = start.elapsed().as_secs_f64();
             println!("[Async] Generated {} vertices in {:.2}s", vertices.len(), elapsed);
             
-            *mesh_status.lock().unwrap() = MeshStatus::Ready { vertices, indices };
+            *mesh_status.lock().unwrap() = MeshStatus::Ready { 
+                vertices, 
+                indices,
+                origin: camera_pos,
+            };
         });
     }
     
-    fn check_and_upload_mesh(&mut self, current_camera_pos: [f64; 3]) {
+    fn check_and_upload_mesh(&mut self, _current_camera_pos: [f64; 3]) {
         let mut status = self.mesh_status.lock().unwrap();
         
-        if let MeshStatus::Ready { vertices, indices } = &*status {
+        if let MeshStatus::Ready { vertices, indices, origin } = &*status {
             let start = std::time::Instant::now();
             
-            if let MeshStatus::Generating { position, .. } = &*status {
-                // Update mesh origin to where it was generated
-                self.mesh_origin = *position;
-            }
+            // Update mesh origin
+            self.mesh_origin = *origin;
             
             println!("[Upload] {} vertices to GPU (origin: {:.1}, {:.1}, {:.1})", 
                      vertices.len(), self.mesh_origin[0], self.mesh_origin[1], self.mesh_origin[2]);
