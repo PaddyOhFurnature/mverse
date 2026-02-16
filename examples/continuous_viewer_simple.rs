@@ -4,6 +4,7 @@
 use metaverse_core::renderer::{Renderer, pipeline::BasicPipeline};
 use metaverse_core::renderer::greedy_mesh::greedy_mesh_block;
 use metaverse_core::renderer::frustum::Frustum;
+use metaverse_core::renderer::skybox::SkyboxPipeline;
 use metaverse_core::continuous_world::ContinuousWorld;
 use metaverse_core::spatial_index::AABB;
 use metaverse_core::renderer::camera::Camera;
@@ -44,6 +45,7 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pipeline: Option<BasicPipeline>,
+    skybox: Option<SkyboxPipeline>,
     camera: Camera,
     continuous_world: Option<ContinuousWorld>,
     vertex_buffer: Option<wgpu::Buffer>,
@@ -81,6 +83,7 @@ impl App {
             window: None,
             renderer: None,
             pipeline: None,
+            skybox: None,
             camera,
             continuous_world: None,
             vertex_buffer: None,
@@ -234,12 +237,14 @@ impl App {
         pipeline.update_uniforms(&renderer.queue, view_proj);
         
         // Render to texture and capture
-        let clear_color = wgpu::Color { r: 0.53, g: 0.81, b: 0.92, a: 1.0 };
+        // Use sky blue clear color (skybox gradient causes lifetime issues in closure)
+        let clear_color = wgpu::Color { r: 0.53, g: 0.71, b: 0.9, a: 1.0 }; // Light sky blue
         let num_indices = self.num_indices;
         let vertex_buffer = self.vertex_buffer.as_ref();
         let index_buffer = self.index_buffer.as_ref();
         
         let result = renderer.render_and_capture(clear_color, |render_pass| {
+            // Render terrain
             if let (Some(vb), Some(ib)) = (vertex_buffer, index_buffer) {
                 if num_indices > 0 {
                     render_pass.set_pipeline(&pipeline.pipeline);

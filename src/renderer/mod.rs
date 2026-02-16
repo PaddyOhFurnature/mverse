@@ -9,6 +9,7 @@ pub mod shaders;
 pub mod mesh;
 pub mod greedy_mesh;
 pub mod frustum;
+pub mod skybox;
 
 use wgpu;
 use winit::window::Window;
