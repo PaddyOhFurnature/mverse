@@ -208,6 +208,61 @@ impl ContinuousWorld {
             .collect()
     }
     
+    /// Query blocks with LOD (Level of Detail) based on distance from camera
+    ///
+    /// Returns blocks at different detail levels based on distance.
+    /// Near blocks get full detail, far blocks get lower detail.
+    ///
+    /// # Arguments
+    /// - `camera_pos` - Camera position in ECEF
+    /// - `max_radius` - Maximum query radius in meters
+    ///
+    /// # Returns
+    /// Vector of (block, lod_level) pairs where lod_level indicates voxel size multiplier
+    /// - lod_level 0: 1m voxels (0-25m from camera)
+    /// - lod_level 1: 2m voxels (25-50m from camera) 
+    /// - lod_level 2: 4m voxels (50-100m from camera)
+    /// - lod_level 3: 8m voxels (100m+ from camera)
+    pub fn query_lod(&mut self, camera_pos: [f64; 3], max_radius: f64) -> Vec<(VoxelBlock, u8)> {
+        // Define LOD distance thresholds
+        let lod_distances = [
+            (25.0, 0u8),   // 0-25m: full detail (1m voxels)
+            (50.0, 1u8),   // 25-50m: half detail (2m voxels)
+            (100.0, 2u8),  // 50-100m: quarter detail (4m voxels)
+            (f64::MAX, 3u8), // 100m+: eighth detail (8m voxels)
+        ];
+        
+        // Query all blocks in range
+        let query_bounds = AABB::from_center(camera_pos, max_radius);
+        let blocks = self.query_range(query_bounds);
+        
+        // Assign LOD level based on distance from camera
+        blocks.into_iter()
+            .map(|block| {
+                // Calculate distance from camera to block center
+                let block_center = [
+                    block.ecef_min[0] + block.size / 2.0,
+                    block.ecef_min[1] + block.size / 2.0,
+                    block.ecef_min[2] + block.size / 2.0,
+                ];
+                
+                let dx = block_center[0] - camera_pos[0];
+                let dy = block_center[1] - camera_pos[1];
+                let dz = block_center[2] - camera_pos[2];
+                let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+                
+                // Find appropriate LOD level
+                let lod_level = lod_distances.iter()
+                    .find(|(threshold, _)| distance < *threshold)
+                    .map(|(_, level)| *level)
+                    .unwrap_or(3); // Default to lowest detail
+                
+                (block, lod_level)
+            })
+            .collect()
+    }
+
+    
     /// Query voxel blocks visible in camera frustum
     ///
     /// Returns blocks visible from camera position and direction.
