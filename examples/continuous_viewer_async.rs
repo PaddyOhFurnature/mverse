@@ -197,13 +197,9 @@ fn generate_mesh(world: &RwLock<ContinuousWorld>, cam_pos: [f64; 3]) -> (Vec<Ver
     for (block, _lod) in &blocks {
         if block.voxels.iter().all(|&v| v == AIR) { continue; }
         
-        let offset = [
-            block.ecef_min[0] - cam_pos[0],
-            block.ecef_min[1] - cam_pos[1],
-            block.ecef_min[2] - cam_pos[2],
-        ];
-        
-        let (verts, inds) = greedy_mesh_block(&block.voxels, offset);
+        // Generate in WORLD space (ECEF), NOT camera-relative!
+        // This way mesh doesn't need to change when camera moves
+        let (verts, inds) = greedy_mesh_block(&block.voxels, block.ecef_min);
         
         let base_idx = vertices.len() as u32;
         vertices.extend(verts);
@@ -305,31 +301,32 @@ impl ApplicationHandler for App {
                     self.last_mesh_camera_pos = cam_pos;
                 }
                 
-                // Render (always smooth, never blocks!)
-                if let (Some(window), Some(renderer), Some(pipeline), Some(skybox)) = 
+                // Render with WORLD-space mesh
+                if let (Some(window), Some(renderer), Some(pipeline), Some(_skybox)) = 
                     (&self.window, &mut self.renderer, &self.pipeline, &self.skybox) {
                     
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
                     
-                    // CRITICAL: Account for mesh origin vs current camera position
-                    // Mesh vertices are relative to mesh_origin, but camera has moved
-                    let offset_from_mesh = [
-                        cam_pos[0] - self.mesh_origin[0],
-                        cam_pos[1] - self.mesh_origin[1],
-                        cam_pos[2] - self.mesh_origin[2],
-                    ];
-                    
-                    // Create camera offset by the difference
-                    let adjusted_camera_pos = glam::DVec3::new(
-                        offset_from_mesh[0],
-                        offset_from_mesh[1],
-                        offset_from_mesh[2],
+                    // Mesh is in WORLD space (ECEF)
+                    // Camera view_projection_matrix already handles floating origin
+                    // So vertices relative to camera work automatically!
+                    let cam_pos_f32 = glam::Vec3::new(
+                        cam_pos[0] as f32,
+                        cam_pos[1] as f32,
+                        cam_pos[2] as f32,
                     );
                     
-                    // Temporarily move camera for view matrix
+                    // Temporarily adjust camera to do camera-relative rendering
                     let original_pos = self.camera.position;
-                    self.camera.position = adjusted_camera_pos;
-                    let (view_proj, _) = self.camera.view_projection_matrix(aspect);
+                    self.camera.position = glam::DVec3::ZERO; // Camera at origin for rendering
+                    
+                    let (view, _) = self.camera.view_matrix();
+                    let proj = self.camera.projection_matrix(aspect);
+                    
+                    // Create model matrix to translate world to camera-relative
+                    let model = glam::Mat4::from_translation(-cam_pos_f32);
+                    let view_proj = proj * view * model;
+                    
                     self.camera.position = original_pos; // Restore
                     
                     pipeline.update_uniforms(&renderer.queue, view_proj);
