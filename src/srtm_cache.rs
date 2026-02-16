@@ -40,10 +40,14 @@ impl SrtmCache {
     pub fn get_tile(&self, lat: i16, lon: i16) -> Result<SrtmTile, Box<dyn std::error::Error>> {
         let tile_path = self.tile_path(lat, lon);
         
+        println!("[SrtmCache] Looking for tile at: {:?}", tile_path);
+        println!("[SrtmCache] File exists: {}", tile_path.exists());
+        
         // Try to load from cache first
         if tile_path.exists() {
-            println!("Loading SRTM tile from cache: {:?}", tile_path);
+            println!("[SrtmCache] Loading SRTM tile from cache: {:?}", tile_path);
             let bytes = fs::read(&tile_path)?;
+            println!("[SrtmCache] Read {} bytes", bytes.len());
             let filename = tile_path.file_name()
                 .and_then(|n| n.to_str())
                 .ok_or("Invalid filename")?;
@@ -51,12 +55,12 @@ impl SrtmCache {
         }
 
         // Not in cache - download it
-        println!("Downloading SRTM tile: {}, {}", lat, lon);
+        println!("[SrtmCache] Downloading SRTM tile: {}, {}", lat, lon);
         let bytes = self.download_tile(lat, lon)?;
         
         // Save to cache
         fs::write(&tile_path, &bytes)?;
-        println!("Cached SRTM tile to: {:?}", tile_path);
+        println!("[SrtmCache] Cached SRTM tile to: {:?}", tile_path);
         
         // Parse and return
         let filename = tile_path.file_name()
