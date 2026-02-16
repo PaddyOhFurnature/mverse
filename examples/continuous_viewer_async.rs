@@ -137,6 +137,7 @@ impl App {
         let mut status = self.mesh_status.lock().unwrap();
         
         if let MeshStatus::Ready { vertices, indices } = &*status {
+            let start = std::time::Instant::now();
             println!("[Upload] {} vertices to GPU", vertices.len());
             
             if let Some(renderer) = &self.renderer {
@@ -156,6 +157,9 @@ impl App {
                 ));
                 self.num_indices = indices.len() as u32;
             }
+            
+            let elapsed = start.elapsed().as_millis();
+            println!("[Upload] Complete in {}ms", elapsed);
             
             *status = MeshStatus::Idle;
         }
@@ -260,9 +264,7 @@ impl ApplicationHandler for App {
                 // ALWAYS handle input and move camera (NEVER skip this!)
                 self.handle_input(delta_time);
                 
-                self.handle_input(delta_time);
-                
-                // Check if mesh is ready (non-blocking!)
+                // Check if mesh is ready and upload (THIS MIGHT BLOCK - the problem!)
                 self.check_and_upload_mesh();
                 
                 // Request new mesh if moved significantly
@@ -335,7 +337,8 @@ impl ApplicationHandler for App {
         }
         
         if let winit::event::DeviceEvent::MouseMotion { delta } = event {
-            self.camera.rotate(-delta.1 * 0.004, delta.0 * 0.004);
+            // Fixed: Reversed left/right (swap sign on delta.0)
+            self.camera.rotate(-delta.1 * 0.004, -delta.0 * 0.004);
         }
     }
     
