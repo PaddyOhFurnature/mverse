@@ -14,6 +14,7 @@ pub mod renderer;
 
 // Continuous query system (Phase 1)
 pub mod spatial_index;
+pub mod adaptive_cache;
 
 #[cfg(test)]
 mod tests;
