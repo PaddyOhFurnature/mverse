@@ -54,25 +54,26 @@ struct App {
     keys_pressed: std::collections::HashSet<KeyCode>,
     mouse_captured: bool,
     last_mouse_pos: Option<(f64, f64)>,
+    screenshot_mode: bool, // Take one screenshot and exit
 }
 
 impl App {
-    fn new() -> Self {
-        // Start at Kangaroo Point, 20m altitude (ground is ~4m)
-        let gps = GpsPos {
-            lat_deg: TEST_LAT,
-            lon_deg: TEST_LON,
-            elevation_m: 20.0,
-        };
+    fn new(gps: GpsPos, pitch_deg: f64, screenshot_mode: bool) -> Self {
         let position_ecef = gps_to_ecef(&gps);
         let position = glam::DVec3::new(position_ecef.x, position_ecef.y, position_ecef.z);
         let look_at = glam::DVec3::ZERO; // Look down
         
-        let camera = Camera::new(position, look_at);
+        let mut camera = Camera::new(position, look_at);
         
-        println!("Camera at Kangaroo Point:");
+        // Apply pitch if specified
+        if pitch_deg != 0.0 {
+            camera.rotate(pitch_deg.to_radians(), 0.0);
+        }
+        
+        println!("Camera at:");
         println!("  GPS: ({:.6}°, {:.6}°, {:.0}m)", gps.lat_deg, gps.lon_deg, gps.elevation_m);
         println!("  ECEF: ({:.1}, {:.1}, {:.1})", position.x, position.y, position.z);
+        println!("  Pitch: {:.1}°", pitch_deg);
         
         Self {
             window: None,
@@ -90,6 +91,7 @@ impl App {
             keys_pressed: std::collections::HashSet::new(),
             mouse_captured: false,
             last_mouse_pos: None,
+            screenshot_mode,
         }
     }
     
@@ -253,6 +255,12 @@ impl App {
                     eprintln!("  ✗ Failed to save: {}", e);
                 } else {
                     println!("  ✓ Screenshot saved: {}", filename);
+                    
+                    // If in screenshot mode, exit immediately
+                    if self.screenshot_mode {
+                        println!("✓ Screenshot mode complete - exiting");
+                        std::process::exit(0);
+                    }
                 }
             }
             Err(e) => {
@@ -305,7 +313,15 @@ impl ApplicationHandler for App {
             
             println!("\nGenerating initial mesh (50m radius)...");
             self.update_mesh();
-            println!("\n✓ Ready! Use WASD to move, mouse to look around.\n");
+            println!("\n✓ Ready!");
+            
+            // If screenshot mode, take screenshot immediately
+            if self.screenshot_mode {
+                println!("\n[Screenshot Mode] Taking screenshot and exiting...");
+                self.capture_screenshot();
+            } else {
+                println!("\nUse WASD to move, mouse to look around.\n");
+            }
         }
     }
     
@@ -447,18 +463,63 @@ impl ApplicationHandler for App {
     }
 }
 
+fn parse_args() -> (GpsPos, f64, bool) {
+    let args: Vec<String> = std::env::args().collect();
+    let mut lat = TEST_LAT;
+    let mut lon = TEST_LON;
+    let mut alt = 20.0;
+    let mut pitch = -20.0;
+    let mut screenshot = false;
+    
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--lat" if i + 1 < args.len() => {
+                lat = args[i + 1].parse().unwrap_or(TEST_LAT);
+                i += 2;
+            }
+            "--lon" if i + 1 < args.len() => {
+                lon = args[i + 1].parse().unwrap_or(TEST_LON);
+                i += 2;
+            }
+            "--alt" if i + 1 < args.len() => {
+                alt = args[i + 1].parse().unwrap_or(20.0);
+                i += 2;
+            }
+            "--pitch" if i + 1 < args.len() => {
+                pitch = args[i + 1].parse().unwrap_or(-20.0);
+                i += 2;
+            }
+            "--screenshot" => {
+                screenshot = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    
+    (GpsPos { lat_deg: lat, lon_deg: lon, elevation_m: alt }, pitch, screenshot)
+}
+
 fn main() {
-    println!("=== Continuous Query Viewer ===");
-    println!("Location: Kangaroo Point, Brisbane");
-    println!("\nControls:");
-    println!("  WASD - Move");
-    println!("  Space/Shift - Up/Down");
-    println!("  Left Click - Capture mouse");
-    println!("  R - Reload mesh");
-    println!("  F5 - Screenshot");
-    println!("  ESC - Exit\n");
+    let (gps, pitch, screenshot_mode) = parse_args();
+    
+    if screenshot_mode {
+        println!("=== Screenshot Mode ===");
+    } else {
+        println!("=== Continuous Query Viewer ===");
+        println!("\nControls:");
+        println!("  WASD - Move");
+        println!("  Space/Shift - Up/Down");
+        println!("  Left Click - Capture mouse");
+        println!("  R - Reload mesh");
+        println!("  F5 - Screenshot");
+        println!("  ESC - Exit\n");
+    }
+    
+    println!("Location: ({:.6}°, {:.6}°, {:.1}m)", gps.lat_deg, gps.lon_deg, gps.elevation_m);
     
     let event_loop = EventLoop::new().unwrap();
-    let mut app = App::new();
+    let mut app = App::new(gps, pitch, screenshot_mode);
     event_loop.run_app(&mut app).unwrap();
 }
