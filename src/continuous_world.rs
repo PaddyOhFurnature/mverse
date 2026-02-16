@@ -174,7 +174,7 @@ impl ContinuousWorld {
                     let block = self.generator.generate_block(ecef_min);
                     
                     // Insert into spatial index
-                    self.index.insert(block.clone());
+                    self.index.insert(block);
                     
                     generated += 1;
                 }
@@ -292,26 +292,11 @@ impl ContinuousWorld {
         if !index_blocks.is_empty() {
             // Found in index - add to cache and return
             let block = &index_blocks[0];
-            
-            // DEBUG: Check if block has terrain
-            let mut non_air = 0;
-            for voxel in block.voxels.iter() {
-                if *voxel != crate::svo::AIR {
-                    non_air += 1;
-                }
-            }
-            if non_air > 0 {
-                eprintln!("DEBUG: Index returned block with {} non-AIR voxels", non_air);
-            } else {
-                eprintln!("DEBUG: Index returned EMPTY block!");
-            }
-            
             self.cache.insert(block.clone());
             return Some(block.clone());
         }
         
         // Cache miss AND not in index - generate block
-        eprintln!("DEBUG: Block not in index, regenerating");
         let block = self.generator.generate_block(ecef);
         
         // Insert into cache

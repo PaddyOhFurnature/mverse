@@ -359,3 +359,49 @@ mod tests {
         assert!(aabb1.intersects(&aabb2));
     }
 }
+
+#[cfg(test)]
+mod voxel_tests {
+    use super::*;
+    use crate::svo::{AIR, GRASS};
+    
+    #[test]
+    fn test_voxel_preservation() {
+        let bounds = AABB {
+            min: [-100.0, -100.0, -100.0],
+            max: [100.0, 100.0, 100.0],
+        };
+        let mut index = SpatialIndex::new(bounds);
+        
+        // Create block with some GRASS voxels
+        let mut voxels = Box::new([AIR; 512]);
+        voxels[0] = GRASS;
+        voxels[100] = GRASS;
+        voxels[511] = GRASS;
+        
+        let block = VoxelBlock {
+            ecef_min: [0.0, 0.0, 0.0],
+            size: 8.0,
+            voxels,
+        };
+        
+        // Count GRASS before insert
+        let grass_before = block.voxels.iter().filter(|&&v| v == GRASS).count();
+        println!("GRASS before insert: {}", grass_before);
+        
+        index.insert(block);
+        
+        // Query back
+        let query = AABB { min: [0.0, 0.0, 0.0], max: [8.0, 8.0, 8.0] };
+        let results = index.query_range(query);
+        
+        assert_eq!(results.len(), 1);
+        let retrieved = &results[0];
+        
+        // Count GRASS after retrieve
+        let grass_after = retrieved.voxels.iter().filter(|&&v| v == GRASS).count();
+        println!("GRASS after retrieve: {}", grass_after);
+        
+        assert_eq!(grass_before, grass_after, "Voxel data lost during index operations!");
+    }
+}

@@ -199,11 +199,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start at Kangaroo Point, various altitudes
     let test_positions = vec![
-        ("ground_level_from_5m", 5.0, 200.0),  // At ground level, wide radius
-        ("low_altitude_20m", 20.0, 100.0),
-        ("medium_altitude_50m", 50.0, 150.0),
-        ("high_altitude_100m", 100.0, 200.0),
-        ("very_high_200m", 200.0, 400.0),
+        ("ground_level_from_5m", 5.0, 50.0),  // Reduced radius for performance
+        ("low_altitude_20m", 20.0, 50.0),
+        ("medium_altitude_50m", 50.0, 75.0),
+        ("high_altitude_100m", 100.0, 100.0),
+        ("very_high_200m", 200.0, 150.0),
     ];
     
     for (name, altitude, query_radius) in test_positions {
@@ -236,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let look_at = position + to_center * 10.0;
     let camera = Camera::new(position, look_at);
     
-    capture.update_mesh([pos_ecef.x, pos_ecef.y, pos_ecef.z], 200.0);
+    capture.update_mesh([pos_ecef.x, pos_ecef.y, pos_ecef.z], 100.0);  // Reduced from 200m
     capture.capture(&camera, "top_down_100m")?;
     
     println!("\n✓ All screenshots captured!");
