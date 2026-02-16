@@ -55,7 +55,8 @@ struct App {
     total_frames: usize,     // Total frames ever (for mesh updates)
     fps_update_time: std::time::Instant,
     last_frame_time: std::time::Instant,
-    last_mesh_update: usize, // Total frame count when mesh was last updated
+    last_mesh_update: usize,      // Total frame count when mesh was last updated
+    last_mesh_camera_pos: [f64; 3], // Camera position when mesh was last updated
     keys_pressed: std::collections::HashSet<KeyCode>,
     mouse_captured: bool,
     last_mouse_pos: Option<(f64, f64)>,
@@ -95,6 +96,7 @@ impl App {
             fps_update_time: std::time::Instant::now(),
             last_frame_time: std::time::Instant::now(),
             last_mesh_update: 0,
+            last_mesh_camera_pos: [position.x, position.y, position.z],
             keys_pressed: std::collections::HashSet::new(),
             mouse_captured: false,
             last_mouse_pos: None,
@@ -427,13 +429,24 @@ impl ApplicationHandler for App {
                 self.last_frame_time = now;
                 self.handle_input(delta_time);
                 
-                // Update mesh every 60 frames (1 second at 60fps, 2 seconds at 30fps)
-                // Only after first frame sets the baseline
+                // Update mesh only when camera moves significantly (> 10m)
+                // This prevents blocking every 60 frames when stationary
+                let cam_pos = [self.camera.position.x, self.camera.position.y, self.camera.position.z];
+                let distance_moved = (
+                    (cam_pos[0] - self.last_mesh_camera_pos[0]).powi(2) +
+                    (cam_pos[1] - self.last_mesh_camera_pos[1]).powi(2) +
+                    (cam_pos[2] - self.last_mesh_camera_pos[2]).powi(2)
+                ).sqrt();
+                
                 if self.last_mesh_update == 0 {
                     self.last_mesh_update = self.total_frames; // Set baseline on first frame
-                } else if self.total_frames >= self.last_mesh_update + 60 {
+                    self.last_mesh_camera_pos = cam_pos;
+                } else if distance_moved > 10.0 && self.total_frames >= self.last_mesh_update + 30 {
+                    // Only update if moved >10m AND at least 30 frames passed (prevent spam)
+                    println!("[Movement] Moved {:.1}m - updating mesh", distance_moved);
                     self.update_mesh();
                     self.last_mesh_update = self.total_frames;
+                    self.last_mesh_camera_pos = cam_pos;
                 }
                 
                 // Render
