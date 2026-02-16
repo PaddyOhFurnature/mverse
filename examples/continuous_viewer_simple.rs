@@ -7,7 +7,7 @@ use metaverse_core::spatial_index::AABB;
 use metaverse_core::renderer::camera::Camera;
 use metaverse_core::renderer::pipeline::Vertex;
 use metaverse_core::coordinates::{gps_to_ecef, ecef_to_gps, GpsPos, EcefPos};
-use metaverse_core::svo::AIR;
+use metaverse_core::svo::{AIR, MaterialId, STONE, DIRT, GRASS, WATER, CONCRETE, ASPHALT};
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -19,6 +19,23 @@ use wgpu;
 // Kangaroo Point, Brisbane
 const TEST_LAT: f64 = -27.479769;
 const TEST_LON: f64 = 153.033586;
+
+/// Map material ID to RGB color
+fn material_color(material: MaterialId) -> [f32; 4] {
+    match material {
+        AIR => [0.0, 0.0, 0.0, 0.0],           // Transparent (shouldn't render)
+        STONE => [0.5, 0.5, 0.5, 1.0],         // Gray stone
+        DIRT => [0.6, 0.4, 0.2, 1.0],          // Brown dirt
+        CONCRETE => [0.7, 0.7, 0.7, 1.0],      // Light gray concrete
+        WATER => [0.2, 0.4, 0.8, 1.0],         // Blue water
+        GRASS => [0.2, 0.8, 0.2, 1.0],         // Green grass
+        ASPHALT => [0.3, 0.3, 0.3, 1.0],       // Dark gray asphalt
+        MaterialId(9) => [0.9, 0.8, 0.6, 1.0], // SAND - Tan
+        MaterialId(4) => [0.6, 0.3, 0.1, 1.0], // WOOD - Brown
+        MaterialId(10) => [0.7, 0.3, 0.2, 1.0],// BRICK - Red-brown
+        _ => [0.8, 0.2, 0.8, 1.0],             // Magenta for unknown materials
+    }
+}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -134,8 +151,8 @@ impl App {
                             
                             let base_idx = vertices.len() as u32;
                             
-                            // Color: dark for near (0.3)
-                            let color = [0.3, 0.3, 0.3, 1.0];
+                            // Color based on material type
+                            let color = material_color(voxel);
             
                         // 8 cube vertices
                         vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
@@ -169,9 +186,19 @@ impl App {
                 // FAR (LOD 2-3): Render entire block as single 8m cube
                 far_blocks += 1;
                 
-                // Check if block has any solid voxels
-                let has_solid = block.voxels.iter().any(|&v| v != AIR);
-                if !has_solid { continue; }
+                // Find dominant material in block (most common non-AIR material)
+                let mut material_counts: std::collections::HashMap<MaterialId, usize> = std::collections::HashMap::new();
+                for &voxel in block.voxels.iter() {
+                    if voxel != AIR {
+                        *material_counts.entry(voxel).or_insert(0) += 1;
+                    }
+                }
+                
+                let dominant_material = material_counts.iter()
+                    .max_by_key(|(_, count)| *count)
+                    .map(|(mat, _)| *mat);
+                
+                let Some(material) = dominant_material else { continue; };
                 
                 voxel_count += 1; // Count as 1 "voxel" for stats
                 
@@ -183,8 +210,8 @@ impl App {
                 
                 let base_idx = vertices.len() as u32;
                 
-                // Color: light for far (0.5)
-                let color = [0.5, 0.5, 0.5, 1.0];
+                // Color based on dominant material
+                let color = material_color(material);
     
                 // 8 cube vertices
                 vertices.push(Vertex { position: [min_x, min_y, min_z], normal: [0.0, 0.0, -1.0], color });
