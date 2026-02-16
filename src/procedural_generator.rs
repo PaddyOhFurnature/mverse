@@ -189,10 +189,9 @@ impl ProceduralGenerator {
             return get_elevation(tile, lat, lon);
         }
         
-        // FALLBACK: Use estimated ground level if no SRTM data
-        // For coastal areas like Brisbane, use ~5m above sea level
-        // This is better than nothing - gives users something to see
-        Some(5.0)
+        // NO FALLBACK: If we have no elevation data, leave as AIR
+        // Don't generate fake terrain - wait for real data
+        None
     }
 
     /// Check if building intersects block bounds
