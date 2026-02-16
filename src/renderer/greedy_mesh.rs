@@ -221,15 +221,16 @@ fn add_quad_mesh(
     }
     
     // Add 2 triangles (6 indices) for quad
-    // Triangle 1: 0-1-2
-    // Triangle 2: 0-2-3
+    // CRITICAL FIX: Flip winding order to render correct face
+    // Original was 0-1-2, 0-2-3 which rendered backsides
+    // Now: 0-2-1, 0-3-2 to flip triangles
     indices.extend_from_slice(&[
         base_idx,
-        base_idx + 1,
-        base_idx + 2,
+        base_idx + 2,  // FLIPPED: was 1
+        base_idx + 1,  // FLIPPED: was 2
         base_idx,
-        base_idx + 2,
-        base_idx + 3,
+        base_idx + 3,  // FLIPPED: was 2
+        base_idx + 2,  // FLIPPED: was 3
     ]);
 }
 
@@ -278,7 +279,8 @@ fn quad_corners(
 
 /// Calculate normal vector for face
 fn calculate_normal(axis: usize, positive: bool) -> [f32; 3] {
-    let sign = if positive { 1.0 } else { -1.0 };
+    // FLIPPED: Invert sign because we flipped winding order
+    let sign = if positive { -1.0 } else { 1.0 };  // WAS: positive=1.0, negative=-1.0
     match axis {
         0 => [sign, 0.0, 0.0], // X-axis
         1 => [0.0, sign, 0.0], // Y-axis
