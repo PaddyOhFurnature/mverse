@@ -233,9 +233,9 @@ fn generate_terrain_mesh() -> Mesh {
                 // Extract mesh for this cube
                 let cube_mesh = extract_cube_mesh(
                     Vec3::new(
-                        lat_offset as f32 * 10.0,
+                        lat_offset as f32,  // 0-10 range = 10m × 10m area
                         height as f32,
-                        lon_offset as f32 * 10.0,
+                        lon_offset as f32,
                     ),
                     &corners,
                 );

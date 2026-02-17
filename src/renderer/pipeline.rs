@@ -281,4 +281,14 @@ impl RenderPipeline {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
     }
+    
+    /// Get pipeline (for direct access when needed)
+    pub fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
+    }
+    
+    /// Get camera bind group
+    pub fn camera_bind_group(&self) -> &wgpu::BindGroup {
+        &self.camera_bind_group
+    }
 }
