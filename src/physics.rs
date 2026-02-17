@@ -402,6 +402,128 @@ impl Player {
             // We track velocity separately in the Player struct
         }
     }
+    
+    /// Detect if player is standing on ground
+    /// 
+    /// Raycasts downward from player feet. If hits terrain within 0.1m,
+    /// player is considered on ground and can jump.
+    pub fn update_ground_detection(&mut self, physics: &PhysicsWorld) {
+        // Get "down" direction (toward Earth center)
+        let down = Vec3::new(
+            -self.position.x as f32,
+            -self.position.y as f32,
+            -self.position.z as f32,
+        ).normalize();
+        
+        // Raycast from player center downward
+        let ray_origin = point![
+            self.position.x as f32,
+            self.position.y as f32,
+            self.position.z as f32
+        ];
+        let ray_dir = vector![down.x, down.y, down.z];
+        
+        // Cast ray 0.1m longer than half height (to detect ground just below feet)
+        let max_distance = (Self::HEIGHT / 2.0) + 0.1;
+        let ray = Ray::new(ray_origin, ray_dir);
+        
+        // Check for collision (exclude self)
+        let filter = QueryFilter::default().exclude_collider(self.collider_handle);
+        
+        if let Some((_, toi)) = physics.query_pipeline.cast_ray(
+            &physics.bodies,
+            &physics.colliders,
+            &ray,
+            max_distance,
+            true, // solid
+            filter,
+        ) {
+            // Hit ground if distance is within tolerance
+            self.on_ground = toi <= (Self::HEIGHT / 2.0) + 0.05;
+        } else {
+            self.on_ground = false;
+        }
+    }
+    
+    /// Apply movement for this frame (call before physics step)
+    /// 
+    /// # Arguments
+    /// * `physics` - Physics world
+    /// * `move_input` - Movement direction (local space: x=right, z=forward, normalized)
+    /// * `jump_input` - True if jump button pressed this frame
+    /// * `dt` - Delta time in seconds
+    pub fn apply_movement(
+        &mut self,
+        physics: &mut PhysicsWorld,
+        move_input: Vec3,
+        jump_input: bool,
+        dt: f32,
+    ) {
+        const WALK_SPEED: f32 = 4.5; // m/s (average walking speed)
+        const JUMP_SPEED: f32 = 5.0; // m/s (initial upward velocity)
+        
+        // Get local "up" direction (away from Earth center)
+        let local_up = Vec3::new(
+            self.position.x as f32,
+            self.position.y as f32,
+            self.position.z as f32,
+        ).normalize();
+        
+        // Convert local movement input to world space
+        let forward = self.camera_forward();
+        let right = self.camera_right();
+        
+        // Project forward/right onto tangent plane (perpendicular to up)
+        let forward_tangent = forward - local_up * forward.dot(local_up);
+        let right_tangent = right - local_up * right.dot(local_up);
+        
+        // Normalize if non-zero (avoid NaN)
+        let forward_tangent = if forward_tangent.length_squared() > 0.001 {
+            forward_tangent.normalize()
+        } else {
+            Vec3::X // Fallback
+        };
+        let right_tangent = if right_tangent.length_squared() > 0.001 {
+            right_tangent.normalize()
+        } else {
+            Vec3::Z // Fallback
+        };
+        
+        // Calculate desired velocity (horizontal movement)
+        let desired_velocity = 
+            (forward_tangent * move_input.z + right_tangent * move_input.x) * WALK_SPEED;
+        
+        // Handle jump
+        if jump_input && self.on_ground {
+            // Add upward impulse
+            self.velocity += local_up * JUMP_SPEED;
+            self.on_ground = false;
+        }
+        
+        // Apply gravity
+        let gravity = PhysicsWorld::gravity_at_position(&self.position);
+        self.velocity += gravity * dt;
+        
+        // Combine horizontal desired velocity with current vertical velocity
+        let vertical_component = local_up * local_up.dot(self.velocity);
+        let horizontal_velocity = desired_velocity;
+        self.velocity = horizontal_velocity + vertical_component;
+        
+        // Update position
+        let new_pos = self.position;
+        let delta = self.velocity * dt;
+        
+        if let Some(body) = physics.bodies.get_mut(self.body_handle) {
+            body.set_translation(
+                vector![
+                    new_pos.x as f32 + delta.x,
+                    new_pos.y as f32 + delta.y,
+                    new_pos.z as f32 + delta.z
+                ],
+                true,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -725,5 +847,186 @@ mod tests {
         } else {
             panic!("Player collider is not a capsule!");
         }
+    }
+    
+    #[test]
+    fn test_ground_detection_on_terrain() {
+        let mut physics = PhysicsWorld::new();
+        
+        // Create flat terrain
+        let mut octree = Octree::new();
+        let origin = VoxelCoord { x: 0, y: 0, z: 0 };
+        for x in -10..10 {
+            for z in -10..10 {
+                for y in -5..0 {
+                    octree.set_voxel(VoxelCoord { x, y, z }, MaterialId::STONE);
+                }
+            }
+        }
+        
+        // Add collision
+        let (heights, scale) = generate_heightmap_collider(&octree, &origin, 20, 20);
+        create_heightmap_collider(&mut physics, heights, 20, 20, scale, Vec3::ZERO);
+        
+        // Create player standing on ground
+        let gps = GPS::new(0.0, 0.0, 0.0);
+        let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Position player just above terrain surface
+        if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+            body.set_translation(vector![0.0, 0.5, 0.0], true); // 0.5m above y=0 surface
+        }
+        player.sync_from_physics(&physics);
+        
+        // Update query pipeline
+        physics.query_pipeline.update(&physics.colliders);
+        
+        // Check ground detection
+        player.update_ground_detection(&physics);
+        
+        // Should detect ground
+        assert!(player.on_ground, "Player should be on ground");
+    }
+    
+    #[test]
+    fn test_ground_detection_in_air() {
+        let mut physics = PhysicsWorld::new();
+        
+        // Create terrain
+        let mut octree = Octree::new();
+        let origin = VoxelCoord { x: 0, y: 0, z: 0 };
+        for x in -10..10 {
+            for z in -10..10 {
+                for y in -5..0 {
+                    octree.set_voxel(VoxelCoord { x, y, z }, MaterialId::STONE);
+                }
+            }
+        }
+        
+        let (heights, scale) = generate_heightmap_collider(&octree, &origin, 20, 20);
+        create_heightmap_collider(&mut physics, heights, 20, 20, scale, Vec3::new(-10.0, -5.0, -10.0));
+        
+        // Create player high in air
+        let gps = GPS::new(0.0, 0.0, 0.0);
+        let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Position player 5m above terrain (too far to detect ground)
+        if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+            body.set_translation(vector![0.0, 5.0, 0.0], true);
+        }
+        player.sync_from_physics(&physics);
+        
+        // Update query pipeline
+        physics.query_pipeline.update(&physics.colliders);
+        
+        // Check ground detection
+        player.update_ground_detection(&physics);
+        
+        // Should NOT detect ground
+        assert!(!player.on_ground, "Player should not be on ground when in air");
+    }
+    
+    #[test]
+    fn test_player_movement_horizontal() {
+        let mut physics = PhysicsWorld::new();
+        
+        let gps = GPS::new(0.0, 0.0, 0.0);
+        let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Record starting position
+        player.sync_from_physics(&physics);
+        let start_pos = player.position;
+        
+        // Apply forward movement for 1 second (60 frames)
+        player.on_ground = true; // Pretend on ground
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            player.apply_movement(
+                &mut physics,
+                Vec3::new(0.0, 0.0, 1.0), // Move forward
+                false, // No jump
+                dt,
+            );
+            player.sync_from_physics(&physics);
+        }
+        
+        // Should have moved
+        let distance = (
+            (player.position.x - start_pos.x).powi(2) +
+            (player.position.y - start_pos.y).powi(2) +
+            (player.position.z - start_pos.z).powi(2)
+        ).sqrt();
+        
+        // Should have moved roughly 4.5m (walk speed)
+        // (won't be exact due to spherical gravity)
+        assert!(distance > 1.0, "Player should have moved forward: distance={}", distance);
+    }
+    
+    #[test]
+    fn test_player_jump() {
+        let mut physics = PhysicsWorld::new();
+        
+        let gps = GPS::new(0.0, 0.0, 0.0);
+        let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Player on ground
+        player.on_ground = true;
+        player.velocity = Vec3::ZERO;
+        
+        // Apply jump
+        let dt = 1.0 / 60.0;
+        player.apply_movement(
+            &mut physics,
+            Vec3::ZERO, // No horizontal movement
+            true, // Jump!
+            dt,
+        );
+        
+        // Should have upward velocity
+        let up = Vec3::new(
+            player.position.x as f32,
+            player.position.y as f32,
+            player.position.z as f32,
+        ).normalize();
+        
+        let upward_velocity = player.velocity.dot(up);
+        assert!(upward_velocity > 4.0, "Should have upward velocity after jump: {}", upward_velocity);
+        
+        // Should no longer be on ground
+        assert!(!player.on_ground, "Should not be on ground after jump");
+    }
+    
+    #[test]
+    fn test_player_cannot_jump_in_air() {
+        let mut physics = PhysicsWorld::new();
+        
+        let gps = GPS::new(0.0, 0.0, 0.0);
+        let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Player in air
+        player.on_ground = false;
+        player.velocity = Vec3::new(0.0, -5.0, 0.0); // Falling
+        
+        let vel_before = player.velocity;
+        
+        // Try to jump (should not work)
+        let dt = 1.0 / 60.0;
+        player.apply_movement(
+            &mut physics,
+            Vec3::ZERO,
+            true, // Try to jump
+            dt,
+        );
+        
+        // Velocity should not have sudden upward change
+        // (will change due to gravity, but not jump impulse)
+        let up = Vec3::new(
+            player.position.x as f32,
+            player.position.y as f32,
+            player.position.z as f32,
+        ).normalize();
+        
+        let vel_change_up = player.velocity.dot(up) - vel_before.dot(up);
+        assert!(vel_change_up < 1.0, "Should not gain significant upward velocity in air: {}", vel_change_up);
     }
 }
