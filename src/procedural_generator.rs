@@ -91,12 +91,13 @@ impl ProceduralGenerator {
     }
 
     /// Fill terrain voxels from SRTM elevation data
-    /// CRITICAL: Only generate SURFACE voxels, not solid filled blocks!
+    /// Generate FULL VOLUMETRIC terrain - fills entire block based on altitude vs ground elevation.
+    /// This is required for cliffs, caves, waterfalls, and any vertical/volumetric geometry.
     fn fill_terrain(&self, voxels: &mut [MaterialId; 512], ecef_min: [f64; 3]) {
-        // Only iterate XY plane (horizontal), find surface Z for each column
+        // Iterate ALL voxels in 3D (not just surface)
         for x in 0..VOXELS_PER_BLOCK {
             for y in 0..VOXELS_PER_BLOCK {
-                // Sample elevation at this XY position (center of column)
+                // Get ground elevation for this horizontal position
                 let sample_ecef = EcefPos {
                     x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
                     y: ecef_min[1] + (y as f64 + 0.5) * VOXEL_SIZE_M,
@@ -105,8 +106,7 @@ impl ProceduralGenerator {
                 let sample_gps = ecef_to_gps(&sample_ecef);
                 
                 if let Some(ground_elevation) = self.get_ground_elevation(sample_gps) {
-                    // Find which Z voxels intersect the surface
-                    // Generate surface + 1-2 layers below for thickness
+                    // Fill ENTIRE vertical column based on voxel altitude
                     for z in 0..VOXELS_PER_BLOCK {
                         let voxel_ecef = EcefPos {
                             x: ecef_min[0] + (x as f64 + 0.5) * VOXEL_SIZE_M,
@@ -116,23 +116,24 @@ impl ProceduralGenerator {
                         let voxel_gps = ecef_to_gps(&voxel_ecef);
                         let voxel_altitude = voxel_gps.elevation_m;
                         
-                        // Distance from surface (negative = below, positive = above)
-                        let dist_from_surface = voxel_altitude - ground_elevation;
+                        let voxel_idx = Self::voxel_index(x, y, z);
                         
-                        // Expanded range: -4m to +2m (6 layers) to avoid gaps at block boundaries
-                        // More forgiving detection prevents missing terrain at edges
-                        if dist_from_surface >= -4.0 && dist_from_surface < 2.0 {
-                            let voxel_idx = Self::voxel_index(x, y, z);
-                            
-                            // Material selection based on depth below surface
-                            voxels[voxel_idx] = if dist_from_surface >= -0.5 {
-                                GRASS  // Top layer: -0.5m to +2m
-                            } else if dist_from_surface >= -2.0 {
-                                DIRT   // Sub-layer 1: -2m to -0.5m
-                            } else {
-                                STONE  // Sub-layer 2: -4m to -2m
-                            };
-                        }
+                        // Volumetric fill: Choose material based on altitude relative to ground
+                        // This fills the ENTIRE volume, not just a thin surface layer
+                        voxels[voxel_idx] = if voxel_altitude < ground_elevation - 50.0 {
+                            STONE  // Deep underground (>50m below surface)
+                        } else if voxel_altitude < ground_elevation - 2.0 {
+                            DIRT   // Shallow underground (2-50m below surface)
+                        } else if voxel_altitude < ground_elevation {
+                            STONE  // Near-surface rock layer (0-2m below surface)
+                                   // This creates cliff faces when ground elevation varies vertically
+                        } else if voxel_altitude < 0.0 {
+                            WATER  // Above ground but below sea level (rivers, lakes)
+                        } else if voxel_altitude < ground_elevation + 0.5 {
+                            GRASS  // Surface layer (0-0.5m above ground = grass/topsoil)
+                        } else {
+                            AIR    // Above surface (sky)
+                        };
                     }
                 }
             }
