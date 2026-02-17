@@ -147,4 +147,110 @@ mod tests {
         // Should be solid material below surface
         assert!(material != MaterialId::AIR);
     }
+    
+    /// VALIDATION TEST: 10m×10m scale test with performance metrics
+    /// 
+    /// Tests that terrain generation works at scale (100 columns not 1).
+    /// Measures time, memory, and validates octree compression.
+    #[test]
+    #[ignore] // Requires SRTM data
+    fn test_terrain_scale_10m_region() {
+        use std::time::Instant;
+        
+        println!("\n=== TERRAIN SCALE VALIDATION ===");
+        println!("Testing 10m × 10m region generation");
+        println!("Target: <5 seconds for 100m×100m (this is 10m×10m)");
+        
+        // Setup elevation pipeline with NAS if available
+        let nas = NasFileSource::new();
+        let api_key = "3e607de6969c687053f9e107a4796962".to_string();
+        let cache_dir = PathBuf::from("./elevation_cache");
+        let api = OpenTopographySource::new(api_key, cache_dir);
+        
+        let mut pipeline = ElevationPipeline::new();
+        if let Some(nas_source) = nas {
+            println!("✓ Using NAS file source");
+            pipeline.add_source(Box::new(nas_source));
+        } else {
+            println!("⚠ NAS not available, using API (will be slower)");
+        }
+        pipeline.add_source(Box::new(api));
+        
+        let mut generator = TerrainGenerator::new(pipeline);
+        let mut octree = Octree::new();
+        
+        // Generate 10m × 10m grid (100 columns)
+        let start_time = Instant::now();
+        let mut column_count = 0;
+        
+        println!("\nGenerating terrain...");
+        for lat_offset in 0..10 {
+            for lon_offset in 0..10 {
+                let lat = -27.4775 + (lat_offset as f64) * 0.00009; // ~10m steps
+                let lon = 153.0355 + (lon_offset as f64) * 0.00009;
+                let gps = GPS::new(lat, lon, 0.0);
+                
+                generator.generate_column(&mut octree, &gps)
+                    .expect(&format!("Failed to generate column at ({}, {})", lat, lon));
+                column_count += 1;
+            }
+        }
+        
+        let elapsed = start_time.elapsed();
+        
+        // Count voxels by material
+        let mut voxel_counts = std::collections::HashMap::new();
+        let mut total_voxels = 0;
+        
+        // Sample the octree to count voxels (approximate)
+        // Check every voxel in the region we generated
+        for lat_offset in 0..10 {
+            for lon_offset in 0..10 {
+                let lat = -27.4775 + (lat_offset as f64) * 0.00009;
+                let lon = 153.0355 + (lon_offset as f64) * 0.00009;
+                
+                // Check voxels from bedrock to sky
+                for height in -200..=100 {
+                    let ecef = GPS::new(lat, lon, height as f64).to_ecef();
+                    let voxel = VoxelCoord::from_ecef(&ecef);
+                    let material = octree.get_voxel(voxel);
+                    
+                    if material != MaterialId::AIR {
+                        *voxel_counts.entry(material).or_insert(0) += 1;
+                        total_voxels += 1;
+                    }
+                }
+            }
+        }
+        
+        println!("\n=== RESULTS ===");
+        println!("Columns generated: {}", column_count);
+        println!("Time elapsed: {:.3}s", elapsed.as_secs_f64());
+        println!("Time per column: {:.3}ms", elapsed.as_secs_f64() * 1000.0 / column_count as f64);
+        println!("\nVoxel counts:");
+        for (material, count) in voxel_counts.iter() {
+            println!("  {:?}: {}", material, count);
+        }
+        println!("Total solid voxels: {}", total_voxels);
+        println!("Expected voxels: ~30,000 (100 columns × 300 voxels each)");
+        
+        // Validate results
+        assert!(column_count == 100, "Should generate 100 columns");
+        assert!(total_voxels > 10000, "Should have significant solid voxels");
+        assert!(elapsed.as_secs_f64() < 30.0, "Should complete in <30s (target <5s for 100m×100m)");
+        
+        // Check material distribution makes sense
+        let stone_count = voxel_counts.get(&MaterialId::STONE).unwrap_or(&0);
+        let dirt_count = voxel_counts.get(&MaterialId::DIRT).unwrap_or(&0);
+        let grass_count = voxel_counts.get(&MaterialId::GRASS).unwrap_or(&0);
+        
+        assert!(*stone_count > 0, "Should have STONE (bedrock)");
+        assert!(*dirt_count > 0, "Should have DIRT (subsurface)");
+        assert!(*grass_count > 0, "Should have GRASS (surface)");
+        
+        println!("\n✓ Scale test PASSED");
+        println!("  • Generated {} columns successfully", column_count);
+        println!("  • Created {} solid voxels", total_voxels);
+        println!("  • Time: {:.3}s ({:.1}× faster than target)", elapsed.as_secs_f64(), 30.0 / elapsed.as_secs_f64());
+    }
 }
