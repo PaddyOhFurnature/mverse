@@ -5,8 +5,7 @@
 use metaverse_core::{
     coordinates::GPS,
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
-    marching_cubes::extract_cube_mesh,
-    materials::MaterialId,
+    marching_cubes::extract_octree_mesh,
     mesh::Mesh,
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
@@ -255,61 +254,19 @@ fn generate_terrain_mesh() -> Mesh {
     let mut generator = TerrainGenerator::new(pipeline);
     let mut octree = Octree::new();
     
-    // Generate 10m × 10m terrain
-    println!("Generating voxel columns...");
-    for lat_offset in 0..10 {
-        for lon_offset in 0..10 {
-            let lat = -27.4775 + (lat_offset as f64) * 0.00009;
-            let lon = 153.0355 + (lon_offset as f64) * 0.00009;
-            let gps = GPS::new(lat, lon, 0.0);
-            
-            generator.generate_column(&mut octree, &gps).unwrap();
-        }
-    }
+    // Generate 120m × 120m terrain at 1m resolution with interpolation
+    println!("Generating 120m × 120m terrain...");
+    let origin = GPS::new(-27.4775, 153.0355, 0.0);
+    generator.generate_region(&mut octree, &origin, 120.0)
+        .expect("Failed to generate terrain");
     
-    // Extract mesh
+    // Calculate voxel coordinate at origin for mesh extraction
+    let origin_ecef = origin.to_ecef();
+    let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+    
+    // Extract mesh from entire region (centered at origin)
     println!("Extracting mesh...");
-    let mut mesh = Mesh::new();
-    
-    for lat_offset in 0..10 {
-        for lon_offset in 0..10 {
-            let lat = -27.4775 + (lat_offset as f64) * 0.00009;
-            let lon = 153.0355 + (lon_offset as f64) * 0.00009;
-            
-            for height in -10..50 {
-                let ecef = GPS::new(lat, lon, height as f64).to_ecef();
-                let voxel_pos = VoxelCoord::from_ecef(&ecef);
-                
-                // Sample 8 corners
-                let mut corners = [false; 8];
-                let offsets = [
-                    (0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1),
-                    (0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1),
-                ];
-                
-                for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
-                    let corner_pos = VoxelCoord::new(
-                        voxel_pos.x + dx,
-                        voxel_pos.y + dy,
-                        voxel_pos.z + dz,
-                    );
-                    corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
-                }
-                
-                // FIXED: Use 1m spacing, not 10m
-                let cube_mesh = extract_cube_mesh(
-                    Vec3::new(
-                        lat_offset as f32,
-                        height as f32,
-                        lon_offset as f32,
-                    ),
-                    &corners,
-                );
-                
-                mesh.merge(&cube_mesh);
-            }
-        }
-    }
+    let mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
     
     mesh
 }

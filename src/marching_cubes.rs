@@ -5,6 +5,7 @@
 
 use crate::mesh::{Mesh, Vertex};
 use crate::materials::MaterialId;
+use crate::voxel::{Octree, VoxelCoord};
 use glam::Vec3;
 
 /// Cube corner numbering (binary position encoding):
@@ -519,4 +520,65 @@ mod tests {
             assert!(pos.y >= 0.4 && pos.y <= 0.6, "Y should be near midpoint: {}", pos.y);
         }
     }
+}
+
+/// Extract mesh from octree region with FloatingOrigin transform
+///
+/// Samples octree in a cube around `center` of size `2^depth` meters.
+/// Transforms vertices from ECEF absolute coordinates to camera-relative (FloatingOrigin).
+/// 
+/// For depth=7: samples 128×128×128 cube = 2,097,152 voxels
+pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> Mesh {
+    use crate::coordinates::ECEF;
+    
+    let mut mesh = Mesh::new();
+    let size = 1 << depth;  // 2^depth
+    let half = size / 2;
+    
+    // Calculate camera origin (for FloatingOrigin)
+    let center_ecef = center.to_ecef();
+    
+    // Iterate over all cubes in the region
+    for x in (-half)..half {
+        for y in (-half)..half {
+            for z in (-half)..half {
+                let voxel_pos = VoxelCoord::new(
+                    center.x + x,
+                    center.y + y,
+                    center.z + z,
+                );
+                
+                // Sample 8 corners of this cube
+                let mut corners = [false; 8];
+                let offsets = [
+                    (0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1),
+                    (0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1),
+                ];
+                
+                for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
+                    let corner_pos = VoxelCoord::new(
+                        voxel_pos.x + dx,
+                        voxel_pos.y + dy,
+                        voxel_pos.z + dz,
+                    );
+                    corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
+                }
+                
+                // Convert voxel position to camera-relative position (FloatingOrigin)
+                let voxel_ecef = voxel_pos.to_ecef();
+                let relative_pos = Vec3::new(
+                    (voxel_ecef.x - center_ecef.x) as f32,
+                    (voxel_ecef.y - center_ecef.y) as f32,
+                    (voxel_ecef.z - center_ecef.z) as f32,
+                );
+                
+                // Extract mesh for this cube
+                let cube_mesh = extract_cube_mesh(relative_pos, &corners);
+                
+                mesh.merge(&cube_mesh);
+            }
+        }
+    }
+    
+    mesh
 }
