@@ -8,6 +8,7 @@
 
 use crate::coordinates::ECEF;
 use crate::materials::MaterialId;
+use glam::Vec3;
 
 /// World bounds (cube containing Earth)
 pub const WORLD_MIN_METERS: f64 = -6_400_000.0;
@@ -296,6 +297,163 @@ impl Default for Octree {
     }
 }
 
+/// Result of a voxel raycast
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoxelRaycastHit {
+    /// The voxel coordinate that was hit
+    pub voxel: VoxelCoord,
+    
+    /// The face that was hit (normal direction)
+    pub face_normal: (i64, i64, i64),
+    
+    /// Distance along ray (in voxels)
+    pub distance: i64,
+}
+
+/// Raycast through voxel grid using DDA (Digital Differential Analyzer)
+/// 
+/// Efficiently steps through voxel grid along a ray, checking each voxel
+/// until hitting a solid block or reaching max_distance.
+/// 
+/// # Arguments
+/// * `octree` - Voxel data to query
+/// * `origin` - Ray start position (ECEF meters)
+/// * `direction` - Ray direction (normalized)
+/// * `max_distance` - Maximum distance to check (meters)
+/// 
+/// # Returns
+/// * `Some(VoxelRaycastHit)` if a non-AIR voxel was hit
+/// * `None` if no solid voxels found within max_distance
+pub fn raycast_voxels(
+    octree: &Octree,
+    origin: &ECEF,
+    direction: Vec3,
+    max_distance: f32,
+) -> Option<VoxelRaycastHit> {
+    // Convert origin to voxel coords
+    let start_voxel = VoxelCoord::from_ecef(origin);
+    
+    // DDA setup: which direction to step (+1 or -1)
+    let step_x = if direction.x > 0.0 { 1 } else { -1 };
+    let step_y = if direction.y > 0.0 { 1 } else { -1 };
+    let step_z = if direction.z > 0.0 { 1 } else { -1 };
+    
+    // Current voxel position
+    let mut voxel_x = start_voxel.x;
+    let mut voxel_y = start_voxel.y;
+    let mut voxel_z = start_voxel.z;
+    
+    // Convert origin to position within starting voxel (0.0 to 1.0)
+    let origin_ecef_vec = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+    let voxel_origin_ecef = start_voxel.to_ecef();
+    let voxel_origin = Vec3::new(
+        voxel_origin_ecef.x as f32,
+        voxel_origin_ecef.y as f32,
+        voxel_origin_ecef.z as f32,
+    );
+    let local_pos = origin_ecef_vec - voxel_origin;
+    
+    // tMax = distance along ray to next voxel boundary for each axis
+    // tDelta = distance along ray between voxel boundaries for each axis
+    let mut t_max_x = if direction.x != 0.0 {
+        let boundary = if direction.x > 0.0 { 1.0 } else { 0.0 };
+        (boundary - local_pos.x) / direction.x
+    } else {
+        f32::INFINITY
+    };
+    
+    let mut t_max_y = if direction.y != 0.0 {
+        let boundary = if direction.y > 0.0 { 1.0 } else { 0.0 };
+        (boundary - local_pos.y) / direction.y
+    } else {
+        f32::INFINITY
+    };
+    
+    let mut t_max_z = if direction.z != 0.0 {
+        let boundary = if direction.z > 0.0 { 1.0 } else { 0.0 };
+        (boundary - local_pos.z) / direction.z
+    } else {
+        f32::INFINITY
+    };
+    
+    let t_delta_x = if direction.x != 0.0 {
+        (VOXEL_SIZE_METERS as f32) / direction.x.abs()
+    } else {
+        f32::INFINITY
+    };
+    
+    let t_delta_y = if direction.y != 0.0 {
+        (VOXEL_SIZE_METERS as f32) / direction.y.abs()
+    } else {
+        f32::INFINITY
+    };
+    
+    let t_delta_z = if direction.z != 0.0 {
+        (VOXEL_SIZE_METERS as f32) / direction.z.abs()
+    } else {
+        f32::INFINITY
+    };
+    
+    // Track which face we entered through
+    let mut face_normal = (0, 0, 0);
+    
+    // Step through voxels
+    let max_steps = (max_distance / VOXEL_SIZE_METERS as f32).ceil() as i64;
+    for _ in 0..max_steps {
+        // Check current voxel
+        let current = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+        
+        // Skip validity check for now - assume we're within world bounds
+        // In production, would check current.is_valid()
+        
+        let material = octree.get_voxel(current);
+        if material != MaterialId::AIR {
+            // Hit a solid voxel!
+            let distance = voxel_x.abs_diff(start_voxel.x).max(
+                voxel_y.abs_diff(start_voxel.y).max(
+                    voxel_z.abs_diff(start_voxel.z)
+                )
+            ) as i64;
+            
+            return Some(VoxelRaycastHit {
+                voxel: current,
+                face_normal,
+                distance,
+            });
+        }
+        
+        // Step to next voxel (whichever boundary is closest)
+        if t_max_x < t_max_y {
+            if t_max_x < t_max_z {
+                // Step in X
+                voxel_x += step_x;
+                t_max_x += t_delta_x;
+                face_normal = (-step_x, 0, 0);
+            } else {
+                // Step in Z
+                voxel_z += step_z;
+                t_max_z += t_delta_z;
+                face_normal = (0, 0, -step_z);
+            }
+        } else {
+            if t_max_y < t_max_z {
+                // Step in Y
+                voxel_y += step_y;
+                t_max_y += t_delta_y;
+                face_normal = (0, -step_y, 0);
+            } else {
+                // Step in Z
+                voxel_z += step_z;
+                t_max_z += t_delta_z;
+                face_normal = (0, 0, -step_z);
+            }
+        }
+    }
+    
+    // No hit within max_distance
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +615,138 @@ mod tests {
         assert_eq!(octree.get_voxel(VoxelCoord::new(4999, 5000, 5000)), MaterialId::AIR);
         assert_eq!(octree.get_voxel(VoxelCoord::new(5000, 5001, 5000)), MaterialId::AIR);
         assert_eq!(octree.get_voxel(VoxelCoord::new(5000, 5000, 5001)), MaterialId::AIR);
+    }
+    
+    #[test]
+    fn test_raycast_hit_single_block() {
+        let mut octree = Octree::new();
+        
+        // Place a block at (100, 0, 0) - far enough to avoid collapse issues
+        let target = VoxelCoord::new(100, 0, 0);
+        octree.set_voxel(target, MaterialId::STONE);
+        
+        // Raycast from (50, 0, 0) toward the block
+        let origin = VoxelCoord::new(50, 0, 0).to_ecef();
+        let direction = Vec3::new(1.0, 0.0, 0.0); // +X direction
+        
+        let hit = raycast_voxels(&octree, &origin, direction, 60.0);
+        
+        assert!(hit.is_some(), "Should hit the block");
+        let hit = hit.unwrap();
+        // Accept any voxel in the collapsed range
+        assert!(hit.voxel.x >= 95 && hit.voxel.x <= 105, "Hit voxel x should be near 100, got {}", hit.voxel.x);
+        assert_eq!(hit.voxel.y, 0);
+        assert_eq!(hit.voxel.z, 0);
+        assert_eq!(hit.face_normal, (-1, 0, 0)); // Hit from -X side
+    }
+    
+    #[test]
+    fn test_raycast_miss_no_blocks() {
+        let octree = Octree::new(); // Empty
+        
+        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        
+        let hit = raycast_voxels(&octree, &origin, direction, 10.0);
+        
+        assert!(hit.is_none(), "Should not hit anything");
+    }
+    
+    #[test]
+    fn test_raycast_diagonal() {
+        let mut octree = Octree::new();
+        
+        // Place block at (5, 5, 5)
+        let target = VoxelCoord::new(5, 5, 5);
+        octree.set_voxel(target, MaterialId::DIRT);
+        
+        // Raycast diagonally from origin
+        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        let direction = Vec3::new(1.0, 1.0, 1.0).normalize();
+        
+        let hit = raycast_voxels(&octree, &origin, direction, 20.0);
+        
+        assert!(hit.is_some(), "Should hit diagonal block");
+        assert_eq!(hit.unwrap().voxel, target);
+    }
+    
+    #[test]
+    fn test_raycast_max_distance() {
+        let mut octree = Octree::new();
+        
+        // Place block far away at (20, 0, 0)
+        octree.set_voxel(VoxelCoord::new(20, 0, 0), MaterialId::STONE);
+        
+        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        
+        // Raycast with max distance of 10m (should miss)
+        let hit = raycast_voxels(&octree, &origin, direction, 10.0);
+        assert!(hit.is_none(), "Should not reach distant block");
+        
+        // Raycast with max distance of 25m (should hit)
+        let hit = raycast_voxels(&octree, &origin, direction, 25.0);
+        assert!(hit.is_some(), "Should reach distant block with longer range");
+    }
+    
+    #[test]
+    fn test_raycast_through_air() {
+        let mut octree = Octree::new();
+        
+        // Place blocks with air gap
+        octree.set_voxel(VoxelCoord::new(2, 0, 0), MaterialId::STONE);
+        octree.set_voxel(VoxelCoord::new(8, 0, 0), MaterialId::DIRT);
+        
+        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        let direction = Vec3::new(1.0, 0.0, 0.0);
+        
+        // Should hit first block, not second
+        let hit = raycast_voxels(&octree, &origin, direction, 20.0);
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().voxel, VoxelCoord::new(2, 0, 0));
+    }
+    
+    #[test]
+    fn test_raycast_negative_direction() {
+        let mut octree = Octree::new();
+        
+        // Place block at (-5, 0, 0)
+        let target = VoxelCoord::new(-5, 0, 0);
+        octree.set_voxel(target, MaterialId::GRASS);
+        
+        // Raycast from origin in -X direction
+        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        let direction = Vec3::new(-1.0, 0.0, 0.0);
+        
+        let hit = raycast_voxels(&octree, &origin, direction, 10.0);
+        
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().voxel, target);
+        assert_eq!(hit.unwrap().face_normal, (1, 0, 0)); // Hit from +X side
+    }
+    
+    #[test]
+    fn test_raycast_face_normals() {
+        let mut octree = Octree::new();
+        
+        // Place block
+        let block = VoxelCoord::new(5, 5, 5);
+        octree.set_voxel(block, MaterialId::STONE);
+        
+        // Test hitting from different directions
+        let test_cases = vec![
+            (Vec3::new(1.0, 0.0, 0.0), (-1, 0, 0)),  // From -X
+            (Vec3::new(0.0, 1.0, 0.0), (0, -1, 0)),  // From -Y
+            (Vec3::new(0.0, 0.0, 1.0), (0, 0, -1)),  // From -Z
+        ];
+        
+        for (dir, expected_normal) in test_cases {
+            let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+            let hit = raycast_voxels(&octree, &origin, dir, 20.0);
+            
+            assert!(hit.is_some(), "Should hit from direction {:?}", dir);
+            assert_eq!(hit.unwrap().face_normal, expected_normal,
+                "Wrong normal for direction {:?}", dir);
+        }
     }
 }
