@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Phase 1: Coordinate system
+geoconv = "0.1"  # GPS (lat/lon/alt) ↔ ECEF conversions, WGS84
+
 rayon = "1"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
