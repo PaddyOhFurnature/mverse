@@ -1,13 +1,9 @@
-//! Simple terrain viewer for validation
-//!
-//! Generates terrain at Kangaroo Point and renders it.
-//! WASD to move, mouse to look, ESC to quit.
+//! Interactive terrain viewer - SAME CODE as screenshot tool but with window
 
 use metaverse_core::{
     coordinates::GPS,
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
-    marching_cubes::extract_cube_mesh,
-    materials::MaterialId,
+    marching_cubes::extract_octree_mesh,
     mesh::Mesh,
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
@@ -18,7 +14,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
-    application::ApplicationHandler,
     event::*,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
@@ -27,22 +22,15 @@ use winit::{
 fn main() {
     env_logger::init();
     
-    println!("=== Terrain Viewer - Validation Tool ===");
-    println!("Controls:");
-    println!("  WASD - Move camera");
-    println!("  Mouse - Look around");
-    println!("  T - Teleport to Kangaroo Point (-27.4775, 153.0355)");
-    println!("  1-9 - Teleport to test locations");
-    println!("  P - Print current camera position");
-    println!("  ESC - Quit\n");
+    println!("=== Terrain Viewer - 120m × 120m ===\n");
     
-    // Create window and event loop
+    // Create window
     let event_loop = EventLoop::new().unwrap();
     let window = event_loop
         .create_window(
             winit::window::WindowAttributes::default()
-                .with_title("Metaverse - Terrain Validation")
-                .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
+                .with_title("Terrain Viewer")
+                .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080))
         )
         .unwrap();
     
@@ -53,51 +41,69 @@ fn main() {
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
     
-    // Initialize camera looking at terrain
-    let aspect = context.size.width as f32 / context.size.height as f32;
-    let mut camera = Camera::new(
-        Vec3::new(0.0, 50.0, -100.0), // 100m back, 50m up
-        aspect,
-    );
-    
-    // Generate terrain
-    println!("\nGenerating terrain at Kangaroo Point...");
+    // Generate terrain (EXACT SAME as screenshot tool)
+    println!("\nGenerating 120m × 120m terrain...");
     let start = Instant::now();
     
-    let terrain_mesh = generate_terrain_mesh();
+    let nas = NasFileSource::new();
+    let api_key = "3e607de6969c687053f9e107a4796962".to_string();
+    let cache_dir = PathBuf::from("./elevation_cache");
+    let api = OpenTopographySource::new(api_key, cache_dir);
     
-    println!("Terrain generated in {:.2}s", start.elapsed().as_secs_f64());
+    let mut elevation_pipeline = ElevationPipeline::new();
+    if let Some(nas_source) = nas {
+        println!("Using NAS SRTM file");
+        elevation_pipeline.add_source(Box::new(nas_source));
+    } else {
+        println!("Using OpenTopography API");
+    }
+    elevation_pipeline.add_source(Box::new(api));
+    
+    let mut generator = TerrainGenerator::new(elevation_pipeline);
+    let mut octree = Octree::new();
+    
+    let origin = GPS::new(-27.4775, 153.0355, 0.0);
+    generator.generate_region(&mut octree, &origin, 120.0)
+        .expect("Failed to generate terrain");
+    
+    let origin_ecef = origin.to_ecef();
+    let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+    
+    let terrain_mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
+    
+    println!("Generated in {:.2}s", start.elapsed().as_secs_f32());
     println!("  Vertices: {}", terrain_mesh.vertex_count());
     println!("  Triangles: {}", terrain_mesh.triangle_count());
     
-    // Upload mesh to GPU
-    println!("\nUploading mesh to GPU...");
+    if terrain_mesh.is_empty() {
+        eprintln!("\nERROR: No mesh generated!");
+        return;
+    }
+    
+    // Upload to GPU
+    println!("\nUploading to GPU...");
     let mesh_buffer = MeshBuffer::from_mesh(&context.device, &terrain_mesh);
     
-    // Event loop state
+    // Setup camera (SAME as screenshot)
+    let aspect = context.size.width as f32 / context.size.height as f32;
+    let mut camera = Camera::new(Vec3::new(-80.0, 60.0, 80.0), aspect);
+    camera.yaw = (-45.0_f32).to_radians();
+    camera.pitch = (-25.0_f32).to_radians();
+    
     let mut last_frame = Instant::now();
-    let mut cursor_grabbed = false;
     
     println!("\n=== Controls ===");
-    println!("WASD: Move camera");
-    println!("Space/Shift: Up/Down");
-    println!("Mouse: Look around");
-    println!("ESC: Quit");
-    println!("\nStarting renderer...\n");
+    println!("WASD: Move | Mouse: Look | T: Reset camera | P: Print position | ESC: Quit\n");
     
     event_loop.run(move |event, elwt| {
         match event {
-            Event::WindowEvent {
-                ref event,
-                window_id,
-            } if window_id == window.id() => match event {
+            Event::WindowEvent { ref event, window_id } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested
                 | WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            physical_key: PhysicalKey::Code(KeyCode::Escape),
-                            ..
-                        },
+                    event: KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                     ..
                 } => elwt.exit(),
                 
@@ -108,51 +114,23 @@ fn main() {
                 }
                 
                 WindowEvent::KeyboardInput {
-                    event:
-                        KeyEvent {
-                            physical_key,
-                            state,
-                            ..
-                        },
+                    event: KeyEvent { physical_key, state, .. },
                     ..
                 } => {
                     let dt = last_frame.elapsed().as_secs_f32();
                     
-                    // Handle teleport keys (on key press only)
                     if *state == ElementState::Pressed {
                         if let PhysicalKey::Code(code) = physical_key {
                             match code {
                                 KeyCode::KeyT => {
-                                    // Teleport to Kangaroo Point
-                                    camera.position = Vec3::new(0.0, 30.0, 50.0);
-                                    camera.yaw = -90.0_f32.to_radians();
-                                    camera.pitch = -20.0_f32.to_radians();
-                                    println!("Teleported to Kangaroo Point view");
-                                }
-                                KeyCode::Digit1 => {
-                                    // View from above
-                                    camera.position = Vec3::new(5.0, 50.0, 5.0);
-                                    camera.yaw = 0.0;
-                                    camera.pitch = -89.0_f32.to_radians();
-                                    println!("Teleported to aerial view");
-                                }
-                                KeyCode::Digit2 => {
-                                    // Ground level, looking north
-                                    camera.position = Vec3::new(0.0, 2.0, 10.0);
-                                    camera.yaw = -90.0_f32.to_radians();
-                                    camera.pitch = 0.0;
-                                    println!("Teleported to ground level (north)");
-                                }
-                                KeyCode::Digit3 => {
-                                    // Ground level, looking east
-                                    camera.position = Vec3::new(-10.0, 2.0, 0.0);
-                                    camera.yaw = 0.0;
-                                    camera.pitch = 0.0;
-                                    println!("Teleported to ground level (east)");
+                                    camera.position = Vec3::new(-80.0, 60.0, 80.0);
+                                    camera.yaw = (-45.0_f32).to_radians();
+                                    camera.pitch = (-25.0_f32).to_radians();
+                                    println!("Camera reset to overview");
                                 }
                                 KeyCode::KeyP => {
-                                    println!("Camera position: {:.2?}", camera.position);
-                                    println!("Camera rotation: yaw={:.1}° pitch={:.1}°", 
+                                    println!("Position: {:?}", camera.position);
+                                    println!("Yaw: {:.1}° Pitch: {:.1}°", 
                                         camera.yaw.to_degrees(), camera.pitch.to_degrees());
                                 }
                                 _ => {}
@@ -164,24 +142,16 @@ fn main() {
                 }
                 
                 WindowEvent::RedrawRequested => {
-                    // Calculate delta time
-                    let dt = last_frame.elapsed().as_secs_f32();
                     last_frame = Instant::now();
                     
-                    // Update camera
                     pipeline.update_camera(&context.queue, &camera);
                     
-                    // Render frame
                     let output = context.surface.get_current_texture().unwrap();
-                    let view = output
-                        .texture
-                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                     
-                    let mut encoder = context
-                        .device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Render Encoder"),
-                        });
+                    let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Render Encoder"),
+                    });
                     
                     {
                         let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
@@ -208,93 +178,4 @@ fn main() {
             _ => {}
         }
     }).unwrap();
-}
-
-/// Generate terrain mesh for Kangaroo Point
-fn generate_terrain_mesh() -> Mesh {
-    // Setup elevation pipeline
-    let nas = NasFileSource::new();
-    let api_key = "3e607de6969c687053f9e107a4796962".to_string();
-    let cache_dir = PathBuf::from("./elevation_cache");
-    let api = OpenTopographySource::new(api_key, cache_dir);
-    
-    let mut pipeline = ElevationPipeline::new();
-    if let Some(nas_source) = nas {
-        println!("Using NAS SRTM file");
-        pipeline.add_source(Box::new(nas_source));
-    } else {
-        println!("Using OpenTopography API");
-    }
-    pipeline.add_source(Box::new(api));
-    
-    let mut generator = TerrainGenerator::new(pipeline);
-    let mut octree = Octree::new();
-    
-    // Generate 10m × 10m terrain (100 columns)
-    println!("Generating voxel columns...");
-    for lat_offset in 0..10 {
-        for lon_offset in 0..10 {
-            let lat = -27.4775 + (lat_offset as f64) * 0.00009; // ~10m steps
-            let lon = 153.0355 + (lon_offset as f64) * 0.00009;
-            let gps = GPS::new(lat, lon, 0.0);
-            
-            generator.generate_column(&mut octree, &gps).unwrap();
-        }
-    }
-    
-    // Extract mesh using marching cubes
-    println!("Extracting mesh...");
-    let mut mesh = Mesh::new();
-    
-    // Sample the terrain region and extract mesh cubes
-    for lat_offset in 0..10 {
-        for lon_offset in 0..10 {
-            let lat = -27.4775 + (lat_offset as f64) * 0.00009;
-            let lon = 153.0355 + (lon_offset as f64) * 0.00009;
-            
-            // Check voxels at different heights
-            for height in -10..50 {
-                let ecef = GPS::new(lat, lon, height as f64).to_ecef();
-                let voxel_pos = VoxelCoord::from_ecef(&ecef);
-                
-                // Sample 8 corners of cube
-                let mut corners = [false; 8];
-                let offsets = [
-                    (0, 0, 0),
-                    (1, 0, 0),
-                    (1, 0, 1),
-                    (0, 0, 1),
-                    (0, 1, 0),
-                    (1, 1, 0),
-                    (1, 1, 1),
-                    (0, 1, 1),
-                ];
-                
-                for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
-                    let corner_pos = VoxelCoord::new(
-                        voxel_pos.x + dx,
-                        voxel_pos.y + dy,
-                        voxel_pos.z + dz,
-                    );
-                    let material = octree.get_voxel(corner_pos);
-                    corners[i] = material != MaterialId::AIR;
-                }
-                
-                // Extract mesh for this cube
-                let cube_mesh = extract_cube_mesh(
-                    Vec3::new(
-                        lat_offset as f32,  // 0-10 range = 10m × 10m area
-                        height as f32,
-                        lon_offset as f32,
-                    ),
-                    &corners,
-                );
-                
-                // Merge into main mesh
-                mesh.merge(&cube_mesh);
-            }
-        }
-    }
-    
-    mesh
 }
