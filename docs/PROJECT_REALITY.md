@@ -13,7 +13,7 @@ This is a **1-3 MILLION line, 5-10 year AAA project** comparable to:
 **Current state: 1,981 lines = 0.2% complete**
 
 ## CRITICAL GAPS IN CURRENT IMPLEMENTATION
-
+- Read all other documentation and research external sorces when required
 ### What's Built (Foundation Only)
 - ✅ Coordinate system (GPS ↔ ECEF ↔ FloatingOrigin)
 - ✅ Elevation pipeline (NAS GDAL + API fallback)
