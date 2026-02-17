@@ -10,6 +10,7 @@ pub struct RenderContext {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
+    pub adapter: wgpu::Adapter,
 }
 
 impl RenderContext {
@@ -77,6 +78,7 @@ impl RenderContext {
             queue,
             config,
             size,
+            adapter,
         }
     }
 

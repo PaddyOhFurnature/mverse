@@ -85,6 +85,7 @@ fn main() {
     }
     
     // Create texture for screenshot
+    // Use surface format for compatibility with pipeline
     let texture_desc = wgpu::TextureDescriptor {
         size: wgpu::Extent3d {
             width: 1920,
@@ -94,13 +95,30 @@ fn main() {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: context.surface.get_capabilities(&context.adapter).formats[0],
         usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
         label: None,
         view_formats: &[],
     };
     let texture = context.device.create_texture(&texture_desc);
     let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    
+    // Create depth buffer for screenshot
+    let depth_texture = context.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Screenshot Depth Texture"),
+        size: wgpu::Extent3d {
+            width: 1920,
+            height: 1080,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
     
     // Render to texture
     {
@@ -119,7 +137,14 @@ fn main() {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
         });

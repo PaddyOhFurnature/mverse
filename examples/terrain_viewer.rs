@@ -27,7 +27,14 @@ use winit::{
 fn main() {
     env_logger::init();
     
-    println!("=== Terrain Viewer - Validation Tool ===\n");
+    println!("=== Terrain Viewer - Validation Tool ===");
+    println!("Controls:");
+    println!("  WASD - Move camera");
+    println!("  Mouse - Look around");
+    println!("  T - Teleport to Kangaroo Point (-27.4775, 153.0355)");
+    println!("  1-9 - Teleport to test locations");
+    println!("  P - Print current camera position");
+    println!("  ESC - Quit\n");
     
     // Create window and event loop
     let event_loop = EventLoop::new().unwrap();
@@ -110,6 +117,49 @@ fn main() {
                     ..
                 } => {
                     let dt = last_frame.elapsed().as_secs_f32();
+                    
+                    // Handle teleport keys (on key press only)
+                    if *state == ElementState::Pressed {
+                        if let PhysicalKey::Code(code) = physical_key {
+                            match code {
+                                KeyCode::KeyT => {
+                                    // Teleport to Kangaroo Point
+                                    camera.position = Vec3::new(0.0, 30.0, 50.0);
+                                    camera.yaw = -90.0_f32.to_radians();
+                                    camera.pitch = -20.0_f32.to_radians();
+                                    println!("Teleported to Kangaroo Point view");
+                                }
+                                KeyCode::Digit1 => {
+                                    // View from above
+                                    camera.position = Vec3::new(5.0, 50.0, 5.0);
+                                    camera.yaw = 0.0;
+                                    camera.pitch = -89.0_f32.to_radians();
+                                    println!("Teleported to aerial view");
+                                }
+                                KeyCode::Digit2 => {
+                                    // Ground level, looking north
+                                    camera.position = Vec3::new(0.0, 2.0, 10.0);
+                                    camera.yaw = -90.0_f32.to_radians();
+                                    camera.pitch = 0.0;
+                                    println!("Teleported to ground level (north)");
+                                }
+                                KeyCode::Digit3 => {
+                                    // Ground level, looking east
+                                    camera.position = Vec3::new(-10.0, 2.0, 0.0);
+                                    camera.yaw = 0.0;
+                                    camera.pitch = 0.0;
+                                    println!("Teleported to ground level (east)");
+                                }
+                                KeyCode::KeyP => {
+                                    println!("Camera position: {:.2?}", camera.position);
+                                    println!("Camera rotation: yaw={:.1}° pitch={:.1}°", 
+                                        camera.yaw.to_degrees(), camera.pitch.to_degrees());
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    
                     camera.process_keyboard(physical_key, *state, dt);
                 }
                 
