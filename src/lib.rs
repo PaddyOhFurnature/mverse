@@ -7,3 +7,4 @@ pub mod elevation;
 pub mod materials;
 pub mod voxel;
 pub mod terrain;
+pub mod mesh;
