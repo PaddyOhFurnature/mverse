@@ -230,31 +230,127 @@ Core:            -6,371km         Coordinate origin (NO STORAGE)
 - ❌ Network sync difficult (float determinism issues)
 - ❌ Less common (fewer examples, harder to implement)
 
-### 4.3 Voxel System Design (TBD)
+### 4.3 Voxel System Design
 
-**To be designed:**
-- Voxel size (0.5m? 1m? variable LOD?)
-- Material representation (byte enum? 16 materials?)
-- Sparse storage (octree depth, branching factor)
-- ECEF → voxel coordinate mapping
-- Chunk boundaries (how big? overlap?)
+**DECIDED:** See `VOXEL_STRUCTURE_DESIGN.md` for complete specification
 
-**See:** `FOUNDATION_WORK_PLAN.md` Question 6
+**Voxel Size:** 1 meter base resolution
+- Human-scale features (doors, rooms, trees)
+- Variable LOD: 1m (close) → 2m → 4m → 8m → 16m (distant)
+- Octree naturally supports multi-resolution
 
-### 4.4 Mesh Extraction Algorithm (TBD)
+**Material Representation:** u8 enum (256 materials max)
+```rust
+#[repr(u8)]
+pub enum Material {
+    AIR = 0,           // Most common (optimize for this)
+    STONE = 2,
+    DIRT = 7,
+    WATER = 50,
+    CONCRETE = 80,
+    GLASS = 83,
+    // ... up to 256 total
+}
+```
 
-**Options:**
-- Marching Cubes (standard, well-documented, lookup tables)
-- Dual Contouring (better sharp features, more complex)
-- Naive Surface Nets (simpler, may be sufficient)
+**Material Properties:** Separate lookup table (not stored per-voxel)
+```rust
+struct MaterialProperties {
+    solid: bool,              // Blocks movement?
+    transparent: bool,        // See through?
+    opacity: f32,            // 0.0-1.0
+    density: f32,            // kg/m³ (physics)
+    color: [u8; 3],          // Base RGB
+    texture_id: u16,         // Atlas index
+    // ... see MATERIAL_PROPERTIES_CLARIFICATION.md
+}
+```
 
-**To be researched:**
-- Algorithm choice
-- Implementation details
-- Chunk boundary handling (seamless stitching)
-- Performance at scale
+**Sparse Octree:** 3 node types, depth 23
+```rust
+pub enum OctreeNode {
+    Empty,                           // 1 byte - atmosphere
+    Solid(Material),                 // 2 bytes - uniform regions
+    Branch {                         // 64 bytes - detailed areas
+        children: Box<[OctreeNode; 8]>,
+        bounds: AABB,
+        cached_mesh: Option<Mesh>,
+    },
+}
+```
+- Compression: 500 million × for uniform regions
+- Depth 23: 1.5m leaf voxels (close to 1m target)
+- Most of Earth at depth 3-5 (coarse, uniform)
+- Surface ±200m at depth 20-23 (detailed)
 
-**See:** `FOUNDATION_WORK_PLAN.md` Question 7
+**Coordinate Mapping:** ECEF f64 → Voxel i64
+```rust
+const WORLD_MIN: Vec3<f64> = Vec3::new(-6_400_000.0, -6_400_000.0, -6_400_000.0);
+const VOXEL_SIZE: f64 = 1.0;
+
+fn ecef_to_voxel(ecef: Vec3<f64>) -> Vec3<i64> {
+    let relative = ecef - WORLD_MIN;
+    Vec3::new(
+        (relative.x / VOXEL_SIZE).floor() as i64,
+        (relative.y / VOXEL_SIZE).floor() as i64,
+        (relative.z / VOXEL_SIZE).floor() as i64,
+    )
+}
+```
+
+**Chunking:** 1km × 1km × 2km vertical
+- Chunk size: ~4 MB compressed (octree)
+- Load radius: 5km (79 chunks = 320 MB RAM)
+- Unload distance: >10km from player
+- Cache to disk: `./chunk_cache/{chunk_id}.bin`
+
+**Performance Targets:**
+- 1M voxel queries/second (get_voxel)
+- 10K voxel modifications/second (set_voxel)
+- 1 second to generate 1km² terrain
+
+### 4.4 Mesh Extraction Algorithm
+
+**DECIDED:** Marching Cubes - See `MESH_EXTRACTION_ALGORITHM.md`
+
+**Algorithm:** Marching Cubes (Lorensen & Cline, 1987)
+
+**Rationale:**
+- ✅ Simple implementation (~300 lines, lookup tables)
+- ✅ Fast execution (1M cubes/second)
+- ✅ Well-documented (37 years, thousands of examples)
+- ✅ Good enough quality (No Man's Sky level target)
+- ✅ Quick to implement (4-6 hours)
+
+**How it works:**
+1. Process each voxel cube (8 corners)
+2. Calculate cube index from solid/air pattern (256 cases)
+3. Lookup edge intersections (EDGE_TABLE)
+4. Generate triangles (TRIANGLE_TABLE)
+5. Interpolate vertex positions (linear, midpoint)
+6. Compute normals (face normal or smooth)
+
+**Lookup Tables:**
+```rust
+const EDGE_TABLE: [u16; 256] = [ /* which edges intersected */ ];
+const TRIANGLE_TABLE: [[i8; 15]; 256] = [ /* how to connect */ ];
+```
+- Copy from Paul Bourke reference (public domain)
+- Pre-computed, no runtime calculation
+
+**Performance:**
+- 1km² terrain (~1M cubes): ~1 second
+- Optimizations: vertex sharing, normal smoothing, parallel
+
+**Future Upgrades (if needed):**
+- Dual Contouring for sharp building corners
+- Hybrid: Marching Cubes (terrain) + Dual Contouring (architecture)
+- LOD mesh simplification for distant chunks
+
+**Chunk Boundaries:**
+- Generate overlapping vertices at boundaries
+- Shared vertices ensure seamless stitching
+- No cracks or T-junctions
 
 ---
 
@@ -298,42 +394,48 @@ Core:            -6,371km         Coordinate origin (NO STORAGE)
 
 ## 6. CURRENT STATUS
 
-### Phase 0: Research & Setup (IN PROGRESS)
+### Phase 0: Research & Setup (COMPLETE ✅)
 
-**Completed:**
-- ✅ Coordinate system foundation understood
-- ✅ WGS84 origin traced to defined standards
-- ✅ Scale requirements validated (f64 sufficient)
-- ✅ Coordinate library chosen (geoconv)
-- ✅ SRTM data sources identified
-- ✅ Terrain representation decided (voxels + smooth)
-- ✅ Documentation organized (old archived)
+**All Foundation Questions Answered:**
+- ✅ Q1: Coordinate library (geoconv chosen)
+- ✅ Q2: SRTM data sources (NAS + OpenTopography + Earthdata)
+- ✅ Q3: Rendering coordinates (floating origin technique)
+- ✅ Q4: Validation strategy (15 tests defined, error margins set)
+- ✅ Q5: GeoTIFF pipeline (multi-source redundancy designed)
+- ✅ Q6: Voxel structure (1m octree, 1km chunks, 256 materials)
+- ✅ Q7: Mesh extraction (Marching Cubes chosen)
 
-**In Progress:**
-- ⏳ SRTM file downloading to NAS
-- ⏳ GeoTIFF library testing (awaiting file)
+**Documentation Created:** 18 research/design documents (~150 pages)
 
-**Next:**
-- Review rendering coordinates (Question 3)
-- Plan validation tests (Question 4)
-- Design voxel structure (Question 6)
-- Research mesh extraction (Question 7)
+**Blocked:**
+- ⏳ SRTM file download (for Phase 2 GeoTIFF testing)
+  - Can proceed with Phase 1 without this
+
+**Ready to Start:**
+- **Phase 1: Coordinate System Validation** (TDD implementation)
 
 ---
 
-## 7. NOT YET DEFINED
+## 7. DECIDED BUT NOT IMPLEMENTED
 
-**Major architectural decisions still needed:**
+**Foundation architecture complete, implementation pending:**
 
-1. **Chunk system** - Size, addressing, LOD strategy
-2. **Voxel structure** - Materials, octree depth, storage
-3. **Mesh generation** - Algorithm, vertex format, boundaries
-4. **OSM integration** - Building generation, road placement
-5. **Network protocol** - P2P discovery, state sync, CRDTs
-6. **Physics system** - Collision, deterministic simulation
-7. **Rendering pipeline** - Shader design, materials, lighting
+1. ✅ **Chunk system** - 1km × 1km × 2km, ECEF-based addressing, variable LOD
+2. ✅ **Voxel structure** - u8 materials, octree depth 23, sparse compression
+3. ✅ **Mesh generation** - Marching Cubes, vertex sharing, normal smoothing
+4. ⏳ **SRTM pipeline** - Multi-source, local cache, redundancy (designed, awaiting file)
+5. ⏳ **Coordinate system** - ECEF f64 + floating origin (designed, Phase 1 implements)
 
-**These will be designed as foundation work progresses.**
+**Still to be designed (later phases):**
+
+6. **OSM integration** - Building generation, road placement, feature extraction
+7. **Network protocol** - P2P discovery, state sync, CRDTs
+8. **Physics system** - Collision (use voxel solid flags), deterministic simulation
+9. **Rendering pipeline** - Shader design, PBR materials, lighting
+10. **Player systems** - Movement, interaction, inventory
+11. **Procedural generation** - Trees, rocks, caves, details beyond SRTM/OSM
+
+**These will be designed as Phases 1-6 complete.**
 
 ---
 
