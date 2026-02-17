@@ -564,16 +564,12 @@ pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> M
                     corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
                 }
                 
-                // Convert voxel position to camera-relative position (FloatingOrigin)
-                let voxel_ecef = voxel_pos.to_ecef();
-                let relative_pos = Vec3::new(
-                    (voxel_ecef.x - center_ecef.x) as f32,
-                    (voxel_ecef.y - center_ecef.y) as f32,
-                    (voxel_ecef.z - center_ecef.z) as f32,
+                // Use simple integer offsets for marching cubes
+                // Marching cubes will interpolate vertices within the cube
+                let cube_mesh = extract_cube_mesh(
+                    Vec3::new(x as f32, y as f32, z as f32),
+                    &corners,
                 );
-                
-                // Extract mesh for this cube
-                let cube_mesh = extract_cube_mesh(relative_pos, &corners);
                 
                 mesh.merge(&cube_mesh);
             }

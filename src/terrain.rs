@@ -70,15 +70,20 @@ impl TerrainGenerator {
         
         println!("  Generating voxel columns at 1m resolution...");
         
+        // Convert origin to voxel coordinates ONCE
+        let origin_ecef = origin.to_ecef();
+        let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+        
         // Generate voxel columns at 1m spacing with bilinear interpolation
         let columns_per_axis = size_meters as usize;
+        let half_size = (size_meters / 2.0) as i64;
         let mut column_count = 0;
         
+        // Use local coordinate offsets to ensure adjacent voxels
         for i in 0..columns_per_axis {
             for j in 0..columns_per_axis {
-                // Position in meters from origin
-                let offset_lat_m = i as f64 - (size_meters / 2.0);
-                let offset_lon_m = j as f64 - (size_meters / 2.0);
+                let local_x = i as i64 - half_size;
+                let local_z = j as i64 - half_size;
                 
                 // Interpolate elevation from SRTM grid
                 let grid_i = (i as f64 / SRTM_RESOLUTION_M).min((samples_per_axis - 2) as f64);
@@ -102,19 +107,22 @@ impl TerrainGenerator {
                 let e1 = e10 * (1.0 - frac_j) + e11 * frac_j;
                 let surface_elevation = e0 * (1.0 - frac_i) + e1 * frac_i;
                 
-                // Generate vertical column at this position
-                let column_lat = origin.lat + (offset_lat_m / METERS_PER_DEGREE_LAT);
-                let column_lon = origin.lon + (offset_lon_m / meters_per_degree_lon);
+                const BEDROCK_DEPTH: i64 = 200;
+                const SKY_HEIGHT: i64 = 100;
                 
-                const BEDROCK_DEPTH: f64 = 200.0;
-                const SKY_HEIGHT: f64 = 100.0;
-                
-                for height_offset in (-BEDROCK_DEPTH as i64)..=(SKY_HEIGHT as i64) {
-                    let voxel_elevation = surface_elevation + height_offset as f64;
-                    let ecef = GPS::new(column_lat, column_lon, voxel_elevation).to_ecef();
-                    let voxel_pos = VoxelCoord::from_ecef(&ecef);
+                // Generate vertical column using LOCAL coordinates
+                // This ensures voxels are actually adjacent (1m spacing)
+                for height_offset in (-BEDROCK_DEPTH)..=SKY_HEIGHT {
+                    let local_y = height_offset + surface_elevation as i64;
                     
-                    let depth_below_surface = surface_elevation - voxel_elevation;
+                    // Direct voxel coordinate from local offset
+                    let voxel_pos = VoxelCoord::new(
+                        origin_voxel.x + local_x,
+                        origin_voxel.y + local_y,
+                        origin_voxel.z + local_z,
+                    );
+                    
+                    let depth_below_surface = surface_elevation - (origin.alt + height_offset as f64);
                     
                     let material = if depth_below_surface > 5.0 {
                         MaterialId::STONE
