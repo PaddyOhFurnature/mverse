@@ -9,6 +9,7 @@
 use crate::coordinates::{ECEF, GPS};
 use crate::voxel::{Octree, VoxelCoord, raycast_voxels, VoxelRaycastHit};
 use crate::materials::MaterialId;
+use crate::marching_cubes::extract_octree_mesh;
 use glam::Vec3;
 use rapier3d::prelude::*;
 
@@ -249,6 +250,86 @@ pub fn create_mesh_collider(
         .build();
     
     physics.colliders.insert(collider)
+}
+
+/// Regenerate collision mesh for a voxel region after modifications
+/// 
+/// Extracts mesh from current voxel state, converts to collision mesh,
+/// and updates physics world. Optionally removes old collider first.
+/// 
+/// # Arguments
+/// * `physics` - Physics world to update
+/// * `octree` - Current voxel data
+/// * `center` - Center of region to regenerate (voxel coords)
+/// * `depth` - Size of region (2^depth voxels per side)
+/// * `old_collider` - Optional handle to old collider (will be removed)
+/// 
+/// # Returns
+/// Handle to new collider
+/// 
+/// # Example
+/// ```ignore
+/// // Player digs a hole at (100, 100, 100)
+/// octree.set_voxel(VoxelCoord::new(100, 100, 100), MaterialId::AIR);
+/// 
+/// // Update collision for 16x16x16 region around that point
+/// let new_collider = update_region_collision(
+///     &mut physics,
+///     &octree,
+///     &VoxelCoord::new(100, 100, 100),
+///     4, // 2^4 = 16 voxels
+///     Some(old_collider_handle),
+/// );
+/// ```
+pub fn update_region_collision(
+    physics: &mut PhysicsWorld,
+    octree: &Octree,
+    center: &VoxelCoord,
+    depth: u8,
+    old_collider: Option<ColliderHandle>,
+) -> ColliderHandle {
+    // Remove old collider if provided
+    if let Some(handle) = old_collider {
+        physics.colliders.remove(
+            handle,
+            &mut physics.islands,
+            &mut physics.bodies,
+            false, // don't wake up bodies
+        );
+    }
+    
+    // Extract mesh from octree using marching cubes
+    let mesh = extract_octree_mesh(octree, center, depth);
+    
+    // Convert mesh to Rapier format
+    let vertices: Vec<[f32; 3]> = mesh.vertices
+        .iter()
+        .map(|v| [v.position[0], v.position[1], v.position[2]])
+        .collect();
+    
+    // Flatten triangle indices to u32 array
+    let indices: Vec<u32> = mesh.triangles
+        .iter()
+        .flat_map(|tri| tri.indices.iter().map(|&i| i as u32))
+        .collect();
+    
+    // Generate collision mesh (simplified if needed)
+    let (rapier_vertices, rapier_indices) = generate_mesh_collider(
+        &vertices,
+        &indices,
+        10000, // Target triangle count (reasonable for local region)
+    );
+    
+    // Calculate position offset (region center in world space)
+    let center_ecef = center.to_ecef();
+    let position = Vec3::new(
+        center_ecef.x as f32,
+        center_ecef.y as f32,
+        center_ecef.z as f32,
+    );
+    
+    // Create new collider at region center
+    create_mesh_collider(physics, rapier_vertices, rapier_indices, position)
 }
 
 /// Player character with physics
@@ -1357,7 +1438,58 @@ mod tests {
         let placed = player.place_voxel(&mut octree, MaterialId::GRASS, 15.0);
         
         // Might succeed or fail depending on octree state, but shouldn't crash
+        let _placed = player.place_voxel(&mut octree, MaterialId::GRASS, 15.0);
         // This tests the full interaction loop
+    }
+    
+    #[test]
+    fn test_mesh_collision_regeneration_api() {
+        // This test verifies the mesh regeneration API exists and doesn't crash
+        // Full collision testing is deferred until FloatingOrigin is implemented
+        // (f32 precision loss at large ECEF coordinates prevents accurate collision)
+        
+        let mut physics = PhysicsWorld::new();
+        let mut octree = Octree::new();
+        
+        // Create a small platform
+        let platform_center = VoxelCoord::new(0, 50, 0);
+        for x in -5..5 {
+            for z in -5..5 {
+                octree.set_voxel(VoxelCoord::new(x, 50, z), MaterialId::STONE);
+            }
+        }
+        
+        // Generate initial collision mesh
+        let collider = update_region_collision(
+            &mut physics,
+            &octree,
+            &platform_center,
+            4, // 2^4 = 16 voxels per side
+            None,
+        );
+        
+        // Verify collider was created
+        assert!(physics.colliders.contains(collider));
+        
+        // Modify the voxels (dig a hole)
+        octree.set_voxel(VoxelCoord::new(0, 50, 0), MaterialId::AIR);
+        octree.set_voxel(VoxelCoord::new(1, 50, 0), MaterialId::AIR);
+        
+        // Regenerate collision mesh (removing old one)
+        let new_collider = update_region_collision(
+            &mut physics,
+            &octree,
+            &platform_center,
+            4,
+            Some(collider),
+        );
+        
+        // Verify old collider was removed and new one created
+        assert!(!physics.colliders.contains(collider), "Old collider should be removed");
+        assert!(physics.colliders.contains(new_collider), "New collider should exist");
+        
+        // Test passes if no crashes occurred
+        // TODO: Add full collision simulation test once FloatingOrigin is implemented
     }
 }
 
