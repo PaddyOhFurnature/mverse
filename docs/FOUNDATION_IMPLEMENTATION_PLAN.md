@@ -105,10 +105,11 @@ Before building any terrain features, we must answer:
 **Tasks:**
 1. ✅ Understand the foundation problem
 2. ✅ Document the questions
-3. ⏳ Answer Question 1 (coordinate library)
-4. ⏳ Answer Question 2 (SRTM data access)
+3. ✅ Answer Question 1 (coordinate library → geoconv)
+4. ✅ Answer Question 2 (SRTM data access → NAS + OpenTopography + Earthdata)
 5. ⏳ Review Question 3 (existing TECH_SPEC design)
 6. ⏳ Plan Question 4 (validation strategy)
+7. ⏳ Choose GeoTIFF library (gdal vs geotiff - test with actual file)
 
 **Output:** Decisions documented, libraries chosen, test data acquired
 
