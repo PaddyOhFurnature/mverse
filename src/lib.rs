@@ -2,6 +2,7 @@
 //!
 //! Fresh implementation starting from foundation research.
 
+pub mod renderer;
 pub mod coordinates;
 pub mod elevation;
 pub mod materials;
