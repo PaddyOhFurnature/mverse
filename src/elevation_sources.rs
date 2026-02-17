@@ -100,6 +100,7 @@ pub trait ElevationSource: Send + Sync {
 /// Formula: elevation_meters = (R * 256 + G + B / 256) - 32768
 /// URL: https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png
 pub struct TerrariumSource {
+    #[allow(dead_code)]
     client: reqwest::blocking::Client,
 }
 
@@ -239,7 +240,9 @@ impl ElevationSource for TerrariumSource {
 /// High-quality elevation data, especially for US but has global coverage.
 /// REST API: https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer
 pub struct Usgs3DepSource {
+    #[allow(dead_code)]
     client: reqwest::blocking::Client,
+    #[allow(dead_code)]
     base_url: String,
 }
 
@@ -279,6 +282,7 @@ impl ElevationSource for Usgs3DepSource {
 ///
 /// Requires free API key from https://portal.opentopography.org/
 pub struct OpenTopographySource {
+    #[allow(dead_code)]
     client: reqwest::blocking::Client,
     api_key: Option<String>,
 }

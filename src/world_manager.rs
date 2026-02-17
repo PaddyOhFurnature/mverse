@@ -26,6 +26,7 @@ pub struct Chunk {
 pub struct WorldManager {
     chunks: HashMap<ChunkId, Chunk>,
     chunk_depth: usize,
+    #[allow(dead_code)]
     render_distance: f64,
     svo_depth: u8,
     last_camera_pos: Option<EcefPos>,
@@ -140,6 +141,7 @@ impl WorldManager {
     }
     
     /// Get 8 immediate neighbors of a chunk (N, S, E, W, NE, NW, SE, SW)
+    #[allow(dead_code)]
     fn get_neighbor_chunks(&self, chunk_id: &ChunkId) -> Vec<ChunkId> {
         use crate::chunks::chunk_bounds_gps;
         

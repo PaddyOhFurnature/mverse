@@ -20,7 +20,9 @@ struct DownloadTask {
     lat: f64,
     lon: f64,
     zoom: u8,
+    #[allow(dead_code)]
     priority: f32, // Lower = higher priority (e.g., distance from camera)
+    #[allow(dead_code)]
     added_at: Instant,
 }
 

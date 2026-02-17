@@ -269,7 +269,7 @@ impl Renderer {
             },
             wgpu::ImageCopyBuffer {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(self.size.height),
@@ -410,7 +410,7 @@ impl Renderer {
             },
             wgpu::ImageCopyBuffer {
                 buffer: &buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
                     rows_per_image: Some(self.size.height),

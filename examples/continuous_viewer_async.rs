@@ -3,12 +3,11 @@
 
 use metaverse_core::renderer::{Renderer, pipeline::BasicPipeline};
 use metaverse_core::renderer::greedy_mesh::greedy_mesh_block;
-use metaverse_core::renderer::skybox::SkyboxPipeline;
 use metaverse_core::continuous_world::ContinuousWorld;
 use metaverse_core::renderer::camera::Camera;
 use metaverse_core::renderer::pipeline::Vertex;
 use metaverse_core::coordinates::{gps_to_ecef, ecef_to_gps, GpsPos, EcefPos};
-use metaverse_core::svo::{AIR};
+use metaverse_core::svo::AIR;
 use std::sync::{Arc, Mutex, RwLock};
 use winit::application::ApplicationHandler;
 use winit::event::*;
@@ -24,7 +23,7 @@ const TEST_LON: f64 = 153.033586;
 #[derive(Debug, Clone)]
 enum MeshStatus {
     Idle,
-    Generating { position: [f64; 3], started_at: std::time::Instant },
+    Generating { position: [f64; 3] },
     Ready { vertices: Vec<Vertex>, indices: Vec<u32>, origin: [f64; 3] },
 }
 
@@ -32,7 +31,6 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pipeline: Option<BasicPipeline>,
-    skybox: Option<SkyboxPipeline>,
     camera: Camera,
     continuous_world: Option<Arc<RwLock<ContinuousWorld>>>,
     vertex_buffer: Option<wgpu::Buffer>,
@@ -46,7 +44,6 @@ struct App {
     last_mesh_camera_pos: [f64; 3],
     keys_pressed: std::collections::HashSet<KeyCode>,
     mouse_captured: bool,
-    last_mouse_pos: Option<(f64, f64)>,
     mesh_status: Arc<Mutex<MeshStatus>>,
 }
 
@@ -67,7 +64,6 @@ impl App {
             window: None,
             renderer: None,
             pipeline: None,
-            skybox: None,
             camera,
             continuous_world: None,
             vertex_buffer: None,
@@ -81,7 +77,6 @@ impl App {
             last_mesh_camera_pos: [position.x, position.y, position.z],
             keys_pressed: std::collections::HashSet::new(),
             mouse_captured: false,
-            last_mouse_pos: None,
             mesh_status: Arc::new(Mutex::new(MeshStatus::Idle)),
         }
     }
@@ -125,7 +120,6 @@ impl App {
         
         *mesh_status.lock().unwrap() = MeshStatus::Generating {
             position: camera_pos,
-            started_at: std::time::Instant::now(),
         };
         
         println!("[Async] Starting mesh generation...");
@@ -184,6 +178,81 @@ impl App {
             *status = MeshStatus::Idle;
         }
     }
+    
+    fn capture_screenshot(&mut self) {
+        let Some(renderer) = &mut self.renderer else { return };
+        let Some(pipeline) = &self.pipeline else { return };
+        
+        // Update camera uniforms for screenshot
+        let aspect = renderer.size.width as f32 / renderer.size.height as f32;
+        let (view, _camera_offset) = self.camera.view_matrix();
+        let proj = glam::Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 10000.0);
+        
+        // Apply model transform (translate mesh from world origin to camera-relative)
+        let cam_pos_f32 = glam::Vec3::new(
+            self.mesh_origin[0] as f32,
+            self.mesh_origin[1] as f32,
+            self.mesh_origin[2] as f32,
+        );
+        let model = glam::Mat4::from_translation(-cam_pos_f32);
+        let view_proj = proj * view * model;
+        
+        pipeline.update_uniforms(&renderer.queue, view_proj);
+        
+        // Render to texture and capture
+        let clear_color = wgpu::Color { r: 0.53, g: 0.81, b: 0.92, a: 1.0 };
+        let num_indices = self.num_indices;
+        let vertex_buffer = self.vertex_buffer.as_ref();
+        let index_buffer = self.index_buffer.as_ref();
+        
+        let result = renderer.render_and_capture(clear_color, |render_pass| {
+            if let (Some(vb), Some(ib)) = (vertex_buffer, index_buffer) {
+                if num_indices > 0 {
+                    render_pass.set_pipeline(&pipeline.pipeline);
+                    render_pass.set_bind_group(0, &pipeline.uniform_bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, vb.slice(..));
+                    render_pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..num_indices, 0, 0..1);
+                }
+            }
+        });
+        
+        match result {
+            Ok((pixels, width, height)) => {
+                // Save to PNG
+                let pos = self.camera.position;
+                let gps = ecef_to_gps(&EcefPos { x: pos.x, y: pos.y, z: pos.z });
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let filename = format!(
+                    "screenshot/async_{}_{:.6}_{:.6}_alt{:.0}m.png",
+                    timestamp,
+                    gps.lat_deg,
+                    gps.lon_deg,
+                    gps.elevation_m
+                );
+                
+                std::fs::create_dir_all("screenshot").ok();
+                
+                if let Err(e) = image::save_buffer(
+                    &filename,
+                    &pixels,
+                    width,
+                    height,
+                    image::ColorType::Rgba8
+                ) {
+                    eprintln!("✗ Failed to save: {}", e);
+                } else {
+                    println!("✓ Screenshot: {}", filename);
+                }
+            }
+            Err(e) => {
+                eprintln!("✗ Screenshot failed: {}", e);
+            }
+        }
+    }
 }
 
 fn generate_mesh(world: &RwLock<ContinuousWorld>, cam_pos: [f64; 3]) -> (Vec<Vertex>, Vec<u32>) {
@@ -221,7 +290,6 @@ impl ApplicationHandler for App {
         
         let renderer = pollster::block_on(Renderer::new(Arc::clone(&window)));
         let pipeline = BasicPipeline::new(&renderer.device, renderer.config.format);
-        let skybox = SkyboxPipeline::new(&renderer.device, renderer.config.format);
         
         let gps_center = GpsPos { lat_deg: TEST_LAT, lon_deg: TEST_LON, elevation_m: 0.0 };
         let center_ecef = gps_to_ecef(&gps_center);
@@ -232,7 +300,6 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.pipeline = Some(pipeline);
-        self.skybox = Some(skybox);
         self.continuous_world = Some(world);
         
         println!("\n✓ Ready! Requesting initial mesh async...\n");
@@ -248,9 +315,20 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if event.state.is_pressed() {
-                        self.keys_pressed.insert(code);
-                        if code == KeyCode::Escape {
-                            event_loop.exit();
+                        // F12 takes screenshot
+                        if code == KeyCode::F12 {
+                            println!("\n[Screenshot] Capturing...");
+                            self.capture_screenshot();
+                        }
+                        // Escape releases mouse, doesn't exit
+                        else if code == KeyCode::Escape && self.mouse_captured {
+                            if let Some(window) = &self.window {
+                                self.mouse_captured = false;
+                                window.set_cursor_visible(true);
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                            }
+                        } else {
+                            self.keys_pressed.insert(code);
                         }
                     } else {
                         self.keys_pressed.remove(&code);
@@ -302,8 +380,8 @@ impl ApplicationHandler for App {
                 }
                 
                 // Render with WORLD-space mesh
-                if let (Some(window), Some(renderer), Some(pipeline), Some(_skybox)) = 
-                    (&self.window, &mut self.renderer, &self.pipeline, &self.skybox) {
+                if let (Some(window), Some(renderer), Some(pipeline)) = 
+                    (&self.window, &mut self.renderer, &self.pipeline) {
                     
                     let aspect = renderer.size.width as f32 / renderer.size.height as f32;
                     
