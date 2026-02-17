@@ -6,3 +6,4 @@ pub mod coordinates;
 pub mod elevation;
 pub mod materials;
 pub mod voxel;
+pub mod terrain;
