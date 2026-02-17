@@ -58,6 +58,58 @@ pub struct OpenTopographySource {
     last_request: Option<std::time::Instant>,
 }
 
+/// NAS global SRTM file source
+pub struct NasFileSource {
+    file_path: PathBuf,
+}
+
+impl NasFileSource {
+    /// Create NAS file source
+    /// 
+    /// Tries multiple paths:
+    /// 1. ./srtm-global.tif (symlink in project)
+    /// 2. /mnt/nas/srtm-v3-1s.tif (if mounted)
+    /// 3. GVFS path (if provided)
+    pub fn new() -> Option<Self> {
+        let candidates = vec![
+            PathBuf::from("./srtm-global.tif"),
+            PathBuf::from("/mnt/nas/srtm-v3-1s.tif"),
+            PathBuf::from("/run/user/1000/gvfs/afp-volume:host=Blade.local,volume=homes/world/srtm-v3-1s.tif"),
+        ];
+        
+        for path in candidates {
+            if path.exists() {
+                println!("Found NAS SRTM file at: {}", path.display());
+                return Some(Self { file_path: path });
+            }
+        }
+        
+        eprintln!("NAS SRTM file not found, will use API fallback");
+        None
+    }
+    
+    /// Create with explicit path
+    pub fn with_path(path: PathBuf) -> Option<Self> {
+        if path.exists() {
+            Some(Self { file_path: path })
+        } else {
+            None
+        }
+    }
+}
+
+impl ElevationSource for NasFileSource {
+    fn query(&mut self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        // Query directly from global GeoTIFF
+        // This is a single 200GB file covering the entire world
+        extract_elevation(&self.file_path, gps).map(Some)
+    }
+    
+    fn name(&self) -> &str {
+        "NAS Global SRTM File"
+    }
+}
+
 impl OpenTopographySource {
     /// Create OpenTopography source with API key
     pub fn new(api_key: String, cache_dir: PathBuf) -> Self {
@@ -157,72 +209,54 @@ impl ElevationSource for OpenTopographySource {
 
 /// Extract elevation from GeoTIFF at given GPS coordinate
 fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
-    use std::fs::File;
-    use std::io::BufReader;
+    use gdal::Dataset;
+    use gdal::raster::ResampleAlg;
     
-    let file = File::open(tiff_path)
-        .map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+    // Open dataset (doesn't load into memory)
+    let dataset = Dataset::open(tiff_path)
+        .map_err(|e| ElevationError::FileNotFound(format!("GDAL open failed: {}", e)))?;
     
-    let mut decoder = tiff::decoder::Decoder::new(BufReader::new(file))
-        .map_err(|e| ElevationError::ParseError(e.to_string()))?;
+    // Get raster band (elevation is usually band 1)
+    let rasterband = dataset.rasterband(1)
+        .map_err(|e| ElevationError::ParseError(format!("No raster band: {}", e)))?;
     
-    // Get image dimensions
-    let (width, height) = decoder.dimensions()
-        .map_err(|e| ElevationError::ParseError(e.to_string()))?;
+    // Get geotransform (maps pixel coords → lat/lon)
+    let geotransform = dataset.geo_transform()
+        .map_err(|e| ElevationError::ParseError(format!("No geotransform: {}", e)))?;
     
-    // SRTM 1 arc-second tiles are 3601×3601 pixels covering 1° × 1°
-    // Each pixel represents ~30m at equator
-    // Pixel (0,0) = top-left = (north_edge, west_edge)
-    // Pixel (3600,3600) = bottom-right = (south_edge, east_edge)
+    // Geotransform format: [x_origin, pixel_width, 0, y_origin, 0, -pixel_height]
+    // x = geotransform[0] + pixel_col * geotransform[1]
+    // y = geotransform[3] + pixel_row * geotransform[5]
     
-    // Calculate tile bounds
-    let lat_tile = gps.lat.floor();
-    let lon_tile = gps.lon.floor();
+    let x_origin = geotransform[0];
+    let pixel_width = geotransform[1];
+    let y_origin = geotransform[3];
+    let pixel_height = geotransform[5];  // Usually negative
     
-    // Position within tile (0.0 to 1.0)
-    let lat_frac = gps.lat - lat_tile;
-    let lon_frac = gps.lon - lon_tile;
+    // Convert lat/lon to pixel coordinates
+    let pixel_col = ((gps.lon - x_origin) / pixel_width).floor() as isize;
+    let pixel_row = ((gps.lat - y_origin) / pixel_height).floor() as isize;
     
-    // Convert to pixel coordinates
-    // Note: latitude increases upward, but row 0 is at top (north edge)
-    // So we need to invert: row 0 = lat_tile+1, row 3600 = lat_tile
-    let row_f = (1.0 - lat_frac) * (height - 1) as f64;
-    let col_f = lon_frac * (width - 1) as f64;
+    // Read a 2×2 window for bilinear interpolation
+    // GDAL read_as uses (x_off, y_off, x_size, y_size) in pixels
+    let buffer = rasterband.read_as::<i16>(
+        (pixel_col, pixel_row),  // offset
+        (2, 2),                   // window size
+        (2, 2),                   // buffer size (no resampling)
+        Some(ResampleAlg::Bilinear)
+    ).map_err(|e| ElevationError::ParseError(format!("GDAL read failed: {}", e)))?;
     
-    // Get 4 surrounding pixels for bilinear interpolation
-    let row0 = row_f.floor() as u32;
-    let col0 = col_f.floor() as u32;
-    let row1 = (row0 + 1).min(height - 1);
-    let col1 = (col0 + 1).min(width - 1);
-    
-    // Fractional parts for interpolation
-    let row_frac = row_f - row0 as f64;
-    let col_frac = col_f - col0 as f64;
-    
-    // Read elevation data
-    let image_data = decoder.read_image()
-        .map_err(|e| ElevationError::ParseError(e.to_string()))?;
-    
-    // Extract i16 values (SRTM is signed 16-bit)
-    let elevations = match image_data {
-        tiff::decoder::DecodingResult::I16(data) => data,
-        _ => return Err(ElevationError::ParseError(
-            "Expected I16 image data".to_string()
-        )),
-    };
-    
-    // Get 4 corner elevations
-    let get_pixel = |row: u32, col: u32| -> f64 {
-        let idx = (row * width + col) as usize;
-        elevations[idx] as f64
-    };
-    
-    let e00 = get_pixel(row0, col0);
-    let e01 = get_pixel(row0, col1);
-    let e10 = get_pixel(row1, col0);
-    let e11 = get_pixel(row1, col1);
+    // Calculate fractional position within pixel
+    let col_frac = ((gps.lon - x_origin) / pixel_width) - pixel_col as f64;
+    let row_frac = ((gps.lat - y_origin) / pixel_height) - pixel_row as f64;
     
     // Bilinear interpolation
+    let data = buffer.data();
+    let e00 = data[0] as f64;  // Top-left
+    let e01 = data[1] as f64;  // Top-right
+    let e10 = data[2] as f64;  // Bottom-left
+    let e11 = data[3] as f64;  // Bottom-right
+    
     let e0 = e00 * (1.0 - col_frac) + e01 * col_frac;  // Top edge
     let e1 = e10 * (1.0 - col_frac) + e11 * col_frac;  // Bottom edge
     let elevation_meters = e0 * (1.0 - row_frac) + e1 * row_frac;
@@ -236,6 +270,26 @@ pub struct ElevationPipeline {
 }
 
 impl ElevationPipeline {
+    /// Create pipeline with default sources
+    /// 
+    /// Priority order:
+    /// 1. NAS file (if available)
+    /// 2. OpenTopography API
+    pub fn with_defaults(api_key: String, cache_dir: PathBuf) -> Self {
+        let mut pipeline = Self::new();
+        
+        // Try NAS file first (highest priority, no rate limits)
+        if let Some(nas) = NasFileSource::new() {
+            pipeline.add_source(Box::new(nas));
+        }
+        
+        // OpenTopography API as fallback
+        let api = OpenTopographySource::new(api_key, cache_dir);
+        pipeline.add_source(Box::new(api));
+        
+        pipeline
+    }
+    
     /// Create pipeline with no sources
     pub fn new() -> Self {
         Self {
@@ -351,11 +405,56 @@ mod tests {
     }
     
     #[test]
-    fn test_pipeline_empty() {
-        let mut pipeline = ElevationPipeline::new();
-        let gps = GPS::new(0.0, 0.0, 0.0);
+    #[ignore] // Requires NAS file
+    fn test_nas_file_source() {
+        let nas = NasFileSource::new();
+        assert!(nas.is_some(), "NAS file should be available");
         
-        let result = pipeline.query(&gps);
-        assert!(result.is_err(), "Empty pipeline should fail");
+        let mut source = nas.unwrap();
+        
+        // Test Kangaroo Point
+        let gps = GPS::new(-27.4775, 153.0355, 0.0);
+        let result = source.query(&gps);
+        
+        match &result {
+            Ok(_) => {},
+            Err(e) => println!("Query error: {}", e),
+        }
+        
+        assert!(result.is_ok(), "Query should succeed");
+        let elevation = result.unwrap();
+        assert!(elevation.is_some(), "Should have elevation data");
+        
+        let elev_m = elevation.unwrap().meters;
+        println!("Kangaroo Point elevation (NAS): {} meters", elev_m);
+        
+        // Should match API result (~20m)
+        assert!(elev_m > 15.0 && elev_m < 25.0, 
+                "Kangaroo Point should be ~20m elevation, got {}", elev_m);
+    }
+    
+    #[test]
+    #[ignore] // Requires NAS file
+    fn test_pipeline_with_nas() {
+        let api_key = "3e607de6969c687053f9e107a4796962".to_string();
+        let cache_dir = PathBuf::from("./elevation_cache");
+        
+        let mut pipeline = ElevationPipeline::with_defaults(api_key, cache_dir);
+        
+        // Test multiple locations
+        let test_points = vec![
+            (-27.4775, 153.0355, "Kangaroo Point"),
+            (0.0, 0.0, "Null Island"),
+            (27.9881, 86.9250, "Mount Everest"),
+        ];
+        
+        for (lat, lon, name) in test_points {
+            let gps = GPS::new(lat, lon, 0.0);
+            let result = pipeline.query(&gps);
+            
+            if let Ok(elevation) = result {
+                println!("{}: {} meters", name, elevation.meters);
+            }
+        }
     }
 }

@@ -7,6 +7,10 @@ edition = "2024"
 # Phase 1: Coordinate system
 geoconv = "0.1"  # GPS (lat/lon/alt) ↔ ECEF conversions, WGS84
 
+# Phase 2: Elevation data
+gdal = "0.18"  # GeoTIFF with random access for large files
+gdal-sys = "0.11"  # GDAL system bindings
+
 rayon = "1"
 sha2 = "0.10"
 serde = { version = "1", features = ["derive"] }
