@@ -10,3 +10,4 @@ pub mod voxel;
 pub mod terrain;
 pub mod mesh;
 pub mod marching_cubes;
+pub mod physics;
