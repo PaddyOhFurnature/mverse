@@ -39,3 +39,7 @@ lru = "0.12"  # LRU cache for warm cache tier
 tempfile = "3"
 env_logger = "0.11"
 
+
+[[example]]
+name = "scale_test"
+path = "examples/scale_test.rs"
