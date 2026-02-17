@@ -1,12 +1,13 @@
-//! Voxel coordinate system
+//! Voxel system - coordinates and sparse octree storage
 //!
 //! Maps between ECEF (Earth-Centered Earth-Fixed) f64 coordinates
-//! and integer voxel grid coordinates.
+//! and integer voxel grid coordinates, plus sparse voxel octree for storage.
 //!
 //! World bounds: ±6.4M meters (contains Earth + atmosphere)
 //! Voxel size: 1 meter
 
 use crate::coordinates::ECEF;
+use crate::materials::MaterialId;
 
 /// World bounds (cube containing Earth)
 pub const WORLD_MIN_METERS: f64 = -6_400_000.0;
@@ -67,6 +68,231 @@ impl VoxelCoord {
         self.x >= 0 && self.x < VOXEL_GRID_SIZE &&
         self.y >= 0 && self.y < VOXEL_GRID_SIZE &&
         self.z >= 0 && self.z < VOXEL_GRID_SIZE
+    }
+}
+
+/// Sparse voxel octree node
+#[derive(Debug, Clone)]
+pub enum OctreeNode {
+    /// Empty region (all AIR) - most common, optimize for this
+    Empty,
+    
+    /// Uniform region (entire subtree is same material)
+    Solid(MaterialId),
+    
+    /// Mixed region with 8 children
+    Branch {
+        /// 8 child octants (heap allocated)
+        /// Index: x | (y << 1) | (z << 2)
+        children: Box<[OctreeNode; 8]>,
+    },
+}
+
+impl OctreeNode {
+    /// Create a new empty node
+    pub fn empty() -> Self {
+        OctreeNode::Empty
+    }
+    
+    /// Create a new solid node
+    pub fn solid(material: MaterialId) -> Self {
+        if material == MaterialId::AIR {
+            OctreeNode::Empty
+        } else {
+            OctreeNode::Solid(material)
+        }
+    }
+    
+    /// Create a new branch with all empty children
+    pub fn branch() -> Self {
+        OctreeNode::Branch {
+            children: Box::new([
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+                OctreeNode::Empty,
+            ]),
+        }
+    }
+    
+    /// Check if this node is a leaf (Empty or Solid)
+    pub fn is_leaf(&self) -> bool {
+        matches!(self, OctreeNode::Empty | OctreeNode::Solid(_))
+    }
+    
+    /// Get the material if this is a uniform node
+    pub fn material(&self) -> Option<MaterialId> {
+        match self {
+            OctreeNode::Empty => Some(MaterialId::AIR),
+            OctreeNode::Solid(mat) => Some(*mat),
+            OctreeNode::Branch { .. } => None,
+        }
+    }
+}
+
+/// Sparse voxel octree for world storage
+pub struct Octree {
+    root: OctreeNode,
+    max_depth: u8,
+}
+
+impl Octree {
+    /// Create new octree (initially all empty)
+    pub fn new() -> Self {
+        Self {
+            root: OctreeNode::Empty,
+            max_depth: 23,  // ~1.5m leaf size
+        }
+    }
+    
+    /// Get material at voxel position
+    pub fn get_voxel(&self, pos: VoxelCoord) -> MaterialId {
+        if !pos.is_valid() {
+            return MaterialId::AIR;
+        }
+        
+        self.get_recursive(&self.root, pos, 0, 0, 0, VOXEL_GRID_SIZE)
+    }
+    
+    fn get_recursive(
+        &self,
+        node: &OctreeNode,
+        pos: VoxelCoord,
+        min_x: i64,
+        min_y: i64,
+        min_z: i64,
+        size: i64,
+    ) -> MaterialId {
+        match node {
+            OctreeNode::Empty => MaterialId::AIR,
+            OctreeNode::Solid(material) => *material,
+            OctreeNode::Branch { children } => {
+                let half = size / 2;
+                
+                // Calculate child index (0-7)
+                let child_x = if pos.x >= min_x + half { 1 } else { 0 };
+                let child_y = if pos.y >= min_y + half { 1 } else { 0 };
+                let child_z = if pos.z >= min_z + half { 1 } else { 0 };
+                let child_idx = (child_x | (child_y << 1) | (child_z << 2)) as usize;
+                
+                // Calculate child bounds
+                let child_min_x = min_x + child_x * half;
+                let child_min_y = min_y + child_y * half;
+                let child_min_z = min_z + child_z * half;
+                
+                self.get_recursive(
+                    &children[child_idx],
+                    pos,
+                    child_min_x,
+                    child_min_y,
+                    child_min_z,
+                    half,
+                )
+            }
+        }
+    }
+    
+    /// Set material at voxel position
+    pub fn set_voxel(&mut self, pos: VoxelCoord, material: MaterialId) {
+        if !pos.is_valid() {
+            return;
+        }
+        
+        Self::set_recursive(&mut self.root, pos, 0, 0, 0, VOXEL_GRID_SIZE, 0, self.max_depth, material);
+    }
+    
+    fn set_recursive(
+        node: &mut OctreeNode,
+        pos: VoxelCoord,
+        min_x: i64,
+        min_y: i64,
+        min_z: i64,
+        size: i64,
+        depth: u8,
+        max_depth: u8,
+        material: MaterialId,
+    ) {
+        // Base case: reached max depth, set leaf
+        if depth >= max_depth || size <= 1 {
+            *node = if material == MaterialId::AIR {
+                OctreeNode::Empty
+            } else {
+                OctreeNode::Solid(material)
+            };
+            return;
+        }
+        
+        // If node is currently a leaf, split it if needed
+        if node.is_leaf() {
+            let current_material = node.material().unwrap();
+            if current_material == material {
+                return; // Already correct material
+            }
+            
+            // Split: create branch with all children set to current material
+            let mut new_branch = OctreeNode::branch();
+            if let OctreeNode::Branch { children } = &mut new_branch {
+                for child in children.iter_mut() {
+                    *child = if current_material == MaterialId::AIR {
+                        OctreeNode::Empty
+                    } else {
+                        OctreeNode::Solid(current_material)
+                    };
+                }
+            }
+            *node = new_branch;
+        }
+        
+        // Recurse into appropriate child
+        if let OctreeNode::Branch { children } = node {
+            let half = size / 2;
+            
+            // Calculate child index
+            let child_x = if pos.x >= min_x + half { 1 } else { 0 };
+            let child_y = if pos.y >= min_y + half { 1 } else { 0 };
+            let child_z = if pos.z >= min_z + half { 1 } else { 0 };
+            let child_idx = (child_x | (child_y << 1) | (child_z << 2)) as usize;
+            
+            // Calculate child bounds
+            let child_min_x = min_x + child_x * half;
+            let child_min_y = min_y + half * child_y;
+            let child_min_z = min_z + half * child_z;
+            
+            Self::set_recursive(
+                &mut children[child_idx],
+                pos,
+                child_min_x,
+                child_min_y,
+                child_min_z,
+                half,
+                depth + 1,
+                max_depth,
+                material,
+            );
+            
+            // Try to collapse: if all children are same material, replace branch with solid
+            let all_same = children.iter().all(|child| {
+                child.material() == Some(material)
+            });
+            
+            if all_same {
+                *node = if material == MaterialId::AIR {
+                    OctreeNode::Empty
+                } else {
+                    OctreeNode::Solid(material)
+                };
+            }
+        }
+    }
+}
+
+impl Default for Octree {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -176,5 +402,60 @@ mod tests {
         assert!(max_voxel.x < VOXEL_GRID_SIZE);
         assert!(max_voxel.y < VOXEL_GRID_SIZE);
         assert!(max_voxel.z < VOXEL_GRID_SIZE);
+    }
+    
+    #[test]
+    fn test_octree_empty() {
+        let octree = Octree::new();
+        let pos = VoxelCoord::new(100, 200, 300);
+        assert_eq!(octree.get_voxel(pos), MaterialId::AIR);
+    }
+    
+    #[test]
+    fn test_octree_set_get() {
+        let mut octree = Octree::new();
+        let pos = VoxelCoord::new(1000, 2000, 3000);
+        
+        // Initially AIR
+        assert_eq!(octree.get_voxel(pos), MaterialId::AIR);
+        
+        // Set to STONE
+        octree.set_voxel(pos, MaterialId::STONE);
+        assert_eq!(octree.get_voxel(pos), MaterialId::STONE);
+        
+        // Set back to AIR
+        octree.set_voxel(pos, MaterialId::AIR);
+        assert_eq!(octree.get_voxel(pos), MaterialId::AIR);
+    }
+    
+    #[test]
+    fn test_octree_multiple_voxels() {
+        let mut octree = Octree::new();
+        
+        let pos1 = VoxelCoord::new(100, 100, 100);
+        let pos2 = VoxelCoord::new(200, 200, 200);
+        let pos3 = VoxelCoord::new(300, 300, 300);
+        
+        octree.set_voxel(pos1, MaterialId::STONE);
+        octree.set_voxel(pos2, MaterialId::DIRT);
+        octree.set_voxel(pos3, MaterialId::GRASS);
+        
+        assert_eq!(octree.get_voxel(pos1), MaterialId::STONE);
+        assert_eq!(octree.get_voxel(pos2), MaterialId::DIRT);
+        assert_eq!(octree.get_voxel(pos3), MaterialId::GRASS);
+    }
+    
+    #[test]
+    fn test_octree_adjacent_voxels() {
+        let mut octree = Octree::new();
+        
+        let base = VoxelCoord::new(5000, 5000, 5000);
+        octree.set_voxel(base, MaterialId::STONE);
+        
+        // Adjacent voxels should still be AIR
+        assert_eq!(octree.get_voxel(VoxelCoord::new(5001, 5000, 5000)), MaterialId::AIR);
+        assert_eq!(octree.get_voxel(VoxelCoord::new(4999, 5000, 5000)), MaterialId::AIR);
+        assert_eq!(octree.get_voxel(VoxelCoord::new(5000, 5001, 5000)), MaterialId::AIR);
+        assert_eq!(octree.get_voxel(VoxelCoord::new(5000, 5000, 5001)), MaterialId::AIR);
     }
 }
