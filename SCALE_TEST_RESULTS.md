@@ -38,32 +38,48 @@
 - **Voxel columns:** 250,000 (75M voxels estimated)
 - **SRTM samples:** 18×18 = 324 points
 
-### 1000m × 1000m ⚠️
+### 1000m × 1000m ❌ HARD LIMIT
 - **Generation:** 51.83s ✓
-- **Mesh extraction:** >180s (timed out) ✗
+- **Mesh extraction:** >180s (completes but slow)
+- **GPU Upload:** **FAILS** - Buffer too large
 - **Voxel columns:** 1,000,000 (300M voxels estimated)
 - **SRTM samples:** 35×35 = 1,225 points
-- **Predicted vertices:** ~24M (8M triangles)
-- **Predicted memory:** ~730 MB mesh data
+- **Vertices:** ~14.5M (estimated)
+- **Mesh buffer size:** 463 MB (14.5M × 32 bytes)
+- **GPU max buffer:** 256 MB (wgpu/hardware limit)
+
+**Error:**
+```
+Buffer size 463891392 is greater than the maximum buffer size (268435456)
+```
+
+**HARD WALL:** Cannot create single mesh buffer >256 MB
 
 ### 2000m+ ❌
 Not tested - 1000m already too slow
 
 ## Performance Scaling
 
-| Size (m) | Area (m²) | Columns | Gen Time | Mesh Time | Total Time | Vertices |
-|----------|-----------|---------|----------|-----------|------------|----------|
-| 120      | 14,400    | 14.4K   | 1.2s     | 0.8s      | 2.1s       | 410K     |
-| 250      | 62,500    | 62.5K   | 3.6s     | 6.1s      | 9.6s       | 1.5M     |
-| 500      | 250,000   | 250K    | 13.0s    | 46.9s     | 59.9s      | 6.1M     |
-| 1000     | 1,000,000 | 1M      | 51.8s    | >180s     | >231s      | ~24M (est)|
+| Size (m) | Area (m²) | Columns | Gen Time | Mesh Time | Total Time | Vertices | Buffer Size | Status |
+|----------|-----------|---------|----------|-----------|------------|----------|-------------|--------|
+| 120      | 14,400    | 14.4K   | 1.2s     | 0.8s      | 2.1s       | 410K     | 12.5 MB     | ✅ Works |
+| 250      | 62,500    | 62.5K   | 3.6s     | 6.1s      | 9.6s       | 1.5M     | 44.9 MB     | ✅ Works |
+| 500      | 250,000   | 250K    | 13.0s    | 46.9s     | 59.9s      | 6.1M     | 186 MB      | ✅ Works |
+| 1000     | 1,000,000 | 1M      | 51.8s    | ~240s     | ~292s      | ~14.5M   | 463 MB      | ❌ GPU limit |
 
 **Generation scales linearly:** ~0.05s per 1,000 columns  
 **Mesh extraction scales worse than linear:** Growing faster than O(n)
 
 ## Bottlenecks Identified
 
-### 1. Mesh Extraction Complexity
+### 1. GPU Buffer Size Limit (HARD WALL)
+- **wgpu max buffer size:** 256 MB
+- 500m mesh = 186 MB ✓ (fits)
+- 1000m mesh = 463 MB ✗ (exceeds limit by 1.8×)
+- **Cannot create single mesh >256 MB regardless of optimization**
+- **REQUIRES chunk-based approach** - split into multiple buffers
+
+### 2. Mesh Extraction Complexity
 - Marching cubes processes every voxel edge
 - 1000m × 1000m = 1M columns × 300 voxels = 300M voxels
 - Each voxel checked for 12 edge intersections
@@ -91,6 +107,13 @@ Not tested - 1000m already too slow
 ✅ Performance acceptable up to 500m × 500m  
 ✅ Bilinear interpolation is fast (13s for 250K columns)  
 ✅ 1m voxel resolution provides sufficient detail  
+✅ **Rendering performance excellent** - 60 FPS with 6.1M vertices!
+
+### Hard Limits Found
+❌ **GPU buffer size: 256 MB** - Cannot create larger single mesh  
+❌ **500m is practical maximum** for single monolithic mesh (186 MB)  
+❌ **1000m requires 463 MB** - Exceeds GPU buffer limit by 1.8×  
+❌ Mesh extraction >60s for areas >500m  
 
 ### What Doesn't Scale
 ❌ Single monolithic mesh generation  
@@ -101,27 +124,26 @@ Not tested - 1000m already too slow
 
 ### Immediate Needs
 
-**For 1km+ scale:**
-1. **LOD system** - Multi-resolution voxel grid
+**For 1km+ scale - MANDATORY changes:**
+1. **Chunk-based rendering** - REQUIRED to bypass 256 MB GPU buffer limit
+   - Split terrain into 256m × 256m chunks
+   - Each chunk = separate GPU buffer (<50 MB each)
+   - Load/unload chunks based on camera position
+   
+2. **LOD system** - Multi-resolution voxel grid
    - Near: 1m resolution
    - Mid: 2-4m resolution
    - Far: 8-16m resolution
    - Very far: 32-64m resolution
-
-2. **Chunk-based rendering** - Divide into manageable pieces
-   - 128m or 256m chunks
-   - Load/unload based on distance
-   - Frustum cull entire chunks
 
 3. **Async mesh extraction** - Don't block on generation
    - Generate chunks in background
    - Stream meshes to GPU as ready
    - Show lower LOD while high LOD loads
 
-4. **Octree mesh extraction optimization**
-   - Skip empty regions (already sparse)
-   - Use jump pointers for faster traversal
-   - Consider dual contouring instead of marching cubes
+4. **Frustum culling** - Don't render off-screen chunks
+   - Test chunk bounding boxes against camera frustum
+   - Skip rendering for off-screen chunks
 
 ## Next Steps
 
@@ -156,10 +178,11 @@ Not tested - 1000m already too slow
 - <4 GB VRAM usage
 
 **Current performance:**
-- View distance: 500m maximum (practical)
+- View distance: 500m maximum (GPU buffer limit)
 - Detail: 1m everywhere (no LOD)
-- 60 FPS: Only if <500K vertices (~250m area)
+- 60 FPS: YES even with 6.1M vertices! (GPU is strong)
 - VRAM: 186 MB for 500m area
+- Hard limit: 256 MB GPU buffer (wgpu max)
 
 **Gap to close:**
 - View distance: 10-20× larger needed

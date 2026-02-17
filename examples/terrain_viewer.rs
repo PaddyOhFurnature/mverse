@@ -22,7 +22,7 @@ use winit::{
 fn main() {
     env_logger::init();
     
-    println!("=== Terrain Viewer - 120m × 120m ===\n");
+    println!("=== Terrain Viewer - 250m × 250m ===\n");
     
     // Create window
     let event_loop = EventLoop::new().unwrap();
@@ -42,7 +42,8 @@ fn main() {
     let mut pipeline = RenderPipeline::new(&context);
     
     // Generate terrain (EXACT SAME as screenshot tool)
-    println!("\nGenerating 120m × 120m terrain...");
+    println!("\nGenerating 250m × 250m terrain...");
+    println!("(Good balance: 10s load, 1.5M vertices, 60 FPS)");
     let start = Instant::now();
     
     let nas = NasFileSource::new();
@@ -63,13 +64,13 @@ fn main() {
     let mut octree = Octree::new();
     
     let origin = GPS::new(-27.4775, 153.0355, 0.0);
-    generator.generate_region(&mut octree, &origin, 120.0)
+    generator.generate_region(&mut octree, &origin, 250.0)
         .expect("Failed to generate terrain");
     
     let origin_ecef = origin.to_ecef();
     let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
     
-    let terrain_mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
+    let terrain_mesh = extract_octree_mesh(&octree, &origin_voxel, 8);
     
     println!("Generated in {:.2}s", start.elapsed().as_secs_f32());
     println!("  Vertices: {}", terrain_mesh.vertex_count());
