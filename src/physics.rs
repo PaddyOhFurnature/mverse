@@ -461,6 +461,9 @@ impl Player {
     ) {
         const WALK_SPEED: f32 = 4.5; // m/s (average walking speed)
         const JUMP_SPEED: f32 = 5.0; // m/s (initial upward velocity)
+        const GROUND_ACCEL: f32 = 20.0; // m/s² (how fast we reach walk speed)
+        const GROUND_DECEL: f32 = 15.0; // m/s² (how fast we stop)
+        const AIR_ACCEL: f32 = 5.0; // m/s² (reduced control in air)
         
         // Get local "up" direction (away from Earth center)
         let local_up = Vec3::new(
@@ -489,36 +492,88 @@ impl Player {
             Vec3::Z // Fallback
         };
         
-        // Calculate desired velocity (horizontal movement)
-        let desired_velocity = 
-            (forward_tangent * move_input.z + right_tangent * move_input.x) * WALK_SPEED;
+        // Calculate desired direction (horizontal movement)
+        let move_direction = forward_tangent * move_input.z + right_tangent * move_input.x;
+        let has_input = move_direction.length_squared() > 0.001;
+        
+        // Get current horizontal velocity (project out vertical component)
+        let vertical_velocity = local_up * local_up.dot(self.velocity);
+        let horizontal_velocity = self.velocity - vertical_velocity;
+        
+        // Apply acceleration/deceleration based on ground state
+        let (accel, target_speed) = if self.on_ground {
+            if has_input {
+                // Accelerate toward desired direction
+                (GROUND_ACCEL, WALK_SPEED)
+            } else {
+                // Decelerate to stop
+                (GROUND_DECEL, 0.0)
+            }
+        } else {
+            // Air control: reduced acceleration, no deceleration
+            if has_input {
+                (AIR_ACCEL, WALK_SPEED)
+            } else {
+                // Maintain velocity in air (no deceleration)
+                (0.0, horizontal_velocity.length())
+            }
+        };
+        
+        // Calculate new horizontal velocity with smooth acceleration
+        let new_horizontal_velocity = if has_input {
+            let desired_velocity = move_direction.normalize() * target_speed;
+            
+            // Lerp toward desired velocity
+            let max_delta = accel * dt;
+            let delta = desired_velocity - horizontal_velocity;
+            let delta_length = delta.length();
+            
+            if delta_length > max_delta {
+                horizontal_velocity + delta / delta_length * max_delta
+            } else {
+                desired_velocity
+            }
+        } else if self.on_ground {
+            // Decelerate to stop
+            let speed = horizontal_velocity.length();
+            if speed > 0.001 {
+                let decel_amount = (GROUND_DECEL * dt).min(speed);
+                horizontal_velocity * (1.0 - decel_amount / speed)
+            } else {
+                Vec3::ZERO
+            }
+        } else {
+            // Maintain velocity in air
+            horizontal_velocity
+        };
+        
+        // Get current vertical velocity
+        let mut vertical_velocity = local_up * local_up.dot(self.velocity);
         
         // Handle jump
         if jump_input && self.on_ground {
             // Add upward impulse
-            self.velocity += local_up * JUMP_SPEED;
+            vertical_velocity += local_up * JUMP_SPEED;
             self.on_ground = false;
         }
         
         // Apply gravity
         let gravity = PhysicsWorld::gravity_at_position(&self.position);
-        self.velocity += gravity * dt;
+        let new_vertical_velocity = vertical_velocity + gravity * dt;
         
-        // Combine horizontal desired velocity with current vertical velocity
-        let vertical_component = local_up * local_up.dot(self.velocity);
-        let horizontal_velocity = desired_velocity;
-        self.velocity = horizontal_velocity + vertical_component;
+        // Combine horizontal and vertical components
+        self.velocity = new_horizontal_velocity + new_vertical_velocity;
         
-        // Update position
-        let new_pos = self.position;
+        // Update position in rigidbody
         let delta = self.velocity * dt;
         
         if let Some(body) = physics.bodies.get_mut(self.body_handle) {
+            let current_pos = body.translation();
             body.set_translation(
                 vector![
-                    new_pos.x as f32 + delta.x,
-                    new_pos.y as f32 + delta.y,
-                    new_pos.z as f32 + delta.z
+                    current_pos.x + delta.x,
+                    current_pos.y + delta.y,
+                    current_pos.z + delta.z
                 ],
                 true,
             );
@@ -932,6 +987,12 @@ mod tests {
         
         let gps = GPS::new(0.0, 0.0, 0.0);
         let mut player = Player::new(&mut physics, gps, 0.0);
+        
+        // Override to local coords for testing (avoid f32 precision issues with ECEF)
+        if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+            body.set_translation(vector![0.0, 1.0, 0.0], true);
+        }
+        player.sync_from_physics(&physics);
         
         // Record starting position
         player.sync_from_physics(&physics);
