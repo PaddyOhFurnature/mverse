@@ -20,7 +20,7 @@ use metaverse_core::{
 use glam::{Vec3, Mat4};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use winit::{
     event::*,
     event_loop::EventLoop,
@@ -214,22 +214,16 @@ fn main() {
     println!("  Space - Jump (walk mode) / Up (fly mode)");
     println!("  Shift - Sprint (walk mode) / Down (fly mode)");
     println!("  F - Toggle Walk/Fly mode");
+    println!("  F12 - Take screenshot");
     println!("  Mouse - Look around");
     println!("  Left Click - Grab mouse");
-    println!("  ESC - Quit");
+    println!("  ESC - Release mouse");
     println!("========================================\n");
     
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { ref event, window_id } if window_id == window.id() => match event {
-                WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput {
-                    event: KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        ..
-                    },
-                    ..
-                } => elwt.exit(),
+                WindowEvent::CloseRequested => elwt.exit(),
                 
                 WindowEvent::Resized(physical_size) => {
                     context.resize(*physical_size);
@@ -244,6 +238,25 @@ fn main() {
                     let pressed = *state == ElementState::Pressed;
                     if let PhysicalKey::Code(code) = physical_key {
                         match code {
+                            KeyCode::Escape if pressed => {
+                                // Release mouse cursor
+                                window.set_cursor_visible(true);
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                cursor_grabbed = false;
+                                println!("Mouse released (click to grab again)");
+                            }
+                            KeyCode::F12 if pressed => {
+                                // Take screenshot
+                                take_screenshot(
+                                    &context,
+                                    &mut pipeline,
+                                    &mut camera,
+                                    &player,
+                                    &terrain_buffer,
+                                    &player_buffer,
+                                    &player_model_bind_group,
+                                );
+                            }
                             KeyCode::KeyW => move_forward = if pressed { 1.0 } else { 0.0 },
                             KeyCode::KeyS => move_forward = if pressed { -1.0 } else { 0.0 },
                             KeyCode::KeyA => move_right = if pressed { -1.0 } else { 0.0 },
@@ -502,4 +515,148 @@ fn create_player_cube() -> Mesh {
     mesh.add_triangle(Triangle::new(v20, v23, v22));
     
     mesh
+}
+
+fn take_screenshot(
+    context: &RenderContext,
+    pipeline: &mut RenderPipeline,
+    camera: &mut Camera,
+    player: &Player,
+    terrain_buffer: &MeshBuffer,
+    player_buffer: &MeshBuffer,
+    player_model_bind_group: &wgpu::BindGroup,
+) {
+    // Update camera to current player position/rotation
+    camera.position = player.position + Vec3::new(0.0, 1.6, 0.0);
+    camera.yaw = player.yaw;
+    camera.pitch = player.pitch;
+    pipeline.update_camera(&context.queue, camera);
+    
+    // Create filename with timestamp, position, and view angles
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let filename = format!(
+        "screenshot/player_x{:.0}_y{:.0}_z{:.0}_yaw{:.0}_pitch{:.0}_{}.png",
+        player.position.x,
+        player.position.y,
+        player.position.z,
+        player.yaw.to_degrees(),
+        player.pitch.to_degrees(),
+        timestamp
+    );
+    
+    println!("📷 Taking screenshot: {}", filename);
+    
+    // Ensure screenshot directory exists
+    std::fs::create_dir_all("screenshot").ok();
+    
+    let width = context.size.width;
+    let height = context.size.height;
+    
+    // Create texture to render to
+    let screenshot_texture = context.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Screenshot Texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: context.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    
+    let screenshot_view = screenshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    
+    // Calculate buffer dimensions (with padding for GPU alignment)
+    let bytes_per_pixel = 4; // RGBA8
+    let unpadded_bytes_per_row = width * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+    let buffer_size = (padded_bytes_per_row * height) as u64;
+    
+    let output_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Screenshot Buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    
+    // Render scene to screenshot texture
+    let mut encoder = context.device.create_command_encoder(
+        &wgpu::CommandEncoderDescriptor { label: Some("Screenshot Encoder") }
+    );
+    
+    {
+        let mut render_pass = pipeline.begin_frame(&mut encoder, &screenshot_view);
+        pipeline.set_pipeline(&mut render_pass);
+        
+        // Render terrain
+        terrain_buffer.render(&mut render_pass);
+        
+        // Render player model
+        pipeline.set_model_bind_group(&mut render_pass, player_model_bind_group);
+        player_buffer.render(&mut render_pass);
+    }
+    
+    // Copy texture to buffer
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &screenshot_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &output_buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    
+    context.queue.submit(std::iter::once(encoder.finish()));
+    
+    // Map buffer and save to file
+    let buffer_slice = output_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    context.device.poll(wgpu::Maintain::Wait);
+    
+    {
+        let data = buffer_slice.get_mapped_range();
+        
+        // Remove padding from rows
+        let mut png_data = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let row_start = (row * padded_bytes_per_row) as usize;
+            let row_end = row_start + (width * bytes_per_pixel) as usize;
+            png_data.extend_from_slice(&data[row_start..row_end]);
+        }
+        
+        // Save to PNG
+        image::save_buffer(
+            &filename,
+            &png_data,
+            width,
+            height,
+            image::ColorType::Rgba8,
+        )
+        .expect("Failed to save screenshot");
+    }
+    
+    output_buffer.unmap();
+    
+    println!("✅ Screenshot saved: {}", filename);
 }
