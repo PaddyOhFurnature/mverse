@@ -387,7 +387,7 @@ fn main() {
                     
                     // Regenerate mesh if terrain changed
                     if mesh_dirty {
-                        println!("Regenerating mesh...");
+                        println!("Regenerating mesh and collision...");
                         let new_mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
                         mesh_buffer = MeshBuffer::from_mesh(&context.device, &new_mesh);
                         
@@ -399,6 +399,7 @@ fn main() {
                             7,
                             Some(terrain_collider),
                         );
+                        println!("✅ Collision mesh updated");
                         
                         mesh_dirty = false;
                     }
