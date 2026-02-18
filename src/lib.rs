@@ -16,3 +16,4 @@ pub mod physics;
 pub mod identity;
 pub mod network;
 pub mod messages;
+pub mod player_state;
