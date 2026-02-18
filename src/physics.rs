@@ -12,6 +12,7 @@ use crate::materials::MaterialId;
 use crate::marching_cubes::extract_octree_mesh;
 use glam::Vec3;
 use rapier3d::prelude::*;
+use rapier3d::control::{KinematicCharacterController, CharacterAutostep, CharacterLength};
 
 /// Physics world managing all simulation
 /// 
@@ -385,6 +386,9 @@ pub struct Player {
     /// Collider handle in physics world
     pub collider_handle: ColliderHandle,
     
+    /// Rapier character controller for collision resolution
+    pub character_controller: KinematicCharacterController,
+    
     /// Camera pitch (radians, -π/2 to π/2)
     pub camera_pitch: f32,
     
@@ -447,12 +451,24 @@ impl Player {
             &mut physics.bodies,
         );
         
+        // Create character controller with proper settings
+        let mut character_controller = KinematicCharacterController::default();
+        character_controller.slide = true; // Enable sliding along walls
+        character_controller.autostep = Some(CharacterAutostep {
+            max_height: CharacterLength::Absolute(0.5), // Can step up 0.5m
+            min_width: CharacterLength::Absolute(0.3), // Need 0.3m clearance
+            include_dynamic_bodies: false, // Don't auto-step on moving objects
+        });
+        character_controller.max_slope_climb_angle = 45.0_f32.to_radians(); // 45 degree max slope
+        character_controller.snap_to_ground = Some(CharacterLength::Absolute(0.2)); // Snap within 0.2m
+        
         Self {
             position,
             velocity: Vec3::ZERO,
             on_ground: false,
             body_handle,
             collider_handle,
+            character_controller,
             camera_pitch: 0.0,
             camera_yaw: 0.0,
         }
@@ -680,13 +696,43 @@ impl Player {
         // Combine horizontal and vertical components (now in local space)
         self.velocity = new_horizontal_velocity + final_vertical_velocity;
         
-        // Update position in local space first
+        // Use Rapier's KinematicCharacterController for collision-resolved movement
         let current_local = physics.ecef_to_local(&self.position);
-        let new_local = Vec3::new(
-            current_local.x + self.velocity.x * dt,
-            current_local.y + self.velocity.y * dt,
-            current_local.z + self.velocity.z * dt,
+        let desired_displacement = self.velocity * dt;
+        
+        // Create character shape for collision
+        let half_height = (Self::HEIGHT - 2.0 * Self::RADIUS) / 2.0;
+        let shape = SharedShape::capsule_y(half_height, Self::RADIUS);
+        let shape_pos = Isometry::translation(current_local.x, current_local.y, current_local.z);
+        let desired_translation = vector![desired_displacement.x, desired_displacement.y, desired_displacement.z];
+        
+        let filter = QueryFilter::default()
+            .exclude_rigid_body(self.body_handle);
+        
+        // Use character controller to compute collision-safe movement
+        let movement = self.character_controller.move_shape(
+            dt,
+            &physics.bodies,
+            &physics.colliders,
+            &physics.query_pipeline,
+            &*shape,
+            &shape_pos,
+            desired_translation,
+            filter,
+            |_collision| {}, // Event callback (unused for now)
         );
+        
+        // Update grounded status from character controller
+        self.on_ground = movement.grounded;
+        
+        // Apply the collision-safe translation
+        let final_displacement = Vec3::new(
+            movement.translation.x,
+            movement.translation.y,
+            movement.translation.z,
+        );
+        
+        let new_local = current_local + final_displacement;
         
         // Convert new local position back to ECEF
         self.position = physics.local_to_ecef(new_local);
