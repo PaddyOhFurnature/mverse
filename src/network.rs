@@ -56,6 +56,39 @@ use futures::StreamExt;
 /// Result type for network operations
 pub type Result<T> = std::result::Result<T, NetworkError>;
 
+/// Commands sent from main thread to background network thread
+#[derive(Debug, Clone)]
+pub enum NetworkCommand {
+    /// Start listening on an address
+    Listen {
+        multiaddr: String,
+    },
+    
+    /// Dial a peer
+    Dial {
+        address: String,
+    },
+    
+    /// Subscribe to a topic
+    Subscribe {
+        topic: String,
+    },
+    
+    /// Unsubscribe from a topic
+    Unsubscribe {
+        topic: String,
+    },
+    
+    /// Publish a message to a topic
+    Publish {
+        topic: String,
+        data: Vec<u8>,
+    },
+    
+    /// Shutdown the network thread
+    Shutdown,
+}
+
 /// Errors that can occur during network operations
 #[derive(Debug)]
 pub enum NetworkError {
@@ -181,6 +214,11 @@ pub struct NetworkNode {
 impl NetworkNode {
     /// Create a new NetworkNode with the given identity
     ///
+    /// **WARNING:** This uses pollster::block_on() which does NOT provide
+    /// a tokio runtime context. mDNS will FAIL when called this way.
+    ///
+    /// **Use new_async() instead when running in a tokio context.**
+    ///
     /// Initializes libp2p Swarm with:
     /// - TCP transport with Noise encryption and Yamux multiplexing
     /// - Kademlia DHT in client mode
@@ -191,7 +229,37 @@ impl NetworkNode {
         let local_peer_id = identity.peer_id().clone();
         
         // Build the Swarm (now synchronous since we use pollster)
+        // WARNING: This will fail for mDNS if not in a tokio context
         let swarm = pollster::block_on(Self::build_swarm(identity.clone()))?;
+        
+        Ok(Self {
+            swarm,
+            identity,
+            local_peer_id,
+            subscribed_topics: HashMap::new(),
+            event_queue: Vec::new(),
+            connected_peers: HashSet::new(),
+        })
+    }
+    
+    /// Create a new NetworkNode with the given identity (async version)
+    ///
+    /// **This is the preferred method when using with MultiplayerSystem.**
+    ///
+    /// Must be called from within a tokio runtime context because
+    /// mDNS requires access to the tokio reactor.
+    ///
+    /// Initializes libp2p Swarm with:
+    /// - TCP transport with Noise encryption and Yamux multiplexing
+    /// - Kademlia DHT in client mode
+    /// - Gossipsub for pub/sub messaging
+    /// - mDNS for local network discovery
+    /// - Identify protocol for peer info exchange
+    pub async fn new_async(identity: Identity) -> Result<Self> {
+        let local_peer_id = identity.peer_id().clone();
+        
+        // Build the Swarm asynchronously (mDNS needs tokio context)
+        let swarm = Self::build_swarm(identity.clone()).await?;
         
         Ok(Self {
             swarm,

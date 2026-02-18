@@ -54,12 +54,13 @@ use crate::{
         ChatMessage, LamportClock, Material, MovementMode, 
         PlayerStateMessage, VoxelOperation, MessageError,
     },
-    network::{NetworkEvent, NetworkNode, NetworkError},
+    network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     player_state::PlayerStateManager,
     voxel::{Octree, VoxelCoord},
     physics::PhysicsWorld,
 };
-use libp2p::{Multiaddr, PeerId};
+use libp2p::PeerId;
+use crossbeam::channel::{self, Sender, Receiver};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -83,6 +84,12 @@ pub enum MultiplayerError {
     
     #[error("Invalid multiaddr: {0}")]
     InvalidMultiaddr(String),
+    
+    #[error("Runtime error: {0}")]
+    RuntimeError(String),
+    
+    #[error("Channel send error")]
+    ChannelSendError,
 }
 
 /// Gossipsub topic names for different message channels
@@ -98,11 +105,17 @@ const MAX_INVALID_SIGNATURES: usize = 5;
 
 /// Multiplayer system coordinating all P2P functionality
 pub struct MultiplayerSystem {
-    /// Network node for P2P communication
-    network: NetworkNode,
+    /// Channel to send commands to background network thread
+    cmd_tx: Sender<NetworkCommand>,
+    
+    /// Channel to receive events from background network thread
+    event_rx: Receiver<NetworkEvent>,
     
     /// Our cryptographic identity
     identity: Identity,
+    
+    /// Local peer ID (cached for convenience)
+    local_peer_id: PeerId,
     
     /// Remote player state manager (interpolation, jitter buffer)
     remote_players: PlayerStateManager,
@@ -140,21 +153,42 @@ pub struct MultiplayerStats {
 }
 
 impl MultiplayerSystem {
-    /// Create a new multiplayer system
-    pub fn new(identity: Identity) -> Result<Self> {
-        let mut network = NetworkNode::new(identity.clone())?;
+    /// Create a new multiplayer system with embedded tokio runtime
+    ///
+    /// **This is the preferred method for non-async game loops.**
+    ///
+    /// Spawns a background thread with a tokio runtime for libp2p operations.
+    /// The background thread handles mDNS discovery and async networking.
+    /// The main thread communicates via non-blocking channels.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use metaverse_core::multiplayer::MultiplayerSystem;
+    /// use metaverse_core::identity::Identity;
+    ///
+    /// let identity = Identity::load_or_create()?;
+    /// let mut mp = MultiplayerSystem::new_with_runtime(identity)?;
+    /// ```
+    pub fn new_with_runtime(identity: Identity) -> Result<Self> {
+        // Create bounded channels for command/event passing
+        // Capacity of 1000 provides back-pressure if game loop falls behind
+        let (cmd_tx, cmd_rx) = channel::bounded(1000);
+        let (event_tx, event_rx) = channel::bounded(1000);
         
-        // Subscribe to all topics
-        network.subscribe(TOPIC_PLAYER_STATE)?;
-        network.subscribe(TOPIC_VOXEL_OPS)?;
-        network.subscribe(TOPIC_CHAT)?;
+        let identity_clone = identity.clone();
+        let local_peer_id = *identity.peer_id();
         
-        let local_peer = *network.local_peer_id();
+        // Spawn background thread with tokio runtime
+        std::thread::spawn(move || {
+            run_network_thread(identity_clone, cmd_rx, event_tx);
+        });
         
         Ok(Self {
-            network,
+            cmd_tx,
+            event_rx,
             identity,
-            remote_players: PlayerStateManager::new(local_peer),
+            local_peer_id,
+            remote_players: PlayerStateManager::new(local_peer_id),
             clock: LamportClock::default(),
             voxel_op_seen: HashSet::new(),
             peer_reputation: HashMap::new(),
@@ -164,21 +198,43 @@ impl MultiplayerSystem {
         })
     }
     
+    /// Create a new multiplayer system (deprecated - use new_with_runtime)
+    ///
+    /// **WARNING:** This method is deprecated and will be removed.
+    /// Use `new_with_runtime()` instead.
+    ///
+    /// This method requires an existing tokio runtime context and
+    /// creates the network node synchronously, which doesn't work
+    /// for mDNS auto-discovery.
+    #[deprecated(note = "Use new_with_runtime() instead")]
+    pub fn new(identity: Identity) -> Result<Self> {
+        // This implementation is now broken due to mDNS tokio requirements
+        // Keeping it for compatibility but marking as deprecated
+        Err(MultiplayerError::RuntimeError(
+            "new() is deprecated - use new_with_runtime() instead".into()
+        ))
+    }
+    
     /// Start listening on the given address
-    pub fn listen_on(&mut self, addr: &str) -> Result<()> {
-        self.network.listen_on(addr)?;
+    /// Start listening on an address
+    pub fn listen_on(&self, addr: &str) -> Result<()> {
+        self.cmd_tx.send(NetworkCommand::Listen {
+            multiaddr: addr.to_string(),
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
         Ok(())
     }
     
     /// Connect to a specific peer
-    pub fn dial(&mut self, addr: &str) -> Result<()> {
-        self.network.dial(addr)?;
+    pub fn dial(&self, addr: &str) -> Result<()> {
+        self.cmd_tx.send(NetworkCommand::Dial {
+            address: addr.to_string(),
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
         Ok(())
     }
     
     /// Get our PeerId
     pub fn peer_id(&self) -> PeerId {
-        *self.network.local_peer_id()
+        self.local_peer_id
     }
     
     /// Update multiplayer system - call this every frame
@@ -186,8 +242,8 @@ impl MultiplayerSystem {
     /// Processes network events, updates remote player interpolation,
     /// and handles periodic broadcasts.
     pub fn update(&mut self, _dt: f32) {
-        // Process all pending network events
-        while let Some(event) = self.network.poll() {
+        // Process all pending network events (non-blocking)
+        while let Ok(event) = self.event_rx.try_recv() {
             if let Err(e) = self.handle_network_event(event) {
                 eprintln!("Error handling network event: {}", e);
             }
@@ -218,7 +274,7 @@ impl MultiplayerSystem {
         
         let timestamp = self.clock.tick();
         let msg = PlayerStateMessage::new(
-            *self.network.local_peer_id(),
+            self.local_peer_id,
             position,
             velocity,
             yaw,
@@ -228,7 +284,10 @@ impl MultiplayerSystem {
         );
         
         let data = msg.to_bytes()?;
-        self.network.publish(TOPIC_PLAYER_STATE, data)?;
+        self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_PLAYER_STATE.to_string(),
+            data,
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
         self.stats.player_states_sent += 1;
         
         Ok(())
@@ -246,7 +305,7 @@ impl MultiplayerSystem {
         let mut op = VoxelOperation::new(
             coord,
             material,
-            *self.network.local_peer_id(),
+            self.local_peer_id,
             timestamp,
         );
         
@@ -254,7 +313,10 @@ impl MultiplayerSystem {
         
         // Serialize and send
         let data = op.to_bytes()?;
-        self.network.publish(TOPIC_VOXEL_OPS, data)?;
+        self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_VOXEL_OPS.to_string(),
+            data,
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
         self.stats.voxel_ops_sent += 1;
         
         // Remember we sent this (for deduplication)
@@ -266,10 +328,13 @@ impl MultiplayerSystem {
     /// Send a chat message
     pub fn send_chat(&mut self, text: String) -> Result<()> {
         let timestamp = self.clock.tick();
-        let msg = ChatMessage::new(*self.network.local_peer_id(), text, timestamp);
+        let msg = ChatMessage::new(self.local_peer_id, text, timestamp);
         
         let data = msg.to_bytes()?;
-        self.network.publish(TOPIC_CHAT, data)?;
+        self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_CHAT.to_string(),
+            data,
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
         
         Ok(())
     }
@@ -468,6 +533,97 @@ impl MultiplayerSystem {
     }
 }
 
+/// Background network thread runner
+///
+/// Runs in a dedicated thread with tokio runtime.
+/// Processes commands from main thread and sends events back.
+fn run_network_thread(
+    identity: Identity,
+    cmd_rx: Receiver<NetworkCommand>,
+    event_tx: Sender<NetworkEvent>,
+) {
+    // Create tokio runtime in this thread
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    
+    // Run the network loop
+    rt.block_on(async {
+        // Create network node asynchronously (mDNS needs tokio context)
+        let mut network = match NetworkNode::new_async(identity).await {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("Failed to create network node: {}", e);
+                return;
+            }
+        };
+        
+        // Subscribe to topics
+        if let Err(e) = network.subscribe(TOPIC_PLAYER_STATE) {
+            eprintln!("Failed to subscribe to player-state: {}", e);
+        }
+        if let Err(e) = network.subscribe(TOPIC_VOXEL_OPS) {
+            eprintln!("Failed to subscribe to voxel-ops: {}", e);
+        }
+        if let Err(e) = network.subscribe(TOPIC_CHAT) {
+            eprintln!("Failed to subscribe to chat: {}", e);
+        }
+        
+        // Main loop: process commands and poll network
+        loop {
+            // Process all pending commands (non-blocking)
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                match cmd {
+                    NetworkCommand::Listen { multiaddr } => {
+                        if let Err(e) = network.listen_on(&multiaddr) {
+                            eprintln!("Failed to listen on {}: {}", multiaddr, e);
+                        }
+                    }
+                    
+                    NetworkCommand::Dial { address } => {
+                        if let Err(e) = network.dial(&address) {
+                            eprintln!("Failed to dial {}: {}", address, e);
+                        }
+                    }
+                    
+                    NetworkCommand::Subscribe { topic } => {
+                        if let Err(e) = network.subscribe(&topic) {
+                            eprintln!("Failed to subscribe to {}: {}", topic, e);
+                        }
+                    }
+                    
+                    NetworkCommand::Unsubscribe { topic } => {
+                        if let Err(e) = network.unsubscribe(&topic) {
+                            eprintln!("Failed to unsubscribe from {}: {}", topic, e);
+                        }
+                    }
+                    
+                    NetworkCommand::Publish { topic, data } => {
+                        if let Err(e) = network.publish(&topic, data) {
+                            eprintln!("Failed to publish to {}: {}", topic, e);
+                        }
+                    }
+                    
+                    NetworkCommand::Shutdown => {
+                        println!("Network thread shutting down");
+                        return;
+                    }
+                }
+            }
+            
+            // Poll network for events
+            if let Some(event) = network.poll() {
+                // Send event to main thread (ignore if channel is full)
+                let _ = event_tx.try_send(event);
+            }
+            
+            // Small sleep to prevent busy-waiting
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    });
+}
+
 /// Helper to convert ECEF position to local rendering space
 pub fn ecef_to_local(ecef: &ECEF, physics: &PhysicsWorld) -> glam::Vec3 {
     physics.ecef_to_local(ecef)
@@ -480,14 +636,19 @@ mod tests {
     #[test]
     fn test_multiplayer_system_creation() {
         let identity = Identity::generate().unwrap();
-        let mp = MultiplayerSystem::new(identity);
+        let mp = MultiplayerSystem::new_with_runtime(identity);
         assert!(mp.is_ok());
+        // Give background thread time to initialize
+        std::thread::sleep(Duration::from_millis(100));
     }
     
     #[test]
     fn test_voxel_op_deduplication() {
         let identity = Identity::generate().unwrap();
-        let mut mp = MultiplayerSystem::new(identity.clone()).unwrap();
+        let mut mp = MultiplayerSystem::new_with_runtime(identity.clone()).unwrap();
+        
+        // Give background thread time to initialize
+        std::thread::sleep(Duration::from_millis(100));
         
         let coord = VoxelCoord::new(0, 0, 0);
         let material = Material::Stone;

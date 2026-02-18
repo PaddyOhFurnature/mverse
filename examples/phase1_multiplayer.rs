@@ -114,7 +114,7 @@ fn main() {
     println!("   Key: ~/.metaverse/identity.key");
     
     println!("\n🌐 Starting P2P network node...");
-    let mut multiplayer = MultiplayerSystem::new(identity)
+    let mut multiplayer = MultiplayerSystem::new_with_runtime(identity)
         .expect("Failed to create multiplayer system");
     
     // Start listening on random port
