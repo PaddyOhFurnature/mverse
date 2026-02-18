@@ -107,8 +107,15 @@ fn main() {
     
     // Initialize P2P networking
     println!("🔐 Initializing cryptographic identity...");
-    let identity = Identity::load_or_create()
-        .expect("Failed to create identity");
+    
+    // Check for --temp-identity flag for testing multiple instances
+    let identity = if std::env::args().any(|arg| arg == "--temp-identity") {
+        println!("   Using temporary identity (not saved)");
+        Identity::generate()
+    } else {
+        Identity::load_or_create()
+            .expect("Failed to create identity")
+    };
     
     println!("   PeerId: {}", short_peer_id(&identity.peer_id()));
     println!("   Key: ~/.metaverse/identity.key");
