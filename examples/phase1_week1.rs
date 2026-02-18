@@ -47,8 +47,8 @@ fn main() {
     println!("  Space - Jump (walk) / Up (fly)");
     println!("  Shift - Down (fly mode)");
     println!("  F - Toggle Walk/Fly mode");
-    println!("  E - Dig voxel");
-    println!("  Q - Place voxel");
+    println!("  E - Dig voxel (10m reach)");
+    println!("  Q - Place voxel (10m reach)");
     println!("  Mouse - Look around (click to grab)");
     println!("  ESC - Release mouse");
     println!("  F12 - Take screenshot\n");
@@ -157,6 +157,10 @@ fn main() {
     let hitbox_mesh = create_hitbox_wireframe();
     let hitbox_buffer = MeshBuffer::from_mesh(&context.device, &hitbox_mesh);
     
+    // Create crosshair (positioned 2m in front of camera, updated each frame)
+    let crosshair_mesh = create_crosshair();
+    let crosshair_buffer = MeshBuffer::from_mesh(&context.device, &crosshair_mesh);
+    
     // Initialize physics world with FloatingOrigin at origin
     let origin_voxel_ecef = origin_voxel.to_ecef();
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
@@ -202,6 +206,10 @@ fn main() {
         player_local
     );
     let (player_model_uniform, player_model_bind_group) = pipeline.create_model_bind_group(&context.device, &player_model_matrix);
+    
+    // Crosshair transform (2m in front of camera, will be updated each frame)
+    let crosshair_matrix = Mat4::IDENTITY;
+    let (crosshair_uniform, crosshair_bind_group) = pipeline.create_model_bind_group(&context.device, &crosshair_matrix);
     
     // Input state
     let mut input_forward = 0.0f32;
@@ -319,7 +327,7 @@ fn main() {
                     
                     // Handle digging
                     if dig_pressed {
-                        if let Some(dug) = player.dig_voxel(&physics, &mut octree, 5.0) {
+                        if let Some(dug) = player.dig_voxel(&physics, &mut octree, 10.0) {
                             println!("Dug voxel at {:?}", dug);
                             mesh_dirty = true;
                         }
@@ -328,7 +336,7 @@ fn main() {
                     
                     // Handle placing
                     if place_pressed {
-                        if let Some(placed) = player.place_voxel(&physics, &mut octree, MaterialId::STONE, 5.0) {
+                        if let Some(placed) = player.place_voxel(&physics, &mut octree, MaterialId::STONE, 10.0) {
                             println!("Placed voxel at {:?}", placed);
                             mesh_dirty = true;
                         }
@@ -374,13 +382,18 @@ fn main() {
                     // Update player hitbox matrix
                     // Hitbox starts at feet (Y=0), camera is at eye level (Y=1.6)
                     // So hitbox needs to be offset down by eye height to align with camera
-                    let player_local = physics.ecef_to_local(&player.position);
+                    let _player_local = physics.ecef_to_local(&player.position);
                     let hitbox_offset = Vec3::new(0.0, -1.6, 0.0); // Down to feet level
                     let player_model_matrix = Mat4::from_rotation_translation(
                         glam::Quat::from_rotation_y(player.camera_yaw),
                         camera.position + hitbox_offset
                     );
                     context.queue.write_buffer(&player_model_uniform, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
+                    
+                    // Update crosshair position (2m in front of camera)
+                    let crosshair_pos = camera.position + player.camera_forward() * 2.0;
+                    let crosshair_matrix = Mat4::from_translation(crosshair_pos);
+                    context.queue.write_buffer(&crosshair_uniform, 0, bytemuck::cast_slice(crosshair_matrix.as_ref()));
                     
                     // Regenerate mesh if terrain changed
                     if mesh_dirty {
@@ -422,6 +435,10 @@ fn main() {
                                 // Render wireframe hitbox
                                 pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
                                 hitbox_buffer.render(&mut render_pass);
+                                
+                                // Render crosshair (last, on top of everything)
+                                pipeline.set_model_bind_group(&mut render_pass, &crosshair_bind_group);
+                                crosshair_buffer.render(&mut render_pass);
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
@@ -647,6 +664,42 @@ fn add_line(mesh: &mut Mesh, p1: Vec3, p2: Vec3, thickness: f32) {
     
     mesh.add_triangle(Triangle::new(v0, v1, v2));
     mesh.add_triangle(Triangle::new(v0, v2, v3));
+}
+
+/// Create crosshair overlay (2D screen-space overlay)
+/// Returns mesh positioned in NDC space (-1 to 1) for screen overlay
+fn create_crosshair() -> Mesh {
+    let mut mesh = Mesh::new();
+    
+    let size = 0.02; // Crosshair size in NDC units
+    let thickness = 0.002;
+    let gap = 0.01; // Gap in center
+    
+    // Horizontal line (left and right segments)
+    add_line(&mut mesh, 
+        Vec3::new(-size, 0.0, 0.0), 
+        Vec3::new(-gap, 0.0, 0.0), 
+        thickness
+    );
+    add_line(&mut mesh, 
+        Vec3::new(gap, 0.0, 0.0), 
+        Vec3::new(size, 0.0, 0.0), 
+        thickness
+    );
+    
+    // Vertical line (top and bottom segments)
+    add_line(&mut mesh, 
+        Vec3::new(0.0, -size, 0.0), 
+        Vec3::new(0.0, -gap, 0.0), 
+        thickness
+    );
+    add_line(&mut mesh, 
+        Vec3::new(0.0, gap, 0.0), 
+        Vec3::new(0.0, size, 0.0), 
+        thickness
+    );
+    
+    mesh
 }
 
 

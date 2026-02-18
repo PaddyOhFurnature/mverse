@@ -830,16 +830,32 @@ impl Player {
                 return None; // Can't place in occupied space
             }
             
-            // Check if placement would intersect player
-            // (Simple check: is placement position within 2 meters of player feet?)
-            let player_voxel = VoxelCoord::from_ecef(&self.position);
-            let dx = (place_coord.x - player_voxel.x).abs();
-            let dy = (place_coord.y - player_voxel.y).abs();
-            let dz = (place_coord.z - player_voxel.z).abs();
+            // Check if placement would intersect player capsule
+            // Player capsule: radius 0.4m, height 1.8m, centered at feet + 0.9m
+            let player_local = physics.ecef_to_local(&self.position);
+            let voxel_ecef = place_coord.to_ecef();
+            let voxel_local = physics.ecef_to_local(&voxel_ecef);
             
-            if dx <= 1 && dy <= 2 && dz <= 1 {
-                println!("  Place blocked: too close to player (dx={}, dy={}, dz={})", dx, dy, dz);
-                return None; // Too close to player (would intersect)
+            // Distance from player center (at Y=0.9m) to voxel center (at Y=0.5m)
+            let player_center = player_local + Vec3::new(0.0, 0.9, 0.0);
+            let voxel_center = voxel_local + Vec3::new(0.5, 0.5, 0.5);
+            
+            // Check horizontal distance (XZ plane)
+            let dx = voxel_center.x - player_center.x;
+            let dz = voxel_center.z - player_center.z;
+            let horizontal_dist = (dx * dx + dz * dz).sqrt();
+            
+            // Check vertical overlap (does voxel Y range [0, 1] overlap with capsule [0, 1.8]?)
+            let voxel_bottom = voxel_local.y;
+            let voxel_top = voxel_local.y + 1.0;
+            let capsule_bottom = player_local.y;
+            let capsule_top = player_local.y + Self::HEIGHT;
+            let vertical_overlap = voxel_top > capsule_bottom && voxel_bottom < capsule_top;
+            
+            // Block if horizontally within capsule radius AND vertically overlapping
+            if horizontal_dist < (Self::RADIUS + 0.5) && vertical_overlap {
+                println!("  Place blocked: would intersect player (h_dist={:.2}m, v_overlap={})", horizontal_dist, vertical_overlap);
+                return None;
             }
             
             // Place the voxel
