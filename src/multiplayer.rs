@@ -579,8 +579,16 @@ fn run_network_thread(
         
         println!("🔍 Network thread started - polling for mDNS and connections...");
         
+        let mut heartbeat_counter = 0u64;
+        
         // Main loop: process commands and poll network
         loop {
+            // Heartbeat every 60 iterations (~60ms) to prove loop is running
+            heartbeat_counter += 1;
+            if heartbeat_counter % 6000 == 0 {
+                println!("💓 [Network Thread] Heartbeat {} - loop is alive", heartbeat_counter / 6000);
+            }
+            
             tokio::select! {
                 // Process commands from main thread
                 cmd = async { cmd_rx.recv() } => {
