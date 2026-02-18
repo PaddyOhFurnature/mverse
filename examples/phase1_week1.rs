@@ -238,7 +238,16 @@ fn main() {
                                 }
                                 KeyCode::F12 => {
                                     // Take screenshot
-                                    take_screenshot(&context, &mut pipeline, &camera, &player);
+                                    take_screenshot(
+                                        &context,
+                                        &mut pipeline,
+                                        &mut camera,
+                                        &player,
+                                        &physics,
+                                        &mesh_buffer,
+                                        &player_model_buffer,
+                                        &player_model_bind_group,
+                                    );
                                 }
                                 KeyCode::KeyF => {
                                     // Toggle fly mode
@@ -520,15 +529,26 @@ fn create_player_cube() -> Mesh {
 fn take_screenshot(
     context: &RenderContext,
     pipeline: &mut RenderPipeline,
-    camera: &Camera,
+    camera: &mut Camera,
     player: &Player,
+    physics: &PhysicsWorld,
+    terrain_buffer: &MeshBuffer,
+    player_buffer: &MeshBuffer,
+    player_model_bind_group: &wgpu::BindGroup,
 ) {
-    // Create filename with coords, yaw, pitch, and timestamp
+    // Update camera to current player position/rotation
+    let camera_ecef = player.camera_position();
+    let camera_local = physics.ecef_to_local(&camera_ecef);
+    camera.position = camera_local;
+    camera.yaw = player.camera_yaw;
+    camera.pitch = player.camera_pitch;
+    pipeline.update_camera(&context.queue, camera);
+    
+    // Create filename with timestamp, position, and view angles
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    
     let filename = format!(
         "screenshot/player_x{:.0}_y{:.0}_z{:.0}_yaw{:.0}_pitch{:.0}_{}.png",
         player.position.x,
@@ -544,7 +564,111 @@ fn take_screenshot(
     // Ensure screenshot directory exists
     std::fs::create_dir_all("screenshot").ok();
     
-    // For now, just print message
-    // Full implementation would render to texture and save PNG
-    println!("   Screenshot saved to {}", filename);
+    let width = context.size.width;
+    let height = context.size.height;
+    
+    // Create texture to render to
+    let screenshot_texture = context.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Screenshot Texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: context.config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    
+    let screenshot_view = screenshot_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    
+    // Calculate buffer dimensions (with padding for GPU alignment)
+    let bytes_per_pixel = 4; // RGBA8
+    let unpadded_bytes_per_row = width * bytes_per_pixel;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+    let buffer_size = (padded_bytes_per_row * height) as u64;
+    
+    let output_buffer = context.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Screenshot Buffer"),
+        size: buffer_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    
+    // Render scene to screenshot texture
+    let mut encoder = context.device.create_command_encoder(
+        &wgpu::CommandEncoderDescriptor { label: Some("Screenshot Encoder") }
+    );
+    
+    {
+        let mut render_pass = pipeline.begin_frame(&mut encoder, &screenshot_view);
+        pipeline.set_pipeline(&mut render_pass);
+        
+        // Render terrain
+        terrain_buffer.render(&mut render_pass);
+        
+        // Render player model
+        pipeline.set_model_bind_group(&mut render_pass, player_model_bind_group);
+        player_buffer.render(&mut render_pass);
+    }
+    
+    // Copy texture to buffer
+    encoder.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &screenshot_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &output_buffer,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    
+    context.queue.submit(std::iter::once(encoder.finish()));
+    
+    // Map buffer and save to file
+    let buffer_slice = output_buffer.slice(..);
+    buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
+    context.device.poll(wgpu::Maintain::Wait);
+    
+    {
+        let data = buffer_slice.get_mapped_range();
+        
+        // Remove padding from rows
+        let mut png_data = Vec::with_capacity((width * height * 4) as usize);
+        for row in 0..height {
+            let row_start = (row * padded_bytes_per_row) as usize;
+            let row_end = row_start + (width * bytes_per_pixel) as usize;
+            png_data.extend_from_slice(&data[row_start..row_end]);
+        }
+        
+        // Save to PNG
+        image::save_buffer(
+            &filename,
+            &png_data,
+            width,
+            height,
+            image::ColorType::Rgba8,
+        )
+        .expect("Failed to save screenshot");
+    }
+    
+    output_buffer.unmap();
+    
+    println!("✅ Screenshot saved: {}", filename);
 }
