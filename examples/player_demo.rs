@@ -324,8 +324,11 @@ fn main() {
                     camera.yaw = player.yaw;
                     camera.pitch = player.pitch;
                     
-                    // Update player model transform
-                    let player_model_matrix = Mat4::from_translation(player.position);
+                    // Update player model transform (translate + rotate with yaw)
+                    let player_model_matrix = Mat4::from_rotation_translation(
+                        glam::Quat::from_rotation_y(player.yaw),
+                        player.position,
+                    );
                     context.queue.write_buffer(&player_model_buffer, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
                     
                     // Render
