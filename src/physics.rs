@@ -780,12 +780,18 @@ impl Player {
         if let Some(hit) = raycast_voxels(octree, &camera_ecef, camera_dir, max_reach) {
             // Calculate distance to hit
             let hit_ecef = hit.voxel.to_ecef();
-            let dx = hit_ecef.x - camera_ecef.x;
-            let dy = hit_ecef.y - camera_ecef.y;
-            let dz = hit_ecef.z - camera_ecef.z;
-            let distance = ((dx*dx + dy*dy + dz*dz) as f32).sqrt();
+            let hit_local = physics.ecef_to_local(&hit_ecef);
+            let camera_local = physics.ecef_to_local(&camera_ecef);
             
-            println!("  Dig: hit voxel at {:.1}m distance", distance);
+            let dx = hit_local.x - camera_local.x;
+            let dy = hit_local.y - camera_local.y;
+            let dz = hit_local.z - camera_local.z;
+            let distance = (dx*dx + dy*dy + dz*dz).sqrt();
+            
+            println!("  Dig: camera({:.1}, {:.1}, {:.1}) → hit({:.1}, {:.1}, {:.1}) = {:.1}m", 
+                camera_local.x, camera_local.y, camera_local.z,
+                hit_local.x, hit_local.y, hit_local.z,
+                distance);
             
             // Remove the voxel (set to AIR)
             octree.set_voxel(hit.voxel, MaterialId::AIR);
