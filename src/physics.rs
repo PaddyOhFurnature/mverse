@@ -788,8 +788,9 @@ impl Player {
             let dz = hit_local.z - camera_local.z;
             let distance = (dx*dx + dy*dy + dz*dz).sqrt();
             
-            println!("  Dig: camera({:.1}, {:.1}, {:.1}) → hit({:.1}, {:.1}, {:.1}) = {:.1}m", 
+            println!("  Dig: camera({:.1}, {:.1}, {:.1}) → voxel({}, {}, {}) @ local({:.1}, {:.1}, {:.1}) = {:.1}m", 
                 camera_local.x, camera_local.y, camera_local.z,
+                hit.voxel.x, hit.voxel.y, hit.voxel.z,
                 hit_local.x, hit_local.y, hit_local.z,
                 distance);
             
