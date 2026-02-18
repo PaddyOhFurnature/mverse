@@ -475,6 +475,15 @@ impl Player {
     }
     
     /// Get camera position (at player's eye level)
+    /// 
+    /// Returns position 1.6m above player's feet in local Y-up space,
+    /// converted to ECEF coordinates.
+    pub fn camera_position_local(&self, physics: &PhysicsWorld) -> Vec3 {
+        let player_local = physics.ecef_to_local(&self.position);
+        player_local + Vec3::new(0.0, Self::EYE_HEIGHT, 0.0)
+    }
+    
+    /// Get camera position in ECEF (legacy - has coordinate bug)
     pub fn camera_position(&self) -> ECEF {
         let up = Vec3::new(
             self.position.x as f32,
@@ -752,19 +761,23 @@ impl Player {
     /// then removes it from the octree.
     /// 
     /// # Arguments
+    /// * `physics` - Physics world for coordinate transforms
     /// * `octree` - Voxel world to modify
     /// * `max_reach` - Maximum distance player can dig (meters)
     /// 
     /// # Returns
     /// * `Some(VoxelCoord)` - The voxel that was removed
     /// * `None` - No voxel within reach or already AIR
-    pub fn dig_voxel(&self, octree: &mut Octree, max_reach: f32) -> Option<VoxelCoord> {
-        // Raycast from camera position
-        let camera_pos = self.camera_position();
+    pub fn dig_voxel(&self, physics: &PhysicsWorld, octree: &mut Octree, max_reach: f32) -> Option<VoxelCoord> {
+        // Get camera position in local space, then convert to ECEF for voxel raycast
+        let camera_local = self.camera_position_local(physics);
+        let camera_ecef = physics.local_to_ecef(camera_local);
+        
+        // Direction is in local space
         let camera_dir = self.camera_forward();
         
-        // Find target voxel
-        if let Some(hit) = raycast_voxels(octree, &camera_pos, camera_dir, max_reach) {
+        // Raycast in voxel space (ECEF coordinates)
+        if let Some(hit) = raycast_voxels(octree, &camera_ecef, camera_dir, max_reach) {
             // Remove the voxel (set to AIR)
             octree.set_voxel(hit.voxel, MaterialId::AIR);
             Some(hit.voxel)
@@ -779,6 +792,7 @@ impl Player {
     /// face that was hit (using face normal to determine placement position).
     /// 
     /// # Arguments
+    /// * `physics` - Physics world for coordinate transforms
     /// * `octree` - Voxel world to modify
     /// * `material` - Material type to place
     /// * `max_reach` - Maximum distance player can place (meters)
@@ -788,16 +802,20 @@ impl Player {
     /// * `None` - No surface within reach, or placement blocked
     pub fn place_voxel(
         &self,
+        physics: &PhysicsWorld,
         octree: &mut Octree,
         material: MaterialId,
         max_reach: f32,
     ) -> Option<VoxelCoord> {
-        // Raycast from camera position
-        let camera_pos = self.camera_position();
+        // Get camera position in local space, then convert to ECEF
+        let camera_local = self.camera_position_local(physics);
+        let camera_ecef = physics.local_to_ecef(camera_local);
+        
+        // Direction is in local space
         let camera_dir = self.camera_forward();
         
         // Find target surface
-        if let Some(hit) = raycast_voxels(octree, &camera_pos, camera_dir, max_reach) {
+        if let Some(hit) = raycast_voxels(octree, &camera_ecef, camera_dir, max_reach) {
             // Calculate placement position (adjacent voxel on hit face)
             let place_coord = VoxelCoord::new(
                 hit.voxel.x + hit.face_normal.0 as i64,

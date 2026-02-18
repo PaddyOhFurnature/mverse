@@ -191,8 +191,7 @@ fn main() {
     println!("  Terrain collider: {:?}", terrain_collider);
     
     // Camera setup - first person from player eyes
-    let camera_ecef = player.camera_position();
-    let camera_local = physics.ecef_to_local(&camera_ecef);
+    let camera_local = player.camera_position_local(&physics);
     let mut camera = Camera::new(camera_local, 1920.0 / 1080.0);
     camera.yaw = player.camera_yaw;
     camera.pitch = player.camera_pitch;
@@ -320,7 +319,7 @@ fn main() {
                     
                     // Handle digging
                     if dig_pressed {
-                        if let Some(dug) = player.dig_voxel(&mut octree, 5.0) {
+                        if let Some(dug) = player.dig_voxel(&physics, &mut octree, 5.0) {
                             println!("Dug voxel at {:?}", dug);
                             mesh_dirty = true;
                         }
@@ -329,7 +328,7 @@ fn main() {
                     
                     // Handle placing
                     if place_pressed {
-                        if let Some(placed) = player.place_voxel(&mut octree, MaterialId::STONE, 5.0) {
+                        if let Some(placed) = player.place_voxel(&physics, &mut octree, MaterialId::STONE, 5.0) {
                             println!("Placed voxel at {:?}", placed);
                             mesh_dirty = true;
                         }
@@ -368,9 +367,7 @@ fn main() {
                     jump_pressed = false;
                     
                     // Update camera to player's eye position (first-person)
-                    let camera_ecef = player.camera_position();
-                    let camera_local = physics.ecef_to_local(&camera_ecef);
-                    camera.position = camera_local;
+                    camera.position = player.camera_position_local(&physics);
                     camera.yaw = player.camera_yaw;
                     camera.pitch = player.camera_pitch;
                     
@@ -381,7 +378,7 @@ fn main() {
                     let hitbox_offset = Vec3::new(0.0, -1.6, 0.0); // Down to feet level
                     let player_model_matrix = Mat4::from_rotation_translation(
                         glam::Quat::from_rotation_y(player.camera_yaw),
-                        camera_local + hitbox_offset
+                        camera.position + hitbox_offset
                     );
                     context.queue.write_buffer(&player_model_uniform, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
                     
@@ -664,12 +661,8 @@ fn take_screenshot(
     player_model_bind_group: &wgpu::BindGroup,
 ) {
     // Update camera to player's eye position (first-person)
-    let camera_ecef = player.camera_position();
-    let camera_local = physics.ecef_to_local(&camera_ecef);
-    camera.position = camera_local;
+    camera.position = player.camera_position_local(physics);
     camera.yaw = player.camera_yaw;
-    camera.pitch = player.camera_pitch;
-    pipeline.update_camera(&context.queue, camera);
     camera.pitch = player.camera_pitch;
     pipeline.update_camera(&context.queue, camera);
     
