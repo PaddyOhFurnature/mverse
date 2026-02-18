@@ -370,16 +370,16 @@ fn main() {
                     // Calculate camera position behind player
                     let player_local = physics.ecef_to_local(&player.position);
                     
-                    // Camera looks in direction of camera_yaw, positioned behind player
-                    let yaw_offset = std::f32::consts::PI; // Look opposite direction (behind)
-                    let camera_yaw_world = player.camera_yaw + yaw_offset;
-                    let camera_offset = Vec3::new(
-                        camera_yaw_world.sin() * CAMERA_DISTANCE,
+                    // Position camera BEHIND where player is facing
+                    // If player faces north (yaw=0), camera should be at player's south
+                    // Camera offset is in OPPOSITE direction of where player looks
+                    let behind_offset = Vec3::new(
+                        -player.camera_yaw.sin() * CAMERA_DISTANCE,  // Opposite X
                         CAMERA_HEIGHT,
-                        camera_yaw_world.cos() * CAMERA_DISTANCE,
+                        -player.camera_yaw.cos() * CAMERA_DISTANCE,  // Opposite Z
                     );
                     
-                    camera.position = player_local + camera_offset;
+                    camera.position = player_local + behind_offset;
                     camera.yaw = player.camera_yaw;
                     camera.pitch = player.camera_pitch;
                     
@@ -553,15 +553,15 @@ fn take_screenshot(
     const CAMERA_HEIGHT: f32 = 1.8;
     
     let player_local = physics.ecef_to_local(&player.position);
-    let yaw_offset = std::f32::consts::PI;
-    let camera_yaw_world = player.camera_yaw + yaw_offset;
-    let camera_offset = Vec3::new(
-        camera_yaw_world.sin() * CAMERA_DISTANCE,
+    
+    // Position camera BEHIND where player is facing
+    let behind_offset = Vec3::new(
+        -player.camera_yaw.sin() * CAMERA_DISTANCE,
         CAMERA_HEIGHT,
-        camera_yaw_world.cos() * CAMERA_DISTANCE,
+        -player.camera_yaw.cos() * CAMERA_DISTANCE,
     );
     
-    camera.position = player_local + camera_offset;
+    camera.position = player_local + behind_offset;
     camera.yaw = player.camera_yaw;
     camera.pitch = player.camera_pitch;
     pipeline.update_camera(&context.queue, camera);
