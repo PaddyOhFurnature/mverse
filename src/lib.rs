@@ -1,4 +1,4 @@
-//! Metaverse Core - Phase 1 & 2
+//! Metaverse Core - Phases 1, 2, and 1.5 (P2P Networking)
 //!
 //! Fresh implementation starting from foundation research.
 
@@ -11,3 +11,6 @@ pub mod terrain;
 pub mod mesh;
 pub mod marching_cubes;
 pub mod physics;
+
+// Phase 1.5: P2P Networking (Local-First Architecture)
+pub mod identity;
