@@ -531,19 +531,13 @@ impl Player {
     /// Raycasts downward from player feet. If hits terrain within 0.1m,
     /// player is considered on ground and can jump.
     pub fn update_ground_detection(&mut self, physics: &PhysicsWorld) {
-        // Get "down" direction (toward Earth center)
-        let down = Vec3::new(
-            -self.position.x as f32,
-            -self.position.y as f32,
-            -self.position.z as f32,
-        ).normalize();
-        
         // Get player position in local coordinates
         let local_pos = physics.ecef_to_local(&self.position);
         
-        // Raycast from player center downward (in local space)
+        // Raycast downward in local space (-Y direction)
+        // Note: In local space with FloatingOrigin, -Y is always "down" (toward Earth center)
         let ray_origin = point![local_pos.x, local_pos.y, local_pos.z];
-        let ray_dir = vector![down.x, down.y, down.z];
+        let ray_dir = vector![0.0, -1.0, 0.0]; // Down in local space
         
         // Cast ray 0.1m longer than half height (to detect ground just below feet)
         let max_distance = (Self::HEIGHT / 2.0) + 0.1;
@@ -552,7 +546,7 @@ impl Player {
         // Check for collision (exclude self)
         let filter = QueryFilter::default().exclude_collider(self.collider_handle);
         
-        if let Some((_, toi)) = physics.query_pipeline.cast_ray(
+        if let Some((handle, toi)) = physics.query_pipeline.cast_ray(
             &physics.bodies,
             &physics.colliders,
             &ray,
@@ -690,12 +684,20 @@ impl Player {
             self.on_ground = false;
         }
         
-        // Apply gravity (in ECEF/world coordinates)
-        let gravity_world = PhysicsWorld::gravity_at_position(&self.position);
-        let new_vertical_velocity = vertical_velocity + gravity_world * dt;
+        // Apply gravity (in local space, always -Y direction)
+        // Note: With FloatingOrigin, local -Y points toward Earth center
+        let gravity_local = Vec3::new(0.0, -9.8, 0.0);
+        let new_vertical_velocity = vertical_velocity + gravity_local * dt;
         
-        // Combine horizontal and vertical components (still in world space)
-        self.velocity = new_horizontal_velocity + new_vertical_velocity;
+        // Stop downward movement if on ground (collision response)
+        let final_vertical_velocity = if self.on_ground && new_vertical_velocity.y < 0.0 {
+            Vec3::new(0.0, 0.0, 0.0) // Zero vertical velocity when grounded
+        } else {
+            new_vertical_velocity
+        };
+        
+        // Combine horizontal and vertical components
+        self.velocity = new_horizontal_velocity + final_vertical_velocity;
         
         // Update position in rigidbody
         // Velocity is in ECEF/world coordinates, position is in local coordinates
