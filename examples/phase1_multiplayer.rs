@@ -123,6 +123,10 @@ fn main() {
     
     println!("   Listening for connections...");
     println!("   mDNS discovery active (auto-connect on LAN)");
+    println!("   PeerId: {}", multiplayer.peer_id());
+    println!("\n⏳ Waiting for peers to connect...");
+    println!("   (Watch for \"Peer discovered\" and \"Peer connected\" messages)");
+    println!("   Note: Publishing will fail until at least one peer connects - this is normal!\n");
     println!();
     
     // Create window

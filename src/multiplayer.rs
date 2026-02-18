@@ -601,7 +601,10 @@ fn run_network_thread(
                     
                     NetworkCommand::Publish { topic, data } => {
                         if let Err(e) = network.publish(&topic, data) {
-                            eprintln!("Failed to publish to {}: {}", topic, e);
+                            // Suppress "no peers" error - it's expected when alone
+                            if !e.to_string().contains("NoPeersSubscribedToTopic") {
+                                eprintln!("Failed to publish to {}: {}", topic, e);
+                            }
                         }
                     }
                     
