@@ -245,8 +245,6 @@ fn main() {
                                         &player,
                                         &physics,
                                         &mesh_buffer,
-                                        &player_model_buffer,
-                                        &player_model_bind_group,
                                     );
                                 }
                                 KeyCode::KeyF => {
@@ -363,27 +361,15 @@ fn main() {
                     
                     jump_pressed = false;
                     
-                    // Update camera to follow player (third-person view)
-                    const CAMERA_DISTANCE: f32 = 3.0; // 3 meters behind player
-                    const CAMERA_HEIGHT: f32 = 1.8;   // Eye level
-                    
-                    // Calculate camera position behind player
-                    let player_local = physics.ecef_to_local(&player.position);
-                    
-                    // Position camera BEHIND where player is facing
-                    // If player faces north (yaw=0), camera should be at player's south
-                    // Camera offset is in OPPOSITE direction of where player looks
-                    let behind_offset = Vec3::new(
-                        -player.camera_yaw.sin() * CAMERA_DISTANCE,  // Opposite X
-                        CAMERA_HEIGHT,
-                        -player.camera_yaw.cos() * CAMERA_DISTANCE,  // Opposite Z
-                    );
-                    
-                    camera.position = player_local + behind_offset;
+                    // Update camera to player's eye position (first-person)
+                    let camera_ecef = player.camera_position();
+                    let camera_local = physics.ecef_to_local(&camera_ecef);
+                    camera.position = camera_local;
                     camera.yaw = player.camera_yaw;
                     camera.pitch = player.camera_pitch;
                     
-                    // Update player model matrix (rotate with camera yaw)
+                    // Update player model matrix (for potential third-person view later)
+                    let player_local = physics.ecef_to_local(&player.position);
                     let player_model_matrix = Mat4::from_rotation_translation(
                         glam::Quat::from_rotation_y(player.camera_yaw),
                         player_local
@@ -426,9 +412,9 @@ fn main() {
                                 // Render terrain
                                 mesh_buffer.render(&mut render_pass);
                                 
-                                // Render player model (visible in third-person)
-                                pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
-                                player_model_buffer.render(&mut render_pass);
+                                // Don't render player model in first-person (camera IS the player)
+                                // pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
+                                // player_model_buffer.render(&mut render_pass);
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
@@ -545,24 +531,14 @@ fn take_screenshot(
     player: &Player,
     physics: &PhysicsWorld,
     terrain_buffer: &MeshBuffer,
-    player_buffer: &MeshBuffer,
-    player_model_bind_group: &wgpu::BindGroup,
 ) {
-    // Update camera to third-person view
-    const CAMERA_DISTANCE: f32 = 3.0;
-    const CAMERA_HEIGHT: f32 = 1.8;
-    
-    let player_local = physics.ecef_to_local(&player.position);
-    
-    // Position camera BEHIND where player is facing
-    let behind_offset = Vec3::new(
-        -player.camera_yaw.sin() * CAMERA_DISTANCE,
-        CAMERA_HEIGHT,
-        -player.camera_yaw.cos() * CAMERA_DISTANCE,
-    );
-    
-    camera.position = player_local + behind_offset;
+    // Update camera to player's eye position (first-person)
+    let camera_ecef = player.camera_position();
+    let camera_local = physics.ecef_to_local(&camera_ecef);
+    camera.position = camera_local;
     camera.yaw = player.camera_yaw;
+    camera.pitch = player.camera_pitch;
+    pipeline.update_camera(&context.queue, camera);
     camera.pitch = player.camera_pitch;
     pipeline.update_camera(&context.queue, camera);
     
@@ -630,12 +606,8 @@ fn take_screenshot(
         let mut render_pass = pipeline.begin_frame(&mut encoder, &screenshot_view);
         pipeline.set_pipeline(&mut render_pass);
         
-        // Render terrain
+        // Render terrain only (first-person view)
         terrain_buffer.render(&mut render_pass);
-        
-        // Render player model
-        pipeline.set_model_bind_group(&mut render_pass, player_model_bind_group);
-        player_buffer.render(&mut render_pass);
     }
     
     // Copy texture to buffer
