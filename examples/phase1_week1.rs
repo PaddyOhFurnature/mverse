@@ -249,6 +249,8 @@ fn main() {
                                         &player,
                                         &physics,
                                         &mesh_buffer,
+                                        &hitbox_buffer,
+                                        &player_model_bind_group,
                                     );
                                 }
                                 KeyCode::KeyF => {
@@ -528,57 +530,109 @@ fn create_player_cube() -> Mesh {
 }
 
 fn create_hitbox_wireframe() -> Mesh {
-    // Create wireframe box showing player capsule hitbox
-    // Player capsule: radius=0.4m, height=1.8m
-    let radius = 0.4;
-    let height = 1.8;
+    // Create capsule mesh matching EXACT Rapier collision capsule
+    // From Player constants: HEIGHT=1.8m, RADIUS=0.4m
+    // Capsule is cylinder with hemispherical caps
+    const RADIUS: f32 = 0.4;
+    const HEIGHT: f32 = 1.8;
+    const HALF_HEIGHT: f32 = (HEIGHT - 2.0 * RADIUS) / 2.0; // Cylinder half-height = 0.5m
     
     let mut mesh = Mesh::new();
     
-    // Bounding box corners (capsule extents)
-    let min_x = -radius;
-    let max_x = radius;
-    let min_y = 0.0; // Feet
-    let max_y = height; // Head
-    let min_z = -radius;
-    let max_z = radius;
+    let segments = 8; // Number of segments around capsule
+    let rings = 4; // Number of rings for hemisphere
     
-    // Bottom square (at feet)
-    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, min_y, min_z), Vec3::Y));
-    let v1 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, min_y, min_z), Vec3::Y));
-    let v2 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, min_y, max_z), Vec3::Y));
-    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, min_y, max_z), Vec3::Y));
+    // Generate cylinder body
+    for i in 0..segments {
+        let angle1 = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        let angle2 = ((i + 1) as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+        
+        let x1 = angle1.cos() * RADIUS;
+        let z1 = angle1.sin() * RADIUS;
+        let x2 = angle2.cos() * RADIUS;
+        let z2 = angle2.sin() * RADIUS;
+        
+        // Bottom of cylinder
+        let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x1, RADIUS, z1), Vec3::new(x1, 0.0, z1).normalize()));
+        let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x2, RADIUS, z2), Vec3::new(x2, 0.0, z2).normalize()));
+        // Top of cylinder
+        let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x2, HEIGHT - RADIUS, z2), Vec3::new(x2, 0.0, z2).normalize()));
+        let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x1, HEIGHT - RADIUS, z1), Vec3::new(x1, 0.0, z1).normalize()));
+        
+        // Cylinder quad (2 triangles)
+        mesh.add_triangle(Triangle::new(v0, v1, v2));
+        mesh.add_triangle(Triangle::new(v0, v2, v3));
+    }
     
-    // Top square (at head)
-    let v4 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, max_y, min_z), Vec3::Y));
-    let v5 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, max_y, min_z), Vec3::Y));
-    let v6 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, max_y, max_z), Vec3::Y));
-    let v7 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, max_y, max_z), Vec3::Y));
+    // Generate bottom hemisphere
+    for ring in 0..rings {
+        let phi1 = (ring as f32 / rings as f32) * std::f32::consts::PI * 0.5;
+        let phi2 = ((ring + 1) as f32 / rings as f32) * std::f32::consts::PI * 0.5;
+        
+        for i in 0..segments {
+            let theta1 = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+            let theta2 = ((i + 1) as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+            
+            let x1 = phi1.sin() * theta1.cos() * RADIUS;
+            let y1 = -phi1.cos() * RADIUS + RADIUS;
+            let z1 = phi1.sin() * theta1.sin() * RADIUS;
+            
+            let x2 = phi1.sin() * theta2.cos() * RADIUS;
+            let y2 = -phi1.cos() * RADIUS + RADIUS;
+            let z2 = phi1.sin() * theta2.sin() * RADIUS;
+            
+            let x3 = phi2.sin() * theta2.cos() * RADIUS;
+            let y3 = -phi2.cos() * RADIUS + RADIUS;
+            let z3 = phi2.sin() * theta2.sin() * RADIUS;
+            
+            let x4 = phi2.sin() * theta1.cos() * RADIUS;
+            let y4 = -phi2.cos() * RADIUS + RADIUS;
+            let z4 = phi2.sin() * theta1.sin() * RADIUS;
+            
+            let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, z1), Vec3::new(x1, y1 - RADIUS, z1).normalize()));
+            let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x2, y2, z2), Vec3::new(x2, y2 - RADIUS, z2).normalize()));
+            let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x3, y3, z3), Vec3::new(x3, y3 - RADIUS, z3).normalize()));
+            let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x4, y4, z4), Vec3::new(x4, y4 - RADIUS, z4).normalize()));
+            
+            mesh.add_triangle(Triangle::new(v0, v1, v2));
+            mesh.add_triangle(Triangle::new(v0, v2, v3));
+        }
+    }
     
-    // Create actual faces for visibility (not just degenerate triangles)
-    // Bottom square
-    mesh.add_triangle(Triangle::new(v0, v1, v2));
-    mesh.add_triangle(Triangle::new(v0, v2, v3));
-    
-    // Top square
-    mesh.add_triangle(Triangle::new(v4, v6, v5));
-    mesh.add_triangle(Triangle::new(v4, v7, v6));
-    
-    // Front face
-    mesh.add_triangle(Triangle::new(v0, v5, v1));
-    mesh.add_triangle(Triangle::new(v0, v4, v5));
-    
-    // Back face
-    mesh.add_triangle(Triangle::new(v2, v7, v3));
-    mesh.add_triangle(Triangle::new(v2, v6, v7));
-    
-    // Left face
-    mesh.add_triangle(Triangle::new(v0, v7, v4));
-    mesh.add_triangle(Triangle::new(v0, v3, v7));
-    
-    // Right face
-    mesh.add_triangle(Triangle::new(v1, v6, v2));
-    mesh.add_triangle(Triangle::new(v1, v5, v6));
+    // Generate top hemisphere
+    for ring in 0..rings {
+        let phi1 = (ring as f32 / rings as f32) * std::f32::consts::PI * 0.5;
+        let phi2 = ((ring + 1) as f32 / rings as f32) * std::f32::consts::PI * 0.5;
+        
+        for i in 0..segments {
+            let theta1 = (i as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+            let theta2 = ((i + 1) as f32 / segments as f32) * 2.0 * std::f32::consts::PI;
+            
+            let x1 = phi1.sin() * theta1.cos() * RADIUS;
+            let y1 = phi1.cos() * RADIUS + (HEIGHT - RADIUS);
+            let z1 = phi1.sin() * theta1.sin() * RADIUS;
+            
+            let x2 = phi1.sin() * theta2.cos() * RADIUS;
+            let y2 = phi1.cos() * RADIUS + (HEIGHT - RADIUS);
+            let z2 = phi1.sin() * theta2.sin() * RADIUS;
+            
+            let x3 = phi2.sin() * theta2.cos() * RADIUS;
+            let y3 = phi2.cos() * RADIUS + (HEIGHT - RADIUS);
+            let z3 = phi2.sin() * theta2.sin() * RADIUS;
+            
+            let x4 = phi2.sin() * theta1.cos() * RADIUS;
+            let y4 = phi2.cos() * RADIUS + (HEIGHT - RADIUS);
+            let z4 = phi2.sin() * theta1.sin() * RADIUS;
+            
+            let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, z1), Vec3::new(x1, y1 - (HEIGHT - RADIUS), z1).normalize()));
+            let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x2, y2, z2), Vec3::new(x2, y2 - (HEIGHT - RADIUS), z2).normalize()));
+            let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x3, y3, z3), Vec3::new(x3, y3 - (HEIGHT - RADIUS), z3).normalize()));
+            let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x4, y4, z4), Vec3::new(x4, y4 - (HEIGHT - RADIUS), z4).normalize()));
+            
+            mesh.add_triangle(Triangle::new(v0, v2, v1));
+            mesh.add_triangle(Triangle::new(v0, v3, v2));
+        }
+    }
     
     mesh
 }
@@ -591,6 +645,8 @@ fn take_screenshot(
     player: &Player,
     physics: &PhysicsWorld,
     terrain_buffer: &MeshBuffer,
+    hitbox_buffer: &MeshBuffer,
+    player_model_bind_group: &wgpu::BindGroup,
 ) {
     // Update camera to player's eye position (first-person)
     let camera_ecef = player.camera_position();
@@ -666,8 +722,12 @@ fn take_screenshot(
         let mut render_pass = pipeline.begin_frame(&mut encoder, &screenshot_view);
         pipeline.set_pipeline(&mut render_pass);
         
-        // Render terrain only (first-person view)
+        // Render terrain
         terrain_buffer.render(&mut render_pass);
+        
+        // Render hitbox (showing collision capsule)
+        pipeline.set_model_bind_group(&mut render_pass, player_model_bind_group);
+        hitbox_buffer.render(&mut render_pass);
     }
     
     // Copy texture to buffer
