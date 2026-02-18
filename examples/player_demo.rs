@@ -415,38 +415,45 @@ fn update_walk_mode(player: &mut Player, terrain_mesh: &Mesh, forward: f32, righ
     let current_horizontal = Vec3::new(player.velocity.x, 0.0, player.velocity.z);
     let new_horizontal = current_horizontal + (target_horizontal - current_horizontal).clamp_length_max(ACCEL * dt);
     
-    // Vertical velocity (gravity)
-    let mut vertical_velocity = player.velocity.y;
+    // Apply gravity
+    let mut vertical_velocity = player.velocity.y - GRAVITY * dt;
     
-    // Find ground height at player's XZ position (search 1m radius)
-    let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, 1.0);
-    
-    // Ground detection using actual terrain height
-    let player_bottom_y = player.position.y - 0.9; // Player cube bottom (half height)
-    
-    if let Some(ground_y) = ground_height {
-        player.on_ground = player_bottom_y <= ground_y + 0.2; // 20cm tolerance
-        
-        if player.on_ground {
-            vertical_velocity = 0.0;
-            player.position.y = ground_y + 0.9; // Snap to ground (standing on surface)
-            
-            if jump {
-                vertical_velocity = JUMP_SPEED;
-                player.on_ground = false;
-            }
-        } else {
-            vertical_velocity -= GRAVITY * dt;
-        }
-    } else {
-        // No terrain found - fall
+    // Handle jump input (only when on ground)
+    if jump && player.on_ground {
+        vertical_velocity = JUMP_SPEED;
         player.on_ground = false;
-        vertical_velocity -= GRAVITY * dt;
     }
     
-    // Update velocity and position
+    // Update velocity
     player.velocity = Vec3::new(new_horizontal.x, vertical_velocity, new_horizontal.z);
+    
+    // Apply velocity to position
     player.position += player.velocity * dt;
+    
+    // NOW check ground collision (after moving)
+    let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, 1.0);
+    let player_bottom_y = player.position.y - 0.9; // Player cube bottom
+    
+    if let Some(ground_y) = ground_height {
+        // Only snap if we're falling (moving downward) and we penetrated the ground
+        if vertical_velocity <= 0.0 && player_bottom_y <= ground_y {
+            // Hit ground while falling
+            player.position.y = ground_y + 0.9; // Snap to surface
+            player.velocity.y = 0.0; // Stop falling
+            player.on_ground = true;
+        } else if player_bottom_y > ground_y + 0.5 {
+            // More than 0.5m above ground - we're in the air
+            player.on_ground = false;
+        } else {
+            // Close to ground but moving up (jumping) - stay on ground flag until we get higher
+            if player_bottom_y > ground_y + 0.2 {
+                player.on_ground = false;
+            }
+        }
+    } else {
+        // No terrain found - we're in the air
+        player.on_ground = false;
+    }
 }
 
 fn update_fly_mode(player: &mut Player, forward: f32, right: f32, up: f32, dt: f32) {
