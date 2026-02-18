@@ -71,6 +71,9 @@ libp2p-dcutr = { version = "0.12" }  # Direct Connection Upgrade through Relay (
 # Random number generation (for nonces, testing)
 rand = "0.8"
 
+# Message passing for async/sync bridge
+crossbeam = "0.8"
+
 [dev-dependencies]
 tempfile = "3"
 env_logger = "0.11"
