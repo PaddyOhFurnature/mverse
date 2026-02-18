@@ -390,8 +390,8 @@ fn main() {
                     );
                     context.queue.write_buffer(&player_model_uniform, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
                     
-                    // Update crosshair position (2m in front of camera)
-                    let crosshair_pos = camera.position + player.camera_forward() * 2.0;
+                    // Update crosshair position (0.5m in front of camera - close and visible)
+                    let crosshair_pos = camera.position + player.camera_forward() * 0.5;
                     let crosshair_matrix = Mat4::from_translation(crosshair_pos);
                     context.queue.write_buffer(&crosshair_uniform, 0, bytemuck::cast_slice(crosshair_matrix.as_ref()));
                     
@@ -671,9 +671,9 @@ fn add_line(mesh: &mut Mesh, p1: Vec3, p2: Vec3, thickness: f32) {
 fn create_crosshair() -> Mesh {
     let mut mesh = Mesh::new();
     
-    let size = 0.02; // Crosshair size in NDC units
-    let thickness = 0.002;
-    let gap = 0.01; // Gap in center
+    let size = 0.05; // Crosshair size (bigger)
+    let thickness = 0.005;
+    let gap = 0.02; // Gap in center
     
     // Horizontal line (left and right segments)
     add_line(&mut mesh, 

@@ -776,8 +776,17 @@ impl Player {
         // Direction is in local space
         let camera_dir = self.camera_forward();
         
-        // Raycast in voxel space (ECEF coordinates)
+        // Find target voxel
         if let Some(hit) = raycast_voxels(octree, &camera_ecef, camera_dir, max_reach) {
+            // Calculate distance to hit
+            let hit_ecef = hit.voxel.to_ecef();
+            let dx = hit_ecef.x - camera_ecef.x;
+            let dy = hit_ecef.y - camera_ecef.y;
+            let dz = hit_ecef.z - camera_ecef.z;
+            let distance = ((dx*dx + dy*dy + dz*dz) as f32).sqrt();
+            
+            println!("  Dig: hit voxel at {:.1}m distance", distance);
+            
             // Remove the voxel (set to AIR)
             octree.set_voxel(hit.voxel, MaterialId::AIR);
             Some(hit.voxel)
