@@ -696,21 +696,21 @@ impl Player {
             new_vertical_velocity
         };
         
-        // Combine horizontal and vertical components
+        // Combine horizontal and vertical components (now in local space)
         self.velocity = new_horizontal_velocity + final_vertical_velocity;
         
-        // Update position in rigidbody
-        // Velocity is in ECEF/world coordinates, position is in local coordinates
-        // We need to update ECEF position first, then convert to local
+        // Update position in local space first
+        let current_local = physics.ecef_to_local(&self.position);
+        let new_local = Vec3::new(
+            current_local.x + self.velocity.x * dt,
+            current_local.y + self.velocity.y * dt,
+            current_local.z + self.velocity.z * dt,
+        );
         
-        // Update ECEF position
-        self.position.x += (self.velocity.x * dt) as f64;
-        self.position.y += (self.velocity.y * dt) as f64;
-        self.position.z += (self.velocity.z * dt) as f64;
+        // Convert new local position back to ECEF
+        self.position = physics.local_to_ecef(new_local);
         
-        // Convert new ECEF position to local coordinates
-        let new_local = physics.ecef_to_local(&self.position);
-        
+        // Update rigidbody position
         if let Some(body) = physics.bodies.get_mut(self.body_handle) {
             body.set_translation(
                 vector![new_local.x, new_local.y, new_local.z],
