@@ -374,11 +374,14 @@ fn main() {
                     camera.yaw = player.camera_yaw;
                     camera.pitch = player.camera_pitch;
                     
-                    // Update player model matrix (for potential third-person view later)
+                    // Update player hitbox matrix
+                    // Hitbox starts at feet (Y=0), camera is at eye level (Y=1.6)
+                    // So hitbox needs to be offset down by eye height to align with camera
                     let player_local = physics.ecef_to_local(&player.position);
+                    let hitbox_offset = Vec3::new(0.0, -1.6, 0.0); // Down to feet level
                     let player_model_matrix = Mat4::from_rotation_translation(
                         glam::Quat::from_rotation_y(player.camera_yaw),
-                        player_local
+                        camera_local + hitbox_offset
                     );
                     context.queue.write_buffer(&player_model_uniform, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
                     
