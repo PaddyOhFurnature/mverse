@@ -38,6 +38,36 @@ image = "0.25"
 rstar = { version = "0.12", features = ["serde"] }  # R*-tree spatial index
 lru = "0.12"  # LRU cache for warm cache tier
 
+# Phase 1.5: P2P Networking (Local-First Architecture)
+# Core libp2p with essential transports and protocols
+libp2p = { version = "0.56", features = [
+    "tcp",              # TCP transport (primary)
+    "noise",            # Noise protocol for encryption
+    "yamux",            # Multiplexing protocol (stream muxer)
+    "gossipsub",        # Pubsub for state sync (player positions, voxel ops)
+    "kad",              # Kademlia DHT for peer discovery
+    "mdns",             # mDNS for local network discovery
+    "request-response", # Request/response protocol for chunk requests
+    "identify",         # Peer identification protocol
+    "ping",             # Keepalive and latency measurement
+    "macros",           # Convenience macros for Swarm
+    "tokio",            # Async runtime integration
+    "serde",            # Serialization support
+] }
+
+# Cryptographic identity (Ed25519 keypairs for peer IDs and signatures)
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+
+# Additional networking utilities
+libp2p-relay = { version = "0.18" }  # NAT traversal via relay nodes
+libp2p-dcutr = { version = "0.12" }  # Direct Connection Upgrade through Relay (hole-punching)
+
+# Async runtime (already have tokio, but ensure features are complete)
+# (tokio already included above with full features)
+
+# Random number generation (for nonces, testing)
+rand = "0.8"
+
 [dev-dependencies]
 tempfile = "3"
 env_logger = "0.11"
