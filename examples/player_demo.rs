@@ -465,21 +465,28 @@ fn update_walk_mode(player: &mut Player, terrain_mesh: &Mesh, forward: f32, righ
     let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, player_bottom_y, 1.0);
     
     if let Some(ground_y) = ground_height {
-        // Only snap if we're falling (moving downward) and we penetrated the ground
-        if vertical_velocity <= 0.0 && player_bottom_y <= ground_y {
-            // Hit ground while falling
-            player.position.y = ground_y + 0.9; // Snap to surface
-            player.velocity.y = 0.0; // Stop falling
+        // Check if we're penetrating ground OR close to ground
+        let distance_to_ground = player_bottom_y - ground_y;
+        
+        if distance_to_ground <= 0.0 {
+            // Below ground - snap up (falling or walking into rising terrain)
+            player.position.y = ground_y + 0.9;
+            player.velocity.y = 0.0;
             player.on_ground = true;
-        } else if player_bottom_y > ground_y + 0.5 {
+        } else if distance_to_ground < 0.2 && player.on_ground {
+            // Very close to ground and was on ground - snap to follow terrain
+            // This handles walking up slopes and bumps
+            player.position.y = ground_y + 0.9;
+            player.velocity.y = 0.0;
+            player.on_ground = true;
+        } else if distance_to_ground > 0.5 {
             // More than 0.5m above ground - we're in the air
             player.on_ground = false;
-        } else {
-            // Close to ground but moving up (jumping) - stay on ground flag until we get higher
-            if player_bottom_y > ground_y + 0.2 {
-                player.on_ground = false;
-            }
+        } else if distance_to_ground > 0.2 {
+            // Between 0.2 and 0.5m - transitioning to air
+            player.on_ground = false;
         }
+        // else: between 0 and 0.2m, falling toward ground, keep current state
     } else {
         // No terrain found - we're in the air
         player.on_ground = false;
