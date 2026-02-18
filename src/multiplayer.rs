@@ -633,6 +633,9 @@ fn run_network_thread(
                 
                 // Poll the swarm directly (this is the key fix!)
                 event = network.swarm.select_next_some() => {
+                    // Log ALL events for debugging
+                    println!("🔧 [DEBUG] Swarm event: {:?}", event);
+                    
                     if let Some(net_event) = network.handle_swarm_event(event) {
                         // Log important events
                         match &net_event {
