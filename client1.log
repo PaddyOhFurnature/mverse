@@ -1,3 +1,4 @@
+   Compiling metaverse_core v0.1.0 (/home/main/metaverse/metaverse_core)
 warning: unused import: `glam::Mat4`
  --> src/renderer/pipeline.rs:5:5
   |
@@ -39,9 +40,9 @@ warning: unused variable: `handle`
     |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_handle`
 
 warning: unused variable: `identity`
-   --> src/multiplayer.rs:211:16
+   --> src/multiplayer.rs:210:16
     |
-211 |     pub fn new(identity: Identity) -> Result<Self> {
+210 |     pub fn new(identity: Identity) -> Result<Self> {
     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_identity`
 
 warning: field `identity` is never read
@@ -68,29 +69,29 @@ warning: field `movement_mode` is never read
 
 warning: `metaverse_core` (lib) generated 9 warnings (run `cargo fix --lib -p metaverse_core` to apply 7 suggestions)
 warning: use of deprecated method `winit::event_loop::EventLoop::<T>::create_window`: use `ActiveEventLoop::create_window` instead
-   --> examples/phase1_multiplayer.rs:135:10
+   --> examples/phase1_multiplayer.rs:142:10
     |
-135 |         .create_window(
+142 |         .create_window(
     |          ^^^^^^^^^^^^^
     |
     = note: `#[warn(deprecated)]` on by default
 
 warning: use of deprecated method `winit::event_loop::EventLoop::<T>::run`: use `EventLoop::run_app` instead
-   --> examples/phase1_multiplayer.rs:299:16
+   --> examples/phase1_multiplayer.rs:306:16
     |
-299 |     event_loop.run(move |event, elwt| {
+306 |     event_loop.run(move |event, elwt| {
     |                ^^^
 
 warning: unused variable: `stats`
-   --> examples/phase1_multiplayer.rs:581:29
+   --> examples/phase1_multiplayer.rs:588:29
     |
-581 |                         let stats = multiplayer.stats();
+588 |                         let stats = multiplayer.stats();
     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_stats`
     |
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: `metaverse_core` (example "phase1_multiplayer") generated 3 warnings (run `cargo fix --example "phase1_multiplayer" -p metaverse_core` to apply 1 suggestion)
-    Finished `release` profile [optimized] target(s) in 0.24s
+    Finished `release` profile [optimized] target(s) in 5.87s
      Running `target/release/examples/phase1_multiplayer`
 === Phase 1 Multiplayer Demo ===
 
@@ -127,10 +128,18 @@ Loading identity from /home/main/.metaverse/identity.key
    Note: Publishing will fail until at least one peer connects - this is normal!
 
 
+🔧 [Network Thread] Creating NetworkNode...
+✅ [Network Thread] NetworkNode created successfully
+🔧 [Network Thread] Subscribing to topics...
 📻 Subscribed to topic: player-state
 📻 Subscribed to topic: voxel-ops
 📻 Subscribed to topic: chat
 🔍 Network thread started - polling for mDNS and connections...
+🔧 [Network Thread] About to enter tokio::select! loop...
+👂 Listening on: /ip4/127.0.0.1/tcp/34793
+👂 Listening on: /ip4/192.168.1.111/tcp/34793
+👂 Listening on: /ip4/192.168.122.1/tcp/34793
+👂 Listening on: /ip4/172.17.0.1/tcp/34793
 🎨 Initializing renderer...
 🗺️  Generating terrain (100m × 100m Brisbane)...
 NAS SRTM file not found, will use API fallback
@@ -138,7 +147,7 @@ Generating 100m × 100m terrain region...
   Sampling SRTM: 5 × 5 = 25 points
   Generating voxel columns at 1m resolution...
   ✓ Generated 10000 columns
-   Terrain generated in 0.33s
+   Terrain generated in 0.41s
    Origin GPS: (-27.470500, 153.026000, 50.0m)
    Origin voxel: VoxelCoord { x: 1353000, y: 8968690, z: 3475406 }
 🔺 Extracting mesh...
@@ -152,245 +161,30 @@ WARNING: Collision mesh has 70610 triangles (target: 10000). May impact performa
    Waiting for peers to connect...
    (Run another instance to test P2P)
 
+📻 Subscribed to topic: player-state
+📻 Subscribed to topic: voxel-ops
+📻 Subscribed to topic: chat
+👂 Listening on: /ip4/127.0.0.1/tcp/34793
+👂 Listening on: /ip4/192.168.1.111/tcp/34793
+👂 Listening on: /ip4/192.168.122.1/tcp/34793
+👂 Listening on: /ip4/172.17.0.1/tcp/34793
 FPS: 65 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 55 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 62 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 65 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+FPS: 64 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 57 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 62 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 56 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 65 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 65 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 66 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+FPS: 41 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 56 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 63 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 54 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+FPS: 47 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+💓 [Network Thread] Heartbeat 1 - loop is alive
+FPS: 27 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+FPS: 45 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
 FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.4) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -4.4, 0.4) | Mode: Walk
-FPS: 57 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 59 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 57 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 57 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 57 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 59 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-  Dig: camera(1.4, -4.0, 0.0) → voxel(1353001, 8968683, 3475406) @ local(1.0, -7.0, 0.0) = 3.1m
-⛏️  Dug voxel at VoxelCoord { x: 1353001, y: 8968683, z: 3475406 }
-🔄 Regenerating mesh and collision...
-WARNING: Collision mesh has 70626 triangles (target: 10000). May impact performance.
-FPS: 19 | Peers: 0 | Local: (1.4, -5.6, 0.0) | Mode: Walk
-FPS: 65 | Peers: 0 | Local: (1.4, -6.6, 0.2) | Mode: Walk
-  Place blocked: would intersect player (h_dist=0.33m, v_overlap=true)
-FPS: 60 | Peers: 0 | Local: (1.4, -6.6, 0.2) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.8, -6.5, 0.9) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (1.8, -5.8, 1.6) | Mode: Walk
-🖱️  Mouse released
-FPS: 61 | Peers: 0 | Local: (2.1, -5.6, 2.3) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 55 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 59 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 65 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 56 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 57 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 66 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (2.2, -5.6, 2.6) | Mode: Walk
+FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+
+👋 Shutting down...
