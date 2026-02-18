@@ -824,7 +824,9 @@ impl Player {
             );
             
             // Check if placement position is already occupied
-            if octree.get_voxel(place_coord) != MaterialId::AIR {
+            let current_material = octree.get_voxel(place_coord);
+            if current_material != MaterialId::AIR {
+                println!("  Place blocked: target already occupied ({:?})", current_material);
                 return None; // Can't place in occupied space
             }
             
@@ -836,6 +838,7 @@ impl Player {
             let dz = (place_coord.z - player_voxel.z).abs();
             
             if dx <= 1 && dy <= 2 && dz <= 1 {
+                println!("  Place blocked: too close to player (dx={}, dy={}, dz={})", dx, dy, dz);
                 return None; // Too close to player (would intersect)
             }
             
@@ -843,6 +846,7 @@ impl Player {
             octree.set_voxel(place_coord, material);
             Some(place_coord)
         } else {
+            println!("  Place blocked: no surface hit within {}m reach", max_reach);
             None
         }
     }

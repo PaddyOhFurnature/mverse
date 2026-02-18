@@ -1,0 +1,242 @@
+warning: unused import: `glam::Mat4`
+ --> src/renderer/pipeline.rs:5:5
+  |
+5 | use glam::Mat4;
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Vec3`
+  --> src/renderer/mod.rs:13:18
+   |
+13 | use glam::{Mat4, Vec3};
+   |                  ^^^^
+
+warning: unused import: `crate::coordinates::ECEF`
+   --> src/marching_cubes.rs:532:9
+    |
+532 |     use crate::coordinates::ECEF;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `VoxelRaycastHit`
+  --> src/physics.rs:10:56
+   |
+10 | use crate::voxel::{Octree, VoxelCoord, raycast_voxels, VoxelRaycastHit};
+   |                                                        ^^^^^^^^^^^^^^^
+
+warning: unused variable: `center_ecef`
+   --> src/marching_cubes.rs:539:9
+    |
+539 |     let center_ecef = center.to_ecef();
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_center_ecef`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `handle`
+   --> src/physics.rs:570:22
+    |
+570 |         if let Some((handle, toi)) = physics.query_pipeline.cast_ray(
+    |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_handle`
+
+warning: `metaverse_core` (lib) generated 6 warnings (run `cargo fix --lib -p metaverse_core` to apply 6 suggestions)
+warning: unused import: `ControlFlow`
+  --> examples/phase1_week1.rs:31:29
+   |
+31 |     event_loop::{EventLoop, ControlFlow},
+   |                             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated type alias `wgpu::ImageCopyTexture`: This has been renamed to `TexelCopyTextureInfo`, and will be removed in 25.0.0.
+   --> examples/phase1_week1.rs:743:15
+    |
+743 |         wgpu::ImageCopyTexture {
+    |               ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `wgpu::ImageCopyBuffer`: This has been renamed to `TexelCopyBufferInfo`, and will be removed in 25.0.0.
+   --> examples/phase1_week1.rs:749:15
+    |
+749 |         wgpu::ImageCopyBuffer {
+    |               ^^^^^^^^^^^^^^^
+
+warning: use of deprecated type alias `wgpu::ImageDataLayout`: This has been renamed to `TexelCopyBufferLayout`, and will be removed in 25.0.0.
+   --> examples/phase1_week1.rs:751:27
+    |
+751 |             layout: wgpu::ImageDataLayout {
+    |                           ^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `winit::event_loop::EventLoop::<T>::create_window`: use `ActiveEventLoop::create_window` instead
+  --> examples/phase1_week1.rs:59:10
+   |
+59 |         .create_window(
+   |          ^^^^^^^^^^^^^
+
+warning: use of deprecated method `winit::event_loop::EventLoop::<T>::run`: use `EventLoop::run_app` instead
+   --> examples/phase1_week1.rs:224:16
+    |
+224 |     event_loop.run(move |event, elwt| {
+    |                ^^^
+
+warning: variable does not need to be mutable
+   --> examples/phase1_week1.rs:154:9
+    |
+154 |     let mut player_model_buffer = MeshBuffer::from_mesh(&context.device, &player_mesh);
+    |         ----^^^^^^^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> examples/phase1_week1.rs:215:9
+    |
+215 |     let mut last_frame = Instant::now();
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `player_local`
+   --> examples/phase1_week1.rs:377:25
+    |
+377 |                     let player_local = physics.ecef_to_local(&player.position);
+    |                         ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_player_local`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `player_model_buffer`
+   --> examples/phase1_week1.rs:154:9
+    |
+154 |     let mut player_model_buffer = MeshBuffer::from_mesh(&context.device, &player_mesh);
+    |         ^^^^^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_player_model_buffer`
+
+warning: unused variable: `last_frame`
+   --> examples/phase1_week1.rs:215:9
+    |
+215 |     let mut last_frame = Instant::now();
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_frame`
+
+warning: `metaverse_core` (example "phase1_week1") generated 11 warnings (run `cargo fix --example "phase1_week1" -p metaverse_core` to apply 6 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.19s
+     Running `target/release/examples/phase1_week1`
+=== Interactive Physics Demo ===
+Controls:
+  WASD - Move
+  Space - Jump (walk) / Up (fly)
+  Shift - Down (fly mode)
+  F - Toggle Walk/Fly mode
+  E - Dig voxel
+  Q - Place voxel
+  Mouse - Look around (click to grab)
+  ESC - Release mouse
+  F12 - Take screenshot
+
+Initializing renderer...
+Generating terrain (100m × 100m Brisbane)...
+Found NAS SRTM file at: ./srtm-global.tif
+Generating 100m × 100m terrain region...
+  Sampling SRTM: 5 × 5 = 25 points
+  Generating voxel columns at 1m resolution...
+  ✓ Generated 10000 columns
+Terrain generated in 1.10s
+  Origin GPS: (-27.470500, 153.026000, 50.0m)
+  Origin voxel: VoxelCoord { x: 1353000, y: 8968690, z: 3475406 }
+  Origin ECEF: (-5046999.8, 2568690.7, -2924593.4)
+Extracting mesh...
+Mesh extracted in 0.79s (211830 vertices)
+  Mesh Y range: [-64.0m, 14.5m]
+  Ground at origin: -6.5m
+  Ground level at spawn: -6.5m
+Generating physics collision...
+WARNING: Collision mesh has 70610 triangles (target: 10000). May impact performance.
+
+✅ Physics initialized with real terrain
+  Player spawned at local: (0.0, -3.5, 0.0)
+  Terrain collider: ColliderHandle(Index { index: 0, generation: 0 })
+
+🎮 Demo running! Press ESC to quit.
+
+FPS: 65 | Voxel Y: 8968684 | ECEF Y: 2568684.9 | Local Y: -5.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.9 | Local Y: -5.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.8 | Local Y: -5.7 | On ground: false | Vel: 2.71 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968685 | ECEF Y: 2568685.2 | Local Y: -5.3 | On ground: false | Vel: 0.75 m/s
+FPS: 61 | Voxel Y: 8968684 | ECEF Y: 2568684.3 | Local Y: -6.2 | On ground: false | Vel: 4.18 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+Dug voxel at VoxelCoord { x: 1352996, y: 8968682, z: 3475406 }
+Regenerating mesh and collision...
+WARNING: Collision mesh has 70642 triangles (target: 10000). May impact performance.
+✅ Collision mesh updated
+FPS: 25 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 65 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968682 | ECEF Y: 2568682.0 | Local Y: -8.5 | On ground: true | Vel: 2.74 m/s
+FPS: 61 | Voxel Y: 8968682 | ECEF Y: 2568682.8 | Local Y: -7.7 | On ground: false | Vel: 5.25 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 2.24 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 2.00 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 1.33 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.3 | Local Y: -6.2 | On ground: false | Vel: 6.01 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+Dug voxel at VoxelCoord { x: 1352993, y: 8968682, z: 3475406 }
+Regenerating mesh and collision...
+WARNING: Collision mesh has 70658 triangles (target: 10000). May impact performance.
+✅ Collision mesh updated
+FPS: 5 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 65 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+Dug voxel at VoxelCoord { x: 1352993, y: 8968682, z: 3475405 }
+Regenerating mesh and collision...
+WARNING: Collision mesh has 70658 triangles (target: 10000). May impact performance.
+✅ Collision mesh updated
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 65 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 1.50 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 3.33 m/s
+Dug voxel at VoxelCoord { x: 1352994, y: 8968682, z: 3475405 }
+Regenerating mesh and collision...
+WARNING: Collision mesh has 70666 triangles (target: 10000). May impact performance.
+✅ Collision mesh updated
+FPS: 52 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 65 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+Dug voxel at VoxelCoord { x: 1352995, y: 8968682, z: 3475405 }
+Regenerating mesh and collision...
+WARNING: Collision mesh has 70666 triangles (target: 10000). May impact performance.
+✅ Collision mesh updated
+FPS: 16 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 65 | Voxel Y: 8968681 | ECEF Y: 2568681.9 | Local Y: -8.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.4 | Local Y: -7.1 | On ground: true | Vel: 3.15 m/s
+FPS: 61 | Voxel Y: 8968682 | ECEF Y: 2568682.2 | Local Y: -8.3 | On ground: true | Vel: 5.97 m/s
+FPS: 60 | Voxel Y: 8968682 | ECEF Y: 2568682.1 | Local Y: -8.4 | On ground: true | Vel: 6.01 m/s
+FPS: 61 | Voxel Y: 8968681 | ECEF Y: 2568681.9 | Local Y: -8.6 | On ground: true | Vel: 3.89 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.8 | Local Y: -6.7 | On ground: false | Vel: 2.18 m/s
+FPS: 61 | Voxel Y: 8968681 | ECEF Y: 2568681.9 | Local Y: -8.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968682 | ECEF Y: 2568682.2 | Local Y: -8.3 | On ground: false | Vel: 4.15 m/s
+FPS: 60 | Voxel Y: 8968682 | ECEF Y: 2568682.6 | Local Y: -7.9 | On ground: false | Vel: 3.37 m/s
+FPS: 60 | Voxel Y: 8968681 | ECEF Y: 2568681.9 | Local Y: -8.6 | On ground: false | Vel: 0.00 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.1 | Local Y: -7.4 | On ground: false | Vel: 1.41 m/s
+FPS: 60 | Voxel Y: 8968682 | ECEF Y: 2568682.6 | Local Y: -7.9 | On ground: false | Vel: 3.96 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.5 | Local Y: -6.0 | On ground: false | Vel: 4.02 m/s
+FPS: 61 | Voxel Y: 8968684 | ECEF Y: 2568684.8 | Local Y: -5.7 | On ground: true | Vel: 7.72 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.8 | Local Y: -5.7 | On ground: true | Vel: 16.66 m/s
+FPS: 61 | Voxel Y: 8968684 | ECEF Y: 2568684.8 | Local Y: -5.7 | On ground: true | Vel: 26.06 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968685 | ECEF Y: 2568685.0 | Local Y: -5.5 | On ground: false | Vel: 4.58 m/s
+FPS: 60 | Voxel Y: 8968684 | ECEF Y: 2568684.9 | Local Y: -5.6 | On ground: false | Vel: 0.00 m/s
+FPS: 61 | Voxel Y: 8968684 | ECEF Y: 2568684.9 | Local Y: -5.6 | On ground: false | Vel: 1.33 m/s
+FPS: 60 | Voxel Y: 8968686 | ECEF Y: 2568686.0 | Local Y: -4.5 | On ground: false | Vel: 4.75 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 3.42 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 3.62 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 4.50 m/s
+Mouse released (click to grab again)
+FPS: 61 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
+FPS: 60 | Voxel Y: 8968683 | ECEF Y: 2568683.9 | Local Y: -6.6 | On ground: false | Vel: 0.00 m/s
