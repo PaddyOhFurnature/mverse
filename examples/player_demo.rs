@@ -427,8 +427,35 @@ fn update_walk_mode(player: &mut Player, terrain_mesh: &Mesh, forward: f32, righ
     // Update velocity
     player.velocity = Vec3::new(new_horizontal.x, vertical_velocity, new_horizontal.z);
     
-    // Apply velocity to position
-    player.position += player.velocity * dt;
+    // Calculate new position from horizontal movement
+    let new_horizontal_pos = Vec3::new(
+        player.position.x + player.velocity.x * dt,
+        player.position.y,
+        player.position.z + player.velocity.z * dt,
+    );
+    
+    // Check horizontal collision at new XZ position
+    let collision_radius = 0.4; // Slightly larger than player width (0.3m half-width)
+    let has_horizontal_collision = check_horizontal_collision(
+        terrain_mesh,
+        new_horizontal_pos.x,
+        new_horizontal_pos.z,
+        player.position.y,
+        collision_radius,
+    );
+    
+    // Apply horizontal movement only if no collision
+    if !has_horizontal_collision {
+        player.position.x = new_horizontal_pos.x;
+        player.position.z = new_horizontal_pos.z;
+    } else {
+        // Hit a wall - stop horizontal velocity
+        player.velocity.x = 0.0;
+        player.velocity.z = 0.0;
+    }
+    
+    // Apply vertical movement (always allow falling/jumping)
+    player.position.y += player.velocity.y * dt;
     
     // NOW check ground collision (after moving)
     let player_bottom_y = player.position.y - 0.9; // Player cube bottom
@@ -570,6 +597,30 @@ fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, current_y: f32, search
     }
     
     best_y
+}
+
+/// Check if moving to new XZ position would collide with terrain at player height
+/// Returns true if collision detected (terrain blocks horizontal movement)
+fn check_horizontal_collision(terrain_mesh: &Mesh, x: f32, z: f32, player_y: f32, search_radius: f32) -> bool {
+    let player_bottom = player_y - 0.9;
+    let player_top = player_y + 0.9;
+    
+    for vertex in &terrain_mesh.vertices {
+        let dx = vertex.position.x - x;
+        let dz = vertex.position.z - z;
+        let dist_sq = dx * dx + dz * dz;
+        
+        if dist_sq <= search_radius * search_radius {
+            let y = vertex.position.y;
+            
+            // If terrain vertex is within player's height range, it's blocking us
+            if y >= player_bottom && y <= player_top {
+                return true; // Collision!
+            }
+        }
+    }
+    
+    false // No collision
 }
 
 fn take_screenshot(
