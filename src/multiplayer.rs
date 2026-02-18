@@ -309,8 +309,7 @@ impl MultiplayerSystem {
             
             NetworkEvent::PeerDisconnected { peer_id } => {
                 println!("💔 Peer disconnected: {}", peer_id);
-                // Remove from players map
-                self.remote_players.players.remove(&peer_id);
+                self.remote_players.remove_player(&peer_id);
             }
             
             NetworkEvent::PeerDiscovered { peer_id } => {
