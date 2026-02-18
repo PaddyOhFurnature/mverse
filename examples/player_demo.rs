@@ -48,7 +48,7 @@ impl Player {
             position: start_pos,
             velocity: Vec3::ZERO,
             yaw: 0.0,
-            pitch: 0.0,
+            pitch: -0.3, // Look down slightly so you can see terrain
             mode: PlayerMode::Walk,
             on_ground: false,
         }
@@ -163,23 +163,29 @@ fn main() {
     println!("✅ Player cube created (0.6m × 1.8m × 0.6m)\n");
     
     // STEP 5: Find ground level and spawn player
-    println!("STEP 4: Spawn player...");
+    println!("STEP 5: Spawn player...");
     
-    // Scan from origin downward to find first solid voxel
-    let mut ground_y = origin_voxel.y;
-    for y_offset in -20..20 {
-        let test_coord = VoxelCoord::new(origin_voxel.x, origin_voxel.y + y_offset, origin_voxel.z);
-        if octree.get_voxel(test_coord) != metaverse_core::materials::MaterialId::AIR {
-            ground_y = origin_voxel.y + y_offset;
-            break;
+    // Find ground by scanning terrain mesh vertices
+    // Mesh is in local coordinates centered at (0, 0, 0)
+    let mut ground_y: f32 = -1000.0;
+    for vertex in &terrain_mesh.vertices {
+        if vertex.position.x.abs() < 5.0 && vertex.position.z.abs() < 5.0 {
+            ground_y = ground_y.max(vertex.position.y);
         }
     }
     
-    // Spawn 3 meters above ground in local coordinates
-    let spawn_local_y = (ground_y - origin_voxel.y) as f32 + 3.0;
-    let mut player = Player::new(Vec3::new(0.0, spawn_local_y, 0.0));
+    if ground_y < -500.0 {
+        // No terrain found near origin, spawn at 0
+        ground_y = 0.0;
+    }
     
-    println!("✅ Player spawned at local Y={:.1} (3m above ground at Y={})", spawn_local_y, ground_y);
+    let spawn_y = ground_y + 3.0; // 3m above ground
+    println!("  Ground level: {:.1}m", ground_y);
+    println!("  Spawn position: (0.0, {:.1}, 0.0)", spawn_y);
+    
+    let mut player = Player::new(Vec3::new(0.0, spawn_y, 0.0));
+    
+    println!("✅ Player spawned at local Y={:.1} (3m above ground)", spawn_y);
     println!();
     
     // STEP 6: Create model transform bind group for player
@@ -305,7 +311,7 @@ fn main() {
                     match player.mode {
                         PlayerMode::Walk => {
                             // Walk mode: physics-based movement
-                            update_walk_mode(&mut player, move_forward, move_right, jump_pressed, sprint_pressed, dt);
+                            update_walk_mode(&mut player, &terrain_mesh, move_forward, move_right, jump_pressed, sprint_pressed, dt);
                         }
                         PlayerMode::Fly => {
                             // Fly mode: free movement in look direction
@@ -390,7 +396,7 @@ fn main() {
     }).unwrap();
 }
 
-fn update_walk_mode(player: &mut Player, forward: f32, right: f32, jump: bool, sprint: bool, dt: f32) {
+fn update_walk_mode(player: &mut Player, terrain_mesh: &Mesh, forward: f32, right: f32, jump: bool, sprint: bool, dt: f32) {
     const WALK_SPEED: f32 = 4.5; // m/s
     const SPRINT_SPEED: f32 = 7.0; // m/s
     const JUMP_SPEED: f32 = 5.0; // m/s
@@ -412,19 +418,29 @@ fn update_walk_mode(player: &mut Player, forward: f32, right: f32, jump: bool, s
     // Vertical velocity (gravity)
     let mut vertical_velocity = player.velocity.y;
     
-    // Simple ground detection (check if close to ground level)
-    // TODO: Proper collision detection
-    player.on_ground = player.position.y <= -17.0 + 0.9; // Half height of player (1.8m / 2)
+    // Find ground height at player's XZ position (search 1m radius)
+    let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, 1.0);
     
-    if player.on_ground {
-        vertical_velocity = 0.0;
-        player.position.y = -17.0 + 0.9; // Snap to ground
+    // Ground detection using actual terrain height
+    let player_bottom_y = player.position.y - 0.9; // Player cube bottom (half height)
+    
+    if let Some(ground_y) = ground_height {
+        player.on_ground = player_bottom_y <= ground_y + 0.2; // 20cm tolerance
         
-        if jump {
-            vertical_velocity = JUMP_SPEED;
-            player.on_ground = false;
+        if player.on_ground {
+            vertical_velocity = 0.0;
+            player.position.y = ground_y + 0.9; // Snap to ground (standing on surface)
+            
+            if jump {
+                vertical_velocity = JUMP_SPEED;
+                player.on_ground = false;
+            }
+        } else {
+            vertical_velocity -= GRAVITY * dt;
         }
     } else {
+        // No terrain found - fall
+        player.on_ground = false;
         vertical_velocity -= GRAVITY * dt;
     }
     
@@ -515,6 +531,26 @@ fn create_player_cube() -> Mesh {
     mesh.add_triangle(Triangle::new(v20, v23, v22));
     
     mesh
+}
+
+/// Find ground height at given XZ position by scanning terrain mesh
+fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, search_radius: f32) -> Option<f32> {
+    let mut max_y = None;
+    
+    for vertex in &terrain_mesh.vertices {
+        let dx = vertex.position.x - x;
+        let dz = vertex.position.z - z;
+        let dist_sq = dx * dx + dz * dz;
+        
+        if dist_sq <= search_radius * search_radius {
+            match max_y {
+                None => max_y = Some(vertex.position.y),
+                Some(y) => max_y = Some(y.max(vertex.position.y)),
+            }
+        }
+    }
+    
+    max_y
 }
 
 fn take_screenshot(
