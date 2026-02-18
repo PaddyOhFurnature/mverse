@@ -2,6 +2,7 @@
 
 use super::{Camera, CameraUniform, Vertex};
 use wgpu::util::DeviceExt;
+use glam::Mat4;
 
 /// Complete rendering context with device, queue, surface
 pub struct RenderContext {
@@ -98,6 +99,9 @@ pub struct RenderPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    model_buffer: wgpu::Buffer,
+    model_bind_group: wgpu::BindGroup,
+    model_bind_group_layout: wgpu::BindGroupLayout,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
 }
@@ -147,6 +151,40 @@ impl RenderPipeline {
             label: Some("camera_bind_group"),
         });
 
+        // Create model uniform buffer (identity matrix initially)
+        let identity_matrix = glam::Mat4::IDENTITY;
+        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Model Buffer"),
+            contents: bytemuck::cast_slice(identity_matrix.as_ref()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Create model bind group layout
+        let model_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+                label: Some("model_bind_group_layout"),
+            });
+
+        // Create model bind group
+        let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &model_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_buffer.as_entire_binding(),
+            }],
+            label: Some("model_bind_group"),
+        });
+
         // Create depth texture
         let depth_texture = Self::create_depth_texture(device, &context.config);
         let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -155,7 +193,7 @@ impl RenderPipeline {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[&camera_bind_group_layout],
+                bind_group_layouts: &[&camera_bind_group_layout, &model_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -208,6 +246,9 @@ impl RenderPipeline {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            model_buffer,
+            model_bind_group,
+            model_bind_group_layout,
             depth_texture,
             depth_view,
         }
@@ -236,6 +277,31 @@ impl RenderPipeline {
         let mut uniform = CameraUniform::new();
         uniform.update(camera);
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
+    }
+
+    /// Update model matrix uniform
+    pub fn update_model(&self, queue: &wgpu::Queue, model_matrix: &glam::Mat4) {
+        queue.write_buffer(&self.model_buffer, 0, bytemuck::cast_slice(model_matrix.as_ref()));
+    }
+
+    /// Create a bind group for a specific model matrix (for multiple objects)
+    pub fn create_model_bind_group(&self, device: &wgpu::Device, model_matrix: &glam::Mat4) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Model Buffer Instance"),
+            contents: bytemuck::cast_slice(model_matrix.as_ref()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.model_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_buffer.as_entire_binding(),
+            }],
+            label: Some("model_bind_group_instance"),
+        });
+
+        (model_buffer, bind_group)
     }
 
     /// Resize depth texture
@@ -282,6 +348,12 @@ impl RenderPipeline {
     pub fn set_pipeline<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.model_bind_group, &[]); // Default identity transform
+    }
+    
+    /// Set a custom model bind group for this object
+    pub fn set_model_bind_group<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, bind_group: &'a wgpu::BindGroup) {
+        render_pass.set_bind_group(1, bind_group, &[]);
     }
     
     /// Get pipeline (for direct access when needed)

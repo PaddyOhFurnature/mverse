@@ -6,6 +6,13 @@ struct CameraUniform {
 @group(0) @binding(0)
 var<uniform> camera: CameraUniform;
 
+struct ModelUniform {
+    model: mat4x4<f32>,
+};
+
+@group(1) @binding(0)
+var<uniform> model: ModelUniform;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -21,12 +28,14 @@ struct VertexOutput {
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     
-    // Transform position to clip space
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    // Apply model transform, then camera transform
+    let world_pos = model.model * vec4<f32>(in.position, 1.0);
+    out.clip_position = camera.view_proj * world_pos;
     
-    // Pass through world-space normal and position
-    out.world_normal = in.normal;
-    out.world_position = in.position;
+    // Transform normal by model matrix (ignoring translation)
+    let world_normal = model.model * vec4<f32>(in.normal, 0.0);
+    out.world_normal = world_normal.xyz;
+    out.world_position = world_pos.xyz;
     
     return out;
 }
