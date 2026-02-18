@@ -602,8 +602,9 @@ fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, current_y: f32, search
 /// Check if moving to new XZ position would collide with terrain at player height
 /// Returns true if collision detected (terrain blocks horizontal movement)
 fn check_horizontal_collision(terrain_mesh: &Mesh, x: f32, z: f32, player_y: f32, search_radius: f32) -> bool {
-    let player_bottom = player_y - 0.9;
+    let player_center = player_y; // Player center height
     let player_top = player_y + 0.9;
+    let min_wall_height = 0.3; // Wall must be at least 0.3m above player bottom to block
     
     for vertex in &terrain_mesh.vertices {
         let dx = vertex.position.x - x;
@@ -613,9 +614,10 @@ fn check_horizontal_collision(terrain_mesh: &Mesh, x: f32, z: f32, player_y: f32
         if dist_sq <= search_radius * search_radius {
             let y = vertex.position.y;
             
-            // If terrain vertex is within player's height range, it's blocking us
-            if y >= player_bottom && y <= player_top {
-                return true; // Collision!
+            // Only consider terrain in upper half of player (waist to head)
+            // This prevents ground from blocking horizontal movement
+            if y >= player_center - 0.3 && y <= player_top {
+                return true; // Wall collision!
             }
         }
     }
