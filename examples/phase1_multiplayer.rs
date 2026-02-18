@@ -63,6 +63,7 @@ use metaverse_core::{
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
+    user_content::UserContentLayer,
     voxel::{Octree, VoxelCoord},
 };
 use glam::{Mat4, Vec3};
@@ -299,6 +300,9 @@ fn main() {
     // Track local voxel operations for CRDT merge
     let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::VoxelOperation> = HashMap::new();
     
+    // User content layer - separates edits from base terrain
+    let mut user_content = UserContentLayer::new();
+    
     println!("\n🎮 Demo running!");
     println!("   Waiting for peers to connect...");
     println!("   (Run another instance to test P2P)\n");
@@ -401,23 +405,6 @@ fn main() {
                     // Update multiplayer system (polls network, interpolates remote players)
                     multiplayer.update(dt);
                     
-                    // Broadcast player state (20 Hz with internal timer)
-                    let movement_mode = match player_mode {
-                        PlayerModeLocal::Walk => MovementMode::Walk,
-                        PlayerModeLocal::Fly => MovementMode::Fly,
-                    };
-                    
-                    let player_local_pos = physics.ecef_to_local(&player.position);
-                    let velocity = [player.velocity.x, player.velocity.y, player.velocity.z];
-                    
-                    let _ = multiplayer.broadcast_player_state(
-                        player.position,
-                        velocity,
-                        player.camera_yaw,
-                        player.camera_pitch,
-                        movement_mode,
-                    );
-                    
                     // Handle chat
                     if chat_pressed {
                         let _ = multiplayer.send_chat("Hello from P2P!".to_string());
@@ -433,7 +420,13 @@ fn main() {
                             // Broadcast voxel operation
                             match multiplayer.broadcast_voxel_operation(dug, Material::Air) {
                                 Ok(op) => {
-                                    local_voxel_ops.insert(dug, op);
+                                    // Track locally for CRDT merge
+                                    local_voxel_ops.insert(dug, op.clone());
+                                    
+                                    // Log to user content layer
+                                    if let Err(e) = user_content.apply_operation(op, &local_voxel_ops) {
+                                        eprintln!("Failed to log local dig operation: {:?}", e);
+                                    }
                                 }
                                 Err(e) => eprintln!("Failed to broadcast dig: {}", e),
                             }
@@ -451,7 +444,13 @@ fn main() {
                             // Broadcast voxel operation
                             match multiplayer.broadcast_voxel_operation(placed, Material::Stone) {
                                 Ok(op) => {
-                                    local_voxel_ops.insert(placed, op);
+                                    // Track locally for CRDT merge
+                                    local_voxel_ops.insert(placed, op.clone());
+                                    
+                                    // Log to user content layer
+                                    if let Err(e) = user_content.apply_operation(op, &local_voxel_ops) {
+                                        eprintln!("Failed to log local place operation: {:?}", e);
+                                    }
                                 }
                                 Err(e) => eprintln!("Failed to broadcast place: {}", e),
                             }
@@ -462,8 +461,31 @@ fn main() {
                     }
                     
                     // Process any received voxel operations
-                    // (In real implementation, MultiplayerSystem would expose pending ops)
-                    // For Phase 1, operations are logged in stats but not yet applied to remote octrees
+                    let pending_ops = multiplayer.take_pending_operations();
+                    if !pending_ops.is_empty() {
+                        println!("📦 Processing {} received voxel operations", pending_ops.len());
+                        for op in pending_ops {
+                            // Apply to user content layer (handles CRDT merge)
+                            match user_content.apply_operation(op.clone(), &local_voxel_ops) {
+                                Ok(true) => {
+                                    // Operation accepted - apply to octree
+                                    let material_id = op.material.to_material_id();
+                                    octree.set_voxel(op.coord, material_id);
+                                    mesh_dirty = true;
+                                    println!("✅ Applied remote voxel operation at {:?}", op.coord);
+                                }
+                                Ok(false) => {
+                                    println!("⚠️  Rejected remote voxel operation (CRDT conflict - local wins)");
+                                }
+                                Err(e) => {
+                                    println!("❌ Invalid remote voxel operation: {:?}", e);
+                                }
+                            }
+                        }
+                        
+                        // Log current operation count
+                        println!("📊 Total operations in log: {}", user_content.op_count());
+                    }
                     
                     // Update player movement
                     let move_input = Vec3::new(input_right, input_up, input_forward);
@@ -489,6 +511,30 @@ fn main() {
                         }
                     }
                     
+                    // Broadcast player state AFTER movement update (20 Hz with internal timer)
+                    let movement_mode = match player_mode {
+                        PlayerModeLocal::Walk => MovementMode::Walk,
+                        PlayerModeLocal::Fly => MovementMode::Fly,
+                    };
+                    
+                    let player_local_pos = physics.ecef_to_local(&player.position);
+                    let velocity = [player.velocity.x, player.velocity.y, player.velocity.z];
+                    
+                    let _ = multiplayer.broadcast_player_state(
+                        player.position,
+                        velocity,
+                        player.camera_yaw,
+                        player.camera_pitch,
+                        movement_mode,
+                    );
+                    
+                    // Debug: Print local position every 60 frames
+                    if frame_count % 60 == 0 {
+                        println!("📤 Broadcasting state: ECEF=({:.1}, {:.1}, {:.1}), Local=({:.1}, {:.1}, {:.1})",
+                            player.position.x, player.position.y, player.position.z,
+                            player_local_pos.x, player_local_pos.y, player_local_pos.z);
+                    }
+                    
                     jump_pressed = false;
                     
                     // Update camera
@@ -510,18 +556,31 @@ fn main() {
                     context.queue.write_buffer(&crosshair_uniform, 0, bytemuck::cast_slice(crosshair_matrix.as_ref()));
                     
                     // Update remote player transforms
+                    let remote_count = multiplayer.remote_players().count();
                     for remote in multiplayer.remote_players() {
                         let transform = remote_player_transform(remote, &physics);
+                        let local_pos = physics.ecef_to_local(&remote.position);
+                        
+                        // Debug: Log remote player rendering every 60 frames
+                        if frame_count % 60 == 0 {
+                            println!("🎨 Rendering remote player at Local=({:.1}, {:.1}, {:.1})", 
+                                local_pos.x, local_pos.y, local_pos.z);
+                        }
                         
                         // Get or create bind group for this peer
                         if !remote_player_bind_groups.contains_key(&remote.peer_id) {
                             let (uniform, bind_group) = pipeline.create_model_bind_group(&context.device, &transform);
                             remote_player_bind_groups.insert(remote.peer_id, (uniform, bind_group));
+                            println!("✨ Created bind group for remote player: {}", short_peer_id(&remote.peer_id));
                         } else {
                             // Update existing transform
                             let (uniform, _) = remote_player_bind_groups.get(&remote.peer_id).unwrap();
                             context.queue.write_buffer(uniform, 0, bytemuck::cast_slice(transform.as_ref()));
                         }
+                    }
+                    
+                    if frame_count % 60 == 0 && remote_count > 0 {
+                        println!("📊 Remote players to render: {}", remote_count);
                     }
                     
                     // Regenerate mesh if terrain changed
@@ -564,11 +623,17 @@ fn main() {
                                 hitbox_buffer.render(&mut render_pass);
                                 
                                 // Render all remote players
+                                let mut rendered_count = 0;
                                 for remote in multiplayer.remote_players() {
                                     if let Some((_, bind_group)) = remote_player_bind_groups.get(&remote.peer_id) {
                                         pipeline.set_model_bind_group(&mut render_pass, bind_group);
                                         remote_player_buffer.render(&mut render_pass);
+                                        rendered_count += 1;
                                     }
+                                }
+                                
+                                if frame_count % 60 == 0 && rendered_count > 0 {
+                                    println!("🖼️  Actually rendered {} remote players", rendered_count);
                                 }
                                 
                                 // Render crosshair (last, on top)

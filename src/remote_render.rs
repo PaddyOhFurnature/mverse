@@ -18,12 +18,12 @@ use libp2p::PeerId;
 pub fn create_remote_player_capsule() -> Mesh {
     let mut mesh = Mesh::new();
     
-    // Player dimensions (matches local player)
-    let w = 0.3; // Half width (0.6m total)
-    let h = 0.9; // Half height (1.8m total)
+    // HUGE AND BRIGHT for testing - 5x normal size!
+    let w = 1.5; // Half width (3m total - was 0.6m)
+    let h = 4.5; // Half height (9m total - was 1.8m)
     
-    // Color: Blue wireframe (different from local green)
-    let color = Vec3::new(0.3, 0.5, 1.0);
+    // Color: BRIGHT RED - impossible to miss!
+    let color = Vec3::new(1.0, 0.0, 0.0);
     
     // Create wireframe cube edges
     // Bottom square

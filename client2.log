@@ -39,9 +39,9 @@ warning: unused variable: `handle`
     |                      ^^^^^^ help: if this is intentional, prefix it with an underscore: `_handle`
 
 warning: unused variable: `identity`
-   --> src/multiplayer.rs:211:16
+   --> src/multiplayer.rs:210:16
     |
-211 |     pub fn new(identity: Identity) -> Result<Self> {
+210 |     pub fn new(identity: Identity) -> Result<Self> {
     |                ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_identity`
 
 warning: field `identity` is never read
@@ -68,30 +68,30 @@ warning: field `movement_mode` is never read
 
 warning: `metaverse_core` (lib) generated 9 warnings (run `cargo fix --lib -p metaverse_core` to apply 7 suggestions)
 warning: use of deprecated method `winit::event_loop::EventLoop::<T>::create_window`: use `ActiveEventLoop::create_window` instead
-   --> examples/phase1_multiplayer.rs:135:10
+   --> examples/phase1_multiplayer.rs:142:10
     |
-135 |         .create_window(
+142 |         .create_window(
     |          ^^^^^^^^^^^^^
     |
     = note: `#[warn(deprecated)]` on by default
 
 warning: use of deprecated method `winit::event_loop::EventLoop::<T>::run`: use `EventLoop::run_app` instead
-   --> examples/phase1_multiplayer.rs:299:16
+   --> examples/phase1_multiplayer.rs:306:16
     |
-299 |     event_loop.run(move |event, elwt| {
+306 |     event_loop.run(move |event, elwt| {
     |                ^^^
 
 warning: unused variable: `stats`
-   --> examples/phase1_multiplayer.rs:581:29
+   --> examples/phase1_multiplayer.rs:614:29
     |
-581 |                         let stats = multiplayer.stats();
+614 |                         let stats = multiplayer.stats();
     |                             ^^^^^ help: if this is intentional, prefix it with an underscore: `_stats`
     |
     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
 
 warning: `metaverse_core` (example "phase1_multiplayer") generated 3 warnings (run `cargo fix --example "phase1_multiplayer" -p metaverse_core` to apply 1 suggestion)
     Finished `release` profile [optimized] target(s) in 0.24s
-     Running `target/release/examples/phase1_multiplayer`
+     Running `target/release/examples/phase1_multiplayer --temp-identity`
 === Phase 1 Multiplayer Demo ===
 
 🌐 P2P NETWORKING ENABLED
@@ -113,24 +113,32 @@ Controls:
   F12 - Take screenshot
 
 🔐 Initializing cryptographic identity...
-Loading identity from /home/main/.metaverse/identity.key
+   Using temporary identity (not saved)
    PeerId: 12D3KooW
    Key: ~/.metaverse/identity.key
 
 🌐 Starting P2P network node...
    Listening for connections...
    mDNS discovery active (auto-connect on LAN)
-   PeerId: 12D3KooWPEPB1wgEDLVoRUrtsNy5arNtvt4wJuyqEoDoKPcEqEEv
+   PeerId: 12D3KooWS9W19TvWB9QrzfkvRqUrUMz18qnvG19aUn11H3co5Hzb
 
 ⏳ Waiting for peers to connect...
    (Watch for "Peer discovered" and "Peer connected" messages)
    Note: Publishing will fail until at least one peer connects - this is normal!
 
 
+🔧 [Network Thread] Creating NetworkNode...
+✅ [Network Thread] NetworkNode created successfully
+🔧 [Network Thread] Subscribing to topics...
 📻 Subscribed to topic: player-state
 📻 Subscribed to topic: voxel-ops
 📻 Subscribed to topic: chat
 🔍 Network thread started - polling for mDNS and connections...
+🔧 [Network Thread] About to enter tokio::select! loop...
+👂 Listening on: /ip4/127.0.0.1/tcp/44637
+👂 Listening on: /ip4/192.168.1.111/tcp/44637
+👂 Listening on: /ip4/192.168.122.1/tcp/44637
+👂 Listening on: /ip4/172.17.0.1/tcp/44637
 🎨 Initializing renderer...
 🗺️  Generating terrain (100m × 100m Brisbane)...
 NAS SRTM file not found, will use API fallback
@@ -138,11 +146,11 @@ Generating 100m × 100m terrain region...
   Sampling SRTM: 5 × 5 = 25 points
   Generating voxel columns at 1m resolution...
   ✓ Generated 10000 columns
-   Terrain generated in 0.39s
+   Terrain generated in 0.33s
    Origin GPS: (-27.470500, 153.026000, 50.0m)
    Origin voxel: VoxelCoord { x: 1353000, y: 8968690, z: 3475406 }
 🔺 Extracting mesh...
-   Mesh extracted in 0.95s (211830 vertices)
+   Mesh extracted in 0.79s (211830 vertices)
    Ground level at spawn: -6.5m
 💥 Generating physics collision...
 WARNING: Collision mesh has 70610 triangles (target: 10000). May impact performance.
@@ -152,15 +160,124 @@ WARNING: Collision mesh has 70610 triangles (target: 10000). May impact performa
    Waiting for peers to connect...
    (Run another instance to test P2P)
 
-FPS: 56 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 35 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 58 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📻 Subscribed to topic: player-state
+📻 Subscribed to topic: voxel-ops
+📻 Subscribed to topic: chat
+👂 Listening on: /ip4/127.0.0.1/tcp/44637
+👂 Listening on: /ip4/192.168.1.111/tcp/44637
+👂 Listening on: /ip4/192.168.122.1/tcp/44637
+👂 Listening on: /ip4/172.17.0.1/tcp/44637
+🔄 Processed 7 network events
+📤 Broadcasting state: ECEF=(-5046999.5, 2568687.0, -2924593.5), Local=(0.0, -3.5, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
 FPS: 65 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 61 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🖱️  Mouse released
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
 FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
-FPS: 60 | Peers: 0 | Local: (0.0, -5.6, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568684.9, -2924593.5), Local=(0.0, -5.6, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+
+👋 Shutting down...

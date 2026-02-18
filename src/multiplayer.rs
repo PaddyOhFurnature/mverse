@@ -126,6 +126,9 @@ pub struct MultiplayerSystem {
     /// Deduplication set for voxel operations (by operation ID)
     voxel_op_seen: HashSet<[u8; 64]>, // Store signature as ID
     
+    /// Pending voxel operations to be applied to world
+    pending_ops: Vec<VoxelOperation>,
+    
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
     
@@ -191,6 +194,7 @@ impl MultiplayerSystem {
             remote_players: PlayerStateManager::new(local_peer_id),
             clock: LamportClock::default(),
             voxel_op_seen: HashSet::new(),
+            pending_ops: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -243,10 +247,16 @@ impl MultiplayerSystem {
     /// and handles periodic broadcasts.
     pub fn update(&mut self, _dt: f32) {
         // Process all pending network events (non-blocking)
+        let mut event_count = 0;
         while let Ok(event) = self.event_rx.try_recv() {
+            event_count += 1;
             if let Err(e) = self.handle_network_event(event) {
                 eprintln!("Error handling network event: {}", e);
             }
+        }
+        
+        if event_count > 0 {
+            println!("🔄 Processed {} network events", event_count);
         }
         
         // Update remote player interpolation
@@ -398,8 +408,11 @@ impl MultiplayerSystem {
     }
     
     /// Handle incoming player state message
-    fn handle_player_state(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
+    fn handle_player_state(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let msg = PlayerStateMessage::from_bytes(data)?;
+        
+        println!("📥 Received player state from {}: pos=({:.1}, {:.1}, {:.1})", 
+            peer_id, msg.position.x, msg.position.y, msg.position.z);
         
         // Update Lamport clock
         self.clock.receive(msg.timestamp);
@@ -408,12 +421,16 @@ impl MultiplayerSystem {
         self.remote_players.handle_message(msg);
         self.stats.player_states_received += 1;
         
+        println!("   Total remote players tracked: {}", self.remote_players.player_count());
+        
         Ok(())
     }
     
     /// Handle incoming voxel operation with CRDT merge and signature verification
     fn handle_voxel_operation(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let op = VoxelOperation::from_bytes(data)?;
+        
+        println!("🔨 Received voxel op from {}: {:?} at {:?}", peer_id, op.material, op.coord);
         
         // Check if we've already seen this operation (deduplication)
         if self.voxel_op_seen.contains(&op.signature) {
@@ -446,8 +463,8 @@ impl MultiplayerSystem {
         
         self.stats.voxel_ops_received += 1;
         
-        // Caller should apply operation to octree
-        // We don't do it here to avoid coupling with game state
+        // Queue operation for application by game loop
+        self.pending_ops.push(op);
         
         Ok(())
     }
@@ -520,6 +537,18 @@ impl MultiplayerSystem {
         
         self.stats.voxel_ops_applied += 1;
         true
+    }
+    
+    /// Get all pending voxel operations and clear the queue
+    ///
+    /// Call this in your game loop to process received operations.
+    pub fn take_pending_operations(&mut self) -> Vec<VoxelOperation> {
+        std::mem::take(&mut self.pending_ops)
+    }
+    
+    /// Check if there are pending operations
+    pub fn has_pending_operations(&self) -> bool {
+        !self.pending_ops.is_empty()
     }
     
     /// Get number of connected peers

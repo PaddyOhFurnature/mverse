@@ -294,6 +294,9 @@ impl NetworkNode {
                 use sha2::{Sha256, Digest};
                 let mut hasher = Sha256::new();
                 hasher.update(&msg.data);
+                // Include source and sequence to prevent deduplication of similar messages
+                hasher.update(msg.source.as_ref().map(|p| p.to_bytes()).unwrap_or_default().as_slice());
+                hasher.update(&msg.sequence_number.unwrap_or(0).to_le_bytes());
                 gossipsub::MessageId::from(hasher.finalize().to_vec())
             })
             .build()
@@ -412,6 +415,8 @@ impl NetworkNode {
             .ok_or_else(|| NetworkError::TopicNotSubscribed(topic_name.to_string()))?
             .clone();
         
+        println!("🟢 [NETWORK] Publishing to {}: {} bytes", topic_name, data.len());
+        
         self.swarm.behaviour_mut().gossipsub.publish(topic, data)
             .map_err(|e| NetworkError::PublishError(e.to_string()))?;
         
@@ -452,6 +457,9 @@ impl NetworkNode {
             )) => {
                 let topic = message.topic.to_string();
                 let data = message.data;
+                
+                println!("🔵 [NETWORK] Gossipsub message received! topic={}, from={}, size={} bytes", 
+                    topic, peer_id, data.len());
                 
                 Some(NetworkEvent::Message {
                     peer_id,

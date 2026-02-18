@@ -67,10 +67,42 @@ impl Mesh {
         self.triangles.push(triangle);
     }
     
-    /// Add a line segment (as a degenerate triangle for wireframe rendering)
+    /// Add a line segment rendered as a thick quad (billboard)
+    /// 
+    /// Creates a quad perpendicular to the camera to make lines visible.
+    /// For proper wireframes, creates 6 vertices (2 triangles) to form a thick line.
+    /// DOUBLE-SIDED: Creates triangles on both sides so visible from any angle.
     pub fn add_line(&mut self, v0: usize, v1: usize) {
-        // Create a degenerate triangle (all vertices on a line)
-        self.triangles.push(Triangle::new(v0, v1, v1));
+        // Get the two endpoint vertices
+        let p0 = self.vertices[v0].position;
+        let p1 = self.vertices[v1].position;
+        let color = self.vertices[v0].normal; // Using normal for color
+        
+        // Calculate line direction and perpendicular offset
+        let dir = (p1 - p0).normalize();
+        let thickness = 0.02; // 2cm thick lines
+        
+        // Create perpendicular vector (try Y-axis first, then X if parallel to Y)
+        let up = if dir.y.abs() < 0.9 {
+            Vec3::Y
+        } else {
+            Vec3::X
+        };
+        let perp = dir.cross(up).normalize() * thickness;
+        
+        // Create quad vertices around the line
+        let v0a = self.add_vertex(Vertex::new(p0 - perp, color));
+        let v0b = self.add_vertex(Vertex::new(p0 + perp, color));
+        let v1a = self.add_vertex(Vertex::new(p1 - perp, color));
+        let v1b = self.add_vertex(Vertex::new(p1 + perp, color));
+        
+        // Create two triangles to form the quad (front-facing)
+        self.triangles.push(Triangle::new(v0a, v1a, v0b));
+        self.triangles.push(Triangle::new(v0b, v1a, v1b));
+        
+        // Create two more triangles for the back (reverse winding)
+        self.triangles.push(Triangle::new(v0b, v1a, v0a));
+        self.triangles.push(Triangle::new(v1b, v1a, v0b));
     }
     
     /// Get vertex count

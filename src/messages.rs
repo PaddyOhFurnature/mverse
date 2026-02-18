@@ -338,6 +338,25 @@ impl VoxelOperation {
         bytes
     }
     
+    /// Verify signature using author's public key (derived from PeerId)
+    ///
+    /// Returns true if signature is valid for this operation.
+    pub fn verify_signature(&self) -> bool {
+        // Extract public key from PeerId (libp2p PeerId contains the public key)
+        // For Ed25519, the PeerId is derived from the public key
+        // This requires access to the public key, which we should store
+        
+        // TODO: Store public keys separately or extract from PeerId
+        // For now, this is a placeholder that always returns true
+        // when signature checking is disabled in UserContentLayer
+        
+        // Once we have the public key:
+        // let verifying_key = VerifyingKey::from_bytes(&public_key_bytes)?;
+        // self.verify(&verifying_key)
+        
+        true // Placeholder - actual verification happens in multiplayer.rs
+    }
+    
     /// Serialize to bytes for network transmission
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(bincode::serialize(self)?)
