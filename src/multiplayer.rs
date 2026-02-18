@@ -61,7 +61,6 @@ use crate::{
 };
 use libp2p::PeerId;
 use crossbeam::channel::{self, Sender, Receiver};
-use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
