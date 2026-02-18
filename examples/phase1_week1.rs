@@ -249,8 +249,6 @@ fn main() {
                                         &player,
                                         &physics,
                                         &mesh_buffer,
-                                        &hitbox_buffer,
-                                        &player_model_bind_group,
                                     );
                                 }
                                 KeyCode::KeyF => {
@@ -415,12 +413,8 @@ fn main() {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
                                 
-                                // Render terrain
+                                // Render terrain only - first-person view, no player model visible
                                 mesh_buffer.render(&mut render_pass);
-                                
-                                // Render hitbox visualization at player position
-                                pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
-                                hitbox_buffer.render(&mut render_pass);
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
@@ -645,8 +639,6 @@ fn take_screenshot(
     player: &Player,
     physics: &PhysicsWorld,
     terrain_buffer: &MeshBuffer,
-    hitbox_buffer: &MeshBuffer,
-    player_model_bind_group: &wgpu::BindGroup,
 ) {
     // Update camera to player's eye position (first-person)
     let camera_ecef = player.camera_position();
@@ -722,12 +714,8 @@ fn take_screenshot(
         let mut render_pass = pipeline.begin_frame(&mut encoder, &screenshot_view);
         pipeline.set_pipeline(&mut render_pass);
         
-        // Render terrain
+        // Render terrain only - first-person view
         terrain_buffer.render(&mut render_pass);
-        
-        // Render hitbox (showing collision capsule)
-        pipeline.set_model_bind_group(&mut render_pass, player_model_bind_group);
-        hitbox_buffer.render(&mut render_pass);
     }
     
     // Copy texture to buffer
