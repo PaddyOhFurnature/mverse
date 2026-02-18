@@ -257,8 +257,8 @@ impl NetworkedPlayer {
 /// Manages all remote players, handles state updates, and performs
 /// interpolation for smooth rendering.
 pub struct PlayerStateManager {
-    /// Map of peer ID to networked player
-    players: HashMap<PeerId, NetworkedPlayer>,
+    /// Map of peer ID to networked player (public for multiplayer system access)
+    pub players: HashMap<PeerId, NetworkedPlayer>,
     
     /// Lamport clock for local player state
     local_clock: LamportClock,

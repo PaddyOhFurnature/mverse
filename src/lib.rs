@@ -17,3 +17,5 @@ pub mod identity;
 pub mod network;
 pub mod messages;
 pub mod player_state;
+pub mod multiplayer;
+pub mod remote_render;

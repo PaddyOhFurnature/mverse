@@ -67,6 +67,12 @@ impl Mesh {
         self.triangles.push(triangle);
     }
     
+    /// Add a line segment (as a degenerate triangle for wireframe rendering)
+    pub fn add_line(&mut self, v0: usize, v1: usize) {
+        // Create a degenerate triangle (all vertices on a line)
+        self.triangles.push(Triangle::new(v0, v1, v1));
+    }
+    
     /// Get vertex count
     pub fn vertex_count(&self) -> usize {
         self.vertices.len()
