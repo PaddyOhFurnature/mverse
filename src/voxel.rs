@@ -22,7 +22,7 @@ pub const VOXEL_SIZE_METERS: f64 = 1.0;
 pub const VOXEL_GRID_SIZE: i64 = (WORLD_SIZE_METERS / VOXEL_SIZE_METERS) as i64;
 
 /// 3D voxel coordinate (integer grid position)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct VoxelCoord {
     pub x: i64,
     pub y: i64,

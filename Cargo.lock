@@ -3137,6 +3137,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "tempfile",
+ "thiserror 2.0.18",
  "tiff 0.11.3",
  "tokio",
  "wgpu",

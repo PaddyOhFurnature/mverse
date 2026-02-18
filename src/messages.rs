@@ -1,0 +1,555 @@
+//! Message protocol for P2P communication
+//!
+//! This module defines all message types exchanged between peers:
+//! - Player state updates (position, rotation, velocity)
+//! - Voxel operations (dig, place) with CRDT semantics
+//! - Chat messages
+//! - Entity updates
+//!
+//! # Design Principles
+//!
+//! 1. **Deterministic Serialization**: All messages use bincode for consistent byte representation
+//! 2. **Cryptographic Signatures**: Critical operations (voxel edits) are signed with Ed25519
+//! 3. **Lamport Clocks**: All messages have logical timestamps for causal ordering
+//! 4. **Bandwidth Awareness**: Messages are designed to be compact (Priority 2: State Sync)
+//! 5. **CRDT Semantics**: Voxel operations are commutative and convergent
+//!
+//! # Bandwidth Budget Mapping
+//!
+//! - PlayerStateMessage: ~64 bytes @ 20Hz = 1.28 KB/s per player
+//! - VoxelOperation: ~128 bytes (includes signature)
+//! - ChatMessage: ~20-200 bytes (variable length text)
+//!
+//! All messages fit within Priority 2 bandwidth budget (1-5 KB/s total).
+
+use crate::coordinates::ECEF;
+use crate::voxel::VoxelCoord;
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use libp2p::PeerId;
+use serde::{Deserialize, Serialize};
+
+// Custom serde for [u8; 64] arrays
+mod serde_arrays {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bytes.serialize(serializer)
+    }
+    
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "Expected 64 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut array = [0u8; 64];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
+
+/// Result type for message operations
+pub type Result<T> = std::result::Result<T, MessageError>;
+
+/// Errors that can occur during message processing
+#[derive(Debug, thiserror::Error)]
+pub enum MessageError {
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] bincode::Error),
+    
+    #[error("Invalid signature")]
+    InvalidSignature,
+    
+    #[error("Message too old (timestamp {0} vs current {1})")]
+    MessageTooOld(u64, u64),
+    
+    #[error("Invalid message format: {0}")]
+    InvalidFormat(String),
+}
+
+/// Lamport logical clock for causal ordering
+///
+/// Every message carries a Lamport timestamp. When receiving a message,
+/// the local clock is updated to max(local, received) + 1.
+///
+/// This ensures causal ordering: if event A causes event B, then timestamp(A) < timestamp(B).
+///
+/// # Usage
+///
+/// ```no_run
+/// let mut clock = LamportClock::new();
+/// let ts1 = clock.tick(); // Get timestamp for outgoing message
+/// clock.receive(ts1);     // Update on incoming message
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LamportClock(u64);
+
+impl LamportClock {
+    /// Create a new clock starting at 0
+    pub fn new() -> Self {
+        Self(0)
+    }
+    
+    /// Increment clock and return new value (for outgoing messages)
+    pub fn tick(&mut self) -> u64 {
+        self.0 += 1;
+        self.0
+    }
+    
+    /// Update clock based on received timestamp
+    pub fn receive(&mut self, received: u64) {
+        self.0 = self.0.max(received) + 1;
+    }
+    
+    /// Get current clock value without incrementing
+    pub fn current(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for LamportClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Player movement mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MovementMode {
+    /// Walking on ground with gravity
+    Walk,
+    /// Flying with no gravity
+    Fly,
+}
+
+/// Player state message (Priority 2: State Sync)
+///
+/// Broadcast at 20Hz to all nearby players. Contains minimum information
+/// needed to render another player's position and movement.
+///
+/// **Bandwidth:** ~64 bytes per message
+/// - ECEF position: 24 bytes (3x f64)
+/// - Velocity: 12 bytes (3x f32)
+/// - Yaw/Pitch: 8 bytes (2x f32)
+/// - Movement mode: 1 byte
+/// - Lamport timestamp: 8 bytes
+/// - PeerId: ~38 bytes (multihash)
+/// - Padding/overhead: ~10 bytes
+///
+/// At 20Hz per player: 64 * 20 = 1.28 KB/s
+/// For 10 nearby players: 12.8 KB/s (still within Priority 2 budget)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerStateMessage {
+    /// Unique peer identifier (author of this state update)
+    pub peer_id: PeerId,
+    
+    /// Player position in Earth-Centered Earth-Fixed coordinates
+    pub position: ECEF,
+    
+    /// Player velocity in meters/second (ECEF frame)
+    pub velocity: [f32; 3],
+    
+    /// Camera yaw (horizontal rotation) in radians
+    pub yaw: f32,
+    
+    /// Camera pitch (vertical rotation) in radians
+    pub pitch: f32,
+    
+    /// Current movement mode (walk/fly)
+    pub movement_mode: MovementMode,
+    
+    /// Lamport timestamp for causal ordering
+    pub timestamp: u64,
+}
+
+impl PlayerStateMessage {
+    /// Create a new player state message
+    pub fn new(
+        peer_id: PeerId,
+        position: ECEF,
+        velocity: [f32; 3],
+        yaw: f32,
+        pitch: f32,
+        movement_mode: MovementMode,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            peer_id,
+            position,
+            velocity,
+            yaw,
+            pitch,
+            movement_mode,
+            timestamp,
+        }
+    }
+    
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// Material type for voxels (network protocol representation)
+///
+/// This is a simplified material enum for network messages.
+/// Maps to MaterialId in the voxel system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Material {
+    Air = 0,
+    Stone = 1,
+    Dirt = 2,
+    Grass = 3,
+    Water = 4,
+}
+
+impl Material {
+    /// Convert to MaterialId for voxel system
+    pub fn to_material_id(self) -> crate::materials::MaterialId {
+        match self {
+            Material::Air => crate::materials::MaterialId::AIR,
+            Material::Stone => crate::materials::MaterialId::STONE,
+            Material::Dirt => crate::materials::MaterialId::DIRT,
+            Material::Grass => crate::materials::MaterialId::GRASS,
+            Material::Water => crate::materials::MaterialId::WATER,
+        }
+    }
+    
+    /// Convert from MaterialId
+    pub fn from_material_id(id: crate::materials::MaterialId) -> Self {
+        match id {
+            crate::materials::MaterialId::AIR => Material::Air,
+            crate::materials::MaterialId::STONE => Material::Stone,
+            crate::materials::MaterialId::DIRT => Material::Dirt,
+            crate::materials::MaterialId::GRASS => Material::Grass,
+            crate::materials::MaterialId::WATER => Material::Water,
+            _ => Material::Stone, // Default fallback
+        }
+    }
+}
+
+/// Voxel operation with CRDT semantics (Priority 2: State Sync)
+///
+/// Represents a single voxel modification (dig or place). Operations are:
+/// - **Commutative**: Can be applied in any order and converge to same state
+/// - **Idempotent**: Applying the same operation twice has no additional effect
+/// - **Signed**: Author proves ownership with Ed25519 signature
+///
+/// **Bandwidth:** ~128 bytes per operation
+/// - VoxelCoord: 12 bytes (3x i32)
+/// - Material: 1 byte
+/// - PeerId: ~38 bytes
+/// - Timestamp: 8 bytes
+/// - Signature: 64 bytes
+/// - Overhead: ~5 bytes
+///
+/// Typical usage: Bursts during building (100 ops/sec = 12.8 KB/s),
+/// otherwise rare (1 op/sec = 128 bytes/sec)
+///
+/// # CRDT Merge Rules
+///
+/// When two peers edit the same voxel concurrently:
+/// 1. **Last-Write-Wins (LWW)**: Higher Lamport timestamp wins
+/// 2. **Tie-break by PeerId**: If timestamps equal, lexicographically larger PeerId wins
+/// 3. **Signature verification**: Only signed operations from parcel owner are valid
+///
+/// This ensures all peers converge to the same state without coordination.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoxelOperation {
+    /// Voxel coordinate being modified
+    pub coord: VoxelCoord,
+    
+    /// New material at this coordinate
+    pub material: Material,
+    
+    /// Peer who authored this operation
+    pub author: PeerId,
+    
+    /// Lamport timestamp for LWW conflict resolution
+    pub timestamp: u64,
+    
+    /// Ed25519 signature over (coord, material, author, timestamp)
+    /// Proves this operation came from the author's private key
+    #[serde(with = "serde_arrays")]
+    pub signature: [u8; 64],
+}
+
+impl VoxelOperation {
+    /// Create a new voxel operation (unsigned)
+    ///
+    /// Call `sign()` to add signature before broadcasting.
+    pub fn new(
+        coord: VoxelCoord,
+        material: Material,
+        author: PeerId,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            coord,
+            material,
+            author,
+            timestamp,
+            signature: [0u8; 64],
+        }
+    }
+    
+    /// Sign this operation with the author's signing key
+    ///
+    /// Creates deterministic signature over serialized operation data.
+    pub fn sign(&mut self, signing_key: &impl Signer<Signature>) {
+        let msg = self.signable_bytes();
+        let sig = signing_key.sign(&msg);
+        self.signature = sig.to_bytes();
+    }
+    
+    /// Verify signature against author's public key
+    ///
+    /// Returns true if signature is valid, false otherwise.
+    pub fn verify(&self, verifying_key: &VerifyingKey) -> bool {
+        let msg = self.signable_bytes();
+        let sig = Signature::from_bytes(&self.signature);
+        verifying_key.verify(&msg, &sig).is_ok()
+    }
+    
+    /// Get bytes to sign/verify (deterministic serialization)
+    fn signable_bytes(&self) -> Vec<u8> {
+        // Serialize everything except the signature itself
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.coord.x.to_le_bytes());
+        bytes.extend_from_slice(&self.coord.y.to_le_bytes());
+        bytes.extend_from_slice(&self.coord.z.to_le_bytes());
+        bytes.push(self.material as u8);
+        bytes.extend_from_slice(&self.author.to_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        bytes
+    }
+    
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+    
+    /// Compare two operations for CRDT merge
+    ///
+    /// Returns true if this operation should win over `other` in a conflict.
+    /// Uses LWW-by-timestamp, tie-break by PeerId.
+    pub fn wins_over(&self, other: &VoxelOperation) -> bool {
+        if self.timestamp != other.timestamp {
+            self.timestamp > other.timestamp
+        } else {
+            // Tie-break: lexicographically larger PeerId wins
+            self.author.to_bytes() > other.author.to_bytes()
+        }
+    }
+}
+
+/// Chat message (Priority 2: State Sync)
+///
+/// Text messages between players. Variable length but capped at 500 chars.
+///
+/// **Bandwidth:** 20-500 bytes per message
+/// - Text content: 1-500 bytes (UTF-8)
+/// - PeerId: ~38 bytes
+/// - Timestamp: 8 bytes
+/// - Overhead: ~5 bytes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// Author of the message
+    pub author: PeerId,
+    
+    /// Message text (max 500 characters)
+    pub text: String,
+    
+    /// Lamport timestamp
+    pub timestamp: u64,
+}
+
+impl ChatMessage {
+    /// Create a new chat message
+    ///
+    /// Text is truncated to 500 characters if longer.
+    pub fn new(author: PeerId, text: String, timestamp: u64) -> Self {
+        let text = if text.len() > 500 {
+            text.chars().take(500).collect()
+        } else {
+            text
+        };
+        Self { author, text, timestamp }
+    }
+    
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// Envelope for all message types
+///
+/// Wraps specific message types with metadata for routing and processing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Message {
+    /// Player state update
+    PlayerState(PlayerStateMessage),
+    
+    /// Voxel modification operation
+    VoxelOp(VoxelOperation),
+    
+    /// Chat message
+    Chat(ChatMessage),
+}
+
+impl Message {
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+    
+    /// Get Lamport timestamp from any message type
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            Message::PlayerState(msg) => msg.timestamp,
+            Message::VoxelOp(msg) => msg.timestamp,
+            Message::Chat(msg) => msg.timestamp,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::Identity;
+    
+    #[test]
+    fn test_lamport_clock() {
+        let mut clock = LamportClock::new();
+        assert_eq!(clock.current(), 0);
+        
+        let t1 = clock.tick();
+        assert_eq!(t1, 1);
+        assert_eq!(clock.current(), 1);
+        
+        clock.receive(5);
+        assert_eq!(clock.current(), 6);
+        
+        let t2 = clock.tick();
+        assert_eq!(t2, 7);
+    }
+    
+    #[test]
+    fn test_player_state_serialization() {
+        let msg = PlayerStateMessage {
+            peer_id: PeerId::random(),
+            position: ECEF::new(0.0, 0.0, 0.0),
+            velocity: [1.0, 2.0, 3.0],
+            yaw: 0.5,
+            pitch: 0.25,
+            movement_mode: MovementMode::Walk,
+            timestamp: 42,
+        };
+        
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = PlayerStateMessage::from_bytes(&bytes).unwrap();
+        
+        assert_eq!(decoded.velocity, msg.velocity);
+        assert_eq!(decoded.timestamp, msg.timestamp);
+    }
+    
+    #[test]
+    fn test_voxel_operation_signature() {
+        let identity = Identity::generate();
+        let coord = VoxelCoord::new(10, 20, 30);
+        
+        let mut op = VoxelOperation::new(
+            coord,
+            Material::Stone,
+            identity.peer_id().clone(),
+            100,
+        );
+        
+        // Sign operation
+        op.sign(identity.signing_key());
+        
+        // Verify with correct key
+        assert!(op.verify(identity.verifying_key()));
+        
+        // Verify fails with different key
+        let other_identity = Identity::generate();
+        assert!(!op.verify(other_identity.verifying_key()));
+    }
+    
+    #[test]
+    fn test_voxel_operation_crdt_ordering() {
+        let id1 = Identity::generate();
+        let id2 = Identity::generate();
+        let coord = VoxelCoord::new(5, 5, 5);
+        
+        // Later timestamp wins
+        let op1 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100);
+        let op2 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 101);
+        assert!(op2.wins_over(&op1));
+        assert!(!op1.wins_over(&op2));
+        
+        // Same timestamp: tie-break by PeerId
+        let op3 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100);
+        let op4 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 100);
+        let winner = if op3.wins_over(&op4) { &op3 } else { &op4 };
+        // Deterministic winner based on PeerId ordering
+        assert!(winner.author.to_bytes() > if winner.author == op3.author { op4.author } else { op3.author }.to_bytes());
+    }
+    
+    #[test]
+    fn test_chat_message_truncation() {
+        let long_text = "a".repeat(1000);
+        let msg = ChatMessage::new(PeerId::random(), long_text, 42);
+        assert_eq!(msg.text.len(), 500);
+    }
+    
+    #[test]
+    fn test_message_envelope() {
+        let player_msg = PlayerStateMessage {
+            peer_id: PeerId::random(),
+            position: ECEF::new(1.0, 2.0, 3.0),
+            velocity: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            movement_mode: MovementMode::Fly,
+            timestamp: 123,
+        };
+        
+        let envelope = Message::PlayerState(player_msg);
+        assert_eq!(envelope.timestamp(), 123);
+        
+        let bytes = envelope.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.timestamp(), 123);
+    }
+}

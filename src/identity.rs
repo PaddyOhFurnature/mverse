@@ -251,6 +251,11 @@ impl Identity {
         &self.verifying_key
     }
     
+    /// Get the signing key (private key) - use carefully!
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
+    
     /// Sign arbitrary data with this identity's private key
     ///
     /// The signature can be verified by anyone with your public key/PeerId.

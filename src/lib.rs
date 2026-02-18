@@ -15,3 +15,4 @@ pub mod physics;
 // Phase 1.5: P2P Networking (Local-First Architecture)
 pub mod identity;
 pub mod network;
+pub mod messages;

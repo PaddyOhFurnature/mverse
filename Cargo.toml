@@ -38,6 +38,9 @@ image = "0.25"
 rstar = { version = "0.12", features = ["serde"] }  # R*-tree spatial index
 lru = "0.12"  # LRU cache for warm cache tier
 
+# Error handling
+thiserror = "2.0"
+
 # Phase 1.5: P2P Networking (Local-First Architecture)
 # Core libp2p with essential transports and protocols
 libp2p = { version = "0.56", features = [

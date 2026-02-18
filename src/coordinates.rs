@@ -30,7 +30,7 @@ impl GPS {
 }
 
 /// ECEF (Earth-Centered Earth-Fixed) coordinates
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ECEF {
     pub x: f64,
     pub y: f64,
