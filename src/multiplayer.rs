@@ -61,6 +61,7 @@ use crate::{
 };
 use libp2p::PeerId;
 use crossbeam::channel::{self, Sender, Receiver};
+use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -562,67 +563,96 @@ fn run_network_thread(
         // Subscribe to topics
         if let Err(e) = network.subscribe(TOPIC_PLAYER_STATE) {
             eprintln!("Failed to subscribe to player-state: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: player-state");
         }
         if let Err(e) = network.subscribe(TOPIC_VOXEL_OPS) {
             eprintln!("Failed to subscribe to voxel-ops: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: voxel-ops");
         }
         if let Err(e) = network.subscribe(TOPIC_CHAT) {
             eprintln!("Failed to subscribe to chat: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: chat");
         }
+        
+        println!("🔍 Network thread started - polling for mDNS and connections...");
         
         // Main loop: process commands and poll network
         loop {
-            // Process all pending commands (non-blocking)
-            while let Ok(cmd) = cmd_rx.try_recv() {
-                match cmd {
-                    NetworkCommand::Listen { multiaddr } => {
-                        if let Err(e) = network.listen_on(&multiaddr) {
-                            eprintln!("Failed to listen on {}: {}", multiaddr, e);
-                        }
-                    }
-                    
-                    NetworkCommand::Dial { address } => {
-                        if let Err(e) = network.dial(&address) {
-                            eprintln!("Failed to dial {}: {}", address, e);
-                        }
-                    }
-                    
-                    NetworkCommand::Subscribe { topic } => {
-                        if let Err(e) = network.subscribe(&topic) {
-                            eprintln!("Failed to subscribe to {}: {}", topic, e);
-                        }
-                    }
-                    
-                    NetworkCommand::Unsubscribe { topic } => {
-                        if let Err(e) = network.unsubscribe(&topic) {
-                            eprintln!("Failed to unsubscribe from {}: {}", topic, e);
-                        }
-                    }
-                    
-                    NetworkCommand::Publish { topic, data } => {
-                        if let Err(e) = network.publish(&topic, data) {
-                            // Suppress "no peers" error - it's expected when alone
-                            if !e.to_string().contains("NoPeersSubscribedToTopic") {
-                                eprintln!("Failed to publish to {}: {}", topic, e);
+            tokio::select! {
+                // Process commands from main thread
+                cmd = async { cmd_rx.recv() } => {
+                    match cmd {
+                        Ok(NetworkCommand::Listen { multiaddr }) => {
+                            if let Err(e) = network.listen_on(&multiaddr) {
+                                eprintln!("Failed to listen on {}: {}", multiaddr, e);
                             }
                         }
+                        
+                        Ok(NetworkCommand::Dial { address }) => {
+                            if let Err(e) = network.dial(&address) {
+                                eprintln!("Failed to dial {}: {}", address, e);
+                            }
+                        }
+                        
+                        Ok(NetworkCommand::Subscribe { topic }) => {
+                            if let Err(e) = network.subscribe(&topic) {
+                                eprintln!("Failed to subscribe to {}: {}", topic, e);
+                            }
+                        }
+                        
+                        Ok(NetworkCommand::Unsubscribe { topic }) => {
+                            if let Err(e) = network.unsubscribe(&topic) {
+                                eprintln!("Failed to unsubscribe from {}: {}", topic, e);
+                            }
+                        }
+                        
+                        Ok(NetworkCommand::Publish { topic, data }) => {
+                            if let Err(e) = network.publish(&topic, data) {
+                                // Suppress "no peers" error - it's expected when alone
+                                if !e.to_string().contains("NoPeersSubscribedToTopic") {
+                                    eprintln!("Failed to publish to {}: {}", topic, e);
+                                }
+                            }
+                        }
+                        
+                        Ok(NetworkCommand::Shutdown) => {
+                            println!("Network thread shutting down");
+                            return;
+                        }
+                        
+                        Err(_) => {
+                            // Channel closed
+                            println!("Command channel closed, shutting down network thread");
+                            return;
+                        }
                     }
-                    
-                    NetworkCommand::Shutdown => {
-                        println!("Network thread shutting down");
-                        return;
+                }
+                
+                // Poll the swarm directly (this is the key fix!)
+                event = network.swarm.select_next_some() => {
+                    if let Some(net_event) = network.handle_swarm_event(event) {
+                        // Log important events
+                        match &net_event {
+                            NetworkEvent::PeerDiscovered { peer_id } => {
+                                println!("🔍 [Network Thread] mDNS discovered peer: {}", peer_id);
+                            }
+                            NetworkEvent::PeerConnected { peer_id, .. } => {
+                                println!("🔗 [Network Thread] Peer connected: {}", peer_id);
+                            }
+                            NetworkEvent::ListeningOn { address } => {
+                                println!("👂 Listening on: {}", address);
+                            }
+                            _ => {}
+                        }
+                        
+                        // Send event to main thread
+                        let _ = event_tx.try_send(net_event);
                     }
                 }
             }
-            
-            // Poll network for events
-            if let Some(event) = network.poll() {
-                // Send event to main thread (ignore if channel is full)
-                let _ = event_tx.try_send(event);
-            }
-            
-            // Small sleep to prevent busy-waiting
-            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     });
 }

@@ -180,11 +180,11 @@ pub enum NetworkEvent {
 /// - mDNS: Local network peer discovery
 /// - Identify: Peer information exchange
 #[derive(NetworkBehaviour)]
-struct MetaverseBehaviour {
-    kademlia: kad::Behaviour<MemoryStore>,
-    gossipsub: gossipsub::Behaviour,
-    mdns: mdns::tokio::Behaviour,
-    identify: identify::Behaviour,
+pub(crate) struct MetaverseBehaviour {
+    pub(crate) kademlia: kad::Behaviour<MemoryStore>,
+    pub(crate) gossipsub: gossipsub::Behaviour,
+    pub(crate) mdns: mdns::tokio::Behaviour,
+    pub(crate) identify: identify::Behaviour,
 }
 
 /// P2P networking node
@@ -193,7 +193,7 @@ struct MetaverseBehaviour {
 /// Uses libp2p for transport, discovery, and messaging.
 pub struct NetworkNode {
     /// libp2p Swarm managing connections and protocols
-    swarm: Swarm<MetaverseBehaviour>,
+    pub(crate) swarm: Swarm<MetaverseBehaviour>,
     
     /// Local peer identity
     identity: Identity,
@@ -440,7 +440,7 @@ impl NetworkNode {
     }
     
     /// Handle a swarm event and convert to NetworkEvent
-    fn handle_swarm_event(&mut self, event: SwarmEvent<MetaverseBehaviourEvent>) -> Option<NetworkEvent> {
+    pub(crate) fn handle_swarm_event(&mut self, event: SwarmEvent<MetaverseBehaviourEvent>) -> Option<NetworkEvent> {
         match event {
             // Gossipsub message received
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Gossipsub(
