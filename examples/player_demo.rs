@@ -431,8 +431,8 @@ fn update_walk_mode(player: &mut Player, terrain_mesh: &Mesh, forward: f32, righ
     player.position += player.velocity * dt;
     
     // NOW check ground collision (after moving)
-    let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, 1.0);
     let player_bottom_y = player.position.y - 0.9; // Player cube bottom
+    let ground_height = get_ground_height(terrain_mesh, player.position.x, player.position.z, player_bottom_y, 1.0);
     
     if let Some(ground_y) = ground_height {
         // Only snap if we're falling (moving downward) and we penetrated the ground
@@ -541,8 +541,10 @@ fn create_player_cube() -> Mesh {
 }
 
 /// Find ground height at given XZ position by scanning terrain mesh
-fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, search_radius: f32) -> Option<f32> {
-    let mut max_y = None;
+/// Returns the highest ground BELOW or slightly above the player's current height
+fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, current_y: f32, search_radius: f32) -> Option<f32> {
+    let mut best_y = None;
+    let max_step_height = 0.5; // Maximum step we can auto-climb (0.5m = one voxel)
     
     for vertex in &terrain_mesh.vertices {
         let dx = vertex.position.x - x;
@@ -550,14 +552,24 @@ fn get_ground_height(terrain_mesh: &Mesh, x: f32, z: f32, search_radius: f32) ->
         let dist_sq = dx * dx + dz * dz;
         
         if dist_sq <= search_radius * search_radius {
-            match max_y {
-                None => max_y = Some(vertex.position.y),
-                Some(y) => max_y = Some(y.max(vertex.position.y)),
+            let y = vertex.position.y;
+            
+            // Only consider ground that's below us or within step height above
+            if y <= current_y + max_step_height {
+                match best_y {
+                    None => best_y = Some(y),
+                    Some(current_best) => {
+                        // Take the highest ground that's still below/near us
+                        if y > current_best && y <= current_y + max_step_height {
+                            best_y = Some(y);
+                        }
+                    }
+                }
             }
         }
     }
     
-    max_y
+    best_y
 }
 
 fn take_screenshot(
