@@ -119,6 +119,15 @@ fn main() {
     println!("  Platform: voxel Y=50, ECEF Y={:.2}", platform_ecef.y);
     println!("  Player: voxel Y=55, ECEF Y={:.2}", player.position.y);
     println!("  Local coords: ({:.2}, {:.2}, {:.2})", local_pos.x, local_pos.y, local_pos.z);
+    
+    // DEBUG: Check gravity calculation
+    let test_gravity = metaverse_core::physics::PhysicsWorld::gravity_at_position(&player.position);
+    println!("\nDEBUG Gravity check:");
+    println!("  Player ECEF: ({:.1}, {:.1}, {:.1})", player.position.x, player.position.y, player.position.z);
+    println!("  Gravity vector: ({:.6}, {:.6}, {:.6})", test_gravity.x, test_gravity.y, test_gravity.z);
+    println!("  Gravity magnitude: {:.2} m/s²", test_gravity.length());
+    println!("  Expected: gravity points toward (0,0,0), magnitude 9.8\n");
+    
     println!("  Player should fall 5 meters and land on platform\n");
     
     // Camera setup - positioned to view platform
@@ -198,13 +207,6 @@ fn main() {
                     // Physics update (60 Hz fixed timestep)
                     let dt = 1.0 / 60.0;
                     
-                    // Calculate gravity (spherical - points toward Earth center)
-                    let gravity = Vec3::new(
-                        -player.position.x as f32,
-                        -player.position.y as f32,
-                        -player.position.z as f32,
-                    ).normalize() * 9.8;
-                    
                     // Handle digging
                     if dig_pressed {
                         if let Some(dug) = player.dig_voxel(&mut octree, 5.0) {
@@ -232,7 +234,9 @@ fn main() {
                     player.sync_from_physics(&physics);
                     
                     // Step physics simulation
-                    physics.step(gravity);
+                    // NOTE: Player applies its own gravity in apply_movement(),
+                    // so we pass zero gravity to avoid double-application
+                    physics.step(Vec3::ZERO);
                     
                     // Regenerate mesh if terrain changed
                     if mesh_dirty {
@@ -278,13 +282,15 @@ fn main() {
                     // FPS counter
                     frame_count += 1;
                     if fps_timer.elapsed().as_secs() >= 1 {
-                        // Calculate voxel Y correctly: (ECEF - WORLD_MIN) / VOXEL_SIZE
+                        // Calculate voxel coords and local pos for debug
                         let voxel_y = ((player.position.y - (-6_400_000.0)) / 1.0) as i32;
+                        let local_pos = physics.ecef_to_local(&player.position);
                         
-                        println!("FPS: {} | Voxel Y: {} | ECEF Y: {:.1} | On ground: {} | Vel: {:.2} m/s",
+                        println!("FPS: {} | Voxel Y: {} | ECEF Y: {:.1} | Local Y: {:.1} | On ground: {} | Vel: {:.2} m/s",
                             frame_count,
                             voxel_y,
                             player.position.y,
+                            local_pos.y,
                             player.on_ground,
                             player.velocity.length()
                         );

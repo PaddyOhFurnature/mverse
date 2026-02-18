@@ -588,11 +588,22 @@ impl Player {
         const AIR_ACCEL: f32 = 5.0; // m/s² (reduced control in air)
         
         // Get local "up" direction (away from Earth center)
-        let local_up = Vec3::new(
+        // In FloatingOrigin system, calculate "up" relative to world_origin
+        // This gives the correct spherical "up" in local coordinates
+        let offset_from_origin = Vec3::new(
+            (self.position.x - physics.world_origin.x) as f32,
+            (self.position.y - physics.world_origin.y) as f32,
+            (self.position.z - physics.world_origin.z) as f32,
+        );
+        
+        // For small regions, offset is tiny and "up" ≈ direction from origin to Earth surface
+        // For the general case, we want the direction from Earth center (0,0,0) to player
+        let to_player_from_center = Vec3::new(
             self.position.x as f32,
             self.position.y as f32,
             self.position.z as f32,
-        ).normalize();
+        );
+        let local_up = to_player_from_center.normalize();
         
         // Convert local movement input to world space
         let forward = self.camera_forward();
@@ -679,27 +690,26 @@ impl Player {
             self.on_ground = false;
         }
         
-        // Apply gravity
-        let gravity = PhysicsWorld::gravity_at_position(&self.position);
-        let new_vertical_velocity = vertical_velocity + gravity * dt;
+        // Apply gravity (in ECEF/world coordinates)
+        let gravity_world = PhysicsWorld::gravity_at_position(&self.position);
+        let new_vertical_velocity = vertical_velocity + gravity_world * dt;
         
-        // Combine horizontal and vertical components
+        // Combine horizontal and vertical components (still in world space)
         self.velocity = new_horizontal_velocity + new_vertical_velocity;
         
-        // Update position in rigidbody (using local coordinates)
-        let delta = self.velocity * dt;
+        // Update position in rigidbody
+        // Velocity is in ECEF/world coordinates, position is in local coordinates
+        // We need to update ECEF position first, then convert to local
+        
+        // Update ECEF position
+        self.position.x += (self.velocity.x * dt) as f64;
+        self.position.y += (self.velocity.y * dt) as f64;
+        self.position.z += (self.velocity.z * dt) as f64;
+        
+        // Convert new ECEF position to local coordinates
+        let new_local = physics.ecef_to_local(&self.position);
         
         if let Some(body) = physics.bodies.get_mut(self.body_handle) {
-            // Get current position in local coords
-            let current_local = Vec3::new(
-                body.translation().x,
-                body.translation().y,
-                body.translation().z,
-            );
-            
-            // Add delta in local space (velocity is in world space, but at these scales it's equivalent)
-            let new_local = current_local + delta;
-            
             body.set_translation(
                 vector![new_local.x, new_local.y, new_local.z],
                 true,
