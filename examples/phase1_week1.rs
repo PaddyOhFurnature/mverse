@@ -16,12 +16,13 @@ use metaverse_core::{
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
     marching_cubes::extract_octree_mesh,
     materials::MaterialId,
+    mesh::{Mesh, Vertex, Triangle},
     physics::{PhysicsWorld, Player},
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
     voxel::{Octree, VoxelCoord},
 };
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use rapier3d::prelude::*;
 use std::sync::Arc;
 use std::time::Instant;
@@ -139,6 +140,10 @@ fn main() {
     // Upload mesh to GPU
     let mut mesh_buffer = MeshBuffer::from_mesh(&context.device, &mesh);
     
+    // Create player model (visible cube)
+    let player_mesh = create_player_cube();
+    let mut player_model_buffer = MeshBuffer::from_mesh(&context.device, &player_mesh);
+    
     // Initialize physics world with FloatingOrigin at origin
     let origin_voxel_ecef = origin_voxel.to_ecef();
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
@@ -178,6 +183,13 @@ fn main() {
     let mut camera = Camera::new(camera_local, 1920.0 / 1080.0);
     camera.yaw = player.camera_yaw;
     camera.pitch = player.camera_pitch;
+    
+    // Player model transform (will be updated each frame)
+    let player_model_matrix = Mat4::from_rotation_translation(
+        glam::Quat::from_rotation_y(player.camera_yaw),
+        player_local
+    );
+    let (player_model_uniform, player_model_bind_group) = pipeline.create_model_bind_group(&context.device, &player_model_matrix);
     
     // Input state
     let mut input_forward = 0.0f32;
@@ -289,6 +301,14 @@ fn main() {
                     camera.yaw = player.camera_yaw;
                     camera.pitch = player.camera_pitch;
                     
+                    // Update player model matrix
+                    let player_local = physics.ecef_to_local(&player.position);
+                    let player_model_matrix = Mat4::from_rotation_translation(
+                        glam::Quat::from_rotation_y(player.camera_yaw),
+                        player_local
+                    );
+                    context.queue.write_buffer(&player_model_uniform, 0, bytemuck::cast_slice(player_model_matrix.as_ref()));
+                    
                     // Regenerate mesh if terrain changed
                     if mesh_dirty {
                         println!("Regenerating mesh...");
@@ -321,7 +341,13 @@ fn main() {
                             {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
+                                
+                                // Render terrain
                                 mesh_buffer.render(&mut render_pass);
+                                
+                                // Render player model
+                                pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
+                                player_model_buffer.render(&mut render_pass);
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
@@ -371,3 +397,62 @@ fn main() {
         }
     }).unwrap();
 }
+fn create_player_cube() -> Mesh {
+    // Create a 0.6m × 1.8m × 0.6m cube (player dimensions like Minecraft)
+    // Centered at origin, will be translated to player position
+    let w = 0.3; // Half width (0.6m total)
+    let h = 0.9; // Half height (1.8m total)
+    
+    let mut mesh = Mesh::new();
+    
+    // Bottom face (Y = -h)
+    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h, -w), Vec3::new(0.0, -1.0, 0.0)));
+    let v1 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h, -w), Vec3::new(0.0, -1.0, 0.0)));
+    let v2 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h,  w), Vec3::new(0.0, -1.0, 0.0)));
+    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h,  w), Vec3::new(0.0, -1.0, 0.0)));
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
+    
+    // Top face (Y = +h)
+    let v4 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h, -w), Vec3::new(0.0, 1.0, 0.0)));
+    let v5 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h, -w), Vec3::new(0.0, 1.0, 0.0)));
+    let v6 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h,  w), Vec3::new(0.0, 1.0, 0.0)));
+    let v7 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h,  w), Vec3::new(0.0, 1.0, 0.0)));
+    mesh.add_triangle(Triangle::new(v4, v5, v6));
+    mesh.add_triangle(Triangle::new(v4, v6, v7));
+    
+    // Front face (Z = -w)
+    let v8 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h, -w), Vec3::new(0.0, 0.0, -1.0)));
+    let v9 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h, -w), Vec3::new(0.0, 0.0, -1.0)));
+    let v10 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h, -w), Vec3::new(0.0, 0.0, -1.0)));
+    let v11 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h, -w), Vec3::new(0.0, 0.0, -1.0)));
+    mesh.add_triangle(Triangle::new(v8, v9, v10));
+    mesh.add_triangle(Triangle::new(v8, v10, v11));
+    
+    // Back face (Z = +w)
+    let v12 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h,  w), Vec3::new(0.0, 0.0, 1.0)));
+    let v13 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h,  w), Vec3::new(0.0, 0.0, 1.0)));
+    let v14 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h,  w), Vec3::new(0.0, 0.0, 1.0)));
+    let v15 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h,  w), Vec3::new(0.0, 0.0, 1.0)));
+    mesh.add_triangle(Triangle::new(v12, v14, v13));
+    mesh.add_triangle(Triangle::new(v12, v15, v14));
+    
+    // Left face (X = -w)
+    let v16 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h, -w), Vec3::new(-1.0, 0.0, 0.0)));
+    let v17 = mesh.add_vertex(Vertex::new(Vec3::new(-w, -h,  w), Vec3::new(-1.0, 0.0, 0.0)));
+    let v18 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h,  w), Vec3::new(-1.0, 0.0, 0.0)));
+    let v19 = mesh.add_vertex(Vertex::new(Vec3::new(-w,  h, -w), Vec3::new(-1.0, 0.0, 0.0)));
+    mesh.add_triangle(Triangle::new(v16, v17, v18));
+    mesh.add_triangle(Triangle::new(v16, v18, v19));
+    
+    // Right face (X = +w)
+    let v20 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h, -w), Vec3::new(1.0, 0.0, 0.0)));
+    let v21 = mesh.add_vertex(Vertex::new(Vec3::new( w, -h,  w), Vec3::new(1.0, 0.0, 0.0)));
+    let v22 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h,  w), Vec3::new(1.0, 0.0, 0.0)));
+    let v23 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h, -w), Vec3::new(1.0, 0.0, 0.0)));
+    mesh.add_triangle(Triangle::new(v20, v22, v21));
+    mesh.add_triangle(Triangle::new(v20, v23, v22));
+    
+    mesh
+}
+

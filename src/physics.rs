@@ -475,9 +475,9 @@ impl Player {
         }
     }
     
-    /// Get camera forward direction vector (world space)
+    /// Get camera forward direction vector (local space)
     pub fn camera_forward(&self) -> Vec3 {
-        // Calculate forward based on pitch and yaw
+        // Calculate forward based on pitch and yaw (in local space where Y is up)
         let forward = Vec3::new(
             self.camera_yaw.cos() * self.camera_pitch.cos(),
             self.camera_pitch.sin(),
@@ -486,16 +486,12 @@ impl Player {
         forward.normalize()
     }
     
-    /// Get camera right direction vector (world space)
+    /// Get camera right direction vector (local space)
     pub fn camera_right(&self) -> Vec3 {
         let forward = self.camera_forward();
         
-        // Get the local "up" direction at player position (radial from Earth center)
-        let local_up = Vec3::new(
-            self.position.x as f32,
-            self.position.y as f32,
-            self.position.z as f32,
-        ).normalize();
+        // In local space with FloatingOrigin, "up" is always +Y
+        let local_up = Vec3::Y;
         
         // Right is perpendicular to forward and up
         // Use cross product: right = forward × up
@@ -504,7 +500,7 @@ impl Player {
         // Handle case where forward is parallel to up (looking straight up/down)
         if right.length_squared() < 0.001 {
             // Use arbitrary right vector
-            Vec3::new(1.0, 0.0, 0.0)
+            Vec3::X
         } else {
             right.normalize()
         }
@@ -581,23 +577,8 @@ impl Player {
         const GROUND_DECEL: f32 = 15.0; // m/s² (how fast we stop)
         const AIR_ACCEL: f32 = 5.0; // m/s² (reduced control in air)
         
-        // Get local "up" direction (away from Earth center)
-        // In FloatingOrigin system, calculate "up" relative to world_origin
-        // This gives the correct spherical "up" in local coordinates
-        let offset_from_origin = Vec3::new(
-            (self.position.x - physics.world_origin.x) as f32,
-            (self.position.y - physics.world_origin.y) as f32,
-            (self.position.z - physics.world_origin.z) as f32,
-        );
-        
-        // For small regions, offset is tiny and "up" ≈ direction from origin to Earth surface
-        // For the general case, we want the direction from Earth center (0,0,0) to player
-        let to_player_from_center = Vec3::new(
-            self.position.x as f32,
-            self.position.y as f32,
-            self.position.z as f32,
-        );
-        let local_up = to_player_from_center.normalize();
+        // In local space with FloatingOrigin, "up" is always +Y
+        let local_up = Vec3::Y;
         
         // Convert local movement input to world space
         let forward = self.camera_forward();
