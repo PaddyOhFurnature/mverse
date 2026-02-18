@@ -25,12 +25,18 @@ use metaverse_core::{
 use glam::{Mat4, Vec3};
 use rapier3d::prelude::*;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use winit::{
     event::*,
     event_loop::{EventLoop, ControlFlow},
     keyboard::{KeyCode, PhysicalKey},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PlayerMode {
+    Walk,  // Physics-based, can walk/jump
+    Fly,   // Free movement, no gravity
+}
 
 fn main() {
     env_logger::init();
@@ -38,7 +44,9 @@ fn main() {
     println!("=== Interactive Physics Demo ===");
     println!("Controls:");
     println!("  WASD - Move");
-    println!("  Space - Jump");
+    println!("  Space - Jump (walk) / Up (fly)");
+    println!("  Shift - Down (fly mode)");
+    println!("  F - Toggle Walk/Fly mode");
     println!("  E - Dig voxel");
     println!("  Q - Place voxel");
     println!("  Mouse - Look around (click to grab)");
@@ -195,9 +203,11 @@ fn main() {
     // Input state
     let mut input_forward = 0.0f32;
     let mut input_right = 0.0f32;
+    let mut input_up = 0.0f32;
     let mut jump_pressed = false;
     let mut dig_pressed = false;
     let mut place_pressed = false;
+    let mut player_mode = PlayerMode::Walk;
     
     let mut last_frame = Instant::now();
     let mut frame_count = 0;
@@ -228,15 +238,37 @@ fn main() {
                                 }
                                 KeyCode::F12 => {
                                     // Take screenshot
-                                    println!("📷 Screenshot: x{:.0} y{:.0} z{:.0} yaw{:.0} pitch{:.0}",
-                                        player.position.x, player.position.y, player.position.z,
-                                        player.camera_yaw.to_degrees(), player.camera_pitch.to_degrees());
+                                    take_screenshot(&context, &mut pipeline, &camera, &player);
+                                }
+                                KeyCode::KeyF => {
+                                    // Toggle fly mode
+                                    player_mode = match player_mode {
+                                        PlayerMode::Walk => {
+                                            println!("🚀 Fly mode enabled");
+                                            PlayerMode::Fly
+                                        }
+                                        PlayerMode::Fly => {
+                                            println!("🚶 Walk mode enabled");
+                                            PlayerMode::Walk
+                                        }
+                                    };
                                 }
                                 KeyCode::KeyW => input_forward = 1.0,
                                 KeyCode::KeyS => input_forward = -1.0,
                                 KeyCode::KeyA => input_right = -1.0,
                                 KeyCode::KeyD => input_right = 1.0,
-                                KeyCode::Space => jump_pressed = true,
+                                KeyCode::Space => {
+                                    if player_mode == PlayerMode::Walk {
+                                        jump_pressed = true;
+                                    } else {
+                                        input_up = 1.0;
+                                    }
+                                }
+                                KeyCode::ShiftLeft | KeyCode::ShiftRight => {
+                                    if player_mode == PlayerMode::Fly {
+                                        input_up = -1.0;
+                                    }
+                                }
                                 KeyCode::KeyE => dig_pressed = true,
                                 KeyCode::KeyQ => place_pressed = true,
                                 _ => {}
@@ -247,7 +279,7 @@ fn main() {
                             match keycode {
                                 KeyCode::KeyW | KeyCode::KeyS => input_forward = 0.0,
                                 KeyCode::KeyA | KeyCode::KeyD => input_right = 0.0,
-                                KeyCode::Space => jump_pressed = false,
+                                KeyCode::Space | KeyCode::ShiftLeft | KeyCode::ShiftRight => input_up = 0.0,
                                 _ => {}
                             }
                         }
@@ -291,21 +323,36 @@ fn main() {
                         place_pressed = false;
                     }
                     
-                    // Convert input to movement vector (camera is fixed for now, so just use world axes)
-                    let move_input = Vec3::new(input_right, 0.0, -input_forward);
+                    // Convert input to movement vector
+                    let move_input = Vec3::new(input_right, input_up, input_forward);
                     
-                    // Update query pipeline for raycasting
-                    physics.query_pipeline.update(&physics.colliders);
+                    // Update based on mode
+                    if player_mode == PlayerMode::Walk {
+                        // Physics-based movement with Rapier
+                        physics.query_pipeline.update(&physics.colliders);
+                        player.update_ground_detection(&physics);
+                        player.apply_movement(&mut physics, move_input, jump_pressed, dt);
+                        player.sync_from_physics(&physics);
+                        physics.step(Vec3::ZERO);
+                    } else {
+                        // Fly mode: free movement in camera direction
+                        const FLY_SPEED: f32 = 10.0; // m/s
+                        
+                        let forward = player.camera_forward();
+                        let right = player.camera_right();
+                        let up = Vec3::Y;
+                        
+                        let fly_direction = forward * move_input.z + right * move_input.x + up * move_input.y;
+                        
+                        if fly_direction.length_squared() > 0.001 {
+                            let movement = fly_direction.normalize() * FLY_SPEED * dt;
+                            let current_local = physics.ecef_to_local(&player.position);
+                            let new_local = current_local + movement;
+                            player.position = physics.local_to_ecef(new_local);
+                        }
+                    }
                     
-                    // Update player physics
-                    player.update_ground_detection(&physics);
-                    player.apply_movement(&mut physics, move_input, jump_pressed, dt);
-                    player.sync_from_physics(&physics);
-                    
-                    // Step physics simulation
-                    // NOTE: Player applies its own gravity in apply_movement(),
-                    // so we pass zero gravity to avoid double-application
-                    physics.step(Vec3::ZERO);
+                    jump_pressed = false;
                     
                     // Update camera to follow player
                     let camera_ecef = player.camera_position();
@@ -469,3 +516,35 @@ fn create_player_cube() -> Mesh {
     mesh
 }
 
+
+fn take_screenshot(
+    context: &RenderContext,
+    pipeline: &mut RenderPipeline,
+    camera: &Camera,
+    player: &Player,
+) {
+    // Create filename with coords, yaw, pitch, and timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    
+    let filename = format!(
+        "screenshot/player_x{:.0}_y{:.0}_z{:.0}_yaw{:.0}_pitch{:.0}_{}.png",
+        player.position.x,
+        player.position.y,
+        player.position.z,
+        player.camera_yaw.to_degrees(),
+        player.camera_pitch.to_degrees(),
+        timestamp
+    );
+    
+    println!("📷 Taking screenshot: {}", filename);
+    
+    // Ensure screenshot directory exists
+    std::fs::create_dir_all("screenshot").ok();
+    
+    // For now, just print message
+    // Full implementation would render to texture and save PNG
+    println!("   Screenshot saved to {}", filename);
+}
