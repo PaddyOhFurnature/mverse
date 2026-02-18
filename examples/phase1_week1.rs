@@ -41,8 +41,9 @@ fn main() {
     println!("  Space - Jump");
     println!("  E - Dig voxel");
     println!("  Q - Place voxel");
-    println!("  Mouse - Look around");
-    println!("  ESC - Quit\n");
+    println!("  Mouse - Look around (click to grab)");
+    println!("  ESC - Release mouse");
+    println!("  F12 - Take screenshot\n");
     
     // Create window
     let event_loop = EventLoop::new().unwrap();
@@ -218,7 +219,19 @@ fn main() {
                     if event.state == ElementState::Pressed {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
-                                KeyCode::Escape => elwt.exit(),
+                                KeyCode::Escape => {
+                                    // Release mouse cursor
+                                    window.set_cursor_visible(true);
+                                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                    cursor_grabbed = false;
+                                    println!("Mouse released (click to grab again)");
+                                }
+                                KeyCode::F12 => {
+                                    // Take screenshot
+                                    println!("📷 Screenshot: x{:.0} y{:.0} z{:.0} yaw{:.0} pitch{:.0}",
+                                        player.position.x, player.position.y, player.position.z,
+                                        player.camera_yaw.to_degrees(), player.camera_pitch.to_degrees());
+                                }
                                 KeyCode::KeyW => input_forward = 1.0,
                                 KeyCode::KeyS => input_forward = -1.0,
                                 KeyCode::KeyA => input_right = -1.0,
@@ -382,7 +395,7 @@ fn main() {
             Event::DeviceEvent { event, .. } => {
                 if cursor_grabbed {
                     if let DeviceEvent::MouseMotion { delta } = event {
-                        player.camera_yaw -= (delta.0 as f32) * 0.002;
+                        player.camera_yaw += (delta.0 as f32) * 0.002; // PLUS for correct L/R
                         player.camera_pitch -= (delta.1 as f32) * 0.002;
                         player.camera_pitch = player.camera_pitch.clamp(-1.5, 1.5);
                     }
