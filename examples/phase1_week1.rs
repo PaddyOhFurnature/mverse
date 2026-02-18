@@ -153,6 +153,10 @@ fn main() {
     let player_mesh = create_player_cube();
     let mut player_model_buffer = MeshBuffer::from_mesh(&context.device, &player_mesh);
     
+    // Create hitbox visualization
+    let hitbox_mesh = create_hitbox_wireframe();
+    let hitbox_buffer = MeshBuffer::from_mesh(&context.device, &hitbox_mesh);
+    
     // Initialize physics world with FloatingOrigin at origin
     let origin_voxel_ecef = origin_voxel.to_ecef();
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
@@ -412,9 +416,9 @@ fn main() {
                                 // Render terrain
                                 mesh_buffer.render(&mut render_pass);
                                 
-                                // Don't render player model in first-person (camera IS the player)
-                                // pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
-                                // player_model_buffer.render(&mut render_pass);
+                                // Render hitbox visualization at player position
+                                pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
+                                hitbox_buffer.render(&mut render_pass);
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
@@ -519,6 +523,62 @@ fn create_player_cube() -> Mesh {
     let v23 = mesh.add_vertex(Vertex::new(Vec3::new( w,  h, -w), Vec3::new(1.0, 0.0, 0.0)));
     mesh.add_triangle(Triangle::new(v20, v22, v21));
     mesh.add_triangle(Triangle::new(v20, v23, v22));
+    
+    mesh
+}
+
+fn create_hitbox_wireframe() -> Mesh {
+    // Create wireframe box showing player capsule hitbox
+    // Player capsule: radius=0.4m, height=1.8m
+    let radius = 0.4;
+    let height = 1.8;
+    
+    let mut mesh = Mesh::new();
+    
+    // Bounding box corners (capsule extents)
+    let min_x = -radius;
+    let max_x = radius;
+    let min_y = 0.0; // Feet
+    let max_y = height; // Head
+    let min_z = -radius;
+    let max_z = radius;
+    
+    // Bottom square (at feet)
+    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, min_y, min_z), Vec3::Y));
+    let v1 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, min_y, min_z), Vec3::Y));
+    let v2 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, min_y, max_z), Vec3::Y));
+    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, min_y, max_z), Vec3::Y));
+    
+    // Top square (at head)
+    let v4 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, max_y, min_z), Vec3::Y));
+    let v5 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, max_y, min_z), Vec3::Y));
+    let v6 = mesh.add_vertex(Vertex::new(Vec3::new(max_x, max_y, max_z), Vec3::Y));
+    let v7 = mesh.add_vertex(Vertex::new(Vec3::new(min_x, max_y, max_z), Vec3::Y));
+    
+    // Create actual faces for visibility (not just degenerate triangles)
+    // Bottom square
+    mesh.add_triangle(Triangle::new(v0, v1, v2));
+    mesh.add_triangle(Triangle::new(v0, v2, v3));
+    
+    // Top square
+    mesh.add_triangle(Triangle::new(v4, v6, v5));
+    mesh.add_triangle(Triangle::new(v4, v7, v6));
+    
+    // Front face
+    mesh.add_triangle(Triangle::new(v0, v5, v1));
+    mesh.add_triangle(Triangle::new(v0, v4, v5));
+    
+    // Back face
+    mesh.add_triangle(Triangle::new(v2, v7, v3));
+    mesh.add_triangle(Triangle::new(v2, v6, v7));
+    
+    // Left face
+    mesh.add_triangle(Triangle::new(v0, v7, v4));
+    mesh.add_triangle(Triangle::new(v0, v3, v7));
+    
+    // Right face
+    mesh.add_triangle(Triangle::new(v1, v6, v2));
+    mesh.add_triangle(Triangle::new(v1, v5, v6));
     
     mesh
 }
