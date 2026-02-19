@@ -348,9 +348,30 @@ impl ChunkId {
     /// assert_eq!(chunk_a.manhattan_distance(&chunk_b), 6);
     /// ```
     pub fn manhattan_distance(&self, other: &ChunkId) -> i64 {
-        (self.x - other.x).abs() +
-        (self.y - other.y).abs() +
+        (self.x - other.x).abs() + 
+        (self.y - other.y).abs() + 
         (self.z - other.z).abs()
+    }
+    
+    /// Calculate chunk ID from ECEF position
+    ///
+    /// Converts ECEF coordinates to voxel, then to chunk ID.
+    /// Useful for determining which chunk a GPS position belongs to.
+    pub fn from_ecef(ecef: &ECEF) -> Self {
+        let voxel = VoxelCoord::from_ecef(ecef);
+        Self::from_voxel(&voxel)
+    }
+    
+    /// Get center ECEF coordinate of this chunk
+    ///
+    /// Useful for distance calculations and chunk streaming.
+    pub fn center_ecef(&self) -> ECEF {
+        let center_voxel = VoxelCoord::new(
+            self.x * CHUNK_SIZE_X + (CHUNK_SIZE_X / 2),
+            self.y * CHUNK_SIZE_Y + (CHUNK_SIZE_Y / 2),
+            self.z * CHUNK_SIZE_Z + (CHUNK_SIZE_Z / 2),
+        );
+        center_voxel.to_ecef()
     }
     
     /// Convert to directory-safe string identifier

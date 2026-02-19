@@ -3,7 +3,7 @@
 use glam::{DVec3, Vec3};
 
 /// GPS coordinates (latitude, longitude, altitude)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GPS {
     pub lat: f64,  // degrees
     pub lon: f64,  // degrees
