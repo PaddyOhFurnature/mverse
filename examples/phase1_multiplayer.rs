@@ -9,22 +9,39 @@
 //! - Remote players rendered as blue wireframe capsules
 //! - Chat messaging (T key to send)
 //! - All Phase 1 features (walk/fly, physics, terrain interaction)
+//! - **Persistent world state** - Edits save to disk, reload on restart
 //!
 //! # Usage
 //!
-//! **Terminal 1:**
+//! **Single machine testing (3 terminals):**
 //! ```bash
-//! cargo run --release --example phase1_multiplayer
+//! # Terminal 1 - Alice
+//! METAVERSE_IDENTITY_FILE=~/.metaverse/alice.key cargo run --release --example phase1_multiplayer
+//!
+//! # Terminal 2 - Bob
+//! METAVERSE_IDENTITY_FILE=~/.metaverse/bob.key cargo run --release --example phase1_multiplayer
+//!
+//! # Terminal 3 - Charlie
+//! METAVERSE_IDENTITY_FILE=~/.metaverse/charlie.key cargo run --release --example phase1_multiplayer
 //! ```
 //!
-//! **Terminal 2:**
+//! **Or use --temp-identity for random keys (testing only):**
 //! ```bash
-//! cargo run --release --example phase1_multiplayer
+//! cargo run --release --example phase1_multiplayer -- --temp-identity
 //! ```
 //!
-//! Both instances will auto-discover each other via mDNS within 1-2 seconds.
-//! Move around in one window, see your player move in the other window.
-//! Dig/place blocks - changes appear in both clients.
+//! All instances will auto-discover each other via mDNS within 1-2 seconds.
+//! Move around in one window, see your player move in the other windows.
+//! Dig/place blocks - changes appear in all connected clients.
+//! **Close and restart - your edits persist!**
+//!
+//! # Persistence
+//!
+//! World state saved to `world_data/operations.json`:
+//! - All voxel operations logged (dig, place)
+//! - Automatically saved on exit
+//! - Automatically loaded on startup
+//! - Deterministic replay reconstructs exact state
 //!
 //! # Controls
 //!
@@ -86,6 +103,23 @@ enum PlayerModeLocal {
 fn main() {
     env_logger::init();
     
+    // ============================================================
+    // ZONE CONFIGURATION
+    // ============================================================
+    // Toggle terrain editability for testing different zone types:
+    //   true  = Editable zone (desert, quarry, beach)
+    //   false = Protected zone (real-world terrain, infrastructure)
+    //
+    // Future: Replace with proper zone system based on GPS coordinates
+    const TERRAIN_IS_EDITABLE: bool = true;
+    
+    if !TERRAIN_IS_EDITABLE {
+        println!("⛔ PROTECTED ZONE - Terrain editing disabled");
+        println!("   This represents real-world terrain (rivers, cliffs, etc.)");
+        println!("   that cannot be modified in production.\n");
+    }
+    // ============================================================
+    
     println!("=== Phase 1 Multiplayer Demo ===");
     println!();
     println!("🌐 P2P NETWORKING ENABLED");
@@ -93,6 +127,7 @@ fn main() {
     println!("   - Player state sync @ 20 Hz");
     println!("   - Voxel operations with CRDT");
     println!("   - Ed25519 signatures");
+    println!("   - World state persistence");
     println!();
     println!("Controls:");
     println!("  WASD - Move");
@@ -483,19 +518,26 @@ fn main() {
                     }
                     
                     // Handle digging
-                    if dig_pressed {
+                    if dig_pressed && TERRAIN_IS_EDITABLE {
                         if let Some(dug) = player.dig_voxel(&physics, &mut octree, 10.0) {
                             println!("⛏️  Dug voxel at {:?}", dug);
                             
                             // Broadcast voxel operation
                             match multiplayer.broadcast_voxel_operation(dug, Material::Air) {
                                 Ok(op) => {
-                                    // Track locally for CRDT merge
-                                    local_voxel_ops.insert(dug, op.clone());
-                                    
-                                    // Log to user content layer
-                                    if let Err(e) = user_content.apply_operation(op, &local_voxel_ops) {
-                                        eprintln!("Failed to log local dig operation: {:?}", e);
+                                    // Log to user content layer (local ops don't need CRDT check)
+                                    let empty_map = HashMap::new();
+                                    match user_content.apply_operation(op.clone(), &empty_map) {
+                                        Ok(true) => {
+                                            // Track locally for future CRDT merges with remote ops
+                                            local_voxel_ops.insert(dug, op);
+                                        }
+                                        Ok(false) => {
+                                            eprintln!("⚠️  Local operation rejected (shouldn't happen)");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("❌ Failed to log local dig operation: {:?}", e);
+                                        }
                                     }
                                 }
                                 Err(e) => eprintln!("Failed to broadcast dig: {}", e),
@@ -507,19 +549,26 @@ fn main() {
                     }
                     
                     // Handle placing
-                    if place_pressed {
+                    if place_pressed && TERRAIN_IS_EDITABLE {
                         if let Some(placed) = player.place_voxel(&physics, &mut octree, MaterialId::STONE, 10.0) {
                             println!("🧱 Placed voxel at {:?}", placed);
                             
                             // Broadcast voxel operation
                             match multiplayer.broadcast_voxel_operation(placed, Material::Stone) {
                                 Ok(op) => {
-                                    // Track locally for CRDT merge
-                                    local_voxel_ops.insert(placed, op.clone());
-                                    
-                                    // Log to user content layer
-                                    if let Err(e) = user_content.apply_operation(op, &local_voxel_ops) {
-                                        eprintln!("Failed to log local place operation: {:?}", e);
+                                    // Log to user content layer (local ops don't need CRDT check)
+                                    let empty_map = HashMap::new();
+                                    match user_content.apply_operation(op.clone(), &empty_map) {
+                                        Ok(true) => {
+                                            // Track locally for future CRDT merges with remote ops
+                                            local_voxel_ops.insert(placed, op);
+                                        }
+                                        Ok(false) => {
+                                            eprintln!("⚠️  Local operation rejected (shouldn't happen)");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("❌ Failed to log local place operation: {:?}", e);
+                                        }
                                     }
                                 }
                                 Err(e) => eprintln!("Failed to broadcast place: {}", e),

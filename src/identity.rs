@@ -121,6 +121,21 @@ impl Identity {
     ///
     /// Returns `~/.metaverse/identity.key`
     fn default_path() -> Result<PathBuf> {
+        // Check for custom identity file path from environment
+        if let Ok(custom_path) = std::env::var("METAVERSE_IDENTITY_FILE") {
+            // Expand ~ to home directory
+            let path = if custom_path.starts_with("~/") {
+                if let Some(home) = dirs::home_dir() {
+                    home.join(&custom_path[2..])
+                } else {
+                    PathBuf::from(custom_path)
+                }
+            } else {
+                PathBuf::from(custom_path)
+            };
+            return Ok(path);
+        }
+        
         let home = dirs::home_dir()
             .ok_or_else(|| {
                 IdentityError::IoError(std::io::Error::new(
@@ -189,6 +204,12 @@ impl Identity {
     /// # Example
     /// ```no_run
     /// let identity = Identity::load_or_create()?;
+    /// ```
+    /// Load identity from default path or create new one
+    ///
+    /// Path can be customized with METAVERSE_IDENTITY_FILE environment variable:
+    /// ```bash
+    /// METAVERSE_IDENTITY_FILE=~/.metaverse/alice.key cargo run
     /// ```
     pub fn load_or_create() -> Result<Self> {
         let path = Self::default_path()?;
