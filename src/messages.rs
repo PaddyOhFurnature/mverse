@@ -249,25 +249,29 @@ impl Material {
 /// - **Idempotent**: Applying the same operation twice has no additional effect
 /// - **Signed**: Author proves ownership with Ed25519 signature
 ///
-/// **Bandwidth:** ~128 bytes per operation
+/// **Bandwidth:** ~160 bytes per operation (increased from 128 with vector clocks)
 /// - VoxelCoord: 12 bytes (3x i32)
 /// - Material: 1 byte
 /// - PeerId: ~38 bytes
-/// - Timestamp: 8 bytes
+/// - Lamport timestamp: 8 bytes (kept for backwards compat + tiebreak)
+/// - VectorClock: ~20-50 bytes (grows with peer count)
 /// - Signature: 64 bytes
 /// - Overhead: ~5 bytes
 ///
-/// Typical usage: Bursts during building (100 ops/sec = 12.8 KB/s),
-/// otherwise rare (1 op/sec = 128 bytes/sec)
+/// Typical usage: Bursts during building (100 ops/sec = 16 KB/s),
+/// otherwise rare (1 op/sec = 160 bytes/sec)
 ///
-/// # CRDT Merge Rules
+/// # CRDT Merge Rules (with Vector Clocks)
 ///
-/// When two peers edit the same voxel concurrently:
-/// 1. **Last-Write-Wins (LWW)**: Higher Lamport timestamp wins
-/// 2. **Tie-break by PeerId**: If timestamps equal, lexicographically larger PeerId wins
-/// 3. **Signature verification**: Only signed operations from parcel owner are valid
+/// When two peers edit the same voxel:
+/// 1. **Causal ordering**: If vector clocks show A→B, B wins (B saw A)
+/// 2. **Concurrent operations**: If vector clocks are concurrent:
+///    - Compare Lamport timestamps (higher wins)
+///    - If equal, PeerId tiebreak (deterministic)
+/// 3. **Signature verification**: Only signed operations from parcel owner valid
 ///
-/// This ensures all peers converge to the same state without coordination.
+/// This ensures all peers converge to the same state without coordination,
+/// while properly handling causal relationships.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoxelOperation {
     /// Voxel coordinate being modified
@@ -279,17 +283,20 @@ pub struct VoxelOperation {
     /// Peer who authored this operation
     pub author: PeerId,
     
-    /// Lamport timestamp for LWW conflict resolution
+    /// Lamport timestamp for backwards compatibility and tiebreak
     pub timestamp: u64,
     
-    /// Ed25519 signature over (coord, material, author, timestamp)
+    /// Vector clock for causal ordering
+    pub vector_clock: crate::vector_clock::VectorClock,
+    
+    /// Ed25519 signature over (coord, material, author, timestamp, vector_clock)
     /// Proves this operation came from the author's private key
     #[serde(with = "serde_arrays")]
     pub signature: [u8; 64],
 }
 
 impl VoxelOperation {
-    /// Create a new voxel operation (unsigned)
+    /// Create a new voxel operation with vector clock
     ///
     /// Call `sign()` to add signature before broadcasting.
     pub fn new(
@@ -297,12 +304,14 @@ impl VoxelOperation {
         material: Material,
         author: PeerId,
         timestamp: u64,
+        vector_clock: crate::vector_clock::VectorClock,
     ) -> Self {
         Self {
             coord,
             material,
             author,
             timestamp,
+            vector_clock,
             signature: [0u8; 64],
         }
     }
@@ -335,6 +344,11 @@ impl VoxelOperation {
         bytes.push(self.material as u8);
         bytes.extend_from_slice(&self.author.to_bytes());
         bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        
+        // Include vector clock in signature
+        let vc_bytes = bincode::serialize(&self.vector_clock).unwrap_or_default();
+        bytes.extend_from_slice(&vc_bytes);
+        
         bytes
     }
     
@@ -367,15 +381,28 @@ impl VoxelOperation {
         Ok(bincode::deserialize(data)?)
     }
     
-    /// Compare two operations for CRDT merge
+    /// Compare two operations for CRDT merge (with vector clocks)
     ///
     /// Returns true if this operation should win over `other` in a conflict.
-    /// Uses LWW-by-timestamp, tie-break by PeerId.
+    ///
+    /// **Merge logic:**
+    /// 1. If vector clocks show causal ordering (A→B), later one wins
+    /// 2. If concurrent, use Lamport timestamp (LWW)
+    /// 3. If timestamps equal, use PeerId tiebreak (deterministic)
     pub fn wins_over(&self, other: &VoxelOperation) -> bool {
+        // Check for causal ordering first
+        if self.vector_clock.happens_after(&other.vector_clock) {
+            return true;  // Self causally after other → self wins
+        }
+        if self.vector_clock.happens_before(&other.vector_clock) {
+            return false; // Self causally before other → other wins
+        }
+        
+        // Operations are concurrent → use timestamp + PeerId tiebreak
         if self.timestamp != other.timestamp {
             self.timestamp > other.timestamp
         } else {
-            // Tie-break: lexicographically larger PeerId wins
+            // Tie-break: lexicographically larger PeerId wins (deterministic)
             self.author.to_bytes() > other.author.to_bytes()
         }
     }

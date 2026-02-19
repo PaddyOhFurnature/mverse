@@ -263,6 +263,7 @@ mod tests {
             Material::Stone,
             PeerId::random(),
             1,
+            crate::vector_clock::VectorClock::new(),
         );
         
         let result = layer.apply_operation(op, &local_ops);
@@ -281,12 +282,24 @@ mod tests {
         let coord = VoxelCoord::new(5, 5, 5);
         
         // Local operation with timestamp 10
-        let local_op = VoxelOperation::new(coord, Material::Stone, PeerId::random(), 10);
+        let local_op = VoxelOperation::new(
+            coord, 
+            Material::Stone, 
+            PeerId::random(), 
+            10,
+            crate::vector_clock::VectorClock::new(),
+        );
         let mut local_ops = HashMap::new();
         local_ops.insert(coord, local_op);
         
         // Remote operation with timestamp 5 (older)
-        let remote_op = VoxelOperation::new(coord, Material::Dirt, PeerId::random(), 5);
+        let remote_op = VoxelOperation::new(
+            coord, 
+            Material::Dirt, 
+            PeerId::random(), 
+            5,
+            crate::vector_clock::VectorClock::new(),
+        );
         
         // Remote operation should be rejected (local wins)
         let result = layer.apply_operation(remote_op, &local_ops);

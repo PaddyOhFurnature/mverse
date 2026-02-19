@@ -20,3 +20,4 @@ pub mod player_state;
 pub mod multiplayer;
 pub mod remote_render;
 pub mod user_content;
+pub mod vector_clock;

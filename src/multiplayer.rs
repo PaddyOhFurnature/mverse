@@ -120,8 +120,11 @@ pub struct MultiplayerSystem {
     /// Remote player state manager (interpolation, jitter buffer)
     remote_players: PlayerStateManager,
     
-    /// Lamport clock for causal ordering
+    /// Lamport clock for causal ordering (kept for backwards compat)
     clock: LamportClock,
+    
+    /// Vector clock for proper CRDT causality
+    vector_clock: crate::vector_clock::VectorClock,
     
     /// Deduplication set for voxel operations (by operation ID)
     voxel_op_seen: HashSet<[u8; 64]>, // Store signature as ID
@@ -193,6 +196,7 @@ impl MultiplayerSystem {
             local_peer_id,
             remote_players: PlayerStateManager::new(local_peer_id),
             clock: LamportClock::default(),
+            vector_clock: crate::vector_clock::VectorClock::new(),
             voxel_op_seen: HashSet::new(),
             pending_ops: Vec::new(),
             peer_reputation: HashMap::new(),
@@ -309,14 +313,17 @@ impl MultiplayerSystem {
         coord: VoxelCoord,
         material: Material,
     ) -> Result<VoxelOperation> {
+        // Increment clocks
         let timestamp = self.clock.tick();
+        self.vector_clock.increment(self.local_peer_id);
         
-        // Create and sign operation
+        // Create and sign operation with vector clock
         let mut op = VoxelOperation::new(
             coord,
             material,
             self.local_peer_id,
             timestamp,
+            self.vector_clock.clone(),
         );
         
         op.sign(self.identity.signing_key());
@@ -455,8 +462,10 @@ impl MultiplayerSystem {
             return Err(MultiplayerError::InvalidSignature(peer_id));
         }
         
-        // Update Lamport clock
+        // Update clocks
         self.clock.receive(op.timestamp);
+        self.vector_clock.merge(&op.vector_clock);  // Merge vector clocks
+        self.vector_clock.increment(self.local_peer_id); // Increment our counter
         
         // Remember we've seen this operation
         self.voxel_op_seen.insert(op.signature);
