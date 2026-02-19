@@ -129,24 +129,36 @@ impl ChunkManager {
         let octree = self.terrain_generator.generate_chunk(&chunk_id)?;
         
         // 2. Create chunk data
-        let chunk_data = ChunkData::new(chunk_id, octree);
+        let mut chunk_data = ChunkData::new(chunk_id, octree);
         
         // 3. Load operations from file (modifies user_content internal state)
-        match self.user_content.load_chunk(world_dir, &chunk_id) {
+        let loaded_ops = match self.user_content.load_chunk(world_dir, &chunk_id) {
             Ok(count) => {
                 if count > 0 {
                     println!("  {} loaded with {} operations", chunk_id, count);
                 }
+                count
             }
             Err(e) => {
                 // File not existing is OK (no edits yet)
                 if e.kind() != std::io::ErrorKind::NotFound {
                     return Err(format!("Failed to load chunk {}: {}", chunk_id, e));
                 }
+                0
+            }
+        };
+        
+        // 4. Apply loaded operations to the chunk octree
+        if loaded_ops > 0 {
+            for op in self.user_content.op_log() {
+                if ChunkId::from_voxel(&op.coord) == chunk_id {
+                    chunk_data.octree.set_voxel(op.coord, op.material.to_material_id());
+                    chunk_data.dirty = true;
+                }
             }
         }
         
-        // 4. Insert into loaded chunks
+        // 5. Insert into loaded chunks
         self.loaded_chunks.insert(chunk_id, chunk_data);
         
         Ok(())
