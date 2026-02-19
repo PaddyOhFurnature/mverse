@@ -683,7 +683,7 @@ impl MultiplayerSystem {
             .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
         
         self.cmd_tx.send(NetworkCommand::Publish {
-            topic: "metaverse/state/response".to_string(),
+            topic: TOPIC_STATE_RESPONSE.to_string(),
             data: bytes,
         }).map_err(|_| MultiplayerError::ChannelSendError)?;
         
@@ -717,7 +717,7 @@ impl MultiplayerSystem {
         
         // Broadcast request to all connected peers
         self.cmd_tx.send(NetworkCommand::Publish {
-            topic: "metaverse/state/request".to_string(),
+            topic: TOPIC_STATE_REQUEST.to_string(),
             data,
         }).map_err(|_| MultiplayerError::ChannelSendError)?;
         
@@ -795,6 +795,16 @@ fn run_network_thread(
             eprintln!("Failed to subscribe to chat: {}", e);
         } else {
             println!("📻 Subscribed to topic: chat");
+        }
+        if let Err(e) = network.subscribe(TOPIC_STATE_REQUEST) {
+            eprintln!("Failed to subscribe to state-request: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: state-request");
+        }
+        if let Err(e) = network.subscribe(TOPIC_STATE_RESPONSE) {
+            eprintln!("Failed to subscribe to state-response: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: state-response");
         }
         
         println!("🔍 Network thread started - polling for mDNS and connections...");
