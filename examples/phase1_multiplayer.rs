@@ -303,6 +303,62 @@ fn main() {
     // User content layer - separates edits from base terrain
     let mut user_content = UserContentLayer::new();
     
+    // World data directory
+    let world_dir = std::path::PathBuf::from("world_data");
+    let ops_file = world_dir.join("operations.json");
+    
+    // Create world directory if it doesn't exist
+    if !world_dir.exists() {
+        std::fs::create_dir_all(&world_dir).expect("Failed to create world data directory");
+        println!("📁 Created world data directory: {:?}", world_dir);
+    }
+    
+    // Load existing operations if file exists
+    if ops_file.exists() {
+        println!("📂 Loading existing world state...");
+        match user_content.load_op_log(&ops_file) {
+            Ok(count) => {
+                println!("   Loaded {} operations from disk", count);
+                
+                // Replay operations to reconstruct state
+                println!("   Replaying operations...");
+                let mut applied = 0;
+                for op in user_content.op_log() {
+                    octree.set_voxel(op.coord, op.material.to_material_id());
+                    applied += 1;
+                }
+                println!("   ✅ Applied {} operations to terrain", applied);
+                
+                // Regenerate mesh with loaded state
+                println!("   Regenerating mesh...");
+                let mesh_start = Instant::now();
+                let mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
+                mesh_buffer = MeshBuffer::from_mesh(&context.device, &mesh);
+                println!("   Mesh regenerated in {:.2}s ({} vertices)", 
+                    mesh_start.elapsed().as_secs_f32(), 
+                    mesh.vertices.len()
+                );
+                
+                // Update collision
+                println!("   Updating collision...");
+                terrain_collider = metaverse_core::physics::update_region_collision(
+                    &mut physics,
+                    &octree,
+                    &origin_voxel,
+                    7,
+                    Some(terrain_collider),
+                );
+                println!("   ✅ World state loaded successfully");
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to load operations: {}", e);
+                println!("   Starting with fresh world state");
+            }
+        }
+    } else {
+        println!("📝 No existing world state found - starting fresh");
+    }
+    
     println!("\n🎮 Demo running!");
     println!("   Waiting for peers to connect...");
     println!("   (Run another instance to test P2P)\n");
@@ -312,6 +368,20 @@ fn main() {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
                     println!("\n👋 Shutting down...");
+                    
+                    // Save world state before exiting
+                    println!("💾 Saving world state...");
+                    match user_content.save_op_log(&ops_file) {
+                        Ok(()) => {
+                            println!("   ✅ Saved {} operations to {:?}", 
+                                user_content.op_count(), ops_file);
+                        }
+                        Err(e) => {
+                            eprintln!("   ⚠️  Failed to save operations: {}", e);
+                        }
+                    }
+                    
+                    println!("   Goodbye!");
                     elwt.exit();
                 }
                 
