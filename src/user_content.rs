@@ -2,15 +2,24 @@
 //!
 //! Separates user modifications from base terrain generation.
 //! Implements CRDT-based conflict resolution and operation logging.
+//!
+//! # Chunk-Based Storage
+//!
+//! Operations are stored per-chunk for spatial sharding:
+//! - `world_data/chunks/chunk_X_Y_Z/operations.json`
+//! - Only load operations for nearby chunks
+//! - Scales to infinite world size
+//! - Foundation for DHT replication
 
 use crate::{
+    chunk::ChunkId,
     messages::VoxelOperation,
     voxel::VoxelCoord,
 };
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Configuration flags for verification (can be toggled for testing)
 #[derive(Debug, Clone)]
@@ -196,14 +205,18 @@ impl UserContentLayer {
         self.has_access(op.author, &op.coord)
     }
     
-    /// Save operation log to disk
+    /// Save operation log to disk (legacy single-file format)
+    ///
+    /// **Deprecated:** Use `save_chunks()` for chunk-based storage
     pub fn save_op_log<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(&self.op_log)?;
         std::fs::write(path, json)?;
         Ok(())
     }
     
-    /// Load operation log from disk
+    /// Load operation log from disk (legacy single-file format)
+    ///
+    /// **Deprecated:** Use `load_chunks()` for chunk-based storage
     ///
     /// Note: Operations are loaded but NOT applied - caller must replay them
     pub fn load_op_log<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
@@ -212,6 +225,127 @@ impl UserContentLayer {
         let count = ops.len();
         self.op_log = ops;
         Ok(count)
+    }
+    
+    /// Save operations organized by chunk
+    ///
+    /// Creates directory structure:
+    /// ```text
+    /// {base_dir}/
+    ///   chunks/
+    ///     chunk_0_0_0/
+    ///       operations.json
+    ///     chunk_1_0_0/
+    ///       operations.json
+    /// ```
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory (e.g., "world_data")
+    ///
+    /// # Returns
+    /// HashMap mapping chunk ID to number of operations saved
+    pub fn save_chunks<P: AsRef<Path>>(&self, base_dir: P) -> std::io::Result<HashMap<ChunkId, usize>> {
+        let chunks_dir = base_dir.as_ref().join("chunks");
+        
+        // Group operations by chunk
+        let mut ops_by_chunk: HashMap<ChunkId, Vec<&VoxelOperation>> = HashMap::new();
+        for op in &self.op_log {
+            let chunk_id = ChunkId::from_voxel(&op.coord);
+            ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
+        }
+        
+        let mut result = HashMap::new();
+        
+        // Save each chunk's operations to its own file
+        for (chunk_id, ops) in ops_by_chunk {
+            let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
+            std::fs::create_dir_all(&chunk_dir)?;
+            
+            let ops_file = chunk_dir.join("operations.json");
+            let json = serde_json::to_string_pretty(&ops)?;
+            std::fs::write(&ops_file, json)?;
+            
+            result.insert(chunk_id, ops.len());
+        }
+        
+        Ok(result)
+    }
+    
+    /// Load operations from a specific chunk
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory (e.g., "world_data")
+    /// * `chunk_id` - Which chunk to load
+    ///
+    /// # Returns
+    /// Number of operations loaded
+    pub fn load_chunk<P: AsRef<Path>>(&mut self, base_dir: P, chunk_id: &ChunkId) -> std::io::Result<usize> {
+        let ops_file = base_dir.as_ref()
+            .join("chunks")
+            .join(chunk_id.to_path_string())
+            .join("operations.json");
+        
+        // If file doesn't exist, that's OK (chunk has no edits)
+        if !ops_file.exists() {
+            return Ok(0);
+        }
+        
+        let json = std::fs::read_to_string(ops_file)?;
+        let ops: Vec<VoxelOperation> = serde_json::from_str(&json)?;
+        let count = ops.len();
+        
+        // Append to existing op log
+        self.op_log.extend(ops);
+        
+        Ok(count)
+    }
+    
+    /// Load operations from multiple chunks
+    ///
+    /// Useful for loading all chunks in player's view radius.
+    ///
+    /// # Arguments
+    /// * `base_dir` - Base directory (e.g., "world_data")
+    /// * `chunk_ids` - List of chunks to load
+    ///
+    /// # Returns
+    /// HashMap mapping chunk ID to number of operations loaded
+    pub fn load_chunks<P: AsRef<Path>>(&mut self, base_dir: P, chunk_ids: &[ChunkId]) -> std::io::Result<HashMap<ChunkId, usize>> {
+        let mut result = HashMap::new();
+        
+        for chunk_id in chunk_ids {
+            match self.load_chunk(base_dir.as_ref(), chunk_id) {
+                Ok(count) => {
+                    if count > 0 {
+                        result.insert(*chunk_id, count);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Chunk file doesn't exist - that's OK
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        
+        Ok(result)
+    }
+    
+    /// Get all chunks that have operations
+    ///
+    /// Useful for discovering which chunks need to be saved.
+    ///
+    /// # Returns
+    /// HashMap mapping chunk ID to operations in that chunk
+    pub fn get_chunks_with_ops(&self) -> HashMap<ChunkId, Vec<VoxelOperation>> {
+        let mut chunks: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
+        
+        for op in &self.op_log {
+            let chunk_id = ChunkId::from_voxel(&op.coord);
+            chunks.entry(chunk_id).or_insert_with(Vec::new).push(op.clone());
+        }
+        
+        chunks
     }
 }
 

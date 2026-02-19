@@ -340,7 +340,6 @@ fn main() {
     
     // World data directory
     let world_dir = std::path::PathBuf::from("world_data");
-    let ops_file = world_dir.join("operations.json");
     
     // Create world directory if it doesn't exist
     if !world_dir.exists() {
@@ -348,12 +347,29 @@ fn main() {
         println!("📁 Created world data directory: {:?}", world_dir);
     }
     
-    // Load existing operations if file exists
-    if ops_file.exists() {
-        println!("📂 Loading existing world state...");
-        match user_content.load_op_log(&ops_file) {
-            Ok(count) => {
-                println!("   Loaded {} operations from disk", count);
+    // Determine which chunks to load (based on current terrain region)
+    // For now, load chunks in a small radius around spawn point
+    use metaverse_core::chunk::{ChunkId, chunks_in_radius};
+    use metaverse_core::voxel::VoxelCoord;
+    
+    let spawn_voxel = VoxelCoord::from_ecef(&origin_ecef);
+    let spawn_chunk = ChunkId::from_voxel(&spawn_voxel);
+    let nearby_chunks = chunks_in_radius(&spawn_chunk, 2); // Load 5×5×5 chunk radius
+    
+    // Load existing operations from chunks
+    println!("📂 Loading world state from {} chunks...", nearby_chunks.len());
+    println!("   Spawn chunk: {}", spawn_chunk);
+    
+    match user_content.load_chunks(&world_dir, &nearby_chunks) {
+        Ok(loaded_chunks) => {
+            if !loaded_chunks.is_empty() {
+                let total_ops: usize = loaded_chunks.values().sum();
+                println!("   Loaded {} operations from {} chunks", total_ops, loaded_chunks.len());
+                
+                // Show which chunks had data
+                for (chunk_id, count) in &loaded_chunks {
+                    println!("     {} : {} ops", chunk_id, count);
+                }
                 
                 // Replay operations to reconstruct state
                 println!("   Replaying operations...");
@@ -383,15 +399,15 @@ fn main() {
                     7,
                     Some(terrain_collider),
                 );
-                println!("   ✅ World state loaded successfully");
-            }
-            Err(e) => {
-                eprintln!("⚠️  Failed to load operations: {}", e);
-                println!("   Starting with fresh world state");
+                println!("   ✅ World state loaded from chunk files");
+            } else {
+                println!("   No existing operations found (fresh world)");
             }
         }
-    } else {
-        println!("📝 No existing world state found - starting fresh");
+        Err(e) => {
+            eprintln!("⚠️  Failed to load chunks: {}", e);
+            println!("   Starting with fresh world state");
+        }
     }
     
     println!("\n🎮 Demo running!");
@@ -404,15 +420,21 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     println!("\n👋 Shutting down...");
                     
-                    // Save world state before exiting
-                    println!("💾 Saving world state...");
-                    match user_content.save_op_log(&ops_file) {
-                        Ok(()) => {
-                            println!("   ✅ Saved {} operations to {:?}", 
-                                user_content.op_count(), ops_file);
+                    // Save world state to chunk files before exiting
+                    println!("💾 Saving world state to chunk files...");
+                    match user_content.save_chunks(&world_dir) {
+                        Ok(chunks_saved) => {
+                            let total_ops: usize = chunks_saved.values().sum();
+                            println!("   ✅ Saved {} operations across {} chunks", 
+                                total_ops, chunks_saved.len());
+                            
+                            // Show which chunks were saved
+                            for (chunk_id, count) in &chunks_saved {
+                                println!("     {} : {} ops", chunk_id, count);
+                            }
                         }
                         Err(e) => {
-                            eprintln!("   ⚠️  Failed to save operations: {}", e);
+                            eprintln!("   ⚠️  Failed to save chunks: {}", e);
                         }
                     }
                     

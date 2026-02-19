@@ -21,3 +21,4 @@ pub mod multiplayer;
 pub mod remote_render;
 pub mod user_content;
 pub mod vector_clock;
+pub mod chunk;
