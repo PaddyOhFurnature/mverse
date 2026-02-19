@@ -68,6 +68,8 @@
 //! - Console shows connection events and sync statistics
 
 use metaverse_core::{
+    chunk::ChunkId,
+    chunk_manager::ChunkManager,
     coordinates::GPS,
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
     identity::Identity,
@@ -81,7 +83,7 @@ use metaverse_core::{
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
-    voxel::{Octree, VoxelCoord},
+    voxel::VoxelCoord,
 };
 use glam::{Mat4, Vec3};
 use rapier3d::prelude::*;
@@ -189,8 +191,8 @@ fn main() {
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
     
-    // Generate terrain with real SRTM data
-    println!("🗺️  Generating terrain (100m × 100m Brisbane)...");
+    // Setup terrain generation with SRTM data
+    println!("🗺️  Setting up chunk-based terrain generation...");
     let start = Instant::now();
     
     let origin_gps = GPS::new(-27.4705, 153.0260, 50.0); // Brisbane
@@ -209,13 +211,7 @@ fn main() {
         elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
     }
     
-    let mut octree = Octree::new();
-    let mut generator = TerrainGenerator::new(elevation_pipeline);
-    
-    generator.generate_region(&mut octree, &origin_gps, 100.0)
-        .expect("Failed to generate terrain");
-    
-    println!("   Terrain generated in {:.2}s", start.elapsed().as_secs_f32());
+    let generator = TerrainGenerator::new(elevation_pipeline);
     
     // Convert GPS origin to voxel coordinates  
     let origin_ecef = origin_gps.to_ecef();
@@ -224,30 +220,101 @@ fn main() {
     println!("   Origin GPS: ({:.6}, {:.6}, {:.1}m)", origin_gps.lat, origin_gps.lon, origin_gps.alt);
     println!("   Origin voxel: {:?}", origin_voxel);
     
-    // Extract initial mesh
-    println!("🔺 Extracting mesh...");
-    let mesh_start = Instant::now();
-    let mesh = extract_octree_mesh(&octree, &origin_voxel, 7); // 128 voxel region
-    println!("   Mesh extracted in {:.2}s ({} vertices)", 
-        mesh_start.elapsed().as_secs_f32(), 
-        mesh.vertices.len()
+    // Calculate spawn chunk
+    let spawn_chunk = ChunkId::from_voxel(&origin_voxel);
+    println!("   Spawn chunk: {}", spawn_chunk);
+    
+    // User content layer - separates edits from base terrain
+    let user_content = UserContentLayer::new();
+    
+    // World data directory
+    let world_dir = std::path::PathBuf::from("world_data");
+    
+    // Create world directory if it doesn't exist
+    if !world_dir.exists() {
+        std::fs::create_dir_all(&world_dir).expect("Failed to create world data directory");
+        println!("📁 Created world data directory: {:?}", world_dir);
+    }
+    
+    // Create chunk manager
+    let mut chunk_manager = ChunkManager::new(generator, user_content);
+    
+    // Load chunks in 2-chunk radius around spawn (3×3×3 = 27 chunks minus corners = 19 chunks)
+    println!("📦 Loading chunks around spawn (radius 2)...");
+    chunk_manager.update_visible_chunks(&spawn_chunk, 2, &world_dir);
+    
+    println!("   ✅ Loaded {} chunks in {:.2}s", 
+        chunk_manager.loaded_count(),
+        start.elapsed().as_secs_f32()
     );
     
-    // Find ground level at origin
-    let mut ground_y = f32::MIN;
-    for v in &mesh.vertices {
-        if v.position.x.abs() < 5.0 && v.position.z.abs() < 5.0 {
-            ground_y = ground_y.max(v.position.y);
+    // Generate meshes and collision for initial chunks
+    println!("🔺 Generating meshes and collision for loaded chunks...");
+    let mesh_start = Instant::now();
+    
+    // Initialize physics world with FloatingOrigin at origin
+    let origin_voxel_ecef = origin_voxel.to_ecef();
+    let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
+    
+    let mut total_vertices = 0;
+    for chunk_data in chunk_manager.loaded_chunks_mut() {
+        // Generate mesh for chunk
+        let min_voxel = chunk_data.chunk_id.min_voxel();
+        let mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
+        total_vertices += mesh.vertices.len();
+        chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
+        
+        // Generate collision for chunk
+        let collider = metaverse_core::physics::update_region_collision(
+            &mut physics,
+            &chunk_data.octree,
+            &min_voxel,
+            7,
+            None,
+        );
+        chunk_data.collider = Some(collider);
+        chunk_data.dirty = false;
+    }
+    
+    println!("   Meshes generated in {:.2}s ({} total vertices)", 
+        mesh_start.elapsed().as_secs_f32(),
+        total_vertices
+    );
+    
+    // Find ground level at spawn by sampling spawn chunk
+    let mut ground_y: f32 = 0.0;
+    if let Some(spawn_chunk_data) = chunk_manager.get_chunk(&spawn_chunk) {
+        // Sample voxels around spawn point to find ground
+        for x_off in -5..=5 {
+            for z_off in -5..=5 {
+                let test_voxel = VoxelCoord::new(
+                    origin_voxel.x + x_off,
+                    origin_voxel.y,
+                    origin_voxel.z + z_off,
+                );
+                
+                // Search upward for first air block above solid ground
+                for y_off in -10..50 {
+                    let check_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off, test_voxel.z);
+                    let below_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off - 1, test_voxel.z);
+                    
+                    let is_air = spawn_chunk_data.octree.get_voxel(check_voxel) == MaterialId::AIR;
+                    let below_is_solid = spawn_chunk_data.octree.get_voxel(below_voxel) != MaterialId::AIR;
+                    
+                    if is_air && below_is_solid {
+                        ground_y = ground_y.max((y_off - 1) as f32);
+                        break;
+                    }
+                }
+            }
         }
     }
-    if ground_y < -500.0 {
+    
+    if ground_y < -50.0 {
         ground_y = 0.0;
     }
     
     println!("   Ground level at spawn: {:.1}m", ground_y);
-    
-    // Upload mesh to GPU
-    let mut mesh_buffer = MeshBuffer::from_mesh(&context.device, &mesh);
     
     // Create player model (visible cube) - green for local player
     let player_mesh = create_local_player_cube();
@@ -264,20 +331,6 @@ fn main() {
     // Create remote player mesh (blue wireframe) - reused for all remote players
     let remote_player_mesh = create_remote_player_capsule();
     let remote_player_buffer = MeshBuffer::from_mesh(&context.device, &remote_player_mesh);
-    
-    // Initialize physics world with FloatingOrigin at origin
-    let origin_voxel_ecef = origin_voxel.to_ecef();
-    let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
-    
-    // Generate collision mesh for terrain
-    println!("💥 Generating physics collision...");
-    let mut terrain_collider = metaverse_core::physics::update_region_collision(
-        &mut physics,
-        &octree,
-        &origin_voxel,
-        7,
-        None,
-    );
     
     // Spawn player 3m above ground
     let mut player = Player::new(&mut physics, origin_gps, 0.0);
@@ -330,85 +383,9 @@ fn main() {
     let mut last_stats_print = Instant::now();
     
     let mut cursor_grabbed = false;
-    let mut mesh_dirty = false;
     
     // Track local voxel operations for CRDT merge
     let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::VoxelOperation> = HashMap::new();
-    
-    // User content layer - separates edits from base terrain
-    let mut user_content = UserContentLayer::new();
-    
-    // World data directory
-    let world_dir = std::path::PathBuf::from("world_data");
-    
-    // Create world directory if it doesn't exist
-    if !world_dir.exists() {
-        std::fs::create_dir_all(&world_dir).expect("Failed to create world data directory");
-        println!("📁 Created world data directory: {:?}", world_dir);
-    }
-    
-    // Determine which chunks to load (based on current terrain region)
-    // For now, load chunks in a small radius around spawn point
-    use metaverse_core::chunk::{ChunkId, chunks_in_radius};
-    use metaverse_core::voxel::VoxelCoord;
-    
-    let spawn_voxel = VoxelCoord::from_ecef(&origin_ecef);
-    let spawn_chunk = ChunkId::from_voxel(&spawn_voxel);
-    let nearby_chunks = chunks_in_radius(&spawn_chunk, 2); // Load 5×5×5 chunk radius
-    
-    // Load existing operations from chunks
-    println!("📂 Loading world state from {} chunks...", nearby_chunks.len());
-    println!("   Spawn chunk: {}", spawn_chunk);
-    
-    match user_content.load_chunks(&world_dir, &nearby_chunks) {
-        Ok(loaded_chunks) => {
-            if !loaded_chunks.is_empty() {
-                let total_ops: usize = loaded_chunks.values().sum();
-                println!("   Loaded {} operations from {} chunks", total_ops, loaded_chunks.len());
-                
-                // Show which chunks had data
-                for (chunk_id, count) in &loaded_chunks {
-                    println!("     {} : {} ops", chunk_id, count);
-                }
-                
-                // Replay operations to reconstruct state
-                println!("   Replaying operations...");
-                let mut applied = 0;
-                for op in user_content.op_log() {
-                    octree.set_voxel(op.coord, op.material.to_material_id());
-                    applied += 1;
-                }
-                println!("   ✅ Applied {} operations to terrain", applied);
-                
-                // Regenerate mesh with loaded state
-                println!("   Regenerating mesh...");
-                let mesh_start = Instant::now();
-                let mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
-                mesh_buffer = MeshBuffer::from_mesh(&context.device, &mesh);
-                println!("   Mesh regenerated in {:.2}s ({} vertices)", 
-                    mesh_start.elapsed().as_secs_f32(), 
-                    mesh.vertices.len()
-                );
-                
-                // Update collision
-                println!("   Updating collision...");
-                terrain_collider = metaverse_core::physics::update_region_collision(
-                    &mut physics,
-                    &octree,
-                    &origin_voxel,
-                    7,
-                    Some(terrain_collider),
-                );
-                println!("   ✅ World state loaded from chunk files");
-            } else {
-                println!("   No existing operations found (fresh world)");
-            }
-        }
-        Err(e) => {
-            eprintln!("⚠️  Failed to load chunks: {}", e);
-            println!("   Starting with fresh world state");
-        }
-    }
     
     println!("\n🎮 Demo running!");
     println!("   Waiting for peers to connect...");
@@ -422,16 +399,9 @@ fn main() {
                     
                     // Save world state to chunk files before exiting
                     println!("💾 Saving world state to chunk files...");
-                    match user_content.save_chunks(&world_dir) {
-                        Ok(chunks_saved) => {
-                            let total_ops: usize = chunks_saved.values().sum();
-                            println!("   ✅ Saved {} operations across {} chunks", 
-                                total_ops, chunks_saved.len());
-                            
-                            // Show which chunks were saved
-                            for (chunk_id, count) in &chunks_saved {
-                                println!("     {} : {} ops", chunk_id, count);
-                            }
+                    match chunk_manager.save_all_chunks(&world_dir) {
+                        Ok(()) => {
+                            println!("   ✅ Saved all modified chunks");
                         }
                         Err(e) => {
                             eprintln!("   ⚠️  Failed to save chunks: {}", e);
@@ -453,6 +423,9 @@ fn main() {
                                     println!("🖱️  Mouse released");
                                 }
                                 KeyCode::F12 => {
+                                    // TODO: Update screenshot to work with multiple chunk meshes
+                                    println!("⚠️  Screenshot temporarily disabled during chunk refactor");
+                                    /*
                                     take_screenshot(
                                         &context,
                                         &mut pipeline,
@@ -463,6 +436,7 @@ fn main() {
                                         &hitbox_buffer,
                                         &player_model_bind_group,
                                     );
+                                    */
                                 }
                                 KeyCode::KeyF => {
                                     player_mode = match player_mode {
@@ -541,62 +515,104 @@ fn main() {
                     
                     // Handle digging
                     if dig_pressed && TERRAIN_IS_EDITABLE {
-                        if let Some(dug) = player.dig_voxel(&physics, &mut octree, 10.0) {
+                        // Find which chunk the raycast will hit (we need to check all loaded chunks)
+                        let camera_local = player.camera_position_local(&physics);
+                        let camera_ecef = physics.local_to_ecef(camera_local);
+                        let camera_dir = player.camera_forward();
+                        
+                        // Try raycasting in each loaded chunk to find hit
+                        let mut hit_coord = None;
+                        for chunk_data in chunk_manager.loaded_chunks_mut() {
+                            if let Some(hit) = metaverse_core::voxel::raycast_voxels(
+                                &chunk_data.octree,
+                                &camera_ecef,
+                                camera_dir,
+                                10.0
+                            ) {
+                                hit_coord = Some(hit.voxel);
+                                // Dig the voxel
+                                chunk_data.octree.set_voxel(hit.voxel, MaterialId::AIR);
+                                chunk_data.dirty = true;
+                                break;
+                            }
+                        }
+                        
+                        if let Some(dug) = hit_coord {
                             println!("⛏️  Dug voxel at {:?}", dug);
                             
                             // Broadcast voxel operation
-                            match multiplayer.broadcast_voxel_operation(dug, Material::Air) {
-                                Ok(op) => {
-                                    // Log to user content layer (local ops don't need CRDT check)
-                                    let empty_map = HashMap::new();
-                                    match user_content.apply_operation(op.clone(), &empty_map) {
-                                        Ok(true) => {
-                                            // Track locally for future CRDT merges with remote ops
-                                            local_voxel_ops.insert(dug, op);
-                                        }
-                                        Ok(false) => {
-                                            eprintln!("⚠️  Local operation rejected (shouldn't happen)");
-                                        }
-                                        Err(e) => {
-                                            eprintln!("❌ Failed to log local dig operation: {:?}", e);
-                                        }
-                                    }
-                                }
-                                Err(e) => eprintln!("Failed to broadcast dig: {}", e),
+                            if let Err(e) = multiplayer.broadcast_voxel_operation(dug, Material::Air) {
+                                eprintln!("Failed to broadcast dig: {}", e);
                             }
                             
-                            mesh_dirty = true;
+                            // Track locally for future CRDT merges
+                            if let Ok(op) = multiplayer.broadcast_voxel_operation(dug, Material::Air) {
+                                local_voxel_ops.insert(dug, op);
+                            }
                         }
                         dig_pressed = false;
                     }
                     
                     // Handle placing
                     if place_pressed && TERRAIN_IS_EDITABLE {
-                        if let Some(placed) = player.place_voxel(&physics, &mut octree, MaterialId::STONE, 10.0) {
-                            println!("🧱 Placed voxel at {:?}", placed);
-                            
-                            // Broadcast voxel operation
-                            match multiplayer.broadcast_voxel_operation(placed, Material::Stone) {
-                                Ok(op) => {
-                                    // Log to user content layer (local ops don't need CRDT check)
-                                    let empty_map = HashMap::new();
-                                    match user_content.apply_operation(op.clone(), &empty_map) {
-                                        Ok(true) => {
-                                            // Track locally for future CRDT merges with remote ops
-                                            local_voxel_ops.insert(placed, op);
-                                        }
-                                        Ok(false) => {
-                                            eprintln!("⚠️  Local operation rejected (shouldn't happen)");
-                                        }
-                                        Err(e) => {
-                                            eprintln!("❌ Failed to log local place operation: {:?}", e);
-                                        }
-                                    }
+                        // Find which chunk the raycast will hit
+                        let camera_local = player.camera_position_local(&physics);
+                        let camera_ecef = physics.local_to_ecef(camera_local);
+                        let camera_dir = player.camera_forward();
+                        
+                        // Try raycasting in each loaded chunk to find hit
+                        let mut place_info: Option<(VoxelCoord, ChunkId)> = None;
+                        for chunk_data in chunk_manager.loaded_chunks() {
+                            if let Some(hit) = metaverse_core::voxel::raycast_voxels(
+                                &chunk_data.octree,
+                                &camera_ecef,
+                                camera_dir,
+                                10.0
+                            ) {
+                                // Place on the face that was hit (adjacent to hit voxel)
+                                let place_voxel = VoxelCoord::new(
+                                    hit.voxel.x + hit.face_normal.0,
+                                    hit.voxel.y + hit.face_normal.1,
+                                    hit.voxel.z + hit.face_normal.2,
+                                );
+                                
+                                // Check player collision before placing
+                                let place_local = physics.ecef_to_local(&place_voxel.to_ecef());
+                                let player_local = physics.ecef_to_local(&player.position);
+                                let capsule_radius = 0.4;
+                                let capsule_height = 1.8;
+                                
+                                // Simple AABB check
+                                let dx = (place_local.x - player_local.x).abs();
+                                let dy = (place_local.y - player_local.y).abs();
+                                let dz = (place_local.z - player_local.z).abs();
+                                
+                                if dx > capsule_radius && dz > capsule_radius && dy > capsule_height / 2.0 {
+                                    let place_chunk_id = ChunkId::from_voxel(&place_voxel);
+                                    place_info = Some((place_voxel, place_chunk_id));
                                 }
-                                Err(e) => eprintln!("Failed to broadcast place: {}", e),
+                                break;
                             }
-                            
-                            mesh_dirty = true;
+                        }
+                        
+                        // Now apply the placement (after iteration is done)
+                        if let Some((place_voxel, place_chunk_id)) = place_info {
+                            if let Some(place_chunk) = chunk_manager.get_chunk_mut(&place_chunk_id) {
+                                place_chunk.octree.set_voxel(place_voxel, MaterialId::STONE);
+                                place_chunk.dirty = true;
+                                
+                                println!("🧱 Placed voxel at {:?}", place_voxel);
+                                
+                                // Broadcast voxel operation
+                                if let Err(e) = multiplayer.broadcast_voxel_operation(place_voxel, Material::Stone) {
+                                    eprintln!("Failed to broadcast place: {}", e);
+                                }
+                                
+                                // Track locally for future CRDT merges
+                                if let Ok(op) = multiplayer.broadcast_voxel_operation(place_voxel, Material::Stone) {
+                                    local_voxel_ops.insert(place_voxel, op);
+                                }
+                            }
                         }
                         place_pressed = false;
                     }
@@ -606,26 +622,17 @@ fn main() {
                     if !pending_ops.is_empty() {
                         println!("📦 Processing {} received voxel operations", pending_ops.len());
                         for op in pending_ops {
-                            // Apply to user content layer (handles CRDT merge)
-                            match user_content.apply_operation(op.clone(), &local_voxel_ops) {
-                                Ok(true) => {
-                                    // Operation accepted - apply to octree
-                                    let material_id = op.material.to_material_id();
-                                    octree.set_voxel(op.coord, material_id);
-                                    mesh_dirty = true;
-                                    println!("✅ Applied remote voxel operation at {:?}", op.coord);
-                                }
-                                Ok(false) => {
-                                    println!("⚠️  Rejected remote voxel operation (CRDT conflict - local wins)");
-                                }
-                                Err(e) => {
-                                    println!("❌ Invalid remote voxel operation: {:?}", e);
-                                }
+                            // Apply to the appropriate chunk
+                            let chunk_id = ChunkId::from_voxel(&op.coord);
+                            if let Some(chunk_data) = chunk_manager.get_chunk_mut(&chunk_id) {
+                                let material_id = op.material.to_material_id();
+                                chunk_data.octree.set_voxel(op.coord, material_id);
+                                chunk_data.dirty = true;
+                                println!("✅ Applied remote voxel operation at {:?}", op.coord);
+                            } else {
+                                println!("⚠️  Remote operation for unloaded chunk {} - skipped", chunk_id);
                             }
                         }
-                        
-                        // Log current operation count
-                        println!("📊 Total operations in log: {}", user_content.op_count());
                     }
                     
                     // Update player movement
@@ -724,21 +731,28 @@ fn main() {
                         println!("📊 Remote players to render: {}", remote_count);
                     }
                     
-                    // Regenerate mesh if terrain changed
-                    if mesh_dirty {
-                        println!("🔄 Regenerating mesh and collision...");
-                        let new_mesh = extract_octree_mesh(&octree, &origin_voxel, 7);
-                        mesh_buffer = MeshBuffer::from_mesh(&context.device, &new_mesh);
-                        
-                        terrain_collider = metaverse_core::physics::update_region_collision(
-                            &mut physics,
-                            &octree,
-                            &origin_voxel,
-                            7,
-                            Some(terrain_collider),
-                        );
-                        
-                        mesh_dirty = false;
+                    // Regenerate dirty chunks (per-chunk, not global)
+                    for chunk_data in chunk_manager.loaded_chunks_mut() {
+                        if chunk_data.dirty {
+                            let min_voxel = chunk_data.chunk_id.min_voxel();
+                            let new_mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
+                            chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_mesh));
+                            
+                            // Update collision for this chunk
+                            // Note: We regenerate the collider rather than updating in place
+                            // This is simpler and collision updates are infrequent
+                            let new_collider = metaverse_core::physics::update_region_collision(
+                                &mut physics,
+                                &chunk_data.octree,
+                                &min_voxel,
+                                7,
+                                chunk_data.collider,  // Pass old collider to be replaced
+                            );
+                            chunk_data.collider = Some(new_collider);
+                            chunk_data.dirty = false;
+                            
+                            println!("🔄 Regenerated mesh and collision for {}", chunk_data.chunk_id);
+                        }
                     }
                     
                     // Render
@@ -756,8 +770,13 @@ fn main() {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
                                 
-                                // Render terrain
-                                mesh_buffer.render(&mut render_pass);
+                                // Render all loaded chunks
+                                for chunk_data in chunk_manager.loaded_chunks() {
+                                    if let Some(mesh_buffer) = &chunk_data.mesh_buffer {
+                                        mesh_buffer.render(&mut render_pass);
+                                    }
+                                }
+                                
                                 
                                 // Render local player hitbox
                                 pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);

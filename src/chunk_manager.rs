@@ -59,6 +59,7 @@
 //! ```
 
 use crate::chunk::{ChunkId, chunks_in_radius, CHUNK_SIZE};
+use crate::renderer::MeshBuffer;
 use crate::terrain::TerrainGenerator;
 use crate::user_content::UserContentLayer;
 use crate::voxel::{Octree, VoxelCoord};
@@ -71,13 +72,10 @@ use std::path::Path;
 pub struct ChunkData {
     pub chunk_id: ChunkId,
     pub octree: Octree,
-    pub mesh_buffer: Option<MeshBuffer>,  // Lazy: only create when needed
-    pub collider: Option<ColliderHandle>,  // Lazy: only create when needed
+    pub mesh_buffer: Option<MeshBuffer>,  // GPU mesh
+    pub collider: Option<ColliderHandle>,  // Physics collider
     pub dirty: bool,  // Needs mesh regeneration
 }
-
-/// Placeholder for mesh buffer (will be defined elsewhere)
-pub struct MeshBuffer;
 
 impl ChunkData {
     pub fn new(chunk_id: ChunkId, octree: Octree) -> Self {
