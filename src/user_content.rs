@@ -269,16 +269,20 @@ impl UserContentLayer {
         
         let mut result = HashMap::new();
         
-        // Save each chunk's operations to its own file
+        // Save each chunk's operations to its own file (binary format)
         for (chunk_id, ops) in ops_by_chunk {
             let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
             std::fs::create_dir_all(&chunk_dir)?;
             
-            let ops_file = chunk_dir.join("operations.json");
-            let json = serde_json::to_string_pretty(&ops)?;
-            std::fs::write(&ops_file, json)?;
+            // Convert &Vec<&VoxelOperation> to Vec<VoxelOperation> for serialization
+            let ops_owned: Vec<VoxelOperation> = ops.iter().map(|&op| op.clone()).collect();
             
-            result.insert(chunk_id, ops.len());
+            let ops_file = chunk_dir.join("operations.bin");
+            let bytes = bincode::serialize(&ops_owned)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            std::fs::write(&ops_file, bytes)?;
+            
+            result.insert(chunk_id, ops_owned.len());
         }
         
         Ok(result)
@@ -296,15 +300,16 @@ impl UserContentLayer {
         let ops_file = base_dir.as_ref()
             .join("chunks")
             .join(chunk_id.to_path_string())
-            .join("operations.json");
+            .join("operations.bin");
         
         // If file doesn't exist, that's OK (chunk has no edits)
         if !ops_file.exists() {
             return Ok(0);
         }
         
-        let json = std::fs::read_to_string(ops_file)?;
-        let ops: Vec<VoxelOperation> = serde_json::from_str(&json)?;
+        let bytes = std::fs::read(ops_file)?;
+        let ops: Vec<VoxelOperation> = bincode::deserialize(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         let count = ops.len();
         
         // Append to existing op log
