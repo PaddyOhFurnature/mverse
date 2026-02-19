@@ -232,20 +232,39 @@ impl ChunkManager {
         }
     }
     
-    /// Set voxel material (marks chunk as dirty)
+    /// Set voxel material and mark affected chunks dirty
     ///
-    /// Automatically marks the chunk as dirty for mesh regeneration.
-    /// Returns true if voxel was in a loaded chunk.
+    /// # Cross-Chunk Boundary Handling
+    ///
+    /// When a voxel is modified at a chunk boundary, multiple chunks need
+    /// to regenerate their meshes. This function:
+    /// 1. Identifies all affected chunks (1-8 depending on position)
+    /// 2. Updates voxel in all affected chunks' octrees
+    /// 3. Marks all affected chunks as dirty for mesh regeneration
+    ///
+    /// This ensures visual consistency across chunk boundaries and proper
+    /// data persistence for planet-scale worlds.
+    ///
+    /// Returns true if at least one chunk was updated.
     pub fn set_voxel(&mut self, coord: VoxelCoord, material: MaterialId) -> bool {
-        let chunk_id = ChunkId::from_voxel(&coord);
+        // Find all chunks affected by this voxel change
+        let affected_chunks = ChunkId::affected_by_voxel(&coord);
         
-        if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
-            chunk_data.octree.set_voxel(coord, material);
-            chunk_data.dirty = true;
-            true
-        } else {
-            false
+        let mut any_updated = false;
+        
+        for chunk_id in affected_chunks {
+            if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
+                // Update voxel in this chunk's octree
+                chunk_data.octree.set_voxel(coord, material);
+                
+                // Mark chunk as dirty for mesh regeneration
+                chunk_data.dirty = true;
+                
+                any_updated = true;
+            }
         }
+        
+        any_updated
     }
     
     /// Get voxel material

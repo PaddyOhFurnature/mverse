@@ -212,6 +212,69 @@ impl ChunkId {
         center_ecef.to_gps()
     }
     
+    /// Get all chunks affected by a voxel modification
+    ///
+    /// When a voxel changes, marching cubes needs to regenerate meshes for all
+    /// chunks that use this voxel as a corner in their cube grid.
+    ///
+    /// A voxel at position (x,y,z) can be a corner of up to 8 cubes (one in each octant).
+    /// Each cube belongs to a chunk, so we may need to update up to 8 chunks.
+    ///
+    /// # Examples
+    ///
+    /// - Voxel in chunk center: 1 chunk affected
+    /// - Voxel on face boundary: 2 chunks affected  
+    /// - Voxel on edge boundary: 4 chunks affected
+    /// - Voxel on corner boundary: 8 chunks affected
+    ///
+    /// # Planet-Scale Design
+    ///
+    /// This correctly handles the fact that a single voxel edit can affect
+    /// mesh generation in multiple chunks. For data persistence and P2P sync,
+    /// the operation must be saved to ALL affected chunks, not just one.
+    ///
+    /// ```no_run
+    /// use metaverse_core::chunk::ChunkId;
+    /// use metaverse_core::voxel::VoxelCoord;
+    ///
+    /// let voxel = VoxelCoord::new(30, 200, 30); // 3-way corner
+    /// let affected = ChunkId::affected_by_voxel(&voxel);
+    /// assert_eq!(affected.len(), 8); // All 8 neighboring chunks
+    /// ```
+    pub fn affected_by_voxel(voxel: &VoxelCoord) -> Vec<ChunkId> {
+        let mut affected = Vec::new();
+        
+        // A voxel can be a corner of up to 8 cubes in the marching cubes grid
+        // Each cube is at position (cube_x, cube_y, cube_z) and samples corners:
+        // (x,y,z), (x+1,y,z), (x+1,y,z+1), (x,y,z+1),
+        // (x,y+1,z), (x+1,y+1,z), (x+1,y+1,z+1), (x,y+1,z+1)
+        //
+        // So voxel (x,y,z) is a corner of cubes at:
+        // (x-1,y-1,z-1), (x,y-1,z-1), (x-1,y,z-1), (x,y,z-1),
+        // (x-1,y-1,z), (x,y-1,z), (x-1,y,z), (x,y,z)
+        //
+        // We determine which chunk each cube belongs to
+        for dx in [-1, 0] {
+            for dy in [-1, 0] {
+                for dz in [-1, 0] {
+                    let cube_x = voxel.x + dx;
+                    let cube_y = voxel.y + dy;
+                    let cube_z = voxel.z + dz;
+                    
+                    let cube_coord = VoxelCoord::new(cube_x, cube_y, cube_z);
+                    let chunk_id = ChunkId::from_voxel(&cube_coord);
+                    
+                    // Use a set-like behavior to avoid duplicates
+                    if !affected.contains(&chunk_id) {
+                        affected.push(chunk_id);
+                    }
+                }
+            }
+        }
+        
+        affected
+    }
+    
     /// Check if voxel coordinate is within this chunk
     ///
     /// # Example

@@ -247,11 +247,16 @@ impl UserContentLayer {
     pub fn save_chunks<P: AsRef<Path>>(&self, base_dir: P) -> std::io::Result<HashMap<ChunkId, usize>> {
         let chunks_dir = base_dir.as_ref().join("chunks");
         
-        // Group operations by chunk
+        // Group operations by ALL affected chunks (not just the chunk containing the voxel)
         let mut ops_by_chunk: HashMap<ChunkId, Vec<&VoxelOperation>> = HashMap::new();
+        
         for op in &self.op_log {
-            let chunk_id = ChunkId::from_voxel(&op.coord);
-            ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
+            // Get all chunks that need this operation for proper mesh generation
+            let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
+            
+            for chunk_id in affected_chunks {
+                ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
+            }
         }
         
         let mut result = HashMap::new();
