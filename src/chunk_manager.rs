@@ -58,7 +58,7 @@
 //! }
 //! ```
 
-use crate::chunk::{ChunkId, chunks_in_radius, CHUNK_SIZE};
+use crate::chunk::{ChunkId, chunks_in_radius, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
 use crate::renderer::MeshBuffer;
 use crate::terrain::TerrainGenerator;
 use crate::user_content::UserContentLayer;

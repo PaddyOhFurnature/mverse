@@ -1,0 +1,1580 @@
+=== Phase 1 Multiplayer Demo ===
+
+🌐 P2P NETWORKING ENABLED
+   - Auto-discovery via mDNS (localhost)
+   - Player state sync @ 20 Hz
+   - Voxel operations with CRDT
+   - Ed25519 signatures
+   - World state persistence
+
+Controls:
+  WASD - Move
+  Space - Jump (walk) / Up (fly)
+  Shift - Down (fly mode)
+  F - Toggle Walk/Fly mode
+  E - Dig voxel (10m reach)
+  Q - Place voxel (10m reach)
+  T - Send test chat message
+  Mouse - Look around (click to grab)
+  ESC - Release mouse
+  F12 - Take screenshot
+
+🔐 Initializing cryptographic identity...
+   PeerId: 12D3KooW
+   Key: ~/.metaverse/identity.key
+
+🌐 Starting P2P network node...
+   Listening for connections...
+   mDNS discovery active (auto-connect on LAN)
+   PeerId: 12D3KooWPEPB1wgEDLVoRUrtsNy5arNtvt4wJuyqEoDoKPcEqEEv
+
+⏳ Waiting for peers to connect...
+   (Watch for "Peer discovered" and "Peer connected" messages)
+   Note: Publishing will fail until at least one peer connects - this is normal!
+
+
+🔧 [Network Thread] Creating NetworkNode...
+✅ [Network Thread] NetworkNode created successfully
+🔧 [Network Thread] Subscribing to topics...
+📻 Subscribed to topic: player-state
+📻 Subscribed to topic: voxel-ops
+📻 Subscribed to topic: chat
+🔍 Network thread started - polling for mDNS and connections...
+🔧 [Network Thread] About to enter tokio::select! loop...
+👂 Listening on: /ip4/127.0.0.1/tcp/42455
+👂 Listening on: /ip4/192.168.1.111/tcp/42455
+👂 Listening on: /ip4/192.168.122.1/tcp/42455
+👂 Listening on: /ip4/172.17.0.1/tcp/42455
+🎨 Initializing renderer...
+🗺️  Setting up chunk-based terrain generation...
+   Origin GPS: (-27.470500, 153.026000, 50.0m)
+   Origin voxel: VoxelCoord { x: 1353000, y: 8968690, z: 3475406 }
+   Spawn chunk: chunk_13530_89686_34754
+📦 Loading chunks around spawn (radius 2)...
+   Will load 13 chunks:
+     - chunk_13528_89686_34754
+     - chunk_13529_89686_34753
+     - chunk_13529_89686_34754
+     - chunk_13529_89686_34755
+     - chunk_13530_89686_34752
+     - chunk_13530_89686_34753
+     - chunk_13530_89686_34754
+     - chunk_13530_89686_34755
+     - chunk_13530_89686_34756
+     - chunk_13531_89686_34753
+     - chunk_13531_89686_34754
+     - chunk_13531_89686_34755
+     - chunk_13532_89686_34754
+   ✅ Loaded 13 chunks in 1.74s
+🔺 Generating meshes and collision for loaded chunks...
+   Meshes generated in 5.46s (1477110 total vertices)
+   Ground level at spawn: 0.0m
+✅ Player spawned at local: (0.0, 3.0, 0.0)
+
+🎮 Demo running!
+   Waiting for peers to connect...
+   (Run another instance to test P2P)
+
+📻 Subscribed to topic: player-state
+📻 Subscribed to topic: voxel-ops
+📻 Subscribed to topic: chat
+👂 Listening on: /ip4/127.0.0.1/tcp/42455
+👂 Listening on: /ip4/192.168.1.111/tcp/42455
+👂 Listening on: /ip4/192.168.122.1/tcp/42455
+👂 Listening on: /ip4/172.17.0.1/tcp/42455
+🔄 Processed 7 network events
+📤 Broadcasting state: ECEF=(-5046999.5, 2568693.5, -2924593.5), Local=(0.0, 3.0, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.5, 2568688.4, -2924593.5), Local=(0.0, -2.1, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 66 | Peers: 0 | Local: (0.0, -3.0, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568687.3, -2924593.5), Local=(0.0, -3.2, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.5, 2568671.4, -2924593.5), Local=(0.0, -19.1, 0.0)
+FPS: 61 | Peers: 0 | Local: (0.0, -19.1, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568671.0, -2924593.5), Local=(0.0, -19.5, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (0.0, -44.9, 0.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.5, 2568645.1, -2924593.5), Local=(0.0, -45.4, 0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+FPS: 61 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 1 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+FPS: 61 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+FPS: 61 | Peers: 0 | Local: (-0.1, -60.5, 0.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046999.6, 2568630.0, -2924593.3), Local=(-0.1, -60.5, 0.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🚀 Fly mode enabled
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (0.9, -55.7, -0.2) | Mode: Fly
+📤 Broadcasting state: ECEF=(-5046998.5, 2568634.7, -2924593.8), Local=(1.0, -55.8, -0.3)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🚶 Walk mode enabled
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046997.4, 2568632.9, -2924594.8), Local=(2.1, -57.6, -1.3)
+FPS: 61 | Peers: 0 | Local: (2.1, -57.6, -1.3) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046997.4, 2568632.9, -2924594.8), Local=(2.1, -57.6, -1.3)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.0, -57.6, -1.2) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.5, 2568632.9, -2924594.7), Local=(3.0, -57.6, -1.2)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (4.4, -57.6, -0.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046995.1, 2568632.9, -2924593.5), Local=(4.4, -57.6, -0.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046995.7, 2568632.9, -2924590.9), Local=(3.8, -57.6, 2.6)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.8, -57.6, 2.6) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046995.7, 2568632.9, -2924590.9), Local=(3.8, -57.6, 2.6)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.8, -57.6, -0.5) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046995.6, 2568632.9, -2924594.1), Local=(3.9, -57.6, -0.6)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.3, 2568632.9, -2924597.5), Local=(3.2, -57.6, -4.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.2, -57.6, -4.0) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.3, 2568632.9, -2924597.5), Local=(3.2, -57.6, -4.0)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 2 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🖱️  Mouse released
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 3 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 58 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 63 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 65 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 4 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 5 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 6 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+💓 [Network Thread] Heartbeat 7 - loop is alive
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 60 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+FPS: 61 | Peers: 0 | Local: (3.1, -57.6, -4.1) | Mode: Walk
+📤 Broadcasting state: ECEF=(-5046996.4, 2568632.9, -2924597.6), Local=(3.1, -57.6, -4.1)
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes
+🟢 [NETWORK] Publishing to player-state: 102 bytes

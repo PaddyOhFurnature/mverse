@@ -578,3 +578,67 @@ pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> M
     
     mesh
 }
+
+/// Extract mesh for exact voxel bounds (for chunks)
+///
+/// Unlike extract_octree_mesh which uses center+depth, this extracts
+/// mesh for an exact voxel range. Useful for chunk-based terrain where
+/// each chunk has specific bounds.
+///
+/// Vertices are positioned relative to chunk center (centered at origin).
+/// Returns both the mesh and the chunk center voxel coordinate.
+pub fn extract_chunk_mesh(
+    octree: &Octree, 
+    min_voxel: &VoxelCoord, 
+    max_voxel: &VoxelCoord,
+) -> (Mesh, VoxelCoord) {
+    let mut mesh = Mesh::new();
+    
+    // Calculate chunk center - max_voxel is exclusive, so true max is max-1
+    // For min=0, max=100: range is 0..99 (inclusive), center should be 49.5
+    // Using integer math: (0+100-1)/2 = 99/2 = 49 (not 50!)
+    let center = VoxelCoord::new(
+        min_voxel.x + (max_voxel.x - min_voxel.x - 1) / 2,
+        min_voxel.y + (max_voxel.y - min_voxel.y - 1) / 2,
+        min_voxel.z + (max_voxel.z - min_voxel.z - 1) / 2,
+    );
+    
+    // Iterate over all cubes in the chunk bounds
+    for voxel_x in min_voxel.x..max_voxel.x {
+        for voxel_y in min_voxel.y..max_voxel.y {
+            for voxel_z in min_voxel.z..max_voxel.z {
+                let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+                
+                // Sample 8 corners of this cube
+                let mut corners = [false; 8];
+                let offsets = [
+                    (0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1),
+                    (0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1),
+                ];
+                
+                for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
+                    let corner_pos = VoxelCoord::new(
+                        voxel_pos.x + dx,
+                        voxel_pos.y + dy,
+                        voxel_pos.z + dz,
+                    );
+                    corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
+                }
+                
+                // Position relative to chunk center (mesh centered at origin)
+                let local_x = (voxel_x - center.x) as f32;
+                let local_y = (voxel_y - center.y) as f32;
+                let local_z = (voxel_z - center.z) as f32;
+                
+                let cube_mesh = extract_cube_mesh(
+                    Vec3::new(local_x, local_y, local_z),
+                    &corners,
+                );
+                
+                mesh.merge(&cube_mesh);
+            }
+        }
+    }
+    
+    (mesh, center)
+}

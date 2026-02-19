@@ -181,99 +181,54 @@ impl TerrainGenerator {
     /// # Ok::<(), String>(())
     /// ```
     pub fn generate_chunk(&mut self, chunk_id: &crate::chunk::ChunkId) -> Result<Octree, String> {
-        use crate::chunk::CHUNK_SIZE;
+        use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
         
-        // Get GPS bounds for this chunk
-        let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-        
-        // Get voxel bounds
         let min_voxel = chunk_id.min_voxel();
         let max_voxel = chunk_id.max_voxel();
         
-        // Sample SRTM at ~30m resolution to get elevation grid
-        const SRTM_RESOLUTION_M: f64 = 30.0;
-        let size_meters = CHUNK_SIZE as f64;
-        let samples_per_axis = (size_meters / SRTM_RESOLUTION_M).ceil() as usize + 1;
-        
-        let mut elevation_grid = Vec::with_capacity(samples_per_axis * samples_per_axis);
-        
-        for i in 0..samples_per_axis {
-            for j in 0..samples_per_axis {
-                let t_lat = i as f64 / (samples_per_axis - 1) as f64;
-                let t_lon = j as f64 / (samples_per_axis - 1) as f64;
-                let lat = lat_min + t_lat * (lat_max - lat_min);
-                let lon = lon_min + t_lon * (lon_max - lon_min);
-                
-                let gps = GPS::new(lat, lon, 0.0);
-                let elevation = self.elevation.query(&gps)
-                    .map_err(|e| format!("SRTM query failed at ({}, {}): {}", lat, lon, e))?;
-                
-                elevation_grid.push(elevation.meters);
-            }
-        }
-        
-        // Create new octree for this chunk
         let mut octree = Octree::new();
         
-        // Generate voxel columns at 1m spacing with bilinear interpolation
-        let columns_per_axis = CHUNK_SIZE as usize;
-        
-        for i in 0..columns_per_axis {
-            for j in 0..columns_per_axis {
-                // Voxel X,Z coordinates (absolute)
-                let voxel_x = min_voxel.x + i as i64;
-                let voxel_z = min_voxel.z + j as i64;
+        // 30m×200m×30m chunks aligned to SRTM
+        // Sample elevation at 30m intervals (1 per horizontal voxel position)
+        for i in 0..CHUNK_SIZE_X {
+            for k in 0..CHUNK_SIZE_Z {
+                let voxel_x = min_voxel.x + i;
+                let voxel_z = min_voxel.z + k;
                 
-                // Interpolate elevation from SRTM grid
-                let grid_i = (i as f64 / SRTM_RESOLUTION_M).min((samples_per_axis - 2) as f64);
-                let grid_j = (j as f64 / SRTM_RESOLUTION_M).min((samples_per_axis - 2) as f64);
+                // Convert voxel position to GPS
+                let sample_voxel = VoxelCoord::new(voxel_x, self.origin_voxel.y, voxel_z);
+                let sample_ecef = sample_voxel.to_ecef();
+                let sample_gps = sample_ecef.to_gps();
                 
-                let i0 = grid_i.floor() as usize;
-                let j0 = grid_j.floor() as usize;
-                let i1 = i0 + 1;
-                let j1 = j0 + 1;
+                // Query SRTM elevation
+                let surface_elevation = self.elevation.query(&sample_gps)
+                    .map(|e| e.meters)
+                    .unwrap_or(self.origin_gps.alt);
                 
-                let frac_i = grid_i - i0 as f64;
-                let frac_j = grid_j - j0 as f64;
+                // Convert to voxel Y coordinate
+                let surface_offset = surface_elevation - self.origin_gps.alt;
+                let surface_voxel_y = self.origin_voxel.y + surface_offset as i64;
                 
-                // Bilinear interpolation
-                let e00 = elevation_grid[i0 * samples_per_axis + j0];
-                let e01 = elevation_grid[i0 * samples_per_axis + j1];
-                let e10 = elevation_grid[i1 * samples_per_axis + j0];
-                let e11 = elevation_grid[i1 * samples_per_axis + j1];
-                
-                let e0 = e00 * (1.0 - frac_j) + e01 * frac_j;
-                let e1 = e10 * (1.0 - frac_j) + e11 * frac_j;
-                let surface_elevation = e0 * (1.0 - frac_i) + e1 * frac_i;
-                
+                // Generate vertical column
                 const BEDROCK_DEPTH: i64 = 200;
                 const SKY_HEIGHT: i64 = 100;
                 
-                // Convert surface elevation to voxel Y coordinate
-                // surface_elevation is meters above sea level
-                // origin_gps.alt is origin altitude above sea level
-                // origin_voxel.y is ECEF voxel coordinate at origin
-                // So: voxel_y = origin_voxel.y + (surface_elevation - origin_altitude) + height_offset
-                let surface_offset = surface_elevation - self.origin_gps.alt;
-                
-                // Generate vertical column
                 for height_offset in (-BEDROCK_DEPTH)..=SKY_HEIGHT {
-                    let voxel_y = self.origin_voxel.y + surface_offset as i64 + height_offset;
-                    
-                    let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+                    let voxel_y = surface_voxel_y + height_offset;
                     
                     // Only generate voxels within chunk Y bounds
-                    if voxel_pos.y < min_voxel.y || voxel_pos.y >= max_voxel.y {
+                    if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
                         continue;
                     }
                     
-                    let depth_below_surface = surface_elevation - (self.origin_gps.alt + height_offset as f64);
+                    let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+                    let depth_below_surface = -height_offset;
                     
-                    let material = if depth_below_surface > 5.0 {
+                    let material = if depth_below_surface > 5 {
                         MaterialId::STONE
-                    } else if depth_below_surface > 1.0 {
+                    } else if depth_below_surface > 1 {
                         MaterialId::DIRT
-                    } else if depth_below_surface > 0.0 {
+                    } else if depth_below_surface > 0 {
                         MaterialId::GRASS
                     } else {
                         MaterialId::AIR

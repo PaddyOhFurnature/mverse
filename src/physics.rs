@@ -10,6 +10,7 @@ use crate::coordinates::{ECEF, GPS};
 use crate::voxel::{Octree, VoxelCoord, raycast_voxels, VoxelRaycastHit};
 use crate::materials::MaterialId;
 use crate::marching_cubes::extract_octree_mesh;
+use crate::mesh::Mesh;
 use glam::Vec3;
 use rapier3d::prelude::*;
 use rapier3d::control::{KinematicCharacterController, CharacterAutostep, CharacterLength};
@@ -284,6 +285,39 @@ pub fn create_mesh_collider(
 ) -> ColliderHandle {
     let collider = ColliderBuilder::trimesh(vertices, indices)
         .translation(vector![position.x, position.y, position.z])
+        .build();
+    
+    physics.colliders.insert(collider)
+}
+
+/// Create collision from pre-extracted mesh
+pub fn create_collision_from_mesh(
+    physics: &mut PhysicsWorld,
+    mesh: &Mesh,
+    _reference_point: &VoxelCoord,
+    old_collider: Option<ColliderHandle>,
+) -> ColliderHandle {
+    if let Some(handle) = old_collider {
+        physics.colliders.remove(handle, &mut physics.islands, &mut physics.bodies, false);
+    }
+    
+    let vertices: Vec<Point<Real>> = mesh.vertices
+        .iter()
+        .map(|v| Point::new(v.position.x, v.position.y, v.position.z))
+        .collect();
+    
+    let mut indices = Vec::new();
+    for tri in &mesh.triangles {
+        indices.push([tri.indices[0] as u32, tri.indices[1] as u32, tri.indices[2] as u32]);
+    }
+    
+    if indices.len() > 10_000 {
+        eprintln!("WARNING: Collision mesh has {} triangles (target: 10000). May impact performance.", indices.len());
+    }
+    
+    let collider = ColliderBuilder::trimesh(vertices, indices)
+        .friction(0.5)
+        .restitution(0.0)
         .build();
     
     physics.colliders.insert(collider)

@@ -73,7 +73,7 @@ use metaverse_core::{
     coordinates::GPS,
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
     identity::Identity,
-    marching_cubes::extract_octree_mesh,
+    marching_cubes::{extract_octree_mesh, extract_chunk_mesh},
     materials::MaterialId,
     mesh::{Mesh, Vertex},
     messages::{Material, MovementMode},
@@ -259,21 +259,41 @@ fn main() {
     
     let mut total_vertices = 0;
     for chunk_data in chunk_manager.loaded_chunks_mut() {
-        // Generate mesh for chunk
+        // Generate mesh for chunk using exact voxel bounds
         let min_voxel = chunk_data.chunk_id.min_voxel();
-        let mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
+        let max_voxel = chunk_data.chunk_id.max_voxel();
+        let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
         total_vertices += mesh.vertices.len();
         
         // Only create mesh buffer and collision if chunk has geometry
         if !mesh.vertices.is_empty() {
+            // Offset mesh vertices to position chunk correctly in world
+            let offset = Vec3::new(
+                (chunk_center.x - origin_voxel.x) as f32,
+                (chunk_center.y - origin_voxel.y) as f32,
+                (chunk_center.z - origin_voxel.z) as f32,
+            );
+            
+            println!("   {} min=({},{},{}) max=({},{},{}) center=({},{},{}) offset=({:.1},{:.1},{:.1})", 
+                chunk_data.chunk_id,
+                min_voxel.x, min_voxel.y, min_voxel.z,
+                max_voxel.x, max_voxel.y, max_voxel.z,
+                chunk_center.x, chunk_center.y, chunk_center.z,
+                offset.x, offset.y, offset.z);
+            
+            for vertex in &mut mesh.vertices {
+                vertex.position.x += offset.x;
+                vertex.position.y += offset.y;
+                vertex.position.z += offset.z;
+            }
+            
             chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
             
-            // Generate collision for chunk
-            let collider = metaverse_core::physics::update_region_collision(
+            // Create collision from the offset mesh
+            let collider = metaverse_core::physics::create_collision_from_mesh(
                 &mut physics,
-                &chunk_data.octree,
-                &min_voxel,
-                7,
+                &mesh,
+                &origin_voxel,
                 None,
             );
             chunk_data.collider = Some(collider);
@@ -746,19 +766,31 @@ fn main() {
                     for chunk_data in chunk_manager.loaded_chunks_mut() {
                         if chunk_data.dirty {
                             let min_voxel = chunk_data.chunk_id.min_voxel();
-                            let new_mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
+                            let max_voxel = chunk_data.chunk_id.max_voxel();
+                            let (mut new_mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
                             
                             // Only create mesh/collision if chunk has geometry
                             if !new_mesh.vertices.is_empty() {
+                                // Simple offset in voxel coordinates
+                                let offset = Vec3::new(
+                                    (chunk_center.x - origin_voxel.x) as f32,
+                                    (chunk_center.y - origin_voxel.y) as f32,
+                                    (chunk_center.z - origin_voxel.z) as f32,
+                                );
+                                
+                                for vertex in &mut new_mesh.vertices {
+                                    vertex.position[0] += offset.x;
+                                    vertex.position[1] += offset.y;
+                                    vertex.position[2] += offset.z;
+                                }
+                                
                                 chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_mesh));
                                 
-                                // Update collision for this chunk
-                                let new_collider = metaverse_core::physics::update_region_collision(
+                                let new_collider = metaverse_core::physics::create_collision_from_mesh(
                                     &mut physics,
-                                    &chunk_data.octree,
-                                    &min_voxel,
-                                    7,
-                                    chunk_data.collider,  // Pass old collider to be replaced
+                                    &new_mesh,
+                                    &origin_voxel,
+                                    chunk_data.collider,
                                 );
                                 chunk_data.collider = Some(new_collider);
                             } else {

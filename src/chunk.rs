@@ -59,8 +59,16 @@ use crate::voxel::VoxelCoord;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Size of chunk in voxels (100×100×100 = 1 million voxels)
-pub const CHUNK_SIZE: i64 = 100;
+/// Chunk dimensions in voxels
+/// 
+/// **ALIGNED TO SRTM DATA:**
+/// - Horizontal: 30m × 30m matches SRTM ~30m resolution
+/// - Vertical: 200m spans terrain (bedrock to sky)
+/// - Efficient: 1 SRTM sample per horizontal position
+/// - No interpolation artifacts
+pub const CHUNK_SIZE_X: i64 = 30;
+pub const CHUNK_SIZE_Y: i64 = 200;
+pub const CHUNK_SIZE_Z: i64 = 30;
 
 /// Chunk identifier (3D grid position)
 ///
@@ -102,9 +110,9 @@ impl ChunkId {
     /// ```
     pub fn from_voxel(coord: &VoxelCoord) -> Self {
         Self {
-            x: coord.x.div_euclid(CHUNK_SIZE),
-            y: coord.y.div_euclid(CHUNK_SIZE),
-            z: coord.z.div_euclid(CHUNK_SIZE),
+            x: coord.x.div_euclid(CHUNK_SIZE_X),
+            y: coord.y.div_euclid(CHUNK_SIZE_Y),
+            z: coord.z.div_euclid(CHUNK_SIZE_Z),
         }
     }
     
@@ -121,9 +129,9 @@ impl ChunkId {
     /// ```
     pub fn min_voxel(&self) -> VoxelCoord {
         VoxelCoord::new(
-            self.x * CHUNK_SIZE,
-            self.y * CHUNK_SIZE,
-            self.z * CHUNK_SIZE,
+            self.x * CHUNK_SIZE_X,
+            self.y * CHUNK_SIZE_Y,
+            self.z * CHUNK_SIZE_Z,
         )
     }
     
@@ -140,9 +148,9 @@ impl ChunkId {
     /// ```
     pub fn max_voxel(&self) -> VoxelCoord {
         VoxelCoord::new(
-            (self.x + 1) * CHUNK_SIZE,
-            (self.y + 1) * CHUNK_SIZE,
-            (self.z + 1) * CHUNK_SIZE,
+            (self.x + 1) * CHUNK_SIZE_X,
+            (self.y + 1) * CHUNK_SIZE_Y,
+            (self.z + 1) * CHUNK_SIZE_Z,
         )
     }
     
@@ -194,9 +202,9 @@ impl ChunkId {
         // Calculate center voxel
         let min = self.min_voxel();
         let center_voxel = VoxelCoord::new(
-            min.x + (CHUNK_SIZE / 2),
-            min.y + (CHUNK_SIZE / 2),
-            min.z + (CHUNK_SIZE / 2),
+            min.x + (CHUNK_SIZE_X / 2),
+            min.y + (CHUNK_SIZE_Y / 2),
+            min.z + (CHUNK_SIZE_Z / 2),
         );
         
         // Convert to GPS
