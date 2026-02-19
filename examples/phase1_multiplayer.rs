@@ -702,6 +702,16 @@ fn main() {
                         println!("   ✅ Applied {} operations (after deduplication)", applied);
                     }
                     
+                    // Check for newly discovered peers and request state
+                    if multiplayer.has_new_peers() {
+                        let new_peers = multiplayer.get_new_peers();
+                        println!("🆕 Detected {} new peers, requesting state...", new_peers.len());
+                        let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+                        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
+                            eprintln!("   ⚠️  Failed to request chunk state: {}", e);
+                        }
+                    }
+                    
                     // Handle state requests from peers
                     let state_requests = multiplayer.take_pending_state_requests();
                     for (peer_id, request) in state_requests {

@@ -395,6 +395,9 @@ impl ChunkManager {
         // Get all operations from user content layer
         let all_ops = self.user_content.op_log();
         
+        println!("🔍 Filtering from {} total operations for {} requested chunks", 
+            all_ops.len(), chunk_ids.len());
+        
         for op in all_ops {
             // Check if requester already has this operation
             // If their vector clock happened-after this op's clock, they have it
@@ -415,6 +418,10 @@ impl ChunkManager {
                 }
             }
         }
+        
+        println!("   → Filtered to {} operations across {} chunks", 
+            result.values().map(|v| v.len()).sum::<usize>(),
+            result.len());
         
         result
     }

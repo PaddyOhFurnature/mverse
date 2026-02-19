@@ -145,6 +145,9 @@ pub struct MultiplayerSystem {
     /// Pending state requests from peers
     pending_state_requests: Vec<(PeerId, ChunkStateRequest)>,
     
+    /// Peers we've requested state from (to avoid duplicate requests)
+    state_requested_from: HashSet<PeerId>,
+    
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
     
@@ -221,6 +224,7 @@ impl MultiplayerSystem {
             pending_ops: Vec::new(),
             pending_state_ops: Vec::new(),
             pending_state_requests: Vec::new(),
+            state_requested_from: HashSet::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -423,6 +427,13 @@ impl MultiplayerSystem {
             
             NetworkEvent::PeerDiscovered { peer_id } => {
                 println!("🔍 Peer discovered: {}", peer_id);
+                self.connected_peers.insert(peer_id);
+                
+                // Mark that we need to request state from this new peer
+                // Game loop will handle the actual request (needs loaded chunk IDs)
+                if !self.state_requested_from.contains(&peer_id) {
+                    println!("   ⏰ Will request state from {} on next update", peer_id);
+                }
             }
             
             NetworkEvent::ListeningOn { address } => {
@@ -721,11 +732,33 @@ impl MultiplayerSystem {
             data,
         }).map_err(|_| MultiplayerError::ChannelSendError)?;
         
+        // Mark all connected peers as requested
+        for peer_id in &self.connected_peers {
+            self.state_requested_from.insert(*peer_id);
+        }
+        
         self.stats.state_requests_sent += 1;
         
-        println!("📡 Requested state for {} chunks from all peers", chunk_ids.len());
+        println!("📡 Requested state for {} chunks from {} peers", 
+            chunk_ids.len(), self.connected_peers.len());
         
         Ok(())
+    }
+    
+    /// Check if there are new peers we should request state from
+    ///
+    /// Returns true if there are peers we haven't requested state from yet.
+    /// Game loop should call request_chunk_state() when this returns true.
+    pub fn has_new_peers(&self) -> bool {
+        self.connected_peers.iter().any(|p| !self.state_requested_from.contains(p))
+    }
+    
+    /// Get list of peers we haven't requested state from
+    pub fn get_new_peers(&self) -> Vec<PeerId> {
+        self.connected_peers.iter()
+            .filter(|p| !self.state_requested_from.contains(p))
+            .copied()
+            .collect()
     }
     
     /// Get list of connected peers
