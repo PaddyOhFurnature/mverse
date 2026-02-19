@@ -22,11 +22,14 @@
 //!
 //! All messages fit within Priority 2 bandwidth budget (1-5 KB/s total).
 
+use crate::chunk::ChunkId;
 use crate::coordinates::ECEF;
+use crate::vector_clock::VectorClock;
 use crate::voxel::VoxelCoord;
 use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // Custom serde for [u8; 64] arrays
 mod serde_arrays {
@@ -453,6 +456,144 @@ impl ChatMessage {
     }
 }
 
+/// Request historical chunk state from peer (Priority 2: State Sync)
+///
+/// When a player joins the network, they request historical voxel operations
+/// for chunks they have loaded. This enables complete world state synchronization
+/// even when joining after other players have made modifications.
+///
+/// # Planet-Scale Design
+///
+/// - **Chunk-Based**: Only request chunks actually loaded (natural bandwidth limit)
+/// - **Vector Clock Filtering**: Responder filters out operations requester already has
+/// - **Spatial Sharding**: Operations grouped by chunk for efficient filtering
+/// - **Incremental**: Request new chunks as player explores
+///
+/// # Bandwidth
+///
+/// Typical: ~50 KB for spawn area  
+/// Worst case: ~304 KB (19 chunks × 100 ops × 160 bytes)  
+/// Fits within Priority 2 budget (1-5 KB/s sustained)
+///
+/// # Example
+///
+/// ```rust
+/// // Bob joins network and loads chunks
+/// let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+///
+/// // Request state from all connected peers
+/// let request = ChunkStateRequest {
+///     chunk_ids: loaded_chunk_ids,
+///     requester_clock: bob_vector_clock.clone(),
+/// };
+/// multiplayer.send_state_request(request)?;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkStateRequest {
+    /// List of chunk IDs to request operations for
+    ///
+    /// Only request chunks that are currently loaded. This provides natural
+    /// bandwidth limiting and prevents requesting data for the entire planet.
+    pub chunk_ids: Vec<ChunkId>,
+    
+    /// Requester's current vector clock
+    ///
+    /// Used by responder to filter out operations the requester already has.
+    /// If requester's clock shows they've seen an operation, don't send it.
+    /// This prevents bandwidth waste and duplicate application.
+    pub requester_clock: VectorClock,
+}
+
+impl ChunkStateRequest {
+    /// Create a new chunk state request
+    pub fn new(chunk_ids: Vec<ChunkId>, requester_clock: VectorClock) -> Self {
+        Self {
+            chunk_ids,
+            requester_clock,
+        }
+    }
+    
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// Response with historical chunk operations (Priority 2: State Sync)
+///
+/// Contains voxel operations for requested chunks, filtered by vector clock
+/// to avoid sending operations the requester already has. Operations are
+/// grouped by chunk for efficient application.
+///
+/// # CRDT Semantics
+///
+/// - **Causally Ordered**: Vector clocks ensure causal relationships preserved
+/// - **Idempotent**: Safe to receive same operation multiple times (deduplication)
+/// - **Commutative**: Operations can be applied in any order
+/// - **Convergent**: All peers converge to same state
+///
+/// # Example
+///
+/// ```rust
+/// // Alice receives request from Bob
+/// let alice_ops = filter_operations_for_chunks(
+///     &alice_op_log,
+///     &request.chunk_ids,
+///     &request.requester_clock
+/// );
+///
+/// let response = ChunkStateResponse {
+///     operations: alice_ops,
+///     responder_clock: alice_vector_clock.clone(),
+/// };
+/// multiplayer.send_state_response(bob_peer_id, response)?;
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkStateResponse {
+    /// Operations grouped by chunk
+    ///
+    /// Each chunk ID maps to a list of operations that modify that chunk.
+    /// Operations are filtered to only include those the requester doesn't have
+    /// (based on vector clock comparison).
+    pub operations: HashMap<ChunkId, Vec<VoxelOperation>>,
+    
+    /// Responder's current vector clock
+    ///
+    /// Requester merges this with their own clock to track causality.
+    /// Ensures proper CRDT semantics and future operation filtering.
+    pub responder_clock: VectorClock,
+}
+
+impl ChunkStateResponse {
+    /// Create a new chunk state response
+    pub fn new(operations: HashMap<ChunkId, Vec<VoxelOperation>>, responder_clock: VectorClock) -> Self {
+        Self {
+            operations,
+            responder_clock,
+        }
+    }
+    
+    /// Count total operations in response
+    pub fn operation_count(&self) -> usize {
+        self.operations.values().map(|ops| ops.len()).sum()
+    }
+    
+    /// Serialize to bytes for network transmission
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    
+    /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
 /// Envelope for all message types
 ///
 /// Wraps specific message types with metadata for routing and processing.
@@ -466,6 +607,12 @@ pub enum Message {
     
     /// Chat message
     Chat(ChatMessage),
+    
+    /// Request historical chunk state from peer
+    ChunkStateRequest(ChunkStateRequest),
+    
+    /// Response with historical chunk operations
+    ChunkStateResponse(ChunkStateResponse),
 }
 
 impl Message {
@@ -485,6 +632,8 @@ impl Message {
             Message::PlayerState(msg) => msg.timestamp,
             Message::VoxelOp(msg) => msg.timestamp,
             Message::Chat(msg) => msg.timestamp,
+            Message::ChunkStateRequest(_) => 0, // State messages don't use Lamport clocks
+            Message::ChunkStateResponse(_) => 0,
         }
     }
 }

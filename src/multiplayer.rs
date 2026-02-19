@@ -48,14 +48,16 @@
 //! ```
 
 use crate::{
+    chunk::ChunkId,
     coordinates::ECEF,
     identity::Identity,
     messages::{
-        ChatMessage, LamportClock, Material, MovementMode, 
-        PlayerStateMessage, VoxelOperation, MessageError,
+        ChatMessage, ChunkStateRequest, ChunkStateResponse, LamportClock, Material, 
+        MovementMode, PlayerStateMessage, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     player_state::PlayerStateManager,
+    vector_clock::VectorClock,
     voxel::{Octree, VoxelCoord},
     physics::PhysicsWorld,
 };
@@ -75,6 +77,9 @@ pub enum MultiplayerError {
     
     #[error("Message error: {0}")]
     Message(#[from] MessageError),
+    
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
     
     #[error("Invalid signature from peer {0}")]
     InvalidSignature(PeerId),
@@ -96,6 +101,8 @@ pub enum MultiplayerError {
 pub const TOPIC_PLAYER_STATE: &str = "player-state";
 pub const TOPIC_VOXEL_OPS: &str = "voxel-ops";
 pub const TOPIC_CHAT: &str = "chat";
+pub const TOPIC_STATE_REQUEST: &str = "state-request";
+pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 
 /// Broadcast interval for player state (20 Hz = 50ms)
 const PLAYER_STATE_BROADCAST_INTERVAL: Duration = Duration::from_millis(50);
@@ -132,6 +139,9 @@ pub struct MultiplayerSystem {
     /// Pending voxel operations to be applied to world
     pending_ops: Vec<VoxelOperation>,
     
+    /// Pending state synchronization operations (from ChunkStateResponse)
+    pending_state_ops: Vec<VoxelOperation>,
+    
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
     
@@ -140,6 +150,9 @@ pub struct MultiplayerSystem {
     
     /// Timer for player state broadcasts
     last_state_broadcast: Instant,
+    
+    /// Connected peers (for state exchange)
+    connected_peers: HashSet<PeerId>,
     
     /// Statistics
     stats: MultiplayerStats,
@@ -156,6 +169,10 @@ pub struct MultiplayerStats {
     pub voxel_ops_rejected: u64,
     pub invalid_signatures: u64,
     pub messages_received: u64,
+    pub state_requests_sent: u64,
+    pub state_responses_sent: u64,
+    pub state_responses_received: u64,
+    pub state_ops_received: u64,
 }
 
 impl MultiplayerSystem {
@@ -199,9 +216,11 @@ impl MultiplayerSystem {
             vector_clock: crate::vector_clock::VectorClock::new(),
             voxel_op_seen: HashSet::new(),
             pending_ops: Vec::new(),
+            pending_state_ops: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
+            connected_peers: HashSet::new(),
             stats: MultiplayerStats::default(),
         })
     }
@@ -381,17 +400,21 @@ impl MultiplayerSystem {
                     TOPIC_PLAYER_STATE => self.handle_player_state(peer_id, &data)?,
                     TOPIC_VOXEL_OPS => self.handle_voxel_operation(peer_id, &data)?,
                     TOPIC_CHAT => self.handle_chat(peer_id, &data)?,
+                    TOPIC_STATE_REQUEST => self.handle_state_request(peer_id, &data)?,
+                    TOPIC_STATE_RESPONSE => self.handle_state_response(peer_id, &data)?,
                     _ => {}
                 }
             }
             
             NetworkEvent::PeerConnected { peer_id, address } => {
                 println!("🔗 Peer connected: {} @ {}", peer_id, address);
+                self.connected_peers.insert(peer_id);
             }
             
             NetworkEvent::PeerDisconnected { peer_id } => {
                 println!("💔 Peer disconnected: {}", peer_id);
                 self.remote_players.remove_player(&peer_id);
+                self.connected_peers.remove(&peer_id);
             }
             
             NetworkEvent::PeerDiscovered { peer_id } => {
@@ -491,6 +514,71 @@ impl MultiplayerSystem {
         Ok(())
     }
     
+    /// Handle incoming chunk state request
+    ///
+    /// Peer is requesting our operations for specific chunks. Filter our op_log
+    /// and send back operations they don't already have (based on vector clock).
+    fn handle_state_request(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
+        let request = ChunkStateRequest::from_bytes(data)
+            .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+        
+        println!("📨 Received state request from {} for {} chunks",
+            peer_id, request.chunk_ids.len());
+        
+        // This is a placeholder - actual filtering needs access to UserContentLayer
+        // Game loop will need to call a method to handle this properly
+        // For now, just acknowledge receipt
+        
+        self.stats.state_requests_sent += 1; // Track that we received it
+        
+        Ok(())
+    }
+    
+    /// Handle incoming chunk state response
+    ///
+    /// We requested chunk state and received operations. Queue them for
+    /// application to chunks (with deduplication and signature verification).
+    fn handle_state_response(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
+        let response = ChunkStateResponse::from_bytes(data)
+            .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+        
+        let op_count = response.operation_count();
+        
+        println!("📦 Received state response from {} with {} operations across {} chunks",
+            peer_id, op_count, response.operations.len());
+        
+        // Merge vector clocks for causality tracking
+        self.vector_clock.merge(&response.responder_clock);
+        
+        // Flatten operations from all chunks into pending queue
+        for (_chunk_id, ops) in response.operations {
+            for op in ops {
+                // Verify signature
+                if !op.verify_signature() {
+                    println!("⚠️  Invalid signature in state response from {}", peer_id);
+                    self.stats.invalid_signatures += 1;
+                    continue;
+                }
+                
+                // Check for duplicates (by signature)
+                if self.voxel_op_seen.contains(&op.signature) {
+                    continue; // Already have this operation
+                }
+                
+                // Mark as seen and queue for application
+                self.voxel_op_seen.insert(op.signature);
+                self.pending_state_ops.push(op);
+                self.stats.state_ops_received += 1;
+            }
+        }
+        
+        self.stats.state_responses_received += 1;
+        
+        println!("   Queued {} new operations for application", self.pending_state_ops.len());
+        
+        Ok(())
+    }
+    
     /// Verify voxel operation signature
     ///
     /// This is critical security - prevents griefing and ensures operations
@@ -553,6 +641,57 @@ impl MultiplayerSystem {
     /// Call this in your game loop to process received operations.
     pub fn take_pending_operations(&mut self) -> Vec<VoxelOperation> {
         std::mem::take(&mut self.pending_ops)
+    }
+    
+    /// Take pending state synchronization operations
+    ///
+    /// Returns operations received from ChunkStateResponse messages.
+    /// These should be applied to chunks and added to local op_log.
+    ///
+    /// Called once per frame after update().
+    pub fn take_pending_state_operations(&mut self) -> Vec<VoxelOperation> {
+        std::mem::take(&mut self.pending_state_ops)
+    }
+    
+    /// Request chunk state from all connected peers
+    ///
+    /// Sends ChunkStateRequest to all peers asking for their operations
+    /// for the specified chunks. Used when joining network or loading new chunks.
+    ///
+    /// # Arguments
+    /// * `chunk_ids` - List of chunk IDs to request operations for
+    ///
+    /// # Example
+    /// ```rust
+    /// // After loading chunks on join
+    /// let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+    /// multiplayer.request_chunk_state(loaded_chunk_ids)?;
+    /// ```
+    pub fn request_chunk_state(&mut self, chunk_ids: Vec<ChunkId>) -> Result<()> {
+        if chunk_ids.is_empty() {
+            return Ok(()); // No chunks to request
+        }
+        
+        let request = ChunkStateRequest::new(chunk_ids.clone(), self.vector_clock.clone());
+        let data = request.to_bytes()
+            .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+        
+        // Broadcast request to all connected peers
+        self.cmd_tx.send(NetworkCommand::Publish {
+            topic: "metaverse/state/request".to_string(),
+            data,
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        
+        self.stats.state_requests_sent += 1;
+        
+        println!("📡 Requested state for {} chunks from all peers", chunk_ids.len());
+        
+        Ok(())
+    }
+    
+    /// Get list of connected peers
+    pub fn connected_peers(&self) -> &HashSet<PeerId> {
+        &self.connected_peers
     }
     
     /// Check if there are pending operations
