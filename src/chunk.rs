@@ -54,6 +54,7 @@
 //! - Easy to calculate neighbors
 //! - Network pub/sub topics work better with discrete regions
 
+use crate::coordinates::{ECEF, GPS};
 use crate::voxel::VoxelCoord;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -143,6 +144,64 @@ impl ChunkId {
             (self.y + 1) * CHUNK_SIZE,
             (self.z + 1) * CHUNK_SIZE,
         )
+    }
+    
+    /// Get GPS bounds for this chunk (min, max)
+    ///
+    /// Converts chunk voxel bounds to GPS coordinates for terrain generation.
+    /// Returns (lat_min, lat_max, lon_min, lon_max) in degrees.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use metaverse_core::chunk::ChunkId;
+    ///
+    /// let chunk = ChunkId::new(0, 0, 0);
+    /// let (lat_min, lat_max, lon_min, lon_max) = chunk.gps_bounds();
+    /// ```
+    pub fn gps_bounds(&self) -> (f64, f64, f64, f64) {
+        let min_voxel = self.min_voxel();
+        let max_voxel = self.max_voxel();
+        
+        // Convert min corner to GPS
+        let min_ecef = min_voxel.to_ecef();
+        let min_gps = min_ecef.to_gps();
+        
+        // Convert max corner to GPS
+        let max_ecef = max_voxel.to_ecef();
+        let max_gps = max_ecef.to_gps();
+        
+        // Return bounding box (may not be perfectly aligned due to Earth curvature)
+        (
+            min_gps.lat.min(max_gps.lat),  // lat_min
+            min_gps.lat.max(max_gps.lat),  // lat_max
+            min_gps.lon.min(max_gps.lon),  // lon_min
+            min_gps.lon.max(max_gps.lon),  // lon_max
+        )
+    }
+    
+    /// Get center GPS coordinate of this chunk
+    ///
+    /// Useful for terrain generation origin point.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use metaverse_core::chunk::ChunkId;
+    ///
+    /// let chunk = ChunkId::new(0, 0, 0);
+    /// let center = chunk.center_gps();
+    /// ```
+    pub fn center_gps(&self) -> GPS {
+        // Calculate center voxel
+        let min = self.min_voxel();
+        let center_voxel = VoxelCoord::new(
+            min.x + (CHUNK_SIZE / 2),
+            min.y + (CHUNK_SIZE / 2),
+            min.z + (CHUNK_SIZE / 2),
+        );
+        
+        // Convert to GPS
+        let center_ecef = center_voxel.to_ecef();
+        center_ecef.to_gps()
     }
     
     /// Check if voxel coordinate is within this chunk
