@@ -445,6 +445,7 @@ impl ChunkManager {
     /// ```
     pub fn merge_received_operations(&mut self, operations: Vec<VoxelOperation>) -> usize {
         let mut applied_count = 0;
+        let mut dirty_chunks = HashSet::new();
         
         for op in operations {
             // Check for duplicates (by signature)
@@ -464,6 +465,7 @@ impl ChunkManager {
                 if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
                     chunk_data.octree.set_voxel(op.coord, material_id);
                     chunk_data.dirty = true;
+                    dirty_chunks.insert(chunk_id);
                 }
             }
             
@@ -471,6 +473,10 @@ impl ChunkManager {
             self.user_content.add_local_operation(op);
             
             applied_count += 1;
+        }
+        
+        if !dirty_chunks.is_empty() {
+            println!("   🔧 Marked {} chunks dirty for regeneration", dirty_chunks.len());
         }
         
         applied_count
