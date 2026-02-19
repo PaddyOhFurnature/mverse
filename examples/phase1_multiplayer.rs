@@ -211,14 +211,15 @@ fn main() {
         elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
     }
     
-    let generator = TerrainGenerator::new(elevation_pipeline);
-    
     // Convert GPS origin to voxel coordinates  
     let origin_ecef = origin_gps.to_ecef();
     let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
     
     println!("   Origin GPS: ({:.6}, {:.6}, {:.1}m)", origin_gps.lat, origin_gps.lon, origin_gps.alt);
     println!("   Origin voxel: {:?}", origin_voxel);
+    
+    // Create terrain generator with origin for coordinate conversion
+    let generator = TerrainGenerator::new(elevation_pipeline, origin_gps, origin_voxel);
     
     // Calculate spawn chunk
     let spawn_chunk = ChunkId::from_voxel(&origin_voxel);
@@ -241,7 +242,7 @@ fn main() {
     
     // Load chunks in 2-chunk radius around spawn (3×3×3 = 27 chunks minus corners = 19 chunks)
     println!("📦 Loading chunks around spawn (radius 2)...");
-    chunk_manager.update_visible_chunks(&spawn_chunk, 2, &world_dir);
+    chunk_manager.load_chunks_immediate(&spawn_chunk, 2, &world_dir);
     
     println!("   ✅ Loaded {} chunks in {:.2}s", 
         chunk_manager.loaded_count(),
@@ -262,17 +263,21 @@ fn main() {
         let min_voxel = chunk_data.chunk_id.min_voxel();
         let mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
         total_vertices += mesh.vertices.len();
-        chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
         
-        // Generate collision for chunk
-        let collider = metaverse_core::physics::update_region_collision(
-            &mut physics,
-            &chunk_data.octree,
-            &min_voxel,
-            7,
-            None,
-        );
-        chunk_data.collider = Some(collider);
+        // Only create mesh buffer and collision if chunk has geometry
+        if !mesh.vertices.is_empty() {
+            chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
+            
+            // Generate collision for chunk
+            let collider = metaverse_core::physics::update_region_collision(
+                &mut physics,
+                &chunk_data.octree,
+                &min_voxel,
+                7,
+                None,
+            );
+            chunk_data.collider = Some(collider);
+        }
         chunk_data.dirty = false;
     }
     
@@ -285,6 +290,7 @@ fn main() {
     let mut ground_y: f32 = 0.0;
     if let Some(spawn_chunk_data) = chunk_manager.get_chunk(&spawn_chunk) {
         // Sample voxels around spawn point to find ground
+        let mut found_ground = false;
         for x_off in -5..=5 {
             for z_off in -5..=5 {
                 let test_voxel = VoxelCoord::new(
@@ -293,8 +299,8 @@ fn main() {
                     origin_voxel.z + z_off,
                 );
                 
-                // Search upward for first air block above solid ground
-                for y_off in -10..50 {
+                // Search upward and downward for first air block above solid ground
+                for y_off in -100..100 {
                     let check_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off, test_voxel.z);
                     let below_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off - 1, test_voxel.z);
                     
@@ -303,10 +309,15 @@ fn main() {
                     
                     if is_air && below_is_solid {
                         ground_y = ground_y.max((y_off - 1) as f32);
+                        found_ground = true;
                         break;
                     }
                 }
             }
+        }
+        
+        if !found_ground {
+            println!("   WARNING: No ground found near spawn, defaulting to 0m");
         }
     }
     
@@ -736,19 +747,25 @@ fn main() {
                         if chunk_data.dirty {
                             let min_voxel = chunk_data.chunk_id.min_voxel();
                             let new_mesh = extract_octree_mesh(&chunk_data.octree, &min_voxel, 7);
-                            chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_mesh));
                             
-                            // Update collision for this chunk
-                            // Note: We regenerate the collider rather than updating in place
-                            // This is simpler and collision updates are infrequent
-                            let new_collider = metaverse_core::physics::update_region_collision(
-                                &mut physics,
-                                &chunk_data.octree,
-                                &min_voxel,
-                                7,
-                                chunk_data.collider,  // Pass old collider to be replaced
-                            );
-                            chunk_data.collider = Some(new_collider);
+                            // Only create mesh/collision if chunk has geometry
+                            if !new_mesh.vertices.is_empty() {
+                                chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_mesh));
+                                
+                                // Update collision for this chunk
+                                let new_collider = metaverse_core::physics::update_region_collision(
+                                    &mut physics,
+                                    &chunk_data.octree,
+                                    &min_voxel,
+                                    7,
+                                    chunk_data.collider,  // Pass old collider to be replaced
+                                );
+                                chunk_data.collider = Some(new_collider);
+                            } else {
+                                // Chunk became empty - remove mesh and collision
+                                chunk_data.mesh_buffer = None;
+                                chunk_data.collider = None;
+                            }
                             chunk_data.dirty = false;
                             
                             println!("🔄 Regenerated mesh and collision for {}", chunk_data.chunk_id);

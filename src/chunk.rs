@@ -330,19 +330,20 @@ impl fmt::Display for ChunkId {
 pub fn chunks_in_radius(center: &ChunkId, radius: i64) -> Vec<ChunkId> {
     let mut result = Vec::new();
     
+    // Only iterate horizontally (X, Z), keep same Y level
+    // This prevents loading chunks above/below which would create stacked terrain
     for dx in -radius..=radius {
-        for dy in -radius..=radius {
-            for dz in -radius..=radius {
-                let chunk = ChunkId::new(
-                    center.x + dx,
-                    center.y + dy,
-                    center.z + dz,
-                );
-                
-                // Only include if within Manhattan distance
-                if center.manhattan_distance(&chunk) <= radius {
-                    result.push(chunk);
-                }
+        for dz in -radius..=radius {
+            let chunk = ChunkId::new(
+                center.x + dx,
+                center.y,  // Keep same Y level
+                center.z + dz,
+            );
+            
+            // Only include if within horizontal Manhattan distance
+            let horizontal_distance = dx.abs() + dz.abs();
+            if horizontal_distance <= radius {
+                result.push(chunk);
             }
         }
     }

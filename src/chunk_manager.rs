@@ -166,6 +166,26 @@ impl ChunkManager {
         Ok(())
     }
     
+    /// Load all chunks in radius immediately (for initialization)
+    ///
+    /// Unlike update_visible_chunks(), this loads all chunks at once
+    /// without gradual loading. Use for initial world setup.
+    ///
+    /// # Arguments
+    /// * `center_chunk` - Chunk to load around
+    /// * `radius` - Chunk radius (e.g., 2 = 3×3×3 chunks with corners removed)
+    pub fn load_chunks_immediate(&mut self, center_chunk: &ChunkId, radius: i64, world_dir: &Path) {
+        let chunks_to_load = chunks_in_radius(center_chunk, radius);
+        
+        for chunk_id in chunks_to_load {
+            if !self.loaded_chunks.contains_key(&chunk_id) {
+                if let Err(e) = self.load_chunk(chunk_id, world_dir) {
+                    eprintln!("Failed to load chunk {}: {}", chunk_id, e);
+                }
+            }
+        }
+    }
+    
     /// Update which chunks are visible based on player position
     ///
     /// Loads chunks in radius, unloads chunks outside radius.

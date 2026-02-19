@@ -10,11 +10,23 @@ use crate::voxel::{Octree, VoxelCoord};
 /// Generate terrain voxels from elevation data
 pub struct TerrainGenerator {
     elevation: ElevationPipeline,
+    origin_gps: GPS,
+    origin_voxel: VoxelCoord,
 }
 
 impl TerrainGenerator {
-    pub fn new(elevation: ElevationPipeline) -> Self {
-        Self { elevation }
+    /// Create new terrain generator
+    ///
+    /// # Arguments
+    /// * `elevation` - Elevation data pipeline
+    /// * `origin_gps` - GPS origin point (for coordinate conversion)
+    /// * `origin_voxel` - Voxel coordinate of origin (for ECEF conversion)
+    pub fn new(elevation: ElevationPipeline, origin_gps: GPS, origin_voxel: VoxelCoord) -> Self {
+        Self { 
+            elevation,
+            origin_gps,
+            origin_voxel,
+        }
     }
     
     /// Generate terrain region with 1m voxel resolution
@@ -237,9 +249,16 @@ impl TerrainGenerator {
                 const BEDROCK_DEPTH: i64 = 200;
                 const SKY_HEIGHT: i64 = 100;
                 
+                // Convert surface elevation to voxel Y coordinate
+                // surface_elevation is meters above sea level
+                // origin_gps.alt is origin altitude above sea level
+                // origin_voxel.y is ECEF voxel coordinate at origin
+                // So: voxel_y = origin_voxel.y + (surface_elevation - origin_altitude) + height_offset
+                let surface_offset = surface_elevation - self.origin_gps.alt;
+                
                 // Generate vertical column
                 for height_offset in (-BEDROCK_DEPTH)..=SKY_HEIGHT {
-                    let voxel_y = height_offset + surface_elevation as i64;
+                    let voxel_y = self.origin_voxel.y + surface_offset as i64 + height_offset;
                     
                     let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
                     
@@ -248,7 +267,7 @@ impl TerrainGenerator {
                         continue;
                     }
                     
-                    let depth_below_surface = surface_elevation - voxel_y as f64;
+                    let depth_below_surface = surface_elevation - (self.origin_gps.alt + height_offset as f64);
                     
                     let material = if depth_below_surface > 5.0 {
                         MaterialId::STONE
