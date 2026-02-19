@@ -1,28 +1,21 @@
-# Build artifacts
-/target/
-/Cargo.lock
-
-# Cache directories
-.metaverse/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
+/target
+**/*.rs.bk
+*.pdb
 .DS_Store
-Thumbs.db
 
-# Archives (session work, not for git)
-/archive/
+# World data directories (per-identity storage)
+world_data/
+world_data_*/
 
-# Node modules (if any)
-node_modules/
-package-lock.json
+# Terrain cache
+elevation_cache/
+*.tif
 
-# Temporary files
-*.tmp
-.cleanup-plan.txt
+# Debug/test files
+*.log
+debug_*
+test_*
+
+# Screenshots
+screenshot/*.png
+!screenshot/.gitkeep
