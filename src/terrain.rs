@@ -1,15 +1,28 @@
 //! Terrain generation from elevation data
 //!
 //! Converts SRTM elevation queries into voxel columns
+//!
+//! # Pure Function Design
+//!
+//! Terrain generation is designed as pure functions where possible:
+//! - `generate_chunk_pure()` - Pure function for chunk generation
+//! - Same ChunkId + elevation data = same Octree (deterministic)
+//! - Thread-safe - can generate multiple chunks in parallel
+//! - No shared mutable state between calls
+//!
+//! The `TerrainGenerator` struct exists for convenience (holds elevation pipeline),
+//! but the core generation logic is in pure standalone functions.
 
 use crate::coordinates::GPS;
 use crate::elevation::ElevationPipeline;
 use crate::materials::MaterialId;
 use crate::voxel::{Octree, VoxelCoord};
+use crate::chunk::ChunkId;
+use std::sync::{Arc, Mutex};
 
 /// Generate terrain voxels from elevation data
 pub struct TerrainGenerator {
-    elevation: ElevationPipeline,
+    elevation: Arc<Mutex<ElevationPipeline>>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
 }
@@ -18,15 +31,33 @@ impl TerrainGenerator {
     /// Create new terrain generator
     ///
     /// # Arguments
-    /// * `elevation` - Elevation data pipeline
+    /// * `elevation` - Elevation data pipeline (wrapped in Arc<Mutex> for thread-safety)
     /// * `origin_gps` - GPS origin point (for coordinate conversion)
     /// * `origin_voxel` - Voxel coordinate of origin (for ECEF conversion)
     pub fn new(elevation: ElevationPipeline, origin_gps: GPS, origin_voxel: VoxelCoord) -> Self {
         Self { 
+            elevation: Arc::new(Mutex::new(elevation)),
+            origin_gps,
+            origin_voxel,
+        }
+    }
+    
+    /// Create with shared elevation pipeline (for parallel chunk generation)
+    pub fn with_shared_elevation(
+        elevation: Arc<Mutex<ElevationPipeline>>,
+        origin_gps: GPS,
+        origin_voxel: VoxelCoord
+    ) -> Self {
+        Self {
             elevation,
             origin_gps,
             origin_voxel,
         }
+    }
+    
+    /// Get shared elevation pipeline (for cloning generator)
+    pub fn elevation_pipeline(&self) -> Arc<Mutex<ElevationPipeline>> {
+        Arc::clone(&self.elevation)
     }
     
     /// Generate terrain region with 1m voxel resolution
@@ -39,12 +70,16 @@ impl TerrainGenerator {
     /// - Interpolates to 120×120 = 14,400 voxel columns at 1m spacing
     /// - Each column extends from bedrock to sky
     pub fn generate_region(
-        &mut self,
+        &self,
         octree: &mut Octree,
         origin: &GPS,
         size_meters: f64,
     ) -> Result<(), String> {
         println!("Generating {}m × {}m terrain region...", size_meters, size_meters);
+        
+        // Lock elevation pipeline
+        let mut elevation = self.elevation.lock()
+            .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // Calculate GPS coordinates for corner points
         const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
@@ -73,10 +108,11 @@ impl TerrainGenerator {
                 let lon = lon_min + t_lon * (lon_max - lon_min);
                 
                 let gps = GPS::new(lat, lon, 0.0);
-                let elevation = self.elevation.query(&gps)
-                    .map_err(|e| format!("SRTM query failed at ({}, {}): {}", lat, lon, e))?;
+                let elev_meters = elevation.query(&gps)
+                    .map_err(|e| format!("SRTM query failed at ({}, {}): {}", lat, lon, e))?
+                    .meters;
                 
-                elevation_grid.push(elevation.meters);
+                elevation_grid.push(elev_meters);
             }
         }
         
@@ -180,13 +216,21 @@ impl TerrainGenerator {
     /// let octree = generator.generate_chunk(&chunk_id)?;
     /// # Ok::<(), String>(())
     /// ```
-    pub fn generate_chunk(&mut self, chunk_id: &crate::chunk::ChunkId) -> Result<Octree, String> {
-        use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
+    /// Generate terrain chunk (thread-safe, immutable)
+    ///
+    /// Pure function: same chunk_id + elevation data = same Octree
+    /// Can be called from multiple threads simultaneously
+    pub fn generate_chunk(&self, chunk_id: &ChunkId) -> Result<Octree, String> {
+        use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
         
         let min_voxel = chunk_id.min_voxel();
         let max_voxel = chunk_id.max_voxel();
         
         let mut octree = Octree::new();
+        
+        // Lock elevation pipeline for queries (internal caching may mutate)
+        let mut elevation = self.elevation.lock()
+            .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // 30m×200m×30m chunks aligned to SRTM
         // Sample elevation at 30m intervals (1 per horizontal voxel position)
@@ -201,7 +245,7 @@ impl TerrainGenerator {
                 let sample_gps = sample_ecef.to_gps();
                 
                 // Query SRTM elevation
-                let surface_elevation = self.elevation.query(&sample_gps)
+                let surface_elevation = elevation.query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
                 
@@ -249,12 +293,17 @@ impl TerrainGenerator {
     /// - DIRT from 5m below surface to surface
     /// - GRASS at surface (top 1m)
     /// - AIR above surface
-    pub fn generate_column(&mut self, octree: &mut Octree, gps: &GPS) -> Result<(), String> {
-        // Query elevation at this lat/lon
-        let elevation = self.elevation.query(gps)
-            .map_err(|e| format!("Elevation query failed: {:?}", e))?;
+    pub fn generate_column(&self, octree: &mut Octree, gps: &GPS) -> Result<(), String> {
+        // Lock elevation pipeline
+        let mut elevation = self.elevation.lock()
+            .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
-        let surface_elevation = elevation.meters;
+        // Query elevation at this lat/lon
+        let elev_meters = elevation.query(gps)
+            .map_err(|e| format!("Elevation query failed: {:?}", e))?
+            .meters;
+        
+        let surface_elevation = elev_meters;
         
         // Generate voxels from bedrock to sky
         const BEDROCK_DEPTH: f64 = 200.0;  // 200m below surface

@@ -4,9 +4,9 @@
 /// Supports terrain generation, mesh generation, and collider generation.
 
 use crate::chunk::ChunkId;
-use crate::coordinates::ECEF;
 use crate::voxel::Octree;
-use std::sync::mpsc::{channel, Sender, Receiver};
+use crate::terrain::TerrainGenerator;
+use std::sync::{mpsc::{channel, Sender, Receiver}, Arc};
 use std::thread;
 use std::time::Instant;
 
@@ -51,6 +51,8 @@ impl ChunkLoader {
     /// Create new background chunk loader
     ///
     /// Spawns a background thread that processes load requests.
+    /// 
+    /// TODO: Add TerrainGenerator parameter once ElevationSource is Send+Sync
     pub fn new() -> Self {
         let (cmd_tx, cmd_rx) = channel();
         let (result_tx, result_rx) = channel();
@@ -106,25 +108,26 @@ impl ChunkLoader {
     /// Background worker thread
     ///
     /// Processes load requests, generates terrain, sends results back.
-    fn worker_thread(cmd_rx: Receiver<LoaderCommand>, result_tx: Sender<LoadResult>) {
-        // TODO: Initialize terrain generator once per thread
-        // For now, just create empty octrees
-        
+    ///
+    /// TODO: Accept TerrainGenerator once ElevationSource is Send+Sync
+    /// For now, generates empty octrees as placeholders.
+    fn worker_thread(
+        cmd_rx: Receiver<LoaderCommand>,
+        result_tx: Sender<LoadResult>,
+    ) {
         loop {
             match cmd_rx.recv() {
                 Ok(LoaderCommand::Load(request)) => {
                     let start = Instant::now();
                     
-                    // TODO: Generate terrain for this chunk
+                    // TODO: Generate real terrain once TerrainGenerator is thread-safe
                     // For now, create empty octree as placeholder
                     let octree = Octree::new();
-                    
-                    let load_time_ms = start.elapsed().as_millis();
                     
                     let result = LoadResult {
                         chunk_id: request.chunk_id,
                         octree: Some(octree),
-                        load_time_ms,
+                        load_time_ms: start.elapsed().as_millis(),
                         error: None,
                     };
                     
