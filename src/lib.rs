@@ -25,4 +25,5 @@ pub mod vector_clock;
 pub mod chunk;
 pub mod chunk_manager;
 pub mod chunk_streaming;
+pub mod chunk_loader;
 pub mod spatial_sharding;
