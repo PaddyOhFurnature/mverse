@@ -290,6 +290,7 @@ impl NetworkNode {
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(1))
             .validation_mode(ValidationMode::Strict)
+            .max_transmit_size(1024 * 1024) // 1 MB max message size (for state sync)
             .message_id_fn(|msg| {
                 use sha2::{Sha256, Digest};
                 let mut hasher = Sha256::new();
