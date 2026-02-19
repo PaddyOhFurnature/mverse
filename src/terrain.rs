@@ -145,6 +145,129 @@ impl TerrainGenerator {
         Ok(())
     }
     
+    /// Generate terrain for a single chunk (pure function)
+    ///
+    /// Creates a new Octree with terrain voxels for the specified chunk.
+    /// Samples SRTM elevation data for the chunk's GPS bounds.
+    ///
+    /// # Arguments
+    /// * `chunk_id` - Which chunk to generate
+    ///
+    /// # Returns
+    /// New Octree containing terrain voxels for this chunk only
+    ///
+    /// # Example
+    /// ```no_run
+    /// use metaverse_core::terrain::TerrainGenerator;
+    /// use metaverse_core::chunk::ChunkId;
+    /// use metaverse_core::elevation::ElevationPipeline;
+    ///
+    /// let elevation = ElevationPipeline::new();
+    /// let mut generator = TerrainGenerator::new(elevation);
+    /// let chunk_id = ChunkId::new(0, 0, 0);
+    /// let octree = generator.generate_chunk(&chunk_id)?;
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn generate_chunk(&mut self, chunk_id: &crate::chunk::ChunkId) -> Result<Octree, String> {
+        use crate::chunk::CHUNK_SIZE;
+        
+        // Get GPS bounds for this chunk
+        let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+        
+        // Get voxel bounds
+        let min_voxel = chunk_id.min_voxel();
+        let max_voxel = chunk_id.max_voxel();
+        
+        // Sample SRTM at ~30m resolution to get elevation grid
+        const SRTM_RESOLUTION_M: f64 = 30.0;
+        let size_meters = CHUNK_SIZE as f64;
+        let samples_per_axis = (size_meters / SRTM_RESOLUTION_M).ceil() as usize + 1;
+        
+        let mut elevation_grid = Vec::with_capacity(samples_per_axis * samples_per_axis);
+        
+        for i in 0..samples_per_axis {
+            for j in 0..samples_per_axis {
+                let t_lat = i as f64 / (samples_per_axis - 1) as f64;
+                let t_lon = j as f64 / (samples_per_axis - 1) as f64;
+                let lat = lat_min + t_lat * (lat_max - lat_min);
+                let lon = lon_min + t_lon * (lon_max - lon_min);
+                
+                let gps = GPS::new(lat, lon, 0.0);
+                let elevation = self.elevation.query(&gps)
+                    .map_err(|e| format!("SRTM query failed at ({}, {}): {}", lat, lon, e))?;
+                
+                elevation_grid.push(elevation.meters);
+            }
+        }
+        
+        // Create new octree for this chunk
+        let mut octree = Octree::new();
+        
+        // Generate voxel columns at 1m spacing with bilinear interpolation
+        let columns_per_axis = CHUNK_SIZE as usize;
+        
+        for i in 0..columns_per_axis {
+            for j in 0..columns_per_axis {
+                // Voxel X,Z coordinates (absolute)
+                let voxel_x = min_voxel.x + i as i64;
+                let voxel_z = min_voxel.z + j as i64;
+                
+                // Interpolate elevation from SRTM grid
+                let grid_i = (i as f64 / SRTM_RESOLUTION_M).min((samples_per_axis - 2) as f64);
+                let grid_j = (j as f64 / SRTM_RESOLUTION_M).min((samples_per_axis - 2) as f64);
+                
+                let i0 = grid_i.floor() as usize;
+                let j0 = grid_j.floor() as usize;
+                let i1 = i0 + 1;
+                let j1 = j0 + 1;
+                
+                let frac_i = grid_i - i0 as f64;
+                let frac_j = grid_j - j0 as f64;
+                
+                // Bilinear interpolation
+                let e00 = elevation_grid[i0 * samples_per_axis + j0];
+                let e01 = elevation_grid[i0 * samples_per_axis + j1];
+                let e10 = elevation_grid[i1 * samples_per_axis + j0];
+                let e11 = elevation_grid[i1 * samples_per_axis + j1];
+                
+                let e0 = e00 * (1.0 - frac_j) + e01 * frac_j;
+                let e1 = e10 * (1.0 - frac_j) + e11 * frac_j;
+                let surface_elevation = e0 * (1.0 - frac_i) + e1 * frac_i;
+                
+                const BEDROCK_DEPTH: i64 = 200;
+                const SKY_HEIGHT: i64 = 100;
+                
+                // Generate vertical column
+                for height_offset in (-BEDROCK_DEPTH)..=SKY_HEIGHT {
+                    let voxel_y = height_offset + surface_elevation as i64;
+                    
+                    let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+                    
+                    // Only generate voxels within chunk Y bounds
+                    if voxel_pos.y < min_voxel.y || voxel_pos.y >= max_voxel.y {
+                        continue;
+                    }
+                    
+                    let depth_below_surface = surface_elevation - voxel_y as f64;
+                    
+                    let material = if depth_below_surface > 5.0 {
+                        MaterialId::STONE
+                    } else if depth_below_surface > 1.0 {
+                        MaterialId::DIRT
+                    } else if depth_below_surface > 0.0 {
+                        MaterialId::GRASS
+                    } else {
+                        MaterialId::AIR
+                    };
+                    
+                    octree.set_voxel(voxel_pos, material);
+                }
+            }
+        }
+        
+        Ok(octree)
+    }
+    
     /// Fill octree with terrain at given GPS location
     /// 
     /// Generates a vertical column of voxels:

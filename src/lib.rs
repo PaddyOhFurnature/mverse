@@ -22,3 +22,4 @@ pub mod remote_render;
 pub mod user_content;
 pub mod vector_clock;
 pub mod chunk;
+pub mod chunk_manager;
