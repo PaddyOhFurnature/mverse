@@ -228,8 +228,19 @@ fn main() {
     // User content layer - separates edits from base terrain
     let user_content = UserContentLayer::new();
     
-    // World data directory
-    let world_dir = std::path::PathBuf::from("world_data");
+    // World data directory - unique per identity for local testing
+    // In production on separate machines, all would use "world_data"
+    let world_dir = if let Ok(identity_file) = std::env::var("METAVERSE_IDENTITY_FILE") {
+        // Extract identity name from file (e.g., alice.key -> alice)
+        let identity_name = std::path::Path::new(&identity_file)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default");
+        
+        std::path::PathBuf::from(format!("world_data_{}", identity_name))
+    } else {
+        std::path::PathBuf::from("world_data")
+    };
     
     // Create world directory if it doesn't exist
     if !world_dir.exists() {
