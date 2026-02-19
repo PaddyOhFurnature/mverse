@@ -677,30 +677,95 @@ impl MultiplayerSystem {
     ///
     /// Called by game loop after filtering operations using ChunkManager.
     /// Operations are grouped by chunk ID and sent with our vector clock.
-    /// Note: Uses broadcast since we don't have direct peer messaging in gossipsub.
+    ///
+    /// # Chunking Strategy
+    /// If response is large (>100 operations), splits into multiple messages.
+    /// Each message is independently deliverable, enabling graceful degradation.
+    ///
+    /// # Arguments
+    /// * `operations_by_chunk` - Operations grouped by chunk ID
+    ///
+    /// # Returns
+    /// Number of messages sent
     pub fn send_chunk_state_response(
         &mut self, 
         operations_by_chunk: HashMap<ChunkId, Vec<VoxelOperation>>
-    ) -> Result<()> {
+    ) -> Result<usize> {
         if operations_by_chunk.is_empty() {
-            return Ok(()); // Nothing to send
+            return Ok(0); // Nothing to send
         }
         
-        let response = ChunkStateResponse::new(
-            operations_by_chunk,
-            self.vector_clock.clone()
-        );
-        let bytes = response.to_bytes()
-            .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+        let total_ops: usize = operations_by_chunk.values().map(|v| v.len()).sum();
         
-        self.cmd_tx.send(NetworkCommand::Publish {
-            topic: TOPIC_STATE_RESPONSE.to_string(),
-            data: bytes,
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        // Adaptive chunking based on operation count
+        const OPS_PER_CHUNK: usize = 100; // ~10-20 KB per message with binary encoding
         
-        self.stats.state_responses_received += 1; // Actually sent, not received
+        if total_ops <= OPS_PER_CHUNK {
+            // Small response - send in one message
+            let response = ChunkStateResponse::new(
+                operations_by_chunk,
+                self.vector_clock.clone()
+            );
+            let bytes = response.to_bytes()
+                .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+            
+            self.cmd_tx.send(NetworkCommand::Publish {
+                topic: TOPIC_STATE_RESPONSE.to_string(),
+                data: bytes,
+            }).map_err(|_| MultiplayerError::ChannelSendError)?;
+            
+            self.stats.state_responses_received += 1;
+            return Ok(1);
+        }
         
-        Ok(())
+        // Large response - chunk it
+        let response_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+        
+        // Flatten operations into single vec for chunking
+        let mut all_ops: Vec<(ChunkId, VoxelOperation)> = Vec::new();
+        for (chunk_id, ops) in operations_by_chunk {
+            for op in ops {
+                all_ops.push((chunk_id, op));
+            }
+        }
+        
+        let chunks: Vec<_> = all_ops.chunks(OPS_PER_CHUNK).collect();
+        let total_chunks = chunks.len() as u32;
+        
+        println!("   📦 Chunking {} ops into {} messages ({} ops/msg)", 
+            total_ops, total_chunks, OPS_PER_CHUNK);
+        
+        for (i, chunk) in chunks.iter().enumerate() {
+            // Rebuild operations_by_chunk for this chunk
+            let mut chunk_ops: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
+            for (chunk_id, op) in chunk.iter() {
+                chunk_ops.entry(*chunk_id)
+                    .or_insert_with(Vec::new)
+                    .push(op.clone());
+            }
+            
+            let response = ChunkStateResponse::new_chunked(
+                chunk_ops,
+                self.vector_clock.clone(),
+                i as u32,
+                total_chunks,
+                response_id,
+            );
+            
+            let bytes = response.to_bytes()
+                .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+            
+            self.cmd_tx.send(NetworkCommand::Publish {
+                topic: TOPIC_STATE_RESPONSE.to_string(),
+                data: bytes,
+            }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        }
+        
+        self.stats.state_responses_received += total_chunks as u64;
+        Ok(total_chunks as usize)
     }
     
     /// Request chunk state from all connected peers

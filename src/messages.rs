@@ -567,6 +567,15 @@ pub struct ChunkStateResponse {
     /// Requester merges this with their own clock to track causality.
     /// Ensures proper CRDT semantics and future operation filtering.
     pub responder_clock: VectorClock,
+    
+    /// Chunk index (0-based) if this is a multi-part response
+    pub chunk_index: u32,
+    
+    /// Total number of chunks in this response set
+    pub total_chunks: u32,
+    
+    /// Unique ID for this response set (multiple chunks share same ID)
+    pub response_id: u64,
 }
 
 impl ChunkStateResponse {
@@ -575,7 +584,37 @@ impl ChunkStateResponse {
         Self {
             operations,
             responder_clock,
+            chunk_index: 0,
+            total_chunks: 1,
+            response_id: 0,
         }
+    }
+    
+    /// Create a chunked response (part of multi-message set)
+    pub fn new_chunked(
+        operations: HashMap<ChunkId, Vec<VoxelOperation>>,
+        responder_clock: VectorClock,
+        chunk_index: u32,
+        total_chunks: u32,
+        response_id: u64,
+    ) -> Self {
+        Self {
+            operations,
+            responder_clock,
+            chunk_index,
+            total_chunks,
+            response_id,
+        }
+    }
+    
+    /// Check if this is part of a multi-chunk response
+    pub fn is_chunked(&self) -> bool {
+        self.total_chunks > 1
+    }
+    
+    /// Check if this is the final chunk in a set
+    pub fn is_final_chunk(&self) -> bool {
+        self.chunk_index + 1 == self.total_chunks
     }
     
     /// Count total operations in response
