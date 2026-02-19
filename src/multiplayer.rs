@@ -57,6 +57,7 @@ use crate::{
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     player_state::PlayerStateManager,
+    spatial_sharding::{SpatialSharding, SpatialConfig},
     vector_clock::VectorClock,
     voxel::{Octree, VoxelCoord},
     physics::PhysicsWorld,
@@ -126,6 +127,12 @@ pub struct MultiplayerSystem {
     
     /// Remote player state manager (interpolation, jitter buffer)
     remote_players: PlayerStateManager,
+    
+    /// Spatial sharding for intelligent peer selection and bandwidth optimization
+    spatial_sharding: Option<SpatialSharding>,
+    
+    /// Local player position (for spatial sharding distance calculations)
+    local_position: ECEF,
     
     /// Lamport clock for causal ordering (kept for backwards compat)
     clock: LamportClock,
@@ -218,6 +225,8 @@ impl MultiplayerSystem {
             identity,
             local_peer_id,
             remote_players: PlayerStateManager::new(local_peer_id),
+            spatial_sharding: None, // Initialized when position is known
+            local_position: ECEF::new(0.0, 0.0, 0.0), // Will be updated
             clock: LamportClock::default(),
             vector_clock: crate::vector_clock::VectorClock::new(),
             voxel_op_seen: HashSet::new(),
@@ -313,6 +322,35 @@ impl MultiplayerSystem {
         
         self.last_state_broadcast = now;
         
+        // Update local position for spatial sharding
+        self.local_position = position;
+        let region_changed = if let Some(ref mut sharding) = self.spatial_sharding {
+            sharding.update_local_position(position)
+        } else {
+            false
+        };
+        
+        // If we moved to a new region, resubscribe to new region topics
+        if region_changed {
+            if let Some(ref sharding) = self.spatial_sharding {
+                println!("📍 Moved to new region: {}", sharding.current_region());
+                
+                // Get topics for new region + neighbors
+                let new_topics = sharding.get_subscribe_topics("voxel-ops");
+                let player_topics = sharding.get_subscribe_topics("player-state");
+                
+                // Subscribe to new topics (bulk operation)
+                let mut all_topics = new_topics;
+                all_topics.extend(player_topics);
+                
+                self.cmd_tx.send(NetworkCommand::SubscribeBulk {
+                    topics: all_topics.clone(),
+                }).map_err(|_| MultiplayerError::ChannelSendError)?;
+                
+                println!("   ✅ Subscribed to {} regional topics", all_topics.len());
+            }
+        }
+        
         let timestamp = self.clock.tick();
         let msg = PlayerStateMessage::new(
             self.local_peer_id,
@@ -325,8 +363,16 @@ impl MultiplayerSystem {
         );
         
         let data = msg.to_bytes()?;
+        
+        // Publish to region-specific topic if spatial sharding enabled
+        let topic = if let Some(ref sharding) = self.spatial_sharding {
+            sharding.get_publish_topic("player-state")
+        } else {
+            TOPIC_PLAYER_STATE.to_string() // Fallback to global topic
+        };
+        
         self.cmd_tx.send(NetworkCommand::Publish {
-            topic: TOPIC_PLAYER_STATE.to_string(),
+            topic,
             data,
         }).map_err(|_| MultiplayerError::ChannelSendError)?;
         self.stats.player_states_sent += 1;
@@ -357,8 +403,16 @@ impl MultiplayerSystem {
         
         // Serialize and send
         let data = op.to_bytes()?;
+        
+        // Publish to region-specific topic if spatial sharding enabled
+        let topic = if let Some(ref sharding) = self.spatial_sharding {
+            sharding.get_publish_topic("voxel-ops")
+        } else {
+            TOPIC_VOXEL_OPS.to_string() // Fallback to global topic
+        };
+        
         self.cmd_tx.send(NetworkCommand::Publish {
-            topic: TOPIC_VOXEL_OPS.to_string(),
+            topic,
             data,
         }).map_err(|_| MultiplayerError::ChannelSendError)?;
         self.stats.voxel_ops_sent += 1;
@@ -393,6 +447,76 @@ impl MultiplayerSystem {
         &self.stats
     }
     
+    /// Enable spatial sharding with custom configuration
+    ///
+    /// Spatial sharding implements hierarchical peer selection for planet-scale P2P:
+    /// - **Tier 1 (100m):** Visibility range - immediate rendering, low latency
+    /// - **Tier 2 (500m):** Nearby region - backup storage, medium latency
+    /// - **Tier 3 (1km):** Local area - wider backup, acceptable latency  
+    /// - **Tier 4 (Global):** Any distance - guaranteed redundancy
+    ///
+    /// # Example
+    /// ```no_run
+    /// use metaverse_core::spatial_sharding::SpatialConfig;
+    /// 
+    /// mp.enable_spatial_sharding_with_config(SpatialConfig {
+    ///     redundancy_target: 10, // 10 copies per operation
+    ///     tier1_radius_m: 100.0,
+    ///     tier2_radius_m: 500.0,
+    ///     tier3_radius_m: 1000.0,
+    ///     gossip_percentage: 0.20,
+    ///     ..Default::default()
+    /// });
+    /// ```
+    pub fn enable_spatial_sharding_with_config(&mut self, config: SpatialConfig) {
+        self.spatial_sharding = Some(SpatialSharding::new(self.local_position, config));
+        println!("✨ Spatial sharding enabled with custom config");
+    }
+    
+    /// Enable spatial sharding with default configuration
+    ///
+    /// Default configuration:
+    /// - Redundancy target: 5 copies
+    /// - Tier 1: 100m (visibility)
+    /// - Tier 2: 500m (nearby)
+    /// - Tier 3: 1km (local area)
+    /// - Gossip: 20% of peers every 10 seconds
+    pub fn enable_spatial_sharding(&mut self) {
+        self.spatial_sharding = Some(SpatialSharding::new_default(self.local_position));
+        println!("✨ Spatial sharding enabled with default config");
+    }
+    
+    /// Disable spatial sharding (back to broadcast-all mode)
+    pub fn disable_spatial_sharding(&mut self) {
+        self.spatial_sharding = None;
+        println!("📡 Spatial sharding disabled - using broadcast mode");
+    }
+    
+    /// Check if spatial sharding is enabled
+    pub fn is_spatial_sharding_enabled(&self) -> bool {
+        self.spatial_sharding.is_some()
+    }
+    
+    /// Get spatial sharding statistics (if enabled)
+    ///
+    /// Returns information about peer distribution across tiers:
+    /// - How many peers in visibility range (100m)
+    /// - How many peers nearby (500m)
+    /// - How many peers in local area (1km)
+    /// - How many peers globally
+    /// - Number of relay nodes
+    pub fn get_spatial_stats(&self) -> Option<crate::spatial_sharding::SpatialStats> {
+        self.spatial_sharding.as_ref().map(|s| s.stats())
+    }
+    
+    /// Update spatial sharding configuration at runtime
+    pub fn update_spatial_config(&mut self, config: SpatialConfig) {
+        if let Some(ref mut sharding) = self.spatial_sharding {
+            sharding.set_config(config);
+            println!("🔧 Spatial sharding configuration updated");
+        }
+    }
+    
     /// Handle incoming network event
     fn handle_network_event(&mut self, event: NetworkEvent) -> Result<()> {
         match event {
@@ -410,6 +534,9 @@ impl MultiplayerSystem {
                     TOPIC_CHAT => self.handle_chat(peer_id, &data)?,
                     TOPIC_STATE_REQUEST => self.handle_state_request(peer_id, &data)?,
                     TOPIC_STATE_RESPONSE => self.handle_state_response(peer_id, &data)?,
+                    // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
+                    t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
+                    t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
                     _ => {}
                 }
             }
@@ -423,6 +550,11 @@ impl MultiplayerSystem {
                 println!("💔 Peer disconnected: {}", peer_id);
                 self.remote_players.remove_player(&peer_id);
                 self.connected_peers.remove(&peer_id);
+                
+                // Remove from spatial sharding
+                if let Some(ref mut sharding) = self.spatial_sharding {
+                    sharding.remove_peer(&peer_id);
+                }
             }
             
             NetworkEvent::PeerDiscovered { peer_id } => {
@@ -463,8 +595,14 @@ impl MultiplayerSystem {
         self.clock.receive(msg.timestamp);
         
         // Update remote player (manager handles deduplication and filtering)
-        self.remote_players.handle_message(msg);
+        self.remote_players.handle_message(msg.clone());
         self.stats.player_states_received += 1;
+        
+        // Update spatial sharding with peer position
+        if let Some(ref mut sharding) = self.spatial_sharding {
+            // Assume regular players, not relay nodes (can add relay detection later)
+            sharding.update_peer(peer_id, msg.position, false);
+        }
         
         println!("   Total remote players tracked: {}", self.remote_players.player_count());
         
@@ -938,6 +1076,20 @@ fn run_network_thread(
                     NetworkCommand::Unsubscribe { topic } => {
                         if let Err(e) = network.unsubscribe(&topic) {
                             eprintln!("Failed to unsubscribe from {}: {}", topic, e);
+                        }
+                    }
+                    NetworkCommand::SubscribeBulk { topics } => {
+                        for topic in topics {
+                            if let Err(e) = network.subscribe(&topic) {
+                                eprintln!("Failed to subscribe to {}: {}", topic, e);
+                            }
+                        }
+                    }
+                    NetworkCommand::UnsubscribeBulk { topics } => {
+                        for topic in topics {
+                            if let Err(e) = network.unsubscribe(&topic) {
+                                eprintln!("Failed to unsubscribe from {}: {}", topic, e);
+                            }
                         }
                     }
                     NetworkCommand::Publish { topic, data } => {

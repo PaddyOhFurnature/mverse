@@ -79,6 +79,16 @@ pub enum NetworkCommand {
         topic: String,
     },
     
+    /// Subscribe to multiple topics at once (efficient bulk operation)
+    SubscribeBulk {
+        topics: Vec<String>,
+    },
+    
+    /// Unsubscribe from multiple topics at once (efficient bulk operation)
+    UnsubscribeBulk {
+        topics: Vec<String>,
+    },
+    
     /// Publish a message to a topic
     Publish {
         topic: String,

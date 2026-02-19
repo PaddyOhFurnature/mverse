@@ -23,3 +23,4 @@ pub mod user_content;
 pub mod vector_clock;
 pub mod chunk;
 pub mod chunk_manager;
+pub mod spatial_sharding;
