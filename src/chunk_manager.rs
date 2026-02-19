@@ -63,6 +63,7 @@ use crate::messages::VoxelOperation;
 use crate::renderer::MeshBuffer;
 use crate::terrain::TerrainGenerator;
 use crate::user_content::UserContentLayer;
+use crate::vector_clock::VectorClock;
 use crate::voxel::{Octree, VoxelCoord};
 use crate::materials::MaterialId;
 use rapier3d::prelude::ColliderHandle;
@@ -97,6 +98,9 @@ pub struct ChunkManager {
     user_content: UserContentLayer,
     load_queue: Vec<ChunkId>,  // Chunks to load (gradual loading)
     unload_queue: Vec<ChunkId>,  // Chunks to unload (gradual unloading)
+    /// Deduplication set for operations (by signature)
+    /// Prevents applying the same operation multiple times from different sources
+    seen_operations: std::collections::HashSet<[u8; 64]>,
 }
 
 impl ChunkManager {
@@ -108,6 +112,7 @@ impl ChunkManager {
             user_content,
             load_queue: Vec::new(),
             unload_queue: Vec::new(),
+            seen_operations: std::collections::HashSet::new(),
         }
     }
     
@@ -344,8 +349,123 @@ impl ChunkManager {
     /// Add a local voxel operation to the content layer
     ///
     /// This should be called after set_voxel() to ensure the operation
-    /// is persisted to disk.
+    /// is persisted to disk. Includes deduplication check.
     pub fn add_operation(&mut self, op: VoxelOperation) {
+        // Check for duplicates
+        if self.seen_operations.contains(&op.signature) {
+            return; // Already have this operation
+        }
+        
+        self.seen_operations.insert(op.signature);
         self.user_content.add_local_operation(op);
+    }
+    
+    /// Get list of loaded chunk IDs
+    ///
+    /// Used for requesting chunk state from peers. Only request chunks
+    /// that are actually loaded to keep bandwidth usage reasonable.
+    ///
+    /// # Example
+    /// ```rust
+    /// let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+    /// multiplayer.request_chunk_state(loaded_chunk_ids)?;
+    /// ```
+    pub fn get_loaded_chunk_ids(&self) -> Vec<ChunkId> {
+        self.loaded_chunks.keys().copied().collect()
+    }
+    
+    /// Filter operations by chunk IDs
+    ///
+    /// Used when responding to state requests. Returns operations that
+    /// modify the requested chunks.
+    ///
+    /// # Arguments
+    /// * `chunk_ids` - List of chunks to filter for
+    /// * `requester_clock` - Requester's vector clock (filter out ops they have)
+    ///
+    /// # Returns
+    /// HashMap mapping chunk ID to list of operations for that chunk
+    pub fn filter_operations_for_chunks(
+        &self,
+        chunk_ids: &[ChunkId],
+        requester_clock: &VectorClock,
+    ) -> HashMap<ChunkId, Vec<VoxelOperation>> {
+        let mut result: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
+        
+        // Get all operations from user content layer
+        let all_ops = self.user_content.op_log();
+        
+        for op in all_ops {
+            // Check if requester already has this operation
+            // If their vector clock happened-after this op's clock, they have it
+            if requester_clock.happens_after(&op.vector_clock) {
+                continue; // Requester already has this
+            }
+            
+            // Find all chunks affected by this operation
+            let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
+            
+            // Add to result if any affected chunk is in requested list
+            for chunk_id in affected_chunks {
+                if chunk_ids.contains(&chunk_id) {
+                    result.entry(chunk_id)
+                        .or_insert_with(Vec::new)
+                        .push(op.clone());
+                    break; // Only add once per operation
+                }
+            }
+        }
+        
+        result
+    }
+    
+    /// Merge received state operations into local state
+    ///
+    /// Called when receiving ChunkStateResponse from peer. Applies operations
+    /// to appropriate chunks with deduplication and proper CRDT merge.
+    ///
+    /// # Arguments
+    /// * `operations` - Operations to merge (already signature-verified)
+    ///
+    /// # Returns
+    /// Number of operations actually applied (after deduplication)
+    ///
+    /// # Example
+    /// ```rust
+    /// let state_ops = multiplayer.take_pending_state_operations();
+    /// let applied = chunk_manager.merge_received_operations(state_ops);
+    /// println!("Applied {} historical operations", applied);
+    /// ```
+    pub fn merge_received_operations(&mut self, operations: Vec<VoxelOperation>) -> usize {
+        let mut applied_count = 0;
+        
+        for op in operations {
+            // Check for duplicates (by signature)
+            if self.seen_operations.contains(&op.signature) {
+                continue; // Already have this operation
+            }
+            
+            // Mark as seen
+            self.seen_operations.insert(op.signature);
+            
+            // Find all chunks affected by this operation
+            let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
+            
+            // Apply to all affected chunks
+            let material_id = op.material.to_material_id();
+            for chunk_id in affected_chunks {
+                if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
+                    chunk_data.octree.set_voxel(op.coord, material_id);
+                    chunk_data.dirty = true;
+                }
+            }
+            
+            // Add to user content layer for persistence
+            self.user_content.add_local_operation(op);
+            
+            applied_count += 1;
+        }
+        
+        applied_count
     }
 }

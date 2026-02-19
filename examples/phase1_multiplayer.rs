@@ -260,6 +260,17 @@ fn main() {
         start.elapsed().as_secs_f32()
     );
     
+    // Request historical chunk state from all connected peers
+    // This ensures we get edits made by other players before we joined
+    if multiplayer.peer_count() > 0 {
+        println!("🔄 Requesting historical state for loaded chunks from {} peers...", 
+            multiplayer.peer_count());
+        let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
+            eprintln!("   ⚠️  Failed to request chunk state: {}", e);
+        }
+    };
+    
     // Generate meshes and collision for initial chunks
     println!("🔺 Generating meshes and collision for loaded chunks...");
     let mesh_start = Instant::now();
@@ -680,6 +691,40 @@ fn main() {
                             } else {
                                 println!("⚠️  Remote operation for unloaded chunk {} - skipped", chunk_id);
                             }
+                        }
+                    }
+                    
+                    // Process any received state synchronization operations
+                    let state_ops = multiplayer.take_pending_state_operations();
+                    if !state_ops.is_empty() {
+                        println!("📥 Merging {} historical operations from peers", state_ops.len());
+                        let applied = chunk_manager.merge_received_operations(state_ops);
+                        println!("   ✅ Applied {} operations (after deduplication)", applied);
+                    }
+                    
+                    // Handle state requests from peers
+                    let state_requests = multiplayer.take_pending_state_requests();
+                    for (peer_id, request) in state_requests {
+                        println!("📨 Processing state request from {} for {} chunks",
+                            peer_id, request.chunk_ids.len());
+                        
+                        // Filter our operations for requested chunks using ChunkManager
+                        let filtered_ops = chunk_manager.filter_operations_for_chunks(
+                            &request.chunk_ids,
+                            &request.requester_clock
+                        );
+                        
+                        if !filtered_ops.is_empty() {
+                            println!("   → Sending {} operations across {} chunks",
+                                filtered_ops.values().map(|v| v.len()).sum::<usize>(),
+                                filtered_ops.len()
+                            );
+                            
+                            if let Err(e) = multiplayer.send_chunk_state_response(filtered_ops) {
+                                eprintln!("   ⚠️  Failed to send state response: {}", e);
+                            }
+                        } else {
+                            println!("   → No new operations to send (peer is up to date)");
                         }
                     }
                     

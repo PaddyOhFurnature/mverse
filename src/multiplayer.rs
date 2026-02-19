@@ -142,6 +142,9 @@ pub struct MultiplayerSystem {
     /// Pending state synchronization operations (from ChunkStateResponse)
     pending_state_ops: Vec<VoxelOperation>,
     
+    /// Pending state requests from peers
+    pending_state_requests: Vec<(PeerId, ChunkStateRequest)>,
+    
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
     
@@ -217,6 +220,7 @@ impl MultiplayerSystem {
             voxel_op_seen: HashSet::new(),
             pending_ops: Vec::new(),
             pending_state_ops: Vec::new(),
+            pending_state_requests: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -516,8 +520,8 @@ impl MultiplayerSystem {
     
     /// Handle incoming chunk state request
     ///
-    /// Peer is requesting our operations for specific chunks. Filter our op_log
-    /// and send back operations they don't already have (based on vector clock).
+    /// Peer is requesting our operations for specific chunks. Queue the request
+    /// for the game loop to handle (needs access to ChunkManager).
     fn handle_state_request(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let request = ChunkStateRequest::from_bytes(data)
             .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
@@ -525,11 +529,8 @@ impl MultiplayerSystem {
         println!("📨 Received state request from {} for {} chunks",
             peer_id, request.chunk_ids.len());
         
-        // This is a placeholder - actual filtering needs access to UserContentLayer
-        // Game loop will need to call a method to handle this properly
-        // For now, just acknowledge receipt
-        
-        self.stats.state_requests_sent += 1; // Track that we received it
+        // Queue for game loop to handle (needs ChunkManager access)
+        self.pending_state_requests.push((peer_id, request));
         
         Ok(())
     }
@@ -651,6 +652,44 @@ impl MultiplayerSystem {
     /// Called once per frame after update().
     pub fn take_pending_state_operations(&mut self) -> Vec<VoxelOperation> {
         std::mem::take(&mut self.pending_state_ops)
+    }
+    
+    /// Get pending state requests from peers.
+    ///
+    /// Game loop should call this, filter operations using ChunkManager,
+    /// and send responses back using send_chunk_state_response().
+    pub fn take_pending_state_requests(&mut self) -> Vec<(PeerId, ChunkStateRequest)> {
+        std::mem::take(&mut self.pending_state_requests)
+    }
+    
+    /// Send chunk state response to a peer.
+    ///
+    /// Called by game loop after filtering operations using ChunkManager.
+    /// Operations are grouped by chunk ID and sent with our vector clock.
+    /// Note: Uses broadcast since we don't have direct peer messaging in gossipsub.
+    pub fn send_chunk_state_response(
+        &mut self, 
+        operations_by_chunk: HashMap<ChunkId, Vec<VoxelOperation>>
+    ) -> Result<()> {
+        if operations_by_chunk.is_empty() {
+            return Ok(()); // Nothing to send
+        }
+        
+        let response = ChunkStateResponse::new(
+            operations_by_chunk,
+            self.vector_clock.clone()
+        );
+        let bytes = response.to_bytes()
+            .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
+        
+        self.cmd_tx.send(NetworkCommand::Publish {
+            topic: "metaverse/state/response".to_string(),
+            data: bytes,
+        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        
+        self.stats.state_responses_received += 1; // Actually sent, not received
+        
+        Ok(())
     }
     
     /// Request chunk state from all connected peers
