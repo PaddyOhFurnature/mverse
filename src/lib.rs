@@ -26,4 +26,5 @@ pub mod chunk;
 pub mod chunk_manager;
 pub mod chunk_streaming;
 pub mod chunk_loader;
+pub mod chunk_placeholder;
 pub mod spatial_sharding;
