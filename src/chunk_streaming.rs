@@ -34,6 +34,7 @@
 
 use crate::{
     chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z},
+    chunk_loader::ChunkLoader,
     coordinates::ECEF,
     voxel::Octree,
 };
@@ -126,6 +127,9 @@ pub struct ChunkStreamer {
     /// Set of chunks currently being loaded (deduplication)
     loading_in_progress: HashSet<ChunkId>,
     
+    /// Background chunk loader
+    chunk_loader: ChunkLoader,
+    
     /// Last player position (for detecting movement)
     last_player_pos: Option<ECEF>,
     
@@ -154,6 +158,7 @@ impl ChunkStreamer {
             loading_queue: VecDeque::new(),
             unloading_queue: Vec::new(),
             loading_in_progress: HashSet::new(),
+            chunk_loader: ChunkLoader::new(),
             last_player_pos: None,
             stats: StreamerStats::default(),
         }
