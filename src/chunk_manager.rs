@@ -59,6 +59,7 @@
 //! ```
 
 use crate::chunk::{ChunkId, chunks_in_radius, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
+use crate::messages::VoxelOperation;
 use crate::renderer::MeshBuffer;
 use crate::terrain::TerrainGenerator;
 use crate::user_content::UserContentLayer;
@@ -338,5 +339,13 @@ impl ChunkManager {
         self.user_content.save_chunks(world_dir)
             .map_err(|e| format!("Failed to save chunks: {}", e))?;
         Ok(())
+    }
+    
+    /// Add a local voxel operation to the content layer
+    ///
+    /// This should be called after set_voxel() to ensure the operation
+    /// is persisted to disk.
+    pub fn add_operation(&mut self, op: VoxelOperation) {
+        self.user_content.add_local_operation(op);
     }
 }

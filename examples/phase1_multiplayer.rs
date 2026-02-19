@@ -578,6 +578,7 @@ fn main() {
                             
                             // Track locally for future CRDT merges
                             if let Ok(op) = multiplayer.broadcast_voxel_operation(dug, Material::Air) {
+                                chunk_manager.add_operation(op.clone());
                                 local_voxel_ops.insert(dug, op);
                             }
                         }
@@ -641,6 +642,7 @@ fn main() {
                                 
                                 // Track locally for future CRDT merges
                                 if let Ok(op) = multiplayer.broadcast_voxel_operation(place_voxel, Material::Stone) {
+                                    chunk_manager.add_operation(op.clone());
                                     local_voxel_ops.insert(place_voxel, op);
                                 }
                             }

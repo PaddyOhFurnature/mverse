@@ -138,6 +138,14 @@ impl UserContentLayer {
         Ok(true)
     }
     
+    /// Add a local operation to the log
+    ///
+    /// Use this for operations created by the local player.
+    /// For received operations from network, use apply_operation().
+    pub fn add_local_operation(&mut self, op: VoxelOperation) {
+        self.op_log.push(op);
+    }
+    
     /// Get the operation log
     pub fn op_log(&self) -> &[VoxelOperation] {
         &self.op_log
