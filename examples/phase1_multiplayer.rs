@@ -672,6 +672,10 @@ fn main() {
                                 let material_id = op.material.to_material_id();
                                 chunk_data.octree.set_voxel(op.coord, material_id);
                                 chunk_data.dirty = true;
+                                
+                                // Add to local op_log for persistence
+                                chunk_manager.add_operation(op.clone());
+                                
                                 println!("✅ Applied remote voxel operation at {:?}", op.coord);
                             } else {
                                 println!("⚠️  Remote operation for unloaded chunk {} - skipped", chunk_id);
