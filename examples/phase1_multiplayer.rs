@@ -174,13 +174,13 @@ fn main() {
     println!("   Note: Publishing will fail until at least one peer connects - this is normal!\n");
     println!();
     
-    // Create window
+    // Create window - sized for 4 instances on 1080p screen (960x540 each)
     let event_loop = EventLoop::new().unwrap();
     let window = event_loop
         .create_window(
             winit::window::WindowAttributes::default()
                 .with_title("Phase 1 Multiplayer - Metaverse Core")
-                .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080))
+                .with_inner_size(winit::dpi::LogicalSize::new(960, 540))
         )
         .unwrap();
     
