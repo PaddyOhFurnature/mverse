@@ -278,27 +278,34 @@ fn main() {
     // ============================================================
     // LOADING PHASE - Pre-load spawn area before gameplay starts
     // ============================================================
-    println!("\n🌍 Loading spawn area (this may take 20-30 seconds)...");
-    println!("   Loading terrain from SRTM elevation data...");
+    println!("\n🌍 Loading spawn area...");
+    println!("   Generating terrain from SRTM elevation data...");
     let load_start = Instant::now();
     
     let spawn_ecef = origin_gps.to_ecef();
     chunk_streamer.update(spawn_ecef);
     
-    // Load spawn chunks with unlimited time budget (blocking is OK during startup)
-    // Target: Load ~20-30 chunks for immediate playable area
-    let mut loaded_last = 0;
-    while chunk_streamer.stats.chunks_queued > 0 && chunk_streamer.stats.chunks_loaded < 30 {
-        chunk_streamer.process_queues(10000.0);  // 10 second budget per iteration
+    // Load chunks until we have enough around spawn (respecting max limit)
+    let target_chunks = 30.min(50 - 5); // Leave headroom below max_loaded_chunks
+    println!("   Target: {} chunks", target_chunks);
+    
+    while chunk_streamer.stats.chunks_loaded < target_chunks && chunk_streamer.stats.chunks_queued > 0 {
+        // Process one chunk at a time for progress visibility
+        let before = chunk_streamer.stats.chunks_loaded;
+        chunk_streamer.process_queues(1000.0);  // 1 second per chunk
         
-        // Progress indicator
-        if chunk_streamer.stats.chunks_loaded != loaded_last {
-            loaded_last = chunk_streamer.stats.chunks_loaded;
-            let progress = (chunk_streamer.stats.chunks_loaded as f32 / 30.0 * 100.0).min(100.0);
-            println!("   [{:3.0}%] Loaded {} chunks ({} remaining in queue)", 
+        if chunk_streamer.stats.chunks_loaded > before {
+            let progress = (chunk_streamer.stats.chunks_loaded as f32 / target_chunks as f32 * 100.0).min(100.0);
+            println!("   [{:3.0}%] Loaded {} / {} chunks", 
                 progress, 
                 chunk_streamer.stats.chunks_loaded,
-                chunk_streamer.stats.chunks_queued);
+                target_chunks);
+        }
+        
+        // Safety: break if stuck
+        if chunk_streamer.stats.chunks_loaded == before && chunk_streamer.stats.chunks_queued > 0 {
+            println!("   ⚠️  Warning: Loading stalled");
+            break;
         }
     }
     
@@ -840,17 +847,25 @@ fn main() {
                     
                     jump_pressed = false;
                     
-                    // Update chunk streaming system (slow background loading)
-                    // Only update desired chunks, don't actually load yet
+                    // Update chunk streaming based on player position
                     chunk_streamer.update(player.position);
                     
-                    // Background loading: Only process 1 chunk every 60 frames (~1 per second at 60fps)
-                    // This prevents FPS drops during gameplay
-                    if frame_count % 60 == 0 && chunk_streamer.stats.chunks_queued > 0 {
-                        chunk_streamer.process_queues(10000.0);  // Load 1 chunk, blocking is OK since it's infrequent
-                        println!("🌍 Background loaded chunk ({} loaded, {} queued)", 
-                            chunk_streamer.stats.chunks_loaded,
-                            chunk_streamer.stats.chunks_queued);
+                    // ACTIVE LOADING: Load chunks in view direction (high priority)
+                    // Check if player is looking at unloaded chunks
+                    let camera_dir = player.camera_forward();
+                    let look_distance = 200.0; // Check 200m ahead
+                    let look_target = player.position.x + camera_dir.x as f64 * look_distance;
+                    // TODO: Calculate chunk at look target and prioritize loading
+                    
+                    // PASSIVE LOADING: Load surrounding chunks every 3 seconds
+                    if frame_count % 180 == 0 && chunk_streamer.stats.chunks_queued > 0 {
+                        // Load 1 chunk in background
+                        chunk_streamer.process_queues(1000.0);
+                        if frame_count % 600 == 0 {  // Log every 10 seconds
+                            println!("🌍 Background: {} loaded, {} queued", 
+                                chunk_streamer.stats.chunks_loaded,
+                                chunk_streamer.stats.chunks_queued);
+                        }
                     }
                     
                     // Update camera
