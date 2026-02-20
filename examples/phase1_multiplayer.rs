@@ -275,14 +275,37 @@ fn main() {
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
     
-    // Initial chunk load around spawn
-    println!("📦 Loading initial chunks around spawn...");
+    // ============================================================
+    // LOADING PHASE - Pre-load spawn area before gameplay starts
+    // ============================================================
+    println!("\n🌍 Loading spawn area (this may take 20-30 seconds)...");
+    println!("   Loading terrain from SRTM elevation data...");
+    let load_start = Instant::now();
+    
     let spawn_ecef = origin_gps.to_ecef();
     chunk_streamer.update(spawn_ecef);
-    chunk_streamer.process_queues(100.0);  // 100ms budget for initial load
     
-    println!("   ✅ Chunk streaming initialized ({} chunks loaded with real terrain)", 
-        chunk_streamer.stats.chunks_loaded
+    // Load spawn chunks with unlimited time budget (blocking is OK during startup)
+    // Target: Load ~20-30 chunks for immediate playable area
+    let mut loaded_last = 0;
+    while chunk_streamer.stats.chunks_queued > 0 && chunk_streamer.stats.chunks_loaded < 30 {
+        chunk_streamer.process_queues(10000.0);  // 10 second budget per iteration
+        
+        // Progress indicator
+        if chunk_streamer.stats.chunks_loaded != loaded_last {
+            loaded_last = chunk_streamer.stats.chunks_loaded;
+            let progress = (chunk_streamer.stats.chunks_loaded as f32 / 30.0 * 100.0).min(100.0);
+            println!("   [{:3.0}%] Loaded {} chunks ({} remaining in queue)", 
+                progress, 
+                chunk_streamer.stats.chunks_loaded,
+                chunk_streamer.stats.chunks_queued);
+        }
+    }
+    
+    let load_elapsed = load_start.elapsed();
+    println!("   ✅ Spawn area loaded: {} chunks in {:.1}s", 
+        chunk_streamer.stats.chunks_loaded,
+        load_elapsed.as_secs_f32()
     );
     
     // Keep chunk manager for user edits and voxel operations tracking only
@@ -817,9 +840,18 @@ fn main() {
                     
                     jump_pressed = false;
                     
-                    // Update chunk streaming system
+                    // Update chunk streaming system (slow background loading)
+                    // Only update desired chunks, don't actually load yet
                     chunk_streamer.update(player.position);
-                    chunk_streamer.process_queues(0.005);  // 5ms time budget
+                    
+                    // Background loading: Only process 1 chunk every 60 frames (~1 per second at 60fps)
+                    // This prevents FPS drops during gameplay
+                    if frame_count % 60 == 0 && chunk_streamer.stats.chunks_queued > 0 {
+                        chunk_streamer.process_queues(10000.0);  // Load 1 chunk, blocking is OK since it's infrequent
+                        println!("🌍 Background loaded chunk ({} loaded, {} queued)", 
+                            chunk_streamer.stats.chunks_loaded,
+                            chunk_streamer.stats.chunks_queued);
+                    }
                     
                     // Update camera
                     camera.position = player.camera_position_local(&physics);
