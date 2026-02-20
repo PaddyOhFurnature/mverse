@@ -74,7 +74,8 @@ impl NasFileSource {
         let candidates = vec![
             PathBuf::from("./srtm-global.tif"),
             PathBuf::from("/mnt/nas/srtm-v3-1s.tif"),
-            PathBuf::from("/run/user/1000/gvfs/afp-volume:host=Blade.local,volume=homes/world/srtm-v3-1s.tif"),
+            PathBuf::from("/run/user/1000/gvfs/smb-share:server=blade.local,share=homes/world/srtm-v3-1s.tif"),
+            PathBuf::from("/run/user/1000/gvfs/afp-volume:host=Blade.local,user=media,volume=homes/world/srtm-v3-1s.tif"),
         ];
         
         for path in candidates {
