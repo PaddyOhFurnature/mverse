@@ -36,10 +36,12 @@ use crate::{
     chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z},
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
+    renderer::MeshBuffer,
     terrain::TerrainGenerator,
     terrain_sync,
     voxel::Octree,
 };
+use rapier3d::prelude::ColliderHandle;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -83,6 +85,15 @@ pub struct LoadedChunk {
     
     /// Voxel data (octree)
     pub octree: Octree,
+    
+    /// GPU mesh buffer (None until generated)
+    pub mesh_buffer: Option<MeshBuffer>,
+    
+    /// Physics collider (None until generated)
+    pub collider: Option<ColliderHandle>,
+    
+    /// Needs mesh regeneration?
+    pub dirty: bool,
     
     /// Distance from player (cached for sorting)
     pub distance_m: f64,
@@ -363,6 +374,9 @@ impl ChunkStreamer {
         Ok(LoadedChunk {
             id: chunk_id,
             octree,
+            mesh_buffer: None,
+            collider: None,
+            dirty: true,  // New chunk needs mesh generation
             distance_m: 0.0, // Will be updated
             in_safe_zone: false, // Will be updated
             state: ChunkLoadState::Loaded,
@@ -406,6 +420,21 @@ impl ChunkStreamer {
     /// Get loaded chunk
     pub fn get_chunk(&self, chunk_id: &ChunkId) -> Option<&LoadedChunk> {
         self.loaded_chunks.get(chunk_id)
+    }
+    
+    /// Get mutable loaded chunk
+    pub fn get_chunk_mut(&mut self, chunk_id: &ChunkId) -> Option<&mut LoadedChunk> {
+        self.loaded_chunks.get_mut(chunk_id)
+    }
+    
+    /// Get all loaded chunks (immutable)
+    pub fn loaded_chunks(&self) -> impl Iterator<Item = &LoadedChunk> {
+        self.loaded_chunks.values()
+    }
+    
+    /// Get all loaded chunks (mutable)
+    pub fn loaded_chunks_mut(&mut self) -> impl Iterator<Item = &mut LoadedChunk> {
+        self.loaded_chunks.values_mut()
     }
     
     /// Get all loaded chunk IDs

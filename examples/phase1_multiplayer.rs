@@ -267,11 +267,11 @@ fn main() {
     // Create chunk streamer with dynamic loading and REAL terrain generation
     println!("🔄 Initializing chunk streaming system...");
     let stream_config = ChunkStreamerConfig {
-        load_radius_m: 500.0,           // Load chunks within 500m
-        unload_radius_m: 1000.0,        // Unload beyond 1km
-        max_loaded_chunks: 100,         // Hard limit
+        load_radius_m: 150.0,           // Start small - load chunks within 150m
+        unload_radius_m: 300.0,         // Unload beyond 300m
+        max_loaded_chunks: 50,          // Moderate limit to start
         safe_zone_radius: 1,            // Keep 3×3 chunks around player
-        frame_budget_ms: 5.0,           // 5ms per frame
+        frame_budget_ms: 5.0,           // 5ms per frame during gameplay
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
     
@@ -294,13 +294,13 @@ fn main() {
     if multiplayer.peer_count() > 0 {
         println!("🔄 Requesting historical state for loaded chunks from {} peers...", 
             multiplayer.peer_count());
-        let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+        let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
         if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
         }
     };
     
-    // Generate meshes and collision for initial chunks
+    // Generate meshes and collision for loaded chunks
     println!("🔺 Generating meshes and collision for loaded chunks...");
     let mesh_start = Instant::now();
     
@@ -309,10 +309,10 @@ fn main() {
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
     
     let mut total_vertices = 0;
-    for chunk_data in chunk_manager.loaded_chunks_mut() {
+    for chunk_data in chunk_streamer.loaded_chunks_mut() {
         // Generate mesh for chunk using exact voxel bounds
-        let min_voxel = chunk_data.chunk_id.min_voxel();
-        let max_voxel = chunk_data.chunk_id.max_voxel();
+        let min_voxel = chunk_data.id.min_voxel();
+        let max_voxel = chunk_data.id.max_voxel();
         let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
         total_vertices += mesh.vertices.len();
         
@@ -326,7 +326,7 @@ fn main() {
             );
             
             println!("   {} min=({},{},{}) max=({},{},{}) center=({},{},{}) offset=({:.1},{:.1},{:.1})", 
-                chunk_data.chunk_id,
+                chunk_data.id,
                 min_voxel.x, min_voxel.y, min_voxel.z,
                 max_voxel.x, max_voxel.y, max_voxel.z,
                 chunk_center.x, chunk_center.y, chunk_center.z,
@@ -359,7 +359,7 @@ fn main() {
     
     // Find ground level at spawn by sampling spawn chunk
     let mut ground_y: f32 = 0.0;
-    if let Some(spawn_chunk_data) = chunk_manager.get_chunk(&spawn_chunk) {
+    if let Some(spawn_chunk_data) = chunk_streamer.get_chunk(&spawn_chunk) {
         // Sample voxels around spawn point to find ground
         let mut found_ground = false;
         for x_off in -5..=5 {
@@ -604,7 +604,7 @@ fn main() {
                         
                         // Try raycasting in each loaded chunk to find hit
                         let mut hit_coord = None;
-                        for chunk_data in chunk_manager.loaded_chunks_mut() {
+                        for chunk_data in chunk_streamer.loaded_chunks_mut() {
                             if let Some(hit) = metaverse_core::voxel::raycast_voxels(
                                 &chunk_data.octree,
                                 &camera_ecef,
@@ -645,7 +645,7 @@ fn main() {
                         
                         // Try raycasting in each loaded chunk to find hit
                         let mut place_info: Option<(VoxelCoord, ChunkId)> = None;
-                        for chunk_data in chunk_manager.loaded_chunks() {
+                        for chunk_data in chunk_streamer.loaded_chunks() {
                             if let Some(hit) = metaverse_core::voxel::raycast_voxels(
                                 &chunk_data.octree,
                                 &camera_ecef,
@@ -680,7 +680,7 @@ fn main() {
                         
                         // Now apply the placement (after iteration is done)
                         if let Some((place_voxel, place_chunk_id)) = place_info {
-                            if let Some(place_chunk) = chunk_manager.get_chunk_mut(&place_chunk_id) {
+                            if let Some(place_chunk) = chunk_streamer.get_chunk_mut(&place_chunk_id) {
                                 place_chunk.octree.set_voxel(place_voxel, MaterialId::STONE);
                                 place_chunk.dirty = true;
                                 
@@ -708,7 +708,7 @@ fn main() {
                         for op in pending_ops {
                             // Apply to the appropriate chunk
                             let chunk_id = ChunkId::from_voxel(&op.coord);
-                            if let Some(chunk_data) = chunk_manager.get_chunk_mut(&chunk_id) {
+                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
                                 let material_id = op.material.to_material_id();
                                 chunk_data.octree.set_voxel(op.coord, material_id);
                                 chunk_data.dirty = true;
@@ -735,7 +735,7 @@ fn main() {
                     if multiplayer.has_new_peers() {
                         let new_peers = multiplayer.get_new_peers();
                         println!("🆕 Detected {} new peers, requesting state...", new_peers.len());
-                        let loaded_chunk_ids = chunk_manager.get_loaded_chunk_ids();
+                        let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
                         if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
                             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
                         }
@@ -868,10 +868,10 @@ fn main() {
                     }
                     
                     // Regenerate dirty chunks (per-chunk, not global)
-                    for chunk_data in chunk_manager.loaded_chunks_mut() {
+                    for chunk_data in chunk_streamer.loaded_chunks_mut() {
                         if chunk_data.dirty {
-                            let min_voxel = chunk_data.chunk_id.min_voxel();
-                            let max_voxel = chunk_data.chunk_id.max_voxel();
+                            let min_voxel = chunk_data.id.min_voxel();
+                            let max_voxel = chunk_data.id.max_voxel();
                             let (mut new_mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
                             
                             // Only create mesh/collision if chunk has geometry
@@ -905,7 +905,7 @@ fn main() {
                             }
                             chunk_data.dirty = false;
                             
-                            println!("🔄 Regenerated mesh and collision for {}", chunk_data.chunk_id);
+                            println!("🔄 Regenerated mesh and collision for {}", chunk_data.id);
                         }
                     }
                     
@@ -924,8 +924,8 @@ fn main() {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
                                 
-                                // Render all loaded chunks
-                                for chunk_data in chunk_manager.loaded_chunks() {
+                                // Render all loaded chunks from ChunkStreamer
+                                for chunk_data in chunk_streamer.loaded_chunks() {
                                     if let Some(mesh_buffer) = &chunk_data.mesh_buffer {
                                         mesh_buffer.render(&mut render_pass);
                                     }
