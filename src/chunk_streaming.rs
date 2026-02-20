@@ -310,7 +310,7 @@ impl ChunkStreamer {
             }
         }
         
-        // Poll for completed chunks from worker threads
+        // Poll for completed chunks from worker threads (always poll, regardless of budget)
         let completed = self.chunk_loader.poll_completed();
         for result in completed {
             self.loading_in_progress.remove(&result.chunk_id);
@@ -328,6 +328,15 @@ impl ChunkStreamer {
                 };
                 self.loaded_chunks.insert(result.chunk_id, chunk);
                 self.stats.chunks_loaded_this_frame += 1;
+                
+                // Log when chunks complete (for debugging parallel loading)
+                if self.stats.chunks_loaded_this_frame <= 3 {
+                    println!("   ✅ Chunk {} loaded ({:.2}s generation time)", 
+                        result.chunk_id, result.load_time_ms as f64 / 1000.0);
+                }
+            } else {
+                // Chunk generation failed - retry?
+                eprintln!("   ❌ Chunk {} generation failed", result.chunk_id);
             }
         }
         

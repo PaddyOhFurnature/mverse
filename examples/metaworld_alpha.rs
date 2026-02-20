@@ -268,9 +268,9 @@ fn main() {
     println!("🔄 Initializing chunk streaming system...");
     let stream_config = ChunkStreamerConfig {
         load_radius_m: 150.0,           // ~78 chunks (5 chunk radius)
-        unload_radius_m: 300.0,         // Unload beyond 300m
-        max_loaded_chunks: 100,         // Plenty of headroom (was 50 - too small!)
-        safe_zone_radius: 1,            // Keep 3×3 chunks around player
+        unload_radius_m: 200.0,         // Unload beyond 200m (tighter window for sliding)
+        max_loaded_chunks: 150,         // Increased headroom for smooth streaming
+        safe_zone_radius: 2,            // Keep 5×5 chunks around player (always loaded)
         frame_budget_ms: 5.0,           // 5ms per frame during gameplay
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
@@ -853,16 +853,25 @@ fn main() {
                     // Update chunk streaming based on player position
                     chunk_streamer.update(player.position);
                     
-                    // PASSIVE LOADING: Only load if below max capacity
-                    // Load 1 chunk every 10 seconds (600 frames at 60fps)
-                    if frame_count % 600 == 0 
-                        && chunk_streamer.stats.chunks_queued > 0 
-                        && chunk_streamer.stats.chunks_loaded < 90 {  // Stop at 90% capacity
+                    // CONTINUOUS LOADING: Process queues every frame with small budget
+                    // This enables smooth loading as player moves without frame drops
+                    const FRAME_BUDGET_MS: f64 = 16.0;  // 16ms budget = 1 chunk per frame max
+                    
+                    // Always process queues (poll completed chunks even if queue empty)
+                    chunk_streamer.process_queues(FRAME_BUDGET_MS);
+                    
+                    // Debug: Log streaming activity (not every frame, too spammy)
+                    if frame_count % 120 == 0 {
+                        let has_activity = chunk_streamer.stats.chunks_queued > 0 
+                            || chunk_streamer.stats.chunks_loading > 0
+                            || chunk_streamer.stats.chunks_loaded_this_frame > 0;
                         
-                        chunk_streamer.process_queues(1000.0);  // Load 1 chunk
-                        println!("🌍 Background: {} loaded, {} queued (max: 100)", 
-                            chunk_streamer.stats.chunks_loaded,
-                            chunk_streamer.stats.chunks_queued);
+                        if has_activity {
+                            println!("🌍 ChunkStreamer: {} loaded, {} queued, {} loading", 
+                                chunk_streamer.stats.chunks_loaded,
+                                chunk_streamer.stats.chunks_queued,
+                                chunk_streamer.stats.chunks_loading);
+                        }
                     }
                     
                     // Update camera
