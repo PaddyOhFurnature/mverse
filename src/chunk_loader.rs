@@ -139,15 +139,13 @@ impl ChunkLoader {
                     let start = Instant::now();
                     
                     // Generate REAL terrain from SRTM elevation data
-                    let octree = {
-                        let terrain_gen = terrain_generator.lock().unwrap();
-                        match terrain_gen.generate_chunk(&request.chunk_id) {
-                            Ok(octree) => Some(octree),
-                            Err(e) => {
-                                eprintln!("[Worker {}] Failed to generate chunk {}: {}", 
-                                    worker_id, request.chunk_id, e);
-                                None
-                            }
+                    // TerrainGenerator.generate_chunk() takes &self (thread-safe)
+                    let octree = match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
+                        Ok(octree) => Some(octree),
+                        Err(e) => {
+                            eprintln!("[Worker {}] Failed to generate chunk {}: {}", 
+                                worker_id, request.chunk_id, e);
+                            None
                         }
                     };
                     

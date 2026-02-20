@@ -289,8 +289,7 @@ impl ChunkStreamer {
             }
         }
         
-        // Load second (use freed memory)
-        let mut loaded_count = 0;
+        // Request loading from worker threads (non-blocking)
         while let Some(chunk_id) = self.loading_queue.pop_front() {
             // Skip if already loaded or loading
             if self.loaded_chunks.contains_key(&chunk_id) {
@@ -300,15 +299,35 @@ impl ChunkStreamer {
                 continue;
             }
             
-            // Load chunk (synchronous for now, will be async in next todo)
-            if let Ok(chunk) = self.load_chunk_immediate(chunk_id) {
-                self.loaded_chunks.insert(chunk_id, chunk);
-                self.stats.chunks_loaded_this_frame += 1;
-                loaded_count += 1;
+            // Request parallel loading (returns immediately)
+            if let Ok(_) = self.chunk_loader.request_load(chunk_id, 1.0) {
+                self.loading_in_progress.insert(chunk_id);
             }
             
+            // Keep requesting until queue empty or budget exhausted
             if start.elapsed().as_secs_f64() * 1000.0 > budget_ms {
                 break;
+            }
+        }
+        
+        // Poll for completed chunks from worker threads
+        let completed = self.chunk_loader.poll_completed();
+        for result in completed {
+            self.loading_in_progress.remove(&result.chunk_id);
+            
+            if let Some(octree) = result.octree {
+                let chunk = LoadedChunk {
+                    id: result.chunk_id,
+                    octree,
+                    mesh_buffer: None,
+                    collider: None,
+                    dirty: true,
+                    distance_m: 0.0,
+                    in_safe_zone: false,
+                    state: ChunkLoadState::Loaded,
+                };
+                self.loaded_chunks.insert(result.chunk_id, chunk);
+                self.stats.chunks_loaded_this_frame += 1;
             }
         }
         

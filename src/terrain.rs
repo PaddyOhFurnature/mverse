@@ -228,9 +228,8 @@ impl TerrainGenerator {
         
         let mut octree = Octree::new();
         
-        // Lock elevation pipeline for queries (internal caching may mutate)
-        let mut elevation = self.elevation.lock()
-            .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
+        // Clone Arc for direct access (ElevationPipeline methods are now &self, thread-safe)
+        let elevation = Arc::clone(&self.elevation);
         
         // 30m×200m×30m chunks aligned to SRTM
         // Sample elevation at 30m intervals (1 per horizontal voxel position)
@@ -244,8 +243,8 @@ impl TerrainGenerator {
                 let sample_ecef = sample_voxel.to_ecef();
                 let sample_gps = sample_ecef.to_gps();
                 
-                // Query SRTM elevation
-                let surface_elevation = elevation.query(&sample_gps)
+                // Query SRTM elevation (thread-safe with brief internal locks)
+                let surface_elevation = elevation.lock().unwrap().query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
                 
