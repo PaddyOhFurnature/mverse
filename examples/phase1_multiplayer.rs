@@ -812,6 +812,10 @@ fn main() {
                     
                     jump_pressed = false;
                     
+                    // Update chunk streaming system
+                    chunk_streamer.update(player.position);
+                    chunk_streamer.process_queues(0.005);  // 5ms time budget
+                    
                     // Update camera
                     camera.position = player.camera_position_local(&physics);
                     camera.yaw = player.camera_yaw;

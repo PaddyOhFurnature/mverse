@@ -199,6 +199,8 @@ impl ChunkStreamer {
             dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
         });
         
+        let to_load_count = to_load_sorted.len();
+        
         // Queue for loading
         for chunk_id in to_load_sorted {
             if !self.loading_queue.contains(&chunk_id) {
@@ -232,6 +234,13 @@ impl ChunkStreamer {
         self.stats.chunks_loaded = self.loaded_chunks.len();
         self.stats.chunks_queued = self.loading_queue.len();
         self.stats.chunks_loading = self.loading_in_progress.len();
+        
+        // Debug: Log chunk streaming activity
+        if to_load_count > 0 || !self.unloading_queue.is_empty() {
+            println!("🌍 ChunkStreamer: {} loaded, {} queued, {} loading, {} to unload",
+                self.stats.chunks_loaded, self.stats.chunks_queued, 
+                self.stats.chunks_loading, self.unloading_queue.len());
+        }
         
         self.last_player_pos = Some(player_pos);
     }
