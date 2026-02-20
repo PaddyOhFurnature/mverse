@@ -9,6 +9,7 @@
 //! See: docs/SRTM_REDUNDANT_PIPELINE.md
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use crate::coordinates::GPS;
 
 /// Elevation query result
@@ -18,10 +19,16 @@ pub struct Elevation {
 }
 
 /// Elevation data source trait
-pub trait ElevationSource {
+/// 
+/// IMPORTANT: Implementations must be Send + Sync for parallel terrain generation.
+/// Use interior mutability (Arc<Mutex<>>) for any mutable state.
+pub trait ElevationSource: Send + Sync {
     /// Query elevation at GPS coordinate
     /// Returns None if data unavailable for this location
-    fn query(&mut self, gps: &GPS) -> Result<Option<Elevation>, ElevationError>;
+    /// 
+    /// Uses &self instead of &mut self to enable parallel queries.
+    /// Implementations use Arc<Mutex<>> for thread-safe interior mutability.
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError>;
     
     /// Source name for logging
     fn name(&self) -> &str;
@@ -55,7 +62,8 @@ impl std::error::Error for ElevationError {}
 pub struct OpenTopographySource {
     api_key: String,
     cache_dir: PathBuf,
-    last_request: Option<std::time::Instant>,
+    // Use Mutex for thread-safe interior mutability (rate limiting state)
+    last_request: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 /// NAS global SRTM file source
@@ -100,9 +108,11 @@ impl NasFileSource {
 }
 
 impl ElevationSource for NasFileSource {
-    fn query(&mut self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         // Query directly from global GeoTIFF
         // This is a single 200GB file covering the entire world
+        // Note: extract_elevation opens file each time (thread-safe but slow)
+        // Future: Cache Dataset handle with Arc<Mutex<>> for better performance
         extract_elevation(&self.file_path, gps).map(Some)
     }
     
@@ -117,18 +127,22 @@ impl OpenTopographySource {
         Self {
             api_key,
             cache_dir,
-            last_request: None,
+            last_request: Arc::new(Mutex::new(None)),
         }
     }
     
     /// Fetch tile from API (respects 2-second rate limit per RULES.md)
-    fn fetch_tile(&mut self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
-        // Rate limiting: 2-second cooldown
-        if let Some(last) = self.last_request {
-            let elapsed = last.elapsed();
-            if elapsed < std::time::Duration::from_secs(2) {
-                let wait = std::time::Duration::from_secs(2) - elapsed;
-                std::thread::sleep(wait);
+    fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
+        // Rate limiting: 2-second cooldown (thread-safe with Mutex)
+        {
+            let mut last_req = self.last_request.lock().unwrap();
+            if let Some(last) = *last_req {
+                let elapsed = last.elapsed();
+                if elapsed < std::time::Duration::from_secs(2) {
+                    let wait = std::time::Duration::from_secs(2) - elapsed;
+                    drop(last_req); // Release lock before sleeping
+                    std::thread::sleep(wait);
+                }
             }
         }
         
@@ -152,7 +166,8 @@ impl OpenTopographySource {
         let response = reqwest::blocking::get(&url)
             .map_err(|e| ElevationError::NetworkError(e.to_string()))?;
         
-        self.last_request = Some(std::time::Instant::now());
+        // Update last request time (thread-safe)
+        *self.last_request.lock().unwrap() = Some(std::time::Instant::now());
         
         if !response.status().is_success() {
             return Err(ElevationError::NetworkError(
@@ -180,7 +195,7 @@ impl OpenTopographySource {
 }
 
 impl ElevationSource for OpenTopographySource {
-    fn query(&mut self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         // Determine which 1° tile contains this point
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
@@ -304,8 +319,8 @@ impl ElevationPipeline {
     }
     
     /// Query elevation, trying sources in order until one succeeds
-    pub fn query(&mut self, gps: &GPS) -> Result<Elevation, ElevationError> {
-        for source in &mut self.sources {
+    pub fn query(&self, gps: &GPS) -> Result<Elevation, ElevationError> {
+        for source in &self.sources {
             match source.query(gps) {
                 Ok(Some(elevation)) => return Ok(elevation),
                 Ok(None) => continue, // Try next source
