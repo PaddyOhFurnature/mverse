@@ -33,8 +33,8 @@ pub struct PlayerPersistence {
 
 impl Default for PlayerPersistence {
     fn default() -> Self {
-        // Default spawn: Mount Everest summit
-        let gps = GPS::new(27.9881, 86.9250, 8848.86);
+        // Default spawn: Brisbane, Australia (same as metaworld_alpha default)
+        let gps = GPS::new(-27.4705, 153.0260, 50.0);
         let position = gps.to_ecef();
         
         Self {

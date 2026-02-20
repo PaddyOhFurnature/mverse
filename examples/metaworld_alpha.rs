@@ -81,6 +81,7 @@ use metaverse_core::{
     messages::{Material, MovementMode},
     multiplayer::MultiplayerSystem,
     physics::{PhysicsWorld, Player},
+    player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
@@ -449,9 +450,24 @@ fn main() {
     let remote_player_mesh = create_remote_player_capsule();
     let remote_player_buffer = MeshBuffer::from_mesh(&context.device, &remote_player_mesh);
     
-    // Spawn player 3m above ground
-    let mut player = Player::new(&mut physics, origin_gps, 0.0);
-    let spawn_local = Vec3::new(0.0, ground_y + 3.0, 0.0);
+    // ============================================================
+    // PLAYER SETUP - Load last position or use default spawn
+    // ============================================================
+    
+    // Load saved player state (position, rotation, mode)
+    let player_state = PlayerPersistence::load(&world_dir);
+    println!("🧍 Setting up player...");
+    
+    // Create player at saved position (or default if no save)
+    let mut player = Player::new(&mut physics, player_state.gps, player_state.yaw);
+    player.position = player_state.position;
+    player.camera_yaw = player_state.yaw;
+    player.camera_pitch = player_state.pitch;
+    
+    // Calculate spawn position (3m above ground at player's location)
+    let origin_local = physics.ecef_to_local(&player.position);
+    let ground_y = origin_local.y;
+    let spawn_local = Vec3::new(origin_local.x, ground_y + 3.0, origin_local.z);
     let spawn_ecef = physics.local_to_ecef(spawn_local);
     player.position = spawn_ecef;
     
@@ -523,6 +539,19 @@ fn main() {
                         Err(e) => {
                             eprintln!("   ⚠️  Failed to save chunks: {}", e);
                         }
+                    }
+                    
+                    // Save player position
+                    let player_state = PlayerPersistence::from_state(
+                        player.position,
+                        player.camera_yaw,
+                        player.camera_pitch,
+                        if player_mode == PlayerModeLocal::Walk { MovementMode::Walk } else { MovementMode::Fly }
+                    );
+                    if let Err(e) = player_state.save(&world_dir) {
+                        eprintln!("   ⚠️  Failed to save player position: {}", e);
+                    } else {
+                        println!("   ✅ Saved player position");
                     }
                     
                     println!("   Goodbye!");
