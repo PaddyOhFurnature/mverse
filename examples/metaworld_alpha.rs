@@ -173,10 +173,10 @@ fn main() {
         .expect("Failed to start listening");
     
     // Connect to relay server for NAT traversal
-    // Relay running on laptop: 192.168.43.168:4001
-    // Peer ID: 12D3KooWBSwyBVre3sttAVJvr12TD2aKtdchWKEnPMnMLGHFVJ4C
-    let relay_addr = "/ip4/192.168.43.168/tcp/4001/p2p/12D3KooWBSwyBVre3sttAVJvr12TD2aKtdchWKEnPMnMLGHFVJ4C";
-    println!("📡 Connecting to relay: {}", relay_addr);
+    // Relay running on Android phone: 49.182.84.9:4001
+    // Peer ID: 12D3KooWEzai1nEViFuX6JmLWDLU61db7T1A3hyd4xpmGs4W59ge
+    let relay_addr = "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWEzai1nEViFuX6JmLWDLU61db7T1A3hyd4xpmGs4W59ge";
+    println!("📡 Connecting to relay on phone: {}", relay_addr);
     if let Err(e) = multiplayer.dial(relay_addr) {
         println!("⚠️  Failed to connect to relay: {} (continuing without relay)", e);
     }
