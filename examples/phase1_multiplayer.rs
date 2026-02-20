@@ -70,6 +70,8 @@
 use metaverse_core::{
     chunk::ChunkId,
     chunk_manager::ChunkManager,
+    chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
+    chunk_placeholder::PlaceholderStyle,
     coordinates::GPS,
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
     identity::Identity,
@@ -248,14 +250,36 @@ fn main() {
         println!("📁 Created world data directory: {:?}", world_dir);
     }
     
-    // Create chunk manager
+    // Create chunk streamer with dynamic loading
+    println!("🔄 Initializing chunk streaming system...");
+    let stream_config = ChunkStreamerConfig {
+        load_radius_m: 500.0,           // Load chunks within 500m
+        unload_radius_m: 1000.0,        // Unload beyond 1km
+        max_loaded_chunks: 100,         // Hard limit
+        safe_zone_radius: 1,            // Keep 3×3 chunks around player
+        frame_budget_ms: 5.0,           // 5ms per frame
+    };
+    let mut chunk_streamer = ChunkStreamer::new(stream_config);
+    
+    // Initial chunk load around spawn
+    println!("📦 Loading initial chunks around spawn...");
+    let spawn_ecef = origin_gps.to_ecef();
+    chunk_streamer.update(spawn_ecef);
+    chunk_streamer.process_queues(100.0);  // 100ms budget for initial load
+    
+    println!("   ✅ Chunk streaming initialized ({} chunks ready)", 
+        chunk_streamer.stats.chunks_loaded
+    );
+    
+    // Keep chunk manager for terrain generation (legacy compatibility)
     let mut chunk_manager = ChunkManager::new(generator, user_content);
     
-    // Load chunks in 2-chunk radius around spawn (3×3×3 = 27 chunks minus corners = 19 chunks)
-    println!("📦 Loading chunks around spawn (radius 2)...");
+    // Load chunks in 2-chunk radius around spawn for immediate terrain
+    // TODO: Remove this once ChunkStreamer generates real terrain
+    println!("📦 Loading terrain data (temporary - legacy system)...");
     chunk_manager.load_chunks_immediate(&spawn_chunk, 2, &world_dir);
     
-    println!("   ✅ Loaded {} chunks in {:.2}s", 
+    println!("   ✅ Loaded {} chunks with terrain in {:.2}s", 
         chunk_manager.loaded_count(),
         start.elapsed().as_secs_f32()
     );
