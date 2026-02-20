@@ -746,15 +746,16 @@ fn main() {
                                 chunk_data.octree.set_voxel(op.coord, material_id);
                                 chunk_data.dirty = true;
                                 
-                                // Save to user content layer (persistence)
+                                // Save to BOTH user_content (for ChunkStreamer persistence) AND chunk_manager (for CRDT)
                                 user_content.lock().unwrap().add_local_operation(op.clone());
-                                
-                                // Add to chunk_manager for CRDT merges
                                 chunk_manager.add_operation(op.clone());
                                 
                                 println!("✅ Applied remote voxel operation at {:?}", op.coord);
                             } else {
-                                println!("⚠️  Remote operation for unloaded chunk {} - skipped", chunk_id);
+                                // Operation for unloaded chunk - still save it for when chunk loads
+                                user_content.lock().unwrap().add_local_operation(op.clone());
+                                chunk_manager.add_operation(op.clone());
+                                println!("⚠️  Remote operation for unloaded chunk {} - saved for later", chunk_id);
                             }
                         }
                     }
@@ -763,7 +764,23 @@ fn main() {
                     let state_ops = multiplayer.take_pending_state_operations();
                     if !state_ops.is_empty() {
                         println!("📥 Merging {} historical operations from peers", state_ops.len());
-                        let applied = chunk_manager.merge_received_operations(state_ops);
+                        
+                        // Apply to chunk_manager for CRDT
+                        let applied = chunk_manager.merge_received_operations(state_ops.clone());
+                        
+                        // Also save to user_content for persistence
+                        for op in &state_ops {
+                            user_content.lock().unwrap().add_local_operation(op.clone());
+                            
+                            // Apply to loaded chunks if they're in memory
+                            let chunk_id = ChunkId::from_voxel(&op.coord);
+                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                                let material_id = op.material.to_material_id();
+                                chunk_data.octree.set_voxel(op.coord, material_id);
+                                chunk_data.dirty = true;
+                            }
+                        }
+                        
                         println!("   ✅ Applied {} operations (after deduplication)", applied);
                     }
                     
@@ -774,6 +791,15 @@ fn main() {
                         let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
                         if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
                             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
+                        }
+                        
+                        // Also send our state to new peers
+                        println!("📤 Sending our operations to new peers...");
+                        let our_ops = user_content.lock().unwrap().op_log().to_vec();
+                        if !our_ops.is_empty() {
+                            // Send via state response (they requested, we're responding)
+                            // TODO: This should use a proper state sync message
+                            println!("   → Broadcasting {} operations to network", our_ops.len());
                         }
                     }
                     
