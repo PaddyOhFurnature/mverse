@@ -199,7 +199,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) gossipsub: gossipsub::Behaviour,
     pub(crate) mdns: mdns::tokio::Behaviour,
     pub(crate) identify: identify::Behaviour,
-    // pub(crate) relay_client: relay::client::Behaviour,  // TODO: Add relay support
+    pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
 }
 
@@ -338,9 +338,9 @@ impl NetworkNode {
             )
         );
         
-        // TODO: Relay client - for NAT traversal coordination
-        // Commenting out until we figure out libp2p 0.56 relay client API
-        // let relay_client = relay::client::Behaviour::new();
+        // Relay client - for NAT traversal coordination ONLY
+        // Once direct P2P is established, relay is no longer needed for data
+        let relay_client = relay::client::Behaviour::new();
         
         // DCUtR - Direct Connection Upgrade through Relay  
         // Attempts hole punching to establish direct P2P through NATs
@@ -352,7 +352,7 @@ impl NetworkNode {
             gossipsub,
             mdns,
             identify,
-            // relay_client,  // Disabled for now
+            relay_client,
             dcutr,
         };
         

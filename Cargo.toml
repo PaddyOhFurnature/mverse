@@ -53,6 +53,8 @@ libp2p = { version = "0.56", features = [
     "request-response", # Request/response protocol for chunk requests
     "identify",         # Peer identification protocol
     "ping",             # Keepalive and latency measurement
+    "relay",            # Circuit relay for NAT traversal coordination
+    "dcutr",            # Direct Connection Upgrade through Relay (hole punching)
     "macros",           # Convenience macros for Swarm
     "tokio",            # Async runtime integration
     "serde",            # Serialization support
