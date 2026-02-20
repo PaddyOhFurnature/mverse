@@ -320,7 +320,9 @@ fn main() {
     
     // Keep chunk manager for user edits and voxel operations tracking only
     // (not for terrain loading - ChunkStreamer handles that now)
-    let mut chunk_manager = ChunkManager::new(chunk_manager_generator, user_content);
+    // Clone the inner UserContentLayer for ChunkManager
+    let chunk_manager_user_content = user_content.lock().unwrap().clone();
+    let mut chunk_manager = ChunkManager::new(chunk_manager_generator, chunk_manager_user_content);
     
     // Request historical chunk state from all connected peers
     // This ensures we get edits made by other players before we joined
