@@ -6,7 +6,7 @@
 use crate::chunk::ChunkId;
 use crate::voxel::Octree;
 use crate::terrain::TerrainGenerator;
-use std::sync::{mpsc::{channel, Sender, Receiver}, Arc};
+use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -48,19 +48,31 @@ pub struct ChunkLoader {
 }
 
 impl ChunkLoader {
-    /// Create new background chunk loader
+    /// Create new background chunk loader with parallel workers
     ///
-    /// Spawns a background thread that processes load requests.
+    /// Spawns multiple background threads for parallel terrain generation.
     /// 
-    /// TODO: Add TerrainGenerator parameter once ElevationSource is Send+Sync
-    pub fn new() -> Self {
+    /// # Arguments
+    /// * `terrain_generator` - Thread-safe terrain generator (Send+Sync)
+    /// * `num_workers` - Number of parallel worker threads (default: 4)
+    pub fn new(terrain_generator: Arc<Mutex<TerrainGenerator>>, num_workers: usize) -> Self {
         let (cmd_tx, cmd_rx) = channel();
         let (result_tx, result_rx) = channel();
         
-        // Spawn background worker thread
-        thread::spawn(move || {
-            Self::worker_thread(cmd_rx, result_tx);
-        });
+        // Spawn multiple worker threads for parallel generation
+        let cmd_rx = Arc::new(Mutex::new(cmd_rx));
+        
+        for worker_id in 0..num_workers {
+            let cmd_rx_clone = Arc::clone(&cmd_rx);
+            let result_tx_clone = result_tx.clone();
+            let terrain_gen_clone = Arc::clone(&terrain_generator);
+            
+            thread::spawn(move || {
+                Self::worker_thread(worker_id, cmd_rx_clone, result_tx_clone, terrain_gen_clone);
+            });
+        }
+        
+        println!("✅ ChunkLoader initialized with {} worker threads", num_workers);
         
         ChunkLoader {
             cmd_tx,
@@ -105,29 +117,51 @@ impl ChunkLoader {
         }
     }
     
-    /// Background worker thread
+    /// Background worker thread (now with REAL terrain generation)
     ///
-    /// Processes load requests, generates terrain, sends results back.
-    ///
-    /// TODO: Accept TerrainGenerator once ElevationSource is Send+Sync
-    /// For now, generates empty octrees as placeholders.
+    /// Processes load requests, generates terrain using SRTM data, sends results back.
+    /// Multiple workers run in parallel for maximum throughput.
     fn worker_thread(
-        cmd_rx: Receiver<LoaderCommand>,
+        worker_id: usize,
+        cmd_rx: Arc<Mutex<Receiver<LoaderCommand>>>,
         result_tx: Sender<LoadResult>,
+        terrain_generator: Arc<Mutex<TerrainGenerator>>,
     ) {
         loop {
-            match cmd_rx.recv() {
+            // Lock only to receive command, then release
+            let command = {
+                let rx = cmd_rx.lock().unwrap();
+                rx.recv()
+            };
+            
+            match command {
                 Ok(LoaderCommand::Load(request)) => {
                     let start = Instant::now();
                     
-                    // TODO: Generate real terrain once TerrainGenerator is thread-safe
-                    // For now, create empty octree as placeholder
-                    let octree = Octree::new();
+                    // Generate REAL terrain from SRTM elevation data
+                    let octree = {
+                        let terrain_gen = terrain_generator.lock().unwrap();
+                        match terrain_gen.generate_chunk(&request.chunk_id) {
+                            Ok(octree) => Some(octree),
+                            Err(e) => {
+                                eprintln!("[Worker {}] Failed to generate chunk {}: {}", 
+                                    worker_id, request.chunk_id, e);
+                                None
+                            }
+                        }
+                    };
+                    
+                    let elapsed = start.elapsed().as_millis();
+                    
+                    if octree.is_some() && elapsed > 1000 {
+                        println!("[Worker {}] Generated chunk {} in {:.2}s", 
+                            worker_id, request.chunk_id, elapsed as f64 / 1000.0);
+                    }
                     
                     let result = LoadResult {
                         chunk_id: request.chunk_id,
-                        octree: Some(octree),
-                        load_time_ms: start.elapsed().as_millis(),
+                        octree,
+                        load_time_ms: elapsed,
                         error: None,
                     };
                     
@@ -137,6 +171,7 @@ impl ChunkLoader {
                     }
                 }
                 Ok(LoaderCommand::Shutdown) => {
+                    println!("[Worker {}] Shutting down", worker_id);
                     break;
                 }
                 Err(_) => {

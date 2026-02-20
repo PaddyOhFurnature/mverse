@@ -169,13 +169,17 @@ pub struct StreamerStats {
 impl ChunkStreamer {
     /// Create a new chunk streamer
     pub fn new(config: ChunkStreamerConfig, terrain_generator: Arc<Mutex<TerrainGenerator>>) -> Self {
+        // Create chunk loader with parallel workers (4 threads for 4-core minimum)
+        let num_workers = 4;  // Can make this configurable later
+        let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers);
+        
         Self {
             config,
             loaded_chunks: HashMap::new(),
             loading_queue: VecDeque::new(),
             unloading_queue: Vec::new(),
             loading_in_progress: HashSet::new(),
-            chunk_loader: ChunkLoader::new(),
+            chunk_loader,
             terrain_generator,
             last_player_pos: None,
             stats: StreamerStats::default(),
