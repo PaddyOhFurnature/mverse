@@ -3111,6 +3111,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytemuck",
+ "chacha20poly1305",
  "crossbeam",
  "dirs",
  "ed25519-dalek",

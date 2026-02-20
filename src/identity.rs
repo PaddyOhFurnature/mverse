@@ -277,6 +277,14 @@ impl Identity {
         &self.signing_key
     }
     
+    /// Get signing key bytes (for deriving encryption keys)
+    /// 
+    /// **WARNING:** This exposes the private key material! Only use for
+    /// deriving symmetric encryption keys, never transmit or log this.
+    pub fn signing_key_bytes(&self) -> &[u8; 32] {
+        self.signing_key.as_bytes()
+    }
+    
     /// Sign arbitrary data with this identity's private key
     ///
     /// The signature can be verified by anyone with your public key/PeerId.

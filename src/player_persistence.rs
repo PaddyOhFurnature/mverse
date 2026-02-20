@@ -1,11 +1,22 @@
-//! Player state persistence
+//! Player state persistence (identity-bound)
 //!
-//! Saves and loads player position, rotation, and settings to/from disk.
-//! Allows players to resume where they left off.
+//! Player state is encrypted and bound to the player's identity key.
+//! This makes it:
+//! - **Portable:** Load your identity.key anywhere and resume where you left off
+//! - **Secure:** State encrypted with identity private key
+//! - **Multi-world:** Same identity can have different states in different worlds
+//!
+//! File location: `world_dir/{peer_id}/player_state.bin` (encrypted binary)
 
 use crate::coordinates::{ECEF, GPS};
+use crate::identity::Identity;
 use crate::messages::MovementMode;
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, OsRng},
+    ChaCha20Poly1305, Nonce,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -69,9 +80,9 @@ impl PlayerPersistence {
         }
     }
     
-    /// Save to disk
-    pub fn save(&self, world_dir: &Path) -> Result<(), String> {
-        let path = Self::persistence_path(world_dir);
+    /// Save to disk (encrypted, identity-bound)
+    pub fn save(&self, world_dir: &Path, identity: &Identity) -> Result<(), String> {
+        let path = Self::persistence_path(world_dir, identity);
         
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -79,47 +90,121 @@ impl PlayerPersistence {
                 .map_err(|e| format!("Failed to create persistence directory: {}", e))?;
         }
         
-        // Serialize to JSON (human-readable for debugging)
-        let json = serde_json::to_string_pretty(self)
+        // Serialize to binary (compact)
+        let plaintext = bincode::serialize(self)
             .map_err(|e| format!("Failed to serialize player state: {}", e))?;
         
+        // Encrypt with identity-derived key
+        let ciphertext = Self::encrypt(&plaintext, identity)
+            .map_err(|e| format!("Failed to encrypt player state: {}", e))?;
+        
         // Write to disk
-        fs::write(&path, json)
+        fs::write(&path, ciphertext)
             .map_err(|e| format!("Failed to write player state: {}", e))?;
         
         Ok(())
     }
     
-    /// Load from disk, or return default if not found
-    pub fn load(world_dir: &Path) -> Self {
-        let path = Self::persistence_path(world_dir);
+    /// Load from disk (encrypted, identity-bound), or return default if not found
+    pub fn load(world_dir: &Path, identity: &Identity) -> Self {
+        let path = Self::persistence_path(world_dir, identity);
         
         // Try to read file
-        let json = match fs::read_to_string(&path) {
+        let ciphertext = match fs::read(&path) {
             Ok(content) => content,
             Err(_) => {
-                println!("No saved player position found, using default spawn");
+                println!("🆕 No saved player state found, using default spawn");
                 return Self::default();
             }
         };
         
-        // Try to deserialize
-        match serde_json::from_str::<PlayerPersistence>(&json) {
+        // Decrypt with identity-derived key
+        let plaintext = match Self::decrypt(&ciphertext, identity) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("⚠️  Failed to decrypt player state: {}, using default", e);
+                return Self::default();
+            }
+        };
+        
+        // Deserialize
+        match bincode::deserialize::<PlayerPersistence>(&plaintext) {
             Ok(state) => {
-                println!("✅ Loaded player position: GPS({:.4}, {:.4}, {:.1}m)", 
-                    state.gps.lat, state.gps.lon, state.gps.alt);
+                println!("✅ Loaded player state: GPS({:.4}, {:.4}, {:.1}m) - last login {} seconds ago", 
+                    state.gps.lat, state.gps.lon, state.gps.alt,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() - state.last_updated
+                );
                 state
             }
             Err(e) => {
-                eprintln!("⚠️ Failed to parse player state: {}, using default", e);
+                eprintln!("⚠️  Failed to parse player state: {}, using default", e);
                 Self::default()
             }
         }
     }
     
-    /// Get path to persistence file
-    fn persistence_path(world_dir: &Path) -> PathBuf {
-        world_dir.join("player_state.json")
+    /// Get path to persistence file (identity-bound)
+    fn persistence_path(world_dir: &Path, identity: &Identity) -> PathBuf {
+        let peer_id = identity.peer_id().to_string();
+        world_dir.join(&peer_id).join("player_state.bin")
+    }
+    
+    /// Encrypt data with identity-derived key
+    fn encrypt(plaintext: &[u8], identity: &Identity) -> Result<Vec<u8>, String> {
+        // Derive encryption key from identity (hash of signing key)
+        let key_material = identity.signing_key_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(b"metaverse-player-state-encryption-v1");
+        hasher.update(key_material);
+        let key_bytes = hasher.finalize();
+        
+        // Create cipher
+        let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes[..32])
+            .map_err(|e| format!("Failed to create cipher: {}", e))?;
+        
+        // Random nonce (96-bit for ChaCha20Poly1305)
+        let nonce_bytes: [u8; 12] = rand::random();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        
+        // Encrypt
+        let ciphertext = cipher.encrypt(nonce, plaintext)
+            .map_err(|e| format!("Encryption failed: {}", e))?;
+        
+        // Prepend nonce to ciphertext (nonce is public, doesn't need to be secret)
+        let mut result = Vec::with_capacity(12 + ciphertext.len());
+        result.extend_from_slice(&nonce_bytes);
+        result.extend_from_slice(&ciphertext);
+        
+        Ok(result)
+    }
+    
+    /// Decrypt data with identity-derived key
+    fn decrypt(data: &[u8], identity: &Identity) -> Result<Vec<u8>, String> {
+        if data.len() < 12 {
+            return Err("Data too short to contain nonce".to_string());
+        }
+        
+        // Extract nonce (first 12 bytes)
+        let nonce = Nonce::from_slice(&data[..12]);
+        let ciphertext = &data[12..];
+        
+        // Derive encryption key from identity (same as encrypt)
+        let key_material = identity.signing_key_bytes();
+        let mut hasher = Sha256::new();
+        hasher.update(b"metaverse-player-state-encryption-v1");
+        hasher.update(key_material);
+        let key_bytes = hasher.finalize();
+        
+        // Create cipher
+        let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes[..32])
+            .map_err(|e| format!("Failed to create cipher: {}", e))?;
+        
+        // Decrypt
+        cipher.decrypt(nonce, ciphertext)
+            .map_err(|e| format!("Decryption failed: {}", e))
     }
     
     /// Check if saved state is stale (older than N days)
@@ -143,6 +228,7 @@ impl PlayerPersistence {
         pitch: f32,
         movement_mode: MovementMode,
         world_dir: &Path,
+        identity: &Identity,
     ) -> Result<(), String> {
         self.position = position;
         self.gps = position.to_gps();
@@ -154,7 +240,7 @@ impl PlayerPersistence {
             .unwrap()
             .as_secs();
         
-        self.save(world_dir)
+        self.save(world_dir, identity)
     }
 }
 

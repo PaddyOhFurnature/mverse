@@ -454,8 +454,8 @@ fn main() {
     // PLAYER SETUP - Load last position or use default spawn
     // ============================================================
     
-    // Load saved player state (position, rotation, mode)
-    let player_state = PlayerPersistence::load(&world_dir);
+    // Load saved player state (position, rotation, mode) - encrypted with identity
+    let player_state = PlayerPersistence::load(&world_dir, &identity);
     println!("🧍 Setting up player...");
     
     // Create player at saved position (or default if no save)
@@ -548,7 +548,7 @@ fn main() {
                         player.camera_pitch,
                         if player_mode == PlayerModeLocal::Walk { MovementMode::Walk } else { MovementMode::Fly }
                     );
-                    if let Err(e) = player_state.save(&world_dir) {
+                    if let Err(e) = player_state.save(&world_dir, &identity) {
                         eprintln!("   ⚠️  Failed to save player position: {}", e);
                     } else {
                         println!("   ✅ Saved player position");
