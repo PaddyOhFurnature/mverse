@@ -36,10 +36,13 @@ use crate::{
     chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z},
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
+    terrain::TerrainGenerator,
+    terrain_sync,
     voxel::Octree,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Configuration for chunk streaming behavior
@@ -127,8 +130,11 @@ pub struct ChunkStreamer {
     /// Set of chunks currently being loaded (deduplication)
     loading_in_progress: HashSet<ChunkId>,
     
-    /// Background chunk loader
+    /// Background chunk loader (currently unused, will be used when ElevationSource is Send+Sync)
     chunk_loader: ChunkLoader,
+    
+    /// Terrain generator for synchronous terrain generation
+    terrain_generator: Arc<Mutex<TerrainGenerator>>,
     
     /// Last player position (for detecting movement)
     last_player_pos: Option<ECEF>,
@@ -151,7 +157,7 @@ pub struct StreamerStats {
 
 impl ChunkStreamer {
     /// Create a new chunk streamer
-    pub fn new(config: ChunkStreamerConfig) -> Self {
+    pub fn new(config: ChunkStreamerConfig, terrain_generator: Arc<Mutex<TerrainGenerator>>) -> Self {
         Self {
             config,
             loaded_chunks: HashMap::new(),
@@ -159,14 +165,15 @@ impl ChunkStreamer {
             unloading_queue: Vec::new(),
             loading_in_progress: HashSet::new(),
             chunk_loader: ChunkLoader::new(),
+            terrain_generator,
             last_player_pos: None,
             stats: StreamerStats::default(),
         }
     }
     
     /// Create with default configuration
-    pub fn new_default() -> Self {
-        Self::new(ChunkStreamerConfig::default())
+    pub fn new_default(terrain_generator: Arc<Mutex<TerrainGenerator>>) -> Self {
+        Self::new(ChunkStreamerConfig::default(), terrain_generator)
     }
     
     /// Update based on player position
@@ -346,8 +353,12 @@ impl ChunkStreamer {
     
     /// Load chunk immediately (synchronous, will be async later)
     fn load_chunk_immediate(&mut self, chunk_id: ChunkId) -> Result<LoadedChunk, String> {
-        // For now, create empty chunk (terrain generation will be added later)
-        let octree = Octree::new();
+        // Generate real terrain using synchronous terrain generator
+        let generator = self.terrain_generator.lock()
+            .map_err(|e| format!("Failed to lock terrain generator: {}", e))?;
+        
+        let octree = generator.generate_chunk(&chunk_id)
+            .map_err(|e| format!("Failed to generate terrain for {}: {}", chunk_id, e))?;
         
         Ok(LoadedChunk {
             id: chunk_id,

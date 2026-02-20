@@ -97,6 +97,7 @@ use winit::{
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
 };
+use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PlayerModeLocal {
@@ -221,7 +222,20 @@ fn main() {
     println!("   Origin voxel: {:?}", origin_voxel);
     
     // Create terrain generator with origin for coordinate conversion
-    let generator = TerrainGenerator::new(elevation_pipeline, origin_gps, origin_voxel);
+    let elevation_pipeline_1 = elevation_pipeline;
+    let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel);
+    let generator_arc = Arc::new(Mutex::new(generator));
+    
+    // Create second elevation pipeline for chunk_manager (temporary until refactor)
+    let mut elevation_pipeline_2 = ElevationPipeline::new();
+    if let Some(nas_source) = NasFileSource::new() {
+        elevation_pipeline_2.add_source(Box::new(nas_source));
+    }
+    let cache_dir_2 = std::env::current_dir().unwrap().join("elevation_cache");
+    if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
+        elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
+    }
+    let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
     
     // Calculate spawn chunk
     let spawn_chunk = ChunkId::from_voxel(&origin_voxel);
@@ -250,7 +264,7 @@ fn main() {
         println!("📁 Created world data directory: {:?}", world_dir);
     }
     
-    // Create chunk streamer with dynamic loading
+    // Create chunk streamer with dynamic loading and REAL terrain generation
     println!("🔄 Initializing chunk streaming system...");
     let stream_config = ChunkStreamerConfig {
         load_radius_m: 500.0,           // Load chunks within 500m
@@ -259,7 +273,7 @@ fn main() {
         safe_zone_radius: 1,            // Keep 3×3 chunks around player
         frame_budget_ms: 5.0,           // 5ms per frame
     };
-    let mut chunk_streamer = ChunkStreamer::new(stream_config);
+    let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
     
     // Initial chunk load around spawn
     println!("📦 Loading initial chunks around spawn...");
@@ -267,22 +281,13 @@ fn main() {
     chunk_streamer.update(spawn_ecef);
     chunk_streamer.process_queues(100.0);  // 100ms budget for initial load
     
-    println!("   ✅ Chunk streaming initialized ({} chunks ready)", 
+    println!("   ✅ Chunk streaming initialized ({} chunks loaded with real terrain)", 
         chunk_streamer.stats.chunks_loaded
     );
     
-    // Keep chunk manager for terrain generation (legacy compatibility)
-    let mut chunk_manager = ChunkManager::new(generator, user_content);
-    
-    // Load chunks in 2-chunk radius around spawn for immediate terrain
-    // TODO: Remove this once ChunkStreamer generates real terrain
-    println!("📦 Loading terrain data (temporary - legacy system)...");
-    chunk_manager.load_chunks_immediate(&spawn_chunk, 2, &world_dir);
-    
-    println!("   ✅ Loaded {} chunks with terrain in {:.2}s", 
-        chunk_manager.loaded_count(),
-        start.elapsed().as_secs_f32()
-    );
+    // Keep chunk manager for user edits and voxel operations tracking only
+    // (not for terrain loading - ChunkStreamer handles that now)
+    let mut chunk_manager = ChunkManager::new(chunk_manager_generator, user_content);
     
     // Request historical chunk state from all connected peers
     // This ensures we get edits made by other players before we joined
