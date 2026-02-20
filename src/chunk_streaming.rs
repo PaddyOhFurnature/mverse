@@ -286,6 +286,7 @@ impl ChunkStreamer {
         }
         
         // Load second (use freed memory)
+        let mut loaded_count = 0;
         while let Some(chunk_id) = self.loading_queue.pop_front() {
             // Skip if already loaded or loading
             if self.loaded_chunks.contains_key(&chunk_id) {
@@ -299,6 +300,7 @@ impl ChunkStreamer {
             if let Ok(chunk) = self.load_chunk_immediate(chunk_id) {
                 self.loaded_chunks.insert(chunk_id, chunk);
                 self.stats.chunks_loaded_this_frame += 1;
+                loaded_count += 1;
             }
             
             if start.elapsed().as_secs_f64() * 1000.0 > budget_ms {
