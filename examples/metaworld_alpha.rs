@@ -730,14 +730,26 @@ fn main() {
                                 let capsule_radius = 0.4;
                                 let capsule_height = 1.8;
                                 
-                                // Simple AABB check
+                                // Check if voxel would overlap with player capsule
+                                // Player position is at feet, capsule extends up
                                 let dx = (place_local.x - player_local.x).abs();
-                                let dy = (place_local.y - player_local.y).abs();
+                                let dy = place_local.y - player_local.y;  // Relative Y (positive = above player)
                                 let dz = (place_local.z - player_local.z).abs();
                                 
-                                if dx > capsule_radius && dz > capsule_radius && dy > capsule_height / 2.0 {
+                                // Horizontal distance check (XZ plane)
+                                let horizontal_dist = (dx * dx + dz * dz).sqrt();
+                                
+                                // Only block placement if voxel is:
+                                // - Within capsule radius horizontally AND
+                                // - Between player's feet and head (0 to capsule_height)
+                                let blocks_player = horizontal_dist < capsule_radius && dy >= 0.0 && dy <= capsule_height;
+                                
+                                if !blocks_player {
+                                    // Voxel doesn't intersect player - safe to place
                                     let place_chunk_id = ChunkId::from_voxel(&place_voxel);
                                     place_info = Some((place_voxel, place_chunk_id));
+                                } else {
+                                    println!("⚠️  Can't place block inside player!");
                                 }
                                 break;
                             }
