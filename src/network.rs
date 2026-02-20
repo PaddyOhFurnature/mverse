@@ -199,7 +199,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) gossipsub: gossipsub::Behaviour,
     pub(crate) mdns: mdns::tokio::Behaviour,
     pub(crate) identify: identify::Behaviour,
-    // pub(crate) relay_client: relay::client::Behaviour,  // TODO: Add relay support
+    pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
 }
 
@@ -292,73 +292,9 @@ impl NetworkNode {
         let local_peer_id = identity.peer_id().clone();
         let keypair = identity.to_libp2p_keypair();
         
-        // Configure Kademlia DHT
-        let kad_store = MemoryStore::new(local_peer_id);
-        let mut kad_config = kad::Config::default();
-        kad_config.set_query_timeout(Duration::from_secs(5 * 60));
-        let kademlia = kad::Behaviour::with_config(
-            local_peer_id,
-            kad_store,
-            kad_config,
-        );
-        
-        // Configure Gossipsub
-        let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(1))
-            .validation_mode(ValidationMode::Strict)
-            .max_transmit_size(1024 * 1024) // 1 MB max message size (for state sync)
-            .message_id_fn(|msg| {
-                use sha2::{Sha256, Digest};
-                let mut hasher = Sha256::new();
-                hasher.update(&msg.data);
-                // Include source and sequence to prevent deduplication of similar messages
-                hasher.update(msg.source.as_ref().map(|p| p.to_bytes()).unwrap_or_default().as_slice());
-                hasher.update(&msg.sequence_number.unwrap_or(0).to_le_bytes());
-                gossipsub::MessageId::from(hasher.finalize().to_vec())
-            })
-            .build()
-            .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-        
-        let gossipsub = gossipsub::Behaviour::new(
-            MessageAuthenticity::Signed(keypair.clone()),
-            gossipsub_config,
-        ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-        
-        // Configure mDNS for local network discovery
-        let mdns = mdns::tokio::Behaviour::new(
-            mdns::Config::default(),
-            local_peer_id,
-        ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-        
-        // Configure Identify protocol
-        let identify = identify::Behaviour::new(
-            identify::Config::new(
-                "/metaverse/1.0.0".to_string(),
-                keypair.public(),
-            )
-        );
-        
-        // TODO: Relay client - for NAT traversal coordination
-        // Commenting out until we figure out libp2p 0.56 relay client API
-        // let relay_client = relay::client::Behaviour::new();
-        
-        // DCUtR - Direct Connection Upgrade through Relay  
-        // Attempts hole punching to establish direct P2P through NATs
-        let dcutr = dcutr::Behaviour::new(local_peer_id);
-        
-        // Combine behaviours
-        let behaviour = MetaverseBehaviour {
-            kademlia,
-            gossipsub,
-            mdns,
-            identify,
-            // relay_client,  // Disabled for now
-            dcutr,
-        };
-        
-        // Build Swarm with libp2p v0.56 API
-        // Use development_transport which handles TCP + Noise + Yamux automatically
-        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+        // Build Swarm with libp2p v0.56 API with relay client
+        // All behaviours are created inside the closure
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
@@ -366,7 +302,66 @@ impl NetworkNode {
                 yamux::Config::default,
             )
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
-            .with_behaviour(|_| behaviour)
+            .with_relay_client(noise::Config::new, yamux::Config::default)
+            .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
+            .with_behaviour(|keypair, relay_behaviour| {
+                // Configure Kademlia DHT
+                let kad_store = MemoryStore::new(local_peer_id);
+                let mut kad_config = kad::Config::default();
+                kad_config.set_query_timeout(Duration::from_secs(5 * 60));
+                let kademlia = kad::Behaviour::with_config(
+                    local_peer_id,
+                    kad_store,
+                    kad_config,
+                );
+                
+                // Configure Gossipsub
+                let gossipsub_config = gossipsub::ConfigBuilder::default()
+                    .heartbeat_interval(Duration::from_secs(1))
+                    .validation_mode(ValidationMode::Strict)
+                    .max_transmit_size(1024 * 1024) // 1 MB max message size (for state sync)
+                    .message_id_fn(|msg| {
+                        use sha2::{Sha256, Digest};
+                        let mut hasher = Sha256::new();
+                        hasher.update(&msg.data);
+                        hasher.update(msg.source.as_ref().map(|p| p.to_bytes()).unwrap_or_default().as_slice());
+                        hasher.update(&msg.sequence_number.unwrap_or(0).to_le_bytes());
+                        gossipsub::MessageId::from(hasher.finalize().to_vec())
+                    })
+                    .build()
+                    .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
+                
+                let gossipsub = gossipsub::Behaviour::new(
+                    MessageAuthenticity::Signed(keypair.clone()),
+                    gossipsub_config,
+                ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
+                
+                // Configure mDNS for local network discovery
+                let mdns = mdns::tokio::Behaviour::new(
+                    mdns::Config::default(),
+                    local_peer_id,
+                ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
+                
+                // Configure Identify protocol
+                let identify = identify::Behaviour::new(
+                    identify::Config::new(
+                        "/metaverse/1.0.0".to_string(),
+                        keypair.public(),
+                    )
+                );
+                
+                // DCUtR for hole punching
+                let dcutr = dcutr::Behaviour::new(local_peer_id);
+                
+                Ok(MetaverseBehaviour {
+                    kademlia,
+                    gossipsub,
+                    mdns,
+                    identify,
+                    relay_client: relay_behaviour,
+                    dcutr,
+                })
+            })
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
@@ -562,6 +557,36 @@ impl NetworkNode {
                 }
                 None
             }
+            
+            // Relay client events - NAT traversal coordination
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayClient(event)) => {
+                match event {
+                    relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
+                        println!("✅ [RELAY] Reservation {} by relay: {}", 
+                            if renewal { "renewed" } else { "accepted" }, relay_peer_id);
+                        None
+                    }
+                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                        println!("🔄 [RELAY] Circuit established via {}", relay_peer_id);
+                        None
+                    }
+                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                        println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
+                        None
+                    }
+                }
+            }
+            
+            // DCUtR events - Direct connection upgrade (hole punching)
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => {
+                println!("🎯 [DCUTR] Event: {:?}", event);
+                None
+            }
+            
+            // TODO: DCUtR events - Direct connection upgrade (hole punching)
+            // Event handling disabled due to libp2p version conflicts
+            // DCUtR behaviour is still active and will perform hole punching
+            // SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => { ... }
             
             // Ignore other events
             _ => None,

@@ -172,6 +172,15 @@ fn main() {
     multiplayer.listen_on("/ip4/0.0.0.0/tcp/0")
         .expect("Failed to start listening");
     
+    // Connect to relay server for NAT traversal
+    // Relay running on laptop: 192.168.43.168:4001
+    // Peer ID: 12D3KooWBSwyBVre3sttAVJvr12TD2aKtdchWKEnPMnMLGHFVJ4C
+    let relay_addr = "/ip4/192.168.43.168/tcp/4001/p2p/12D3KooWBSwyBVre3sttAVJvr12TD2aKtdchWKEnPMnMLGHFVJ4C";
+    println!("📡 Connecting to relay: {}", relay_addr);
+    if let Err(e) = multiplayer.dial(relay_addr) {
+        println!("⚠️  Failed to connect to relay: {} (continuing without relay)", e);
+    }
+    
     println!("   Listening for connections...");
     println!("   mDNS discovery active (auto-connect on LAN)");
     println!("   PeerId: {}", multiplayer.peer_id());

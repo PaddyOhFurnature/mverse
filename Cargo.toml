@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 # Phase 1: Coordinate system
-geoconv = "0.1"  # GPS (lat/lon/alt) ↔ ECEF conversions, WGS84
+geoconv = { version = "0.1", optional = true }  # GPS (lat/lon/alt) ↔ ECEF conversions, WGS84
 
-# Phase 2: Elevation data
-gdal = "0.18"  # GeoTIFF with random access for large files
-gdal-sys = "0.11"  # GDAL system bindings
+# Phase 2: Elevation data (optional for relay server)
+gdal = { version = "0.18", optional = true }  # GeoTIFF with random access for large files
+gdal-sys = { version = "0.11", optional = true }  # GDAL system bindings
 
 rayon = "1"
 sha2 = "0.10"
@@ -21,8 +21,8 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros", "rt-multi-t
 futures = "0.3"
 tiff = "0.11"  # TIFF/GeoTIFF parsing for SRTM elevation data
 serde_json = "1"
-wgpu = { version = "24", features = ["wgsl"] }
-winit = "0.30"
+wgpu = { version = "24", features = ["wgsl"], optional = true }
+winit = { version = "0.30", optional = true }
 pollster = "0.4"
 glam = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
@@ -78,9 +78,38 @@ chacha20poly1305 = "0.10"
 
 # Message passing for async/sync bridge
 crossbeam = "0.8"
+env_logger = "0.11"  # Logging for binaries
 
 [dev-dependencies]
 tempfile = "3"
-env_logger = "0.11"
 shellexpand = "3"
 
+
+[features]
+# Default features include terrain and full client functionality
+default = ["terrain", "client"]
+
+# Terrain features (GDAL for elevation data)
+terrain = ["gdal", "gdal-sys", "geoconv"]
+
+# Client features (rendering, etc)
+client = ["wgpu", "winit"]
+
+# Vendor OpenSSL for cross-compilation (builds from source instead of linking system OpenSSL)
+vendored-openssl = ["openssl/vendored"]
+
+# OpenSSL dependency
+[dependencies.openssl]
+version = "0.10"
+features = ["vendored"]
+optional = false
+
+# CLI argument parsing for relay server
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+
+[[bin]]
+name = "metaverse-relay"
+path = "examples/metaverse_relay.rs"
+required-features = []  # Relay doesn't need terrain or client features
