@@ -242,7 +242,7 @@ fn main() {
     println!("   Spawn chunk: {}", spawn_chunk);
     
     // User content layer - separates edits from base terrain
-    let user_content = UserContentLayer::new();
+    let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
     
     // World data directory - unique per identity for local testing
     // In production on separate machines, all would use "world_data"
@@ -273,7 +273,7 @@ fn main() {
         safe_zone_radius: 2,            // Keep 5×5 chunks around player (always loaded)
         frame_budget_ms: 5.0,           // 5ms per frame during gameplay
     };
-    let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
+    let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone(), user_content.clone(), world_dir.clone());
     
     // ============================================================
     // LOADING PHASE - Pre-load spawn area before gameplay starts
@@ -656,12 +656,11 @@ fn main() {
                             println!("⛏️  Dug voxel at {:?}", dug);
                             
                             // Broadcast voxel operation
-                            if let Err(e) = multiplayer.broadcast_voxel_operation(dug, Material::Air) {
-                                eprintln!("Failed to broadcast dig: {}", e);
-                            }
-                            
-                            // Track locally for future CRDT merges
                             if let Ok(op) = multiplayer.broadcast_voxel_operation(dug, Material::Air) {
+                                // Save to user content layer (persistence)
+                                user_content.lock().unwrap().add_local_operation(op.clone());
+                                
+                                // Track for CRDT merges
                                 chunk_manager.add_operation(op.clone());
                                 local_voxel_ops.insert(dug, op);
                             }
@@ -719,13 +718,12 @@ fn main() {
                                 
                                 println!("🧱 Placed voxel at {:?}", place_voxel);
                                 
-                                // Broadcast voxel operation
-                                if let Err(e) = multiplayer.broadcast_voxel_operation(place_voxel, Material::Stone) {
-                                    eprintln!("Failed to broadcast place: {}", e);
-                                }
-                                
-                                // Track locally for future CRDT merges
+                                // Broadcast voxel operation and save to user content
                                 if let Ok(op) = multiplayer.broadcast_voxel_operation(place_voxel, Material::Stone) {
+                                    // Save to user content layer (persistence)
+                                    user_content.lock().unwrap().add_local_operation(op.clone());
+                                    
+                                    // Track for CRDT merges
                                     chunk_manager.add_operation(op.clone());
                                     local_voxel_ops.insert(place_voxel, op);
                                 }
@@ -746,7 +744,10 @@ fn main() {
                                 chunk_data.octree.set_voxel(op.coord, material_id);
                                 chunk_data.dirty = true;
                                 
-                                // Add to local op_log for persistence
+                                // Save to user content layer (persistence)
+                                user_content.lock().unwrap().add_local_operation(op.clone());
+                                
+                                // Add to chunk_manager for CRDT merges
                                 chunk_manager.add_operation(op.clone());
                                 
                                 println!("✅ Applied remote voxel operation at {:?}", op.coord);

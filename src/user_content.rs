@@ -138,6 +138,16 @@ impl UserContentLayer {
         Ok(true)
     }
     
+    /// Get all operations affecting a chunk (for applying on load)
+    pub fn operations_for_chunk(&self, chunk_id: &ChunkId) -> Vec<&VoxelOperation> {
+        self.op_log.iter()
+            .filter(|op| {
+                let op_chunk = ChunkId::from_voxel(&op.coord);
+                op_chunk == *chunk_id
+            })
+            .collect()
+    }
+    
     /// Add a local operation to the log
     ///
     /// Use this for operations created by the local player.

@@ -36,14 +36,16 @@ use crate::{
     chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z},
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
+    materials::MaterialId,
     renderer::MeshBuffer,
     terrain::TerrainGenerator,
     terrain_sync,
+    user_content::UserContentLayer,
     voxel::Octree,
 };
 use rapier3d::prelude::ColliderHandle;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -141,11 +143,17 @@ pub struct ChunkStreamer {
     /// Set of chunks currently being loaded (deduplication)
     loading_in_progress: HashSet<ChunkId>,
     
-    /// Background chunk loader (currently unused, will be used when ElevationSource is Send+Sync)
+    /// Background chunk loader (parallel workers)
     chunk_loader: ChunkLoader,
     
     /// Terrain generator for synchronous terrain generation
     terrain_generator: Arc<Mutex<TerrainGenerator>>,
+    
+    /// User content layer for voxel operations (edits/modifications)
+    user_content: Arc<Mutex<UserContentLayer>>,
+    
+    /// World data directory for persistence
+    world_dir: PathBuf,
     
     /// Last player position (for detecting movement)
     last_player_pos: Option<ECEF>,
@@ -168,7 +176,12 @@ pub struct StreamerStats {
 
 impl ChunkStreamer {
     /// Create a new chunk streamer
-    pub fn new(config: ChunkStreamerConfig, terrain_generator: Arc<Mutex<TerrainGenerator>>) -> Self {
+    pub fn new(
+        config: ChunkStreamerConfig, 
+        terrain_generator: Arc<Mutex<TerrainGenerator>>,
+        user_content: Arc<Mutex<UserContentLayer>>,
+        world_dir: PathBuf,
+    ) -> Self {
         // Create chunk loader with parallel workers (4 threads for 4-core minimum)
         let num_workers = 4;  // Can make this configurable later
         let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers);
@@ -181,14 +194,20 @@ impl ChunkStreamer {
             loading_in_progress: HashSet::new(),
             chunk_loader,
             terrain_generator,
+            user_content,
+            world_dir,
             last_player_pos: None,
             stats: StreamerStats::default(),
         }
     }
     
     /// Create with default configuration
-    pub fn new_default(terrain_generator: Arc<Mutex<TerrainGenerator>>) -> Self {
-        Self::new(ChunkStreamerConfig::default(), terrain_generator)
+    pub fn new_default(
+        terrain_generator: Arc<Mutex<TerrainGenerator>>,
+        user_content: Arc<Mutex<UserContentLayer>>,
+        world_dir: PathBuf,
+    ) -> Self {
+        Self::new(ChunkStreamerConfig::default(), terrain_generator, user_content, world_dir)
     }
     
     /// Update based on player position
@@ -315,7 +334,33 @@ impl ChunkStreamer {
         for result in completed {
             self.loading_in_progress.remove(&result.chunk_id);
             
-            if let Some(octree) = result.octree {
+            if let Some(mut octree) = result.octree {
+                // Load and apply user operations from disk
+                let ops_loaded = match self.user_content.lock().unwrap().load_chunk(&self.world_dir, &result.chunk_id) {
+                    Ok(count) => count,
+                    Err(e) => {
+                        eprintln!("⚠️  Failed to load operations for {}: {}", result.chunk_id, e);
+                        0
+                    }
+                };
+                
+                // Apply loaded operations to octree
+                if ops_loaded > 0 {
+                    let user_content = self.user_content.lock().unwrap();
+                    for op in user_content.operations_for_chunk(&result.chunk_id) {
+                        // Convert Material to MaterialId
+                        let material_id = match op.material {
+                            crate::messages::Material::Air => MaterialId::AIR,
+                            crate::messages::Material::Stone => MaterialId::STONE,
+                            crate::messages::Material::Dirt => MaterialId::DIRT,
+                            crate::messages::Material::Grass => MaterialId::GRASS,
+                            crate::messages::Material::Water => MaterialId::AIR, // TODO: Add water material
+                        };
+                        octree.set_voxel(op.coord, material_id);
+                    }
+                    println!("   📝 Applied {} saved operations to {}", ops_loaded, result.chunk_id);
+                }
+                
                 let chunk = LoadedChunk {
                     id: result.chunk_id,
                     octree,
@@ -417,10 +462,16 @@ impl ChunkStreamer {
         })
     }
     
-    /// Unload a chunk
+    /// Unload a chunk (saves modifications to disk)
     fn unload_chunk(&mut self, chunk_id: &ChunkId) {
         if let Some(_chunk) = self.loaded_chunks.remove(chunk_id) {
-            // TODO: Save chunk to disk if modified
+            // Save operations for this chunk to disk
+            // Note: save_chunks() saves ALL operations, but we only care about this chunk
+            // A more efficient approach would be to track dirty chunks
+            if let Err(e) = self.user_content.lock().unwrap().save_chunks(&self.world_dir) {
+                eprintln!("⚠️  Failed to save operations for {}: {}", chunk_id, e);
+            }
+            
             // TODO: Free GPU resources (mesh, collision)
         }
         self.loading_in_progress.remove(chunk_id);
