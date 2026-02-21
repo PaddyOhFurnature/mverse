@@ -332,6 +332,9 @@ impl NetworkNode {
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
             // QUIC transport (better NAT traversal, faster handshake, UDP-based)
             .with_quic()
+            // DNS resolution (required for proper transport chain)
+            .with_dns()
+            .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
             // Relay client (can use relays for NAT traversal)
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
