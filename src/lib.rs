@@ -16,6 +16,7 @@ pub mod physics;
 // Phase 1.5: P2P Networking (Local-First Architecture)
 pub mod identity;
 pub mod network;
+pub mod http_tunnel;  // HTTP fallback for firewall bypass
 pub mod messages;
 pub mod player_state;
 pub mod player_persistence;

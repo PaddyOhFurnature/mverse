@@ -45,6 +45,9 @@ thiserror = "2.0"
 # Core libp2p with essential transports and protocols
 libp2p = { version = "0.56", features = [
     "tcp",              # TCP transport (primary)
+    "quic",             # QUIC transport (better NAT traversal, faster handshake)
+    "dns",              # DNS resolution (required for websocket)
+    "websocket",        # WebSocket transport (port 443 fallback, firewall bypass)
     "noise",            # Noise protocol for encryption
     "yamux",            # Multiplexing protocol (stream muxer)
     "gossipsub",        # Pubsub for state sync (player positions, voxel ops)
@@ -55,6 +58,7 @@ libp2p = { version = "0.56", features = [
     "ping",             # Keepalive and latency measurement
     "relay",            # Circuit relay for NAT traversal coordination
     "dcutr",            # Direct Connection Upgrade through Relay (hole punching)
+    "autonat",          # AutoNAT for detecting our own NAT status
     "macros",           # Convenience macros for Swarm
     "tokio",            # Async runtime integration
     "serde",            # Serialization support
@@ -72,6 +76,12 @@ libp2p-dcutr = { version = "0.12" }  # Direct Connection Upgrade through Relay (
 
 # Random number generation (for nonces, testing)
 rand = "0.8"
+
+# HTTP fallback infrastructure
+axum = "0.7"                          # HTTP server for relay endpoints
+tower-http = { version = "0.5", features = ["cors", "trace"] }  # HTTP middleware
+hyper = { version = "1.0", features = ["full"] }  # HTTP client/server
+uuid = { version = "1.0", features = ["v4", "serde"] }  # Session IDs for HTTP tunnel
 
 # Authenticated encryption for player state
 chacha20poly1305 = "0.10"

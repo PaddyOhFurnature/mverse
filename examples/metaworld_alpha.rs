@@ -168,9 +168,13 @@ fn main() {
     let mut multiplayer = MultiplayerSystem::new_with_runtime(identity.clone())
         .expect("Failed to create multiplayer system");
     
-    // Start listening on random port
+    // Start listening on all available transports for maximum connectivity
+    // TCP (primary), QUIC (NAT traversal), on dynamic ports
     multiplayer.listen_on("/ip4/0.0.0.0/tcp/0")
-        .expect("Failed to start listening");
+        .expect("Failed to listen on TCP");
+    multiplayer.listen_on("/ip4/0.0.0.0/udp/0/quic-v1")
+        .expect("Failed to listen on QUIC");
+    println!("📡 Multi-transport: TCP + QUIC (universal connectivity)");
     
     // Connect to relay server for NAT traversal
     // Relay running on Android phone: 49.182.84.9:4001

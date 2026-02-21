@@ -41,6 +41,7 @@
 
 use crate::identity::Identity;
 use libp2p::{
+    autonat,
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
     identify,
     kad::{self, store::MemoryStore},
@@ -49,7 +50,7 @@ use libp2p::{
     relay,
     dcutr,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm,
+    tcp, quic, websocket, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -182,6 +183,19 @@ pub enum NetworkEvent {
     TopicUnsubscribed {
         topic: String,
     },
+    
+    /// NAT status changed (detected via AutoNAT)
+    NatStatusChanged {
+        old_status: String,
+        new_status: String,
+        external_address: Option<Multiaddr>,
+    },
+    
+    /// Connection upgraded from relay to direct (DCUtR success)
+    ConnectionUpgraded {
+        peer_id: PeerId,
+        from_relay: bool,
+    },
 }
 
 /// Combined network behaviour for libp2p
@@ -212,6 +226,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) relay_server: relay::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
+    pub(crate) autonat: autonat::Behaviour,
 }
 
 /// P2P networking node
@@ -303,16 +318,21 @@ impl NetworkNode {
         let local_peer_id = identity.peer_id().clone();
         let keypair = identity.to_libp2p_keypair();
         
-        // Build Swarm with libp2p v0.56 API with relay client
-        // All behaviours are created inside the closure
+        // Build Swarm with multi-transport support for universal connectivity
+        // TCP + QUIC = works in most scenarios
+        // WebSocket requires different builder API - handled separately
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
+            // TCP transport (primary, works on open networks)
             .with_tcp(
                 tcp::Config::default(),
                 noise::Config::new,
                 yamux::Config::default,
             )
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
+            // QUIC transport (better NAT traversal, faster handshake, UDP-based)
+            .with_quic()
+            // Relay client (can use relays for NAT traversal)
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
             .with_behaviour(|keypair, relay_behaviour| {
@@ -377,6 +397,24 @@ impl NetworkNode {
                 };
                 let relay_server = relay::Behaviour::new(local_peer_id, relay_server_config);
                 
+                // Configure AutoNAT - detect our own NAT status
+                let autonat = autonat::Behaviour::new(
+                    local_peer_id,
+                    autonat::Config {
+                        // Only servers with confirmed public addresses can be servers
+                        only_global_ips: true,
+                        // Ask 3 peers to probe us
+                        boot_delay: Duration::from_secs(15),
+                        // Refresh every 5 minutes
+                        refresh_interval: Duration::from_secs(300),
+                        // Retry failed probes
+                        retry_interval: Duration::from_secs(60),
+                        // Throttle to avoid spamming
+                        throttle_server_period: Duration::ZERO,
+                        ..Default::default()
+                    },
+                );
+                
                 Ok(MetaverseBehaviour {
                     kademlia,
                     gossipsub,
@@ -385,6 +423,7 @@ impl NetworkNode {
                     relay_client: relay_behaviour,
                     relay_server,
                     dcutr,
+                    autonat,
                 })
             })
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
@@ -640,8 +679,47 @@ impl NetworkNode {
             
             // DCUtR events - Direct connection upgrade (hole punching)
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => {
-                println!("🎯 [DCUTR] Event: {:?}", event);
+                // DCUtR events vary by version - just log for now
+                println!("🎯 [DCUTR] Hole punching event: {:?}", event);
                 None
+            }
+            
+            // AutoNAT events - Detect our NAT status
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Autonat(event)) => {
+                match event {
+                    autonat::Event::StatusChanged { old, new } => {
+                        let (old_str, new_str, external_addr) = match (&old, &new) {
+                            (autonat::NatStatus::Unknown, autonat::NatStatus::Public(addr)) => {
+                                ("Unknown", "Public", Some(addr.clone()))
+                            }
+                            (autonat::NatStatus::Unknown, autonat::NatStatus::Private) => {
+                                ("Unknown", "Private (NAT)", None)
+                            }
+                            (autonat::NatStatus::Public(_), autonat::NatStatus::Private) => {
+                                ("Public", "Private (NAT)", None)
+                            }
+                            (autonat::NatStatus::Private, autonat::NatStatus::Public(addr)) => {
+                                ("Private (NAT)", "Public", Some(addr.clone()))
+                            }
+                            _ => return None,
+                        };
+                        
+                        println!("🔍 [AUTONAT] NAT status: {} → {}", old_str, new_str);
+                        if let Some(ref addr) = external_addr {
+                            println!("   External address: {}", addr);
+                        }
+                        
+                        Some(NetworkEvent::NatStatusChanged {
+                            old_status: old_str.to_string(),
+                            new_status: new_str.to_string(),
+                            external_address: external_addr,
+                        })
+                    }
+                    autonat::Event::InboundProbe(_) | autonat::Event::OutboundProbe(_) => {
+                        // Probing activity - don't spam console
+                        None
+                    }
+                }
             }
             
             // TODO: DCUtR events - Direct connection upgrade (hole punching)

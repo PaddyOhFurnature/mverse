@@ -579,6 +579,19 @@ impl MultiplayerSystem {
             NetworkEvent::TopicUnsubscribed { topic } => {
                 println!("📴 Unsubscribed from topic: {}", topic);
             }
+            
+            NetworkEvent::NatStatusChanged { old_status, new_status, external_address } => {
+                println!("🔍 NAT status: {} → {}", old_status, new_status);
+                if let Some(addr) = external_address {
+                    println!("   External address: {}", addr);
+                }
+            }
+            
+            NetworkEvent::ConnectionUpgraded { peer_id, from_relay } => {
+                if from_relay {
+                    println!("⚡ Direct P2P connection established with: {}", peer_id);
+                }
+            }
         }
         
         Ok(())
