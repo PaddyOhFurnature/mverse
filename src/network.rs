@@ -459,6 +459,22 @@ impl NetworkNode {
         
         Ok(())
     }
+
+    /// Fetch bootstrap nodes from the remote URL (or cache/fallback) and dial them all.
+    /// Call this once after `listen_on` to join the network.
+    pub async fn connect_to_bootstrap(&mut self) {
+        let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
+        println!("[network] Dialing {} bootstrap node(s)", nodes.len());
+        for addr in &nodes {
+            match self.dial(addr) {
+                Ok(()) => println!("[network] Dialing bootstrap: {}", addr),
+                Err(e) => eprintln!("[network] Failed to dial {}: {}", addr, e),
+            }
+        }
+        // Kick off DHT bootstrap query once we have peers
+        self.swarm.behaviour_mut().kademlia.bootstrap().ok();
+    }
+
     
     /// Subscribe to a topic
     ///

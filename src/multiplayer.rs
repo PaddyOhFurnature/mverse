@@ -1058,7 +1058,18 @@ fn run_network_thread(
         
         println!("🔍 Network thread started - polling for mDNS and connections...");
         println!("🔧 [Network Thread] About to enter tokio::select! loop...");
-        
+
+        // Start listening then connect to bootstrap nodes
+        if let Err(e) = network.listen_on("/ip4/0.0.0.0/tcp/0") {
+            eprintln!("Failed to listen on TCP: {}", e);
+        }
+        if let Err(e) = network.listen_on("/ip4/0.0.0.0/udp/0/quic-v1") {
+            eprintln!("Failed to listen on QUIC: {}", e);
+        }
+        println!("🌐 [Network Thread] Fetching bootstrap nodes...");
+        network.connect_to_bootstrap().await;
+        println!("🌐 [Network Thread] Bootstrap dial initiated");
+
         let mut heartbeat_counter = 0u64;
         
         // Main loop: process commands and poll network
