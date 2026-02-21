@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "network": "mainnet",
+  "updated_at": "2026-02-21T14:02:00Z",
+  "min_client_version": "0.1.0",
+  "ttl_seconds": 3600,
+  
+  "bootstrap_nodes": [
+    {
+      "id": "phone-relay-primary",
+      "name": "Primary Phone Relay",
+      "description": "Main relay running on Android phone",
+      "multiaddr": "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
+      "capabilities": ["relay", "bootstrap", "dht"],
+      "region": "AU",
+      "priority": 100,
+      "verified": true
+    }
+  ],
+  
+  "fallback_discovery": {
+    "dns_seeds": [],
+    "http_rendezvous": [],
+    "ipfs_gateways": []
+  },
+  
+  "metadata": {
+    "maintainer": "Metaverse Core Team",
+    "source_repo": "https://github.com/yourproject/metaverse",
+    "note": "Update this file when relay IP changes - clients fetch automatically"
+  }
+}
