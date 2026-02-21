@@ -355,11 +355,14 @@ impl NetworkNode {
                 let kad_store = MemoryStore::new(local_peer_id);
                 let mut kad_config = kad::Config::default();
                 kad_config.set_query_timeout(Duration::from_secs(5 * 60));
-                let kademlia = kad::Behaviour::with_config(
+                let mut kademlia = kad::Behaviour::with_config(
                     local_peer_id,
                     kad_store,
                     kad_config,
                 );
+                // Server mode: advertise our addresses (including circuit addresses) to the DHT
+                // This is how other peers find us when we're behind CGNAT/VPN/Starlink
+                kademlia.set_mode(Some(kad::Mode::Server));
                 
                 // Configure Gossipsub
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -712,6 +715,10 @@ impl NetworkNode {
             
             // New listen address
             SwarmEvent::NewListenAddr { address, .. } => {
+                // If we got a circuit address, re-advertise to DHT so other peers find us
+                if address.to_string().contains("p2p-circuit") {
+                    self.swarm.behaviour_mut().kademlia.bootstrap().ok();
+                }
                 Some(NetworkEvent::ListeningOn { address })
             }
             
@@ -841,11 +848,35 @@ impl NetworkNode {
                 }
             }
             
-            // TODO: DCUtR events - Direct connection upgrade (hole punching)
-            // Event handling disabled due to libp2p version conflicts
-            // DCUtR behaviour is still active and will perform hole punching
-            // SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => { ... }
-            
+            // Kademlia DHT events - peer discovery via DHT
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Kademlia(event)) => {
+                match event {
+                    kad::Event::RoutingUpdated { peer, addresses, .. } => {
+                        // New peer found in DHT - dial it so we can exchange gossipsub messages
+                        if !self.connected_peers.contains(&peer) {
+                            for addr in addresses.iter() {
+                                let dial_addr = addr.clone()
+                                    .with(libp2p::multiaddr::Protocol::P2p(peer));
+                                println!("🔍 [DHT] Found peer {}, dialing {}", peer, dial_addr);
+                                self.swarm.dial(dial_addr).ok();
+                                break; // dial one address, libp2p handles fallback
+                            }
+                        }
+                        None
+                    }
+                    kad::Event::OutboundQueryProgressed {
+                        result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk { num_remaining, .. })),
+                        ..
+                    } => {
+                        if num_remaining == 0 {
+                            println!("✅ [DHT] Bootstrap complete");
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            }
+
             // Ignore other events
             _ => None,
         }

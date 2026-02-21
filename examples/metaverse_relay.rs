@@ -35,10 +35,13 @@ use libp2p::{
     identity,
     relay,
     tls,
+    kad, identify,
     swarm::{NetworkBehaviour, SwarmEvent},
     SwarmBuilder,
     PeerId,
+    Multiaddr,
 };
+use libp2p::kad::store::MemoryStore;
 use futures::StreamExt;
 use std::error::Error;
 use std::time::Duration;
@@ -74,6 +77,8 @@ struct Args {
 struct RelayBehaviour {
     relay: relay::Behaviour,
     ping: libp2p::ping::Behaviour,
+    kademlia: kad::Behaviour<MemoryStore>,
+    identify: identify::Behaviour,
 }
 
 #[tokio::main]
@@ -130,9 +135,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .await?
         .with_behaviour(|key: &identity::Keypair| {
+            let peer_id = key.public().to_peer_id();
+            // Kademlia DHT - serves as bootstrap node for peer discovery
+            let mut kad_config = kad::Config::default();
+            kad_config.set_query_timeout(Duration::from_secs(60));
+            let mut kademlia = kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
+            kademlia.set_mode(Some(kad::Mode::Server)); // relay is always a DHT server
+            // Identify - lets clients know our addresses and protocols
+            let identify = identify::Behaviour::new(
+                identify::Config::new("/metaverse/1.0.0".to_string(), key.public())
+                    .with_push_listen_addr_updates(true)
+            );
             Ok(RelayBehaviour {
-                relay: relay::Behaviour::new(key.public().to_peer_id(), relay_config),
+                relay: relay::Behaviour::new(peer_id, relay_config),
                 ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
+                kademlia,
+                identify,
             })
         })?
         .with_swarm_config(|c: libp2p::swarm::Config| {
@@ -201,6 +219,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                     _ => {}
                 }
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(
+                identify::Event::Received { peer_id, info, .. }
+            )) => {
+                // Add peer's addresses to our DHT so other clients can find them
+                for addr in &info.listen_addrs {
+                    swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                }
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Kademlia(_)) => {
+                // DHT events - routing updates etc, no action needed
             }
             SwarmEvent::Behaviour(RelayBehaviourEvent::Ping(_)) => {
                 // Ping events are verbose, ignore them
