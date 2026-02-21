@@ -186,13 +186,23 @@ pub enum NetworkEvent {
 
 /// Combined network behaviour for libp2p
 ///
-/// **P2P-First Architecture:**
+/// **Mesh P2P Architecture:**
 /// - Kademlia: DHT for peer discovery
 /// - Gossipsub: Pubsub for state sync (primary communication)
 /// - mDNS: Local network auto-discovery
 /// - Identify: Peer information exchange
-/// - Relay Client: NAT traversal coordination (NOT data routing!)
+/// - Relay Client: Can USE other peers as relays for NAT traversal
+/// - Relay Server: Can BE a relay to help other peers connect (mesh topology)
 /// - DCUtR: Direct Connection Upgrade (hole punching)
+///
+/// Every peer is simultaneously:
+/// - A client (can use relays)
+/// - A server (can be a relay)
+/// - A DHT node (helps with discovery)
+/// - A content node (shares data via gossipsub)
+///
+/// This creates a true mesh network where dedicated relays are just
+/// "always-on peers" rather than special infrastructure.
 #[derive(NetworkBehaviour)]
 pub(crate) struct MetaverseBehaviour {
     pub(crate) kademlia: kad::Behaviour<MemoryStore>,
@@ -200,6 +210,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) mdns: mdns::tokio::Behaviour,
     pub(crate) identify: identify::Behaviour,
     pub(crate) relay_client: relay::client::Behaviour,
+    pub(crate) relay_server: relay::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
 }
 
@@ -353,12 +364,26 @@ impl NetworkNode {
                 // DCUtR for hole punching
                 let dcutr = dcutr::Behaviour::new(local_peer_id);
                 
+                // Configure Relay Server - enables this peer to relay for others
+                // Conservative limits for client nodes (not dedicated relays)
+                let relay_server_config = relay::Config {
+                    max_reservations: 128,                              // Allow 128 peers to reserve slots
+                    max_reservations_per_peer: 4,                       // Each peer can reserve 4 slots
+                    max_circuits: 16,                                   // Allow 16 simultaneous relay circuits
+                    max_circuits_per_peer: 4,                           // Each peer can use 4 circuits through us
+                    max_circuit_duration: Duration::from_secs(120),     // 2 minutes per circuit (enough for DCUtR)
+                    max_circuit_bytes: 1024 * 1024,                     // 1 MB per circuit (state sync only)
+                    ..Default::default()
+                };
+                let relay_server = relay::Behaviour::new(local_peer_id, relay_server_config);
+                
                 Ok(MetaverseBehaviour {
                     kademlia,
                     gossipsub,
                     mdns,
                     identify,
                     relay_client: relay_behaviour,
+                    relay_server,
                     dcutr,
                 })
             })
@@ -572,6 +597,42 @@ impl NetworkNode {
                     }
                     relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
                         println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
+                        None
+                    }
+                }
+            }
+            
+            // Relay server events - we're acting as a relay for others
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayServer(event)) => {
+                match event {
+                    relay::Event::ReservationReqAccepted { src_peer_id, renewed, .. } => {
+                        println!("✅ [RELAY SERVER] Reservation {} for peer: {}", 
+                            if renewed { "renewed" } else { "accepted" }, src_peer_id);
+                        None
+                    }
+                    relay::Event::ReservationTimedOut { src_peer_id } => {
+                        println!("⏱️  [RELAY SERVER] Reservation timed out for: {}", src_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
+                        println!("🔄 [RELAY SERVER] Circuit: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
+                        println!("❌ [RELAY SERVER] Circuit denied: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
+                        println!("🔚 [RELAY SERVER] Circuit closed: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::ReservationReqDenied { src_peer_id, .. } => {
+                        println!("❌ [RELAY SERVER] Reservation denied for: {}", src_peer_id);
+                        None
+                    }
+                    // Other relay events (accept failed, deny failed, closed, etc.)
+                    _ => {
+                        println!("ℹ️  [RELAY SERVER] Event: {:?}", event);
                         None
                     }
                 }
