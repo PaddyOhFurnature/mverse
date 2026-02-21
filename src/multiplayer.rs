@@ -1071,6 +1071,8 @@ fn run_network_thread(
         println!("🌐 [Network Thread] Bootstrap dial initiated");
 
         let mut heartbeat_counter = 0u64;
+        let mut last_peer_seen = tokio::time::Instant::now();
+        let mut last_reconnect = tokio::time::Instant::now();
         
         // Main loop: process commands and poll network
         loop {
@@ -1136,9 +1138,11 @@ fn run_network_thread(
                 match &event {
                     NetworkEvent::PeerDiscovered { peer_id } => {
                         println!("🔍 [Network Thread] mDNS discovered peer: {}", peer_id);
+                        last_peer_seen = tokio::time::Instant::now();
                     }
                     NetworkEvent::PeerConnected { peer_id, .. } => {
                         println!("🔗 [Network Thread] Peer connected: {}", peer_id);
+                        last_peer_seen = tokio::time::Instant::now();
                     }
                     NetworkEvent::ListeningOn { address } => {
                         println!("👂 Listening on: {}", address);
@@ -1147,6 +1151,16 @@ fn run_network_thread(
                 }
                 
                 let _ = event_tx.try_send(event);
+            }
+
+            // Auto-reconnect: if no peers for 30s, re-run bootstrap
+            let no_peers = network.connected_peer_count() == 0;
+            let time_since_peer = last_peer_seen.elapsed().as_secs();
+            let time_since_reconnect = last_reconnect.elapsed().as_secs();
+            if no_peers && time_since_peer > 30 && time_since_reconnect > 30 {
+                println!("🔄 [Network] No peers for {}s, reconnecting to bootstrap...", time_since_peer);
+                network.connect_to_bootstrap().await;
+                last_reconnect = tokio::time::Instant::now();
             }
             
             // Small sleep to avoid busy-waiting

@@ -64,7 +64,7 @@ struct Args {
     max_circuits: usize,
 
     /// Maximum circuit duration in seconds
-    #[arg(long, default_value = "120")]
+    #[arg(long, default_value = "3600")]
     max_circuit_duration: u64,
 
     /// Maximum bytes per circuit (1MB default)

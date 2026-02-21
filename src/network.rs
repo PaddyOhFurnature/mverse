@@ -409,7 +409,7 @@ impl NetworkNode {
                     max_reservations_per_peer: 4,                       // Each peer can reserve 4 slots
                     max_circuits: 16,                                   // Allow 16 simultaneous relay circuits
                     max_circuits_per_peer: 4,                           // Each peer can use 4 circuits through us
-                    max_circuit_duration: Duration::from_secs(120),     // 2 minutes per circuit (enough for DCUtR)
+                    max_circuit_duration: Duration::from_secs(3600),     // 1 hour per circuit
                     max_circuit_bytes: 1024 * 1024,                     // 1 MB per circuit (state sync only)
                     ..Default::default()
                 };
