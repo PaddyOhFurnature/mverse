@@ -4,6 +4,9 @@
 **Context:** Discovery system clarification - priority beyond chunks  
 **Key Insight:** "We need a priority tree, more like a nervous system than a tree"
 
+**Core Principle:** **EFFICIENT > FAST**  
+"Data must be pure, even if it means slower transmission. Humans adapt to consistent 100ms delay instantly. Think LoRa/packet radio."
+
 ---
 
 ## 🎯 The Real Problem: Entity State Priority
@@ -511,6 +514,133 @@ Total: ~275 KB/s (97% reduction!)
 
 ---
 
+## 📡 Data Efficiency Principles
+
+### The LoRa/Packet Radio Model
+
+**Why This Matters:**
+- LoRa sends rich data over 0.3-50 kbps
+- Achieves this through **extreme efficiency**
+- Sacrifices speed for reliability and encoding density
+
+**Applied to Metaverse:**
+
+#### 1. Tokenization Over Full State
+```rust
+// ❌ Traditional (bloated):
+{
+  "player_id": "abc123",
+  "position": {"x": 123.45, "y": 67.89, "z": 234.56},
+  "rotation": {"yaw": 45.2, "pitch": 0.0, "roll": 0.0},
+  "velocity": {"x": 0.5, "y": 0.0, "z": 1.2},
+  "animation": "walking"
+}
+// ~150 bytes JSON
+
+// ✅ Tokenized (efficient):
+0x4A 0x7B 0x12 0x45 0x03
+// Token: move_north (1 byte)
+// Delta XZ: compressed (2 bytes)
+// Animation: enum (1 byte)
+// Velocity: quantized (1 byte)
+// ~5 bytes total = 97% reduction
+```
+
+#### 2. Priority-Based Encoding Precision
+```
+CRITICAL entities:
+  - Full precision (f32)
+  - Every change transmitted
+  - Binary protocol, no compression latency
+  
+HIGH entities:
+  - Medium precision (f16 or quantized)
+  - Batched every 2-3 frames
+  
+MEDIUM entities:
+  - Low precision (i16 quantized)
+  - Batched every 5-10 frames
+  
+LOW entities:
+  - Very low precision (i8 quantized)
+  - Eventually consistent (seconds)
+```
+
+#### 3. The 100ms Constant Delay Advantage
+
+**Human Perception:**
+- Variable 10-500ms latency = **feels terrible forever**
+- Constant 100ms latency = **invisible after 30 seconds**
+- Brain adapts to predictable timing (like rhythm games)
+
+**What This Enables:**
+```
+Traditional approach:
+  - Send immediately = variable latency (10-500ms)
+  - Jitter, packet loss, unpredictable
+  
+Efficient approach:
+  - Buffer for 100ms (always)
+  - Batch multiple updates
+  - Compress batch
+  - Send exactly at 100ms mark
+  - Predictable latency = muscle memory adapts
+```
+
+**Real Example - Fighting Game:**
+- 3 frames (50ms) consistent = tournament viable
+- Variable 1-6 frames (16-100ms) = unplayable trash
+- Players adapt to FIXED latency, not variable
+
+#### 4. Delta Encoding + Prediction
+```rust
+// Don't send full state every frame
+// Send CHANGES only
+
+Frame 1: Full state (5 bytes)
+Frame 2: Delta from F1 (1 byte) - "moved 0.5m north"
+Frame 3: Delta from F2 (1 byte) - "same direction, same speed"
+Frame 4: Delta from F3 (0 bytes) - "predicted correctly, no send"
+
+// Client predicts, server corrects only on deviation
+// Bandwidth: 5 bytes initial + ~0.5 bytes/frame average
+```
+
+#### 5. Efficient > Fast
+```
+Slow but efficient:
+  ✅ Tokenized deltas
+  ✅ Binary protocol
+  ✅ Batch compression
+  ✅ 100ms predictable latency
+  ✅ Scales to thousands of entities
+  
+Fast but bloated:
+  ❌ Full JSON states
+  ❌ Send every frame
+  ❌ Variable latency
+  ❌ Doesn't scale past 100 entities
+```
+
+### Bandwidth Comparison with Efficiency
+
+**Previous calculation (full states):**
+- 275 KB/s with priority tiers
+
+**With tokenization and deltas:**
+```
+Critical (10 entities): 10 × 5 bytes × 60 Hz = 3 KB/s
+High (50 entities):     50 × 2 bytes × 20 Hz = 2 KB/s
+Medium (200 entities):  200 × 1 byte × 5 Hz = 1 KB/s
+Low (740 entities):     740 × 0.2 bytes × 1 Hz = 0.15 KB/s
+
+Total: ~6 KB/s (99.9% reduction from naive!)
+```
+
+**Reality:** Will be ~20-30 KB/s with overhead, but still **200x better** than naive approach.
+
+---
+
 ## 🎯 Summary
 
 **Key Insights:**
@@ -520,6 +650,8 @@ Total: ~275 KB/s (97% reduction!)
 3. **Entity interactions are the problem** - Need precision for gameplay
 4. **Not all data is equal** - Priority must be dynamic
 5. **Nervous system, not tree** - Reflex arcs for critical data
+6. **Efficient > Fast** - Tokenization, batching, predictable latency
+7. **Humans adapt to consistent delay** - 100ms constant = invisible
 
 **What to build:**
 - Interaction graph (who affects who)
@@ -527,5 +659,7 @@ Total: ~275 KB/s (97% reduction!)
 - Multi-tier sync (critical → high → medium → low)
 - Authority resolution (who's right when conflicts occur)
 - Reflex arcs (bypass slow paths for critical data)
+- **Tokenization protocol** (binary, delta-encoded, priority-aware)
+- **100ms batching system** (predictable latency buffer)
 
-**This is not about chunks - it's about entity state synchronization with awareness-based priority.**
+**This is not about chunks - it's about entity state synchronization with awareness-based priority and data efficiency.**
