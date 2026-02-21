@@ -1,15 +1,15 @@
 {
   "schema_version": "1.0",
   "network": "mainnet",
-  "updated_at": "2026-02-21T14:47:00Z",
+  "updated_at": "2026-02-21T15:07:00Z",
   "min_client_version": "0.1.0",
   "ttl_seconds": 3600,
-  
+
   "bootstrap_nodes": [
     {
-      "id": "home-relay-primary",
-      "name": "Primary Home Relay",
-      "description": "Dev machine relay - real public IP, persistent identity, DCUtR coordination",
+      "id": "home-relay-tcp",
+      "name": "Home Relay - TCP",
+      "description": "Dev machine - TCP transport",
       "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
       "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
       "region": "AU",
@@ -17,9 +17,19 @@
       "verified": true
     },
     {
-      "id": "phone-relay-secondary",
-      "name": "Secondary Phone Relay",
-      "description": "Android phone relay - secondary node",
+      "id": "home-relay-ws",
+      "name": "Home Relay - WebSocket",
+      "description": "Dev machine - WebSocket transport (works through VPN/firewall/CGNAT)",
+      "multiaddr": "/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
+      "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
+      "region": "AU",
+      "priority": 95,
+      "verified": true
+    },
+    {
+      "id": "phone-relay",
+      "name": "Phone Relay",
+      "description": "Android phone relay",
       "multiaddr": "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
       "capabilities": ["relay", "dht"],
       "region": "AU",
@@ -27,16 +37,15 @@
       "verified": true
     }
   ],
-  
+
   "fallback_discovery": {
     "dns_seeds": [],
     "http_rendezvous": [],
     "ipfs_gateways": []
   },
-  
+
   "metadata": {
     "maintainer": "Metaverse Core Team",
-    "source_repo": "https://github.com/yourproject/metaverse",
-    "note": "Update this file when relay IP changes - clients fetch automatically"
+    "note": "WebSocket transport works through VPN, Starlink, 4G/CGNAT - clients connect OUTBOUND"
   }
 }

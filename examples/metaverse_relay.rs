@@ -34,6 +34,7 @@
 use libp2p::{
     identity,
     relay,
+    tls,
     swarm::{NetworkBehaviour, SwarmEvent},
     SwarmBuilder,
     PeerId,
@@ -114,7 +115,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ..Default::default()
     };
 
-    // Build swarm with relay server
+    // Build swarm with relay server - TCP + WebSocket for universal connectivity
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(
@@ -122,6 +123,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
+        .with_dns()?
+        .with_websocket(
+            (libp2p::tls::Config::new, libp2p::noise::Config::new),
+            libp2p::yamux::Config::default,
+        )
+        .await?
         .with_behaviour(|key: &identity::Keypair| {
             Ok(RelayBehaviour {
                 relay: relay::Behaviour::new(key.public().to_peer_id(), relay_config),
@@ -133,9 +140,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .build();
 
-    // Listen on all interfaces
+    // Listen TCP
     let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", args.port);
     swarm.listen_on(listen_addr.parse()?)?;
+
+    // Listen WebSocket on port 9001 (or tcp_port+5000 for WS)
+    let ws_port = args.port + 5000;
+    let ws_addr = format!("/ip4/0.0.0.0/tcp/{}/ws", ws_port);
+    swarm.listen_on(ws_addr.parse()?)?;
+    println!("🌐 WebSocket port: {}", ws_port);
 
     // If external address provided, add it
     if let Some(external) = args.external_addr {

@@ -48,6 +48,7 @@ libp2p = { version = "0.56", features = [
     "quic",             # QUIC transport (better NAT traversal, faster handshake)
     "dns",              # DNS resolution (required for websocket)
     "websocket",        # WebSocket transport (port 443 fallback, firewall bypass)
+    "tls",              # TLS encryption (required for WebSocket/WSS)
     "noise",            # Noise protocol for encryption
     "yamux",            # Multiplexing protocol (stream muxer)
     "gossipsub",        # Pubsub for state sync (player positions, voxel ops)

@@ -50,7 +50,7 @@ use libp2p::{
     relay,
     dcutr,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, quic, websocket, yamux, Multiaddr, PeerId, Swarm, Transport,
+    tcp, quic, websocket, tls, yamux, Multiaddr, PeerId, Swarm, Transport,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -319,8 +319,7 @@ impl NetworkNode {
         let keypair = identity.to_libp2p_keypair();
         
         // Build Swarm with multi-transport support for universal connectivity
-        // TCP + QUIC = works in most scenarios
-        // WebSocket requires different builder API - handled separately
+        // TCP + QUIC + WebSocket = works on open networks, CGNAT, VPNs, firewalls
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             // TCP transport (primary, works on open networks)
@@ -332,10 +331,18 @@ impl NetworkNode {
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
             // QUIC transport (better NAT traversal, faster handshake, UDP-based)
             .with_quic()
-            // DNS resolution (required for proper transport chain)
+            // DNS resolution (required for websocket + hostname dials)
             .with_dns()
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
-            // Relay client (can use relays for NAT traversal)
+            // WebSocket transport (port 443/80 fallback - works through VPNs, firewalls, CGNAT)
+            // Both sides connect OUTBOUND to a WSS relay - no inbound port needed
+            .with_websocket(
+                (libp2p::tls::Config::new, noise::Config::new),
+                yamux::Config::default,
+            )
+            .await
+            .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
+            // Relay client (can use relays for NAT traversal + DCUtR hole punching)
             .with_relay_client(noise::Config::new, yamux::Config::default)
             .map_err(|e| NetworkError::TransportError(format!("{:?}", e)))?
             .with_behaviour(|keypair, relay_behaviour| {
