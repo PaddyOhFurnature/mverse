@@ -251,6 +251,9 @@ pub struct NetworkNode {
     
     /// Connected peers
     connected_peers: HashSet<PeerId>,
+
+    /// Peers we know are relay nodes - listen on circuit when connected
+    relay_nodes: HashSet<PeerId>,
 }
 
 impl NetworkNode {
@@ -281,6 +284,7 @@ impl NetworkNode {
             subscribed_topics: HashMap::new(),
             event_queue: Vec::new(),
             connected_peers: HashSet::new(),
+            relay_nodes: HashSet::new(),
         })
     }
     
@@ -310,6 +314,7 @@ impl NetworkNode {
             subscribed_topics: HashMap::new(),
             event_queue: Vec::new(),
             connected_peers: HashSet::new(),
+            relay_nodes: HashSet::new(),
         })
     }
     
@@ -468,18 +473,64 @@ impl NetworkNode {
     }
 
     /// Fetch bootstrap nodes from the remote URL (or cache/fallback) and dial them all.
+    /// Also dials Protocol Labs public relay nodes and registers relay circuit listeners.
     /// Call this once after `listen_on` to join the network.
     pub async fn connect_to_bootstrap(&mut self) {
-        let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
-        println!("[network] Dialing {} bootstrap node(s)", nodes.len());
-        for addr in &nodes {
+        // Protocol Labs public relay/bootstrap nodes - permanent infrastructure, no hosting needed
+        // Both sides connect OUTBOUND to these - works through CGNAT, VPN, Starlink, 4G
+        let public_relay_nodes: &[(&str, &str)] = &[
+            ("QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
+             "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"),
+            ("QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
+             "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"),
+            ("QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
+             "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"),
+            ("QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+             "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"),
+        ];
+
+        // Dial Protocol Labs nodes and mark them as known relay nodes
+        for (peer_id_str, addr) in public_relay_nodes {
+            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
+                self.relay_nodes.insert(peer_id);
+            }
             match self.dial(addr) {
-                Ok(()) => println!("[network] Dialing bootstrap: {}", addr),
-                Err(e) => eprintln!("[network] Failed to dial {}: {}", addr, e),
+                Ok(()) => println!("[bootstrap] Dialing public relay: {}", addr),
+                Err(e) => eprintln!("[bootstrap] Failed to dial {}: {}", addr, e),
             }
         }
-        // Kick off DHT bootstrap query once we have peers
+
+        // Also dial nodes from our bootstrap.json (Gist / cache / hardcoded fallback)
+        let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
+        println!("[bootstrap] Dialing {} node(s) from bootstrap file", nodes.len());
+        for addr in &nodes {
+            // Mark as relay node so we listen on circuit when connected
+            if let Ok(ma) = addr.parse::<Multiaddr>() {
+                if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = ma.iter().last() {
+                    self.relay_nodes.insert(peer_id);
+                }
+            }
+            match self.dial(addr) {
+                Ok(()) => println!("[bootstrap] Dialing: {}", addr),
+                Err(e) => eprintln!("[bootstrap] Failed to dial {}: {}", addr, e),
+            }
+        }
+
+        // Kick off DHT bootstrap query
         self.swarm.behaviour_mut().kademlia.bootstrap().ok();
+    }
+
+    /// Listen on a relay circuit - makes this peer reachable through the relay.
+    /// Works through CGNAT, VPN, Starlink - no inbound port needed.
+    fn listen_via_relay(&mut self, relay_peer_id: PeerId, relay_addr: Multiaddr) {
+        // Circuit relay listen address: <relay-multiaddr>/p2p-circuit
+        let circuit_addr = relay_addr
+            .with(libp2p::multiaddr::Protocol::P2p(relay_peer_id))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit);
+        println!("[relay] Listening via circuit: {}", circuit_addr);
+        if let Err(e) = self.swarm.listen_on(circuit_addr) {
+            eprintln!("[relay] Failed to listen on circuit: {}", e);
+        }
     }
 
     
@@ -632,9 +683,21 @@ impl NetworkNode {
                 ..
             } => {
                 self.connected_peers.insert(peer_id);
+                let remote_addr = endpoint.get_remote_address().clone();
+
+                // If this is a known relay node, listen on circuit relay immediately
+                // This makes us reachable through the relay - works through CGNAT/VPN/Starlink
+                if self.relay_nodes.contains(&peer_id) {
+                    // Strip the peer ID suffix from the address for the circuit listen
+                    let relay_base: Multiaddr = remote_addr.iter()
+                        .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                        .collect();
+                    self.listen_via_relay(peer_id, relay_base);
+                }
+
                 Some(NetworkEvent::PeerConnected {
                     peer_id,
-                    address: endpoint.get_remote_address().clone(),
+                    address: remote_addr,
                 })
             }
             
@@ -657,8 +720,23 @@ impl NetworkNode {
                 identify::Event::Received { peer_id, info, .. }
             )) => {
                 // Add peer's listen addresses to Kademlia
-                for addr in info.listen_addrs {
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
+                for addr in &info.listen_addrs {
+                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                }
+                // If peer advertises circuit relay v2 support, mark as relay and listen via it
+                let relay_proto = libp2p::core::upgrade::Version::V1;
+                let is_relay = info.protocols.iter().any(|p| {
+                    p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop")
+                });
+                if is_relay && !self.relay_nodes.contains(&peer_id) {
+                    println!("[relay] Peer {} supports relay, listening via circuit", peer_id);
+                    self.relay_nodes.insert(peer_id);
+                    if let Some(addr) = info.listen_addrs.first() {
+                        let relay_base: Multiaddr = addr.iter()
+                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                            .collect();
+                        self.listen_via_relay(peer_id, relay_base);
+                    }
                 }
                 None
             }
