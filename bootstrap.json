@@ -1,19 +1,29 @@
 {
   "schema_version": "1.0",
   "network": "mainnet",
-  "updated_at": "2026-02-21T14:02:00Z",
+  "updated_at": "2026-02-21T14:47:00Z",
   "min_client_version": "0.1.0",
   "ttl_seconds": 3600,
   
   "bootstrap_nodes": [
     {
-      "id": "phone-relay-primary",
-      "name": "Primary Phone Relay",
-      "description": "Main relay running on Android phone",
-      "multiaddr": "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
-      "capabilities": ["relay", "bootstrap", "dht"],
+      "id": "home-relay-primary",
+      "name": "Primary Home Relay",
+      "description": "Dev machine relay - real public IP, persistent identity, DCUtR coordination",
+      "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
+      "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
       "region": "AU",
       "priority": 100,
+      "verified": true
+    },
+    {
+      "id": "phone-relay-secondary",
+      "name": "Secondary Phone Relay",
+      "description": "Android phone relay - secondary node",
+      "multiaddr": "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
+      "capabilities": ["relay", "dht"],
+      "region": "AU",
+      "priority": 50,
       "verified": true
     }
   ],

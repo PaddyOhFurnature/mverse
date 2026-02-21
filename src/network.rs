@@ -548,6 +548,21 @@ impl NetworkNode {
             }
         })
     }
+
+    /// Wait for the next network event (async, properly drives the swarm).
+    /// Use this in async contexts instead of poll().
+    pub async fn next_event(&mut self) -> NetworkEvent {
+        loop {
+            if !self.event_queue.is_empty() {
+                return self.event_queue.remove(0);
+            }
+            use futures::StreamExt;
+            let event = self.swarm.next().await.unwrap();
+            if let Some(net_event) = self.handle_swarm_event(event) {
+                return net_event;
+            }
+        }
+    }
     
     /// Handle a swarm event and convert to NetworkEvent
     pub(crate) fn handle_swarm_event(&mut self, event: SwarmEvent<MetaverseBehaviourEvent>) -> Option<NetworkEvent> {

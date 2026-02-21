@@ -88,8 +88,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Circuit data limit: {}MB", args.max_circuit_bytes / 1024 / 1024);
     println!();
 
-    // Generate or load identity
-    let local_key = identity::Keypair::generate_ed25519();
+    // Load or generate persistent identity (saves to ~/.metaverse/relay.key)
+    let key_path = {
+        let base = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        base.join(".metaverse").join("relay.key")
+    };
+    let local_key = if key_path.exists() {
+        let bytes = std::fs::read(&key_path)?;
+        identity::Keypair::from_protobuf_encoding(&bytes)?
+    } else {
+        let kp = identity::Keypair::generate_ed25519();
+        if let Some(parent) = key_path.parent() { std::fs::create_dir_all(parent)?; }
+        std::fs::write(&key_path, kp.to_protobuf_encoding()?)?;
+        kp
+    };
     let local_peer_id = PeerId::from(local_key.public());
     println!("🔑 Peer ID: {}", local_peer_id);
 
