@@ -853,13 +853,12 @@ fn main() {
                     // Update chunk streaming based on player position
                     chunk_streamer.update(player.position);
                     
-                    // PASSIVE LOADING: Only load if below max capacity
-                    // Load 1 chunk every 10 seconds (600 frames at 60fps)
+                    // PASSIVE LOADING: Process chunk streaming EVERY FRAME
+                    chunk_streamer.process_queues(16.0);  // 16ms budget per frame
+                    
+                    // Log occasionally (not every frame)
                     if frame_count % 600 == 0 
-                        && chunk_streamer.stats.chunks_queued > 0 
-                        && chunk_streamer.stats.chunks_loaded < 90 {  // Stop at 90% capacity
-                        
-                        chunk_streamer.process_queues(1000.0);  // Load 1 chunk
+                        && chunk_streamer.stats.chunks_queued > 0 {
                         println!("🌍 Background: {} loaded, {} queued (max: 100)", 
                             chunk_streamer.stats.chunks_loaded,
                             chunk_streamer.stats.chunks_queued);
