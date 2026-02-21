@@ -48,24 +48,27 @@ echo ""
 # Set identity and run
 export METAVERSE_IDENTITY_FILE="$IDENTITY_FILE"
 
+# OpenTopography API key for real terrain data (SRTM via API fallback)
+# This is used when local SRTM file is not available
+if [ -z "$OPENTOPOGRAPHY_API_KEY" ]; then
+    export OPENTOPOGRAPHY_API_KEY="3e607de6969c687053f9e107a4796962"
+fi
+
 # Point to data directory containing srtm-global.tif and elevation_cache
 # On dev machine: repo root. On remote: set METAVERSE_DATA_DIR before running.
 if [ -z "$METAVERSE_DATA_DIR" ]; then
-    # Default: look for srtm file relative to script location
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
     if [ -f "$SCRIPT_DIR/../srtm-global.tif" ]; then
         export METAVERSE_DATA_DIR="$SCRIPT_DIR/.."
     elif [ -f "$SCRIPT_DIR/srtm-global.tif" ]; then
         export METAVERSE_DATA_DIR="$SCRIPT_DIR"
+    else
+        # No local SRTM file - use script dir for elevation cache (API downloads go here)
+        export METAVERSE_DATA_DIR="$SCRIPT_DIR"
     fi
 fi
 
-if [ -n "$METAVERSE_DATA_DIR" ]; then
-    echo "📁 Data dir: $METAVERSE_DATA_DIR"
-else
-    echo "⚠️  No SRTM terrain file found - terrain will be flat"
-    echo "   Set METAVERSE_DATA_DIR to folder containing srtm-global.tif"
-    echo "   or copy srtm-global.tif to the deploy folder"
-fi
+echo "📁 Data dir: $METAVERSE_DATA_DIR"
+echo "🌍 Terrain: $([ -f "$METAVERSE_DATA_DIR/srtm-global.tif" ] && echo 'Local SRTM file' || echo 'OpenTopography API (downloads tiles on first visit)')"
 
 ./bin/metaworld_alpha
