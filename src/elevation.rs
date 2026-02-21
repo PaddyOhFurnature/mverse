@@ -143,12 +143,16 @@ impl NasFileSource {
     /// 2. /mnt/nas/srtm-v3-1s.tif (if mounted)
     /// 3. GVFS path (if provided)
     pub fn new() -> Option<Self> {
-        let candidates = vec![
+        let mut candidates = vec![
             PathBuf::from("./srtm-global.tif"),
             PathBuf::from("/mnt/nas/srtm-v3-1s.tif"),
             PathBuf::from("/run/user/1000/gvfs/smb-share:server=blade.local,share=homes/world/srtm-v3-1s.tif"),
             PathBuf::from("/run/user/1000/gvfs/afp-volume:host=Blade.local,user=media,volume=homes/world/srtm-v3-1s.tif"),
         ];
+        // Also check $METAVERSE_DATA_DIR/srtm-global.tif
+        if let Ok(data_dir) = std::env::var("METAVERSE_DATA_DIR") {
+            candidates.insert(0, PathBuf::from(data_dir).join("srtm-global.tif"));
+        }
         
         for path in candidates {
             if path.exists() {

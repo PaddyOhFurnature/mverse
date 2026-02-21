@@ -47,4 +47,25 @@ echo ""
 
 # Set identity and run
 export METAVERSE_IDENTITY_FILE="$IDENTITY_FILE"
+
+# Point to data directory containing srtm-global.tif and elevation_cache
+# On dev machine: repo root. On remote: set METAVERSE_DATA_DIR before running.
+if [ -z "$METAVERSE_DATA_DIR" ]; then
+    # Default: look for srtm file relative to script location
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ -f "$SCRIPT_DIR/../srtm-global.tif" ]; then
+        export METAVERSE_DATA_DIR="$SCRIPT_DIR/.."
+    elif [ -f "$SCRIPT_DIR/srtm-global.tif" ]; then
+        export METAVERSE_DATA_DIR="$SCRIPT_DIR"
+    fi
+fi
+
+if [ -n "$METAVERSE_DATA_DIR" ]; then
+    echo "📁 Data dir: $METAVERSE_DATA_DIR"
+else
+    echo "⚠️  No SRTM terrain file found - terrain will be flat"
+    echo "   Set METAVERSE_DATA_DIR to folder containing srtm-global.tif"
+    echo "   or copy srtm-global.tif to the deploy folder"
+fi
+
 ./bin/metaworld_alpha

@@ -225,7 +225,11 @@ fn main() {
     }
     
     // Add OpenTopography API source (with cache)
-    let cache_dir = std::env::current_dir().unwrap().join("elevation_cache");
+    // Cache dir: $METAVERSE_DATA_DIR/elevation_cache or ./elevation_cache
+    let data_dir = std::env::var("METAVERSE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap());
+    let cache_dir = data_dir.join("elevation_cache");
     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").ok();
     if let Some(key) = api_key {
         elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
@@ -248,7 +252,7 @@ fn main() {
     if let Some(nas_source) = NasFileSource::new() {
         elevation_pipeline_2.add_source(Box::new(nas_source));
     }
-    let cache_dir_2 = std::env::current_dir().unwrap().join("elevation_cache");
+    let cache_dir_2 = data_dir.join("elevation_cache");
     if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
     }
