@@ -89,15 +89,12 @@ use metaverse_core::{
 };
 use glam::{Mat4, Vec3};
 use rapier3d::prelude::*;
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::{Arc, Mutex}, collections::HashMap, time::Instant, path::PathBuf};
 use winit::{
     event::*,
     event_loop::EventLoop,
     keyboard::{KeyCode, PhysicalKey},
 };
-use std::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PlayerModeLocal {
@@ -273,7 +270,10 @@ fn main() {
         safe_zone_radius: 1,            // Keep 3×3 chunks around player
         frame_budget_ms: 5.0,           // 5ms per frame during gameplay
     };
-    let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone());
+    
+    let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
+    let world_dir = PathBuf::from("./world_data");
+    let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone(), user_content.clone(), world_dir.clone());
     
     // ============================================================
     // LOADING PHASE - Pre-load spawn area before gameplay starts
@@ -320,7 +320,7 @@ fn main() {
     
     // Keep chunk manager for user edits and voxel operations tracking only
     // (not for terrain loading - ChunkStreamer handles that now)
-    let mut chunk_manager = ChunkManager::new(chunk_manager_generator, user_content);
+    let mut chunk_manager = ChunkManager::new(chunk_manager_generator, (*user_content.lock().unwrap()).clone());
     
     // Request historical chunk state from all connected peers
     // This ensures we get edits made by other players before we joined
