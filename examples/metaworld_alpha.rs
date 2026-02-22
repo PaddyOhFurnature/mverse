@@ -478,10 +478,28 @@ fn main() {
     // Load saved player state (position, rotation, mode) - encrypted with identity
     let player_state = PlayerPersistence::load(&world_dir, &identity);
     println!("🧍 Setting up player...");
-    
+
+    // If saved position is more than 2km from current spawn origin, discard it.
+    // This happens when the spawn GPS changes between sessions.
+    let spawn_ecef_origin = origin_gps.to_ecef();
+    let saved_ecef = player_state.position;
+    let dist_from_origin = {
+        let dx = saved_ecef.x - spawn_ecef_origin.x;
+        let dy = saved_ecef.y - spawn_ecef_origin.y;
+        let dz = saved_ecef.z - spawn_ecef_origin.z;
+        (dx*dx + dy*dy + dz*dz).sqrt()
+    };
+    let use_saved = dist_from_origin < 2000.0 && dist_from_origin > 0.001;
+    if !use_saved {
+        println!("   ⚠️  Saved position {:.0}m from spawn — resetting to spawn", dist_from_origin);
+    }
+
+    let initial_position = if use_saved { player_state.position } else { spawn_ecef_origin };
+    let initial_gps    = if use_saved { player_state.gps } else { origin_gps };
+
     // Create player at saved position (or default if no save)
-    let mut player = Player::new(&mut physics, player_state.gps, player_state.yaw);
-    player.position = player_state.position;
+    let mut player = Player::new(&mut physics, initial_gps, player_state.yaw);
+    player.position = initial_position;
     player.camera_yaw = player_state.yaw;
     player.camera_pitch = player_state.pitch;
     
