@@ -247,11 +247,8 @@ fn main() {
     let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel);
     let generator_arc = Arc::new(Mutex::new(generator));
     
-    // Create second elevation pipeline for chunk_manager (temporary until refactor)
+    // Create second elevation pipeline for chunk_manager (same source as above)
     let mut elevation_pipeline_2 = ElevationPipeline::new();
-    if let Some(nas_source) = NasFileSource::new() {
-        elevation_pipeline_2.add_source(Box::new(nas_source));
-    }
     let cache_dir_2 = data_dir.join("elevation_cache");
     if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
