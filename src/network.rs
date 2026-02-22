@@ -752,13 +752,20 @@ impl NetworkNode {
                 })
             }
             
-            // Connection closed
+            // Connection closed — only remove peer when ALL connections to them are gone.
+            // libp2p opens multiple connections per peer (QUIC + TCP + circuit).
+            // Removing on any single close causes spurious "Peers: 0" while still connected.
             SwarmEvent::ConnectionClosed {
                 peer_id,
+                num_established,
                 ..
             } => {
-                self.connected_peers.remove(&peer_id);
-                Some(NetworkEvent::PeerDisconnected { peer_id })
+                if num_established == 0 {
+                    self.connected_peers.remove(&peer_id);
+                    Some(NetworkEvent::PeerDisconnected { peer_id })
+                } else {
+                    None // Still have other connections to this peer
+                }
             }
             
             // New listen address
