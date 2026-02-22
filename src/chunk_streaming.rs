@@ -47,7 +47,11 @@ use rapier3d::prelude::ColliderHandle;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+}
 
 /// Configuration for chunk streaming behavior
 #[derive(Debug, Clone)]
@@ -105,6 +109,10 @@ pub struct LoadedChunk {
     
     /// Loading state
     pub state: ChunkLoadState,
+
+    /// Unix timestamp (secs) when this chunk was last modified by terrain gen or user op.
+    /// Used for chunk terrain sync: newer timestamp wins.
+    pub last_modified: u64,
 }
 
 /// Loading states for chunks
@@ -370,6 +378,7 @@ impl ChunkStreamer {
                     distance_m: 0.0,
                     in_safe_zone: false,
                     state: ChunkLoadState::Loaded,
+                    last_modified: now_secs(),
                 };
                 self.loaded_chunks.insert(result.chunk_id, chunk);
                 self.stats.chunks_loaded_this_frame += 1;
@@ -459,6 +468,7 @@ impl ChunkStreamer {
             distance_m: 0.0, // Will be updated
             in_safe_zone: false, // Will be updated
             state: ChunkLoadState::Loaded,
+            last_modified: now_secs(),
         })
     }
     
@@ -528,15 +538,35 @@ impl ChunkStreamer {
     }
 
     /// Replace a chunk's octree with authoritative data received from a peer.
-    /// Returns true if the chunk was loaded and replaced, false if not in memory.
-    /// The chunk is marked dirty so its mesh and collision get rebuilt.
-    pub fn replace_chunk_octree(&mut self, chunk_id: &ChunkId, octree: crate::voxel::Octree) -> bool {
+    /// Only applies if `received_last_modified` is NEWER than what we have.
+    /// Returns true if the chunk was replaced, false if rejected (ours is newer/equal or chunk not loaded).
+    pub fn replace_chunk_octree(&mut self, chunk_id: &ChunkId, octree: crate::voxel::Octree, received_last_modified: u64) -> bool {
         if let Some(chunk) = self.loaded_chunks.get_mut(chunk_id) {
-            chunk.octree = octree;
-            chunk.dirty = true;
-            true
+            if received_last_modified > chunk.last_modified {
+                chunk.octree = octree;
+                chunk.dirty = true;
+                chunk.last_modified = received_last_modified;
+                true
+            } else {
+                false // our version is same age or newer — keep it
+            }
         } else {
-            false
+            false // chunk not loaded yet
+        }
+    }
+
+    /// Get a manifest of all loaded chunks: (ChunkId, last_modified).
+    /// Used to negotiate which chunks to exchange with peers — newer wins.
+    pub fn chunk_manifest(&self) -> Vec<(ChunkId, u64)> {
+        self.loaded_chunks.values()
+            .map(|c| (c.id, c.last_modified))
+            .collect()
+    }
+
+    /// Update a chunk's last_modified timestamp (called when a user op is applied).
+    pub fn touch_chunk(&mut self, chunk_id: &ChunkId) {
+        if let Some(chunk) = self.loaded_chunks.get_mut(chunk_id) {
+            chunk.last_modified = now_secs();
         }
     }
     
@@ -602,6 +632,10 @@ mod tests {
                 distance_m: i as f64,
                 in_safe_zone: false,
                 state: ChunkLoadState::Loaded,
+                mesh_buffer: None,
+                collider: None,
+                dirty: false,
+                last_modified: 0,
             };
             streamer.loaded_chunks.insert(chunk_id, chunk);
         }

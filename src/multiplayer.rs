@@ -52,7 +52,7 @@ use crate::{
     coordinates::ECEF,
     identity::Identity,
     messages::{
-        ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, LamportClock, Material, 
+        ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest, LamportClock, Material, 
         MovementMode, PlayerStateMessage, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
@@ -105,6 +105,7 @@ pub const TOPIC_CHAT: &str = "chat";
 pub const TOPIC_STATE_REQUEST: &str = "state-request";
 pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 pub const TOPIC_CHUNK_TERRAIN: &str = "chunk-terrain";
+pub const TOPIC_CHUNK_MANIFEST: &str = "chunk-manifest";
 
 /// Broadcast interval for player state (20 Hz = 50ms)
 const PLAYER_STATE_BROADCAST_INTERVAL: Duration = Duration::from_millis(50);
@@ -160,7 +161,10 @@ pub struct MultiplayerSystem {
     peers_needing_sync: Vec<PeerId>,
 
     /// Received chunk terrain data waiting to be applied to the world
-    pending_chunk_terrain: Vec<(ChunkId, Vec<u8>)>,
+    pending_chunk_terrain: Vec<(ChunkId, Vec<u8>, u64)>,
+
+    /// Received chunk manifests waiting to be processed (compare + send our newer chunks)
+    pending_chunk_manifests: Vec<Vec<(ChunkId, u64)>>,
     
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
@@ -243,6 +247,7 @@ impl MultiplayerSystem {
             state_requested_from: HashSet::new(),
             peers_needing_sync: Vec::new(),
             pending_chunk_terrain: Vec::new(),
+            pending_chunk_manifests: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -544,6 +549,7 @@ impl MultiplayerSystem {
                     TOPIC_STATE_REQUEST => self.handle_state_request(peer_id, &data)?,
                     TOPIC_STATE_RESPONSE => self.handle_state_response(peer_id, &data)?,
                     TOPIC_CHUNK_TERRAIN => self.handle_chunk_terrain(peer_id, &data)?,
+                    TOPIC_CHUNK_MANIFEST => self.handle_chunk_manifest(peer_id, &data)?,
                     // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
                     t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
                     t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
@@ -938,12 +944,10 @@ impl MultiplayerSystem {
         Ok(total_chunks as usize)
     }
     
-    /// Broadcast chunk terrain (raw octree bytes) to all peers.
-    /// Called once per loaded chunk when a new peer connects.
-    /// The receiving peer uses this to replace its locally-generated terrain,
-    /// eliminating the height-difference feedback loop.
-    pub fn broadcast_chunk_terrain(&mut self, chunk_id: ChunkId, octree_bytes: Vec<u8>) -> Result<()> {
-        let data = ChunkTerrainData { chunk_id, octree_bytes };
+    /// Broadcast chunk terrain (raw octree bytes + timestamp) to all peers.
+    /// Peers only apply this if the received timestamp is newer than what they have.
+    pub fn broadcast_chunk_terrain(&mut self, chunk_id: ChunkId, octree_bytes: Vec<u8>, last_modified: u64) -> Result<()> {
+        let data = ChunkTerrainData { chunk_id, octree_bytes, last_modified };
         let bytes = data.to_bytes()?;
         if let Err(e) = self.cmd_tx.send(NetworkCommand::Publish {
             topic: TOPIC_CHUNK_TERRAIN.to_string(),
@@ -957,16 +961,44 @@ impl MultiplayerSystem {
     /// Receive handler for chunk-terrain gossipsub messages.
     fn handle_chunk_terrain(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
         let terrain_data = ChunkTerrainData::from_bytes(data)?;
-        println!("📦 [TERRAIN SYNC] Received terrain for chunk {:?} ({} bytes)",
-            terrain_data.chunk_id, terrain_data.octree_bytes.len());
-        self.pending_chunk_terrain.push((terrain_data.chunk_id, terrain_data.octree_bytes));
+        println!("📦 [TERRAIN SYNC] Received terrain for chunk {:?} ({} bytes, t={})",
+            terrain_data.chunk_id, terrain_data.octree_bytes.len(), terrain_data.last_modified);
+        self.pending_chunk_terrain.push((terrain_data.chunk_id, terrain_data.octree_bytes, terrain_data.last_modified));
         Ok(())
     }
 
     /// Take all pending chunk terrain data for application to the world.
-    /// Called from the main game loop.
-    pub fn take_pending_chunk_terrain(&mut self) -> Vec<(ChunkId, Vec<u8>)> {
+    /// Returns (chunk_id, octree_bytes, last_modified).
+    pub fn take_pending_chunk_terrain(&mut self) -> Vec<(ChunkId, Vec<u8>, u64)> {
         std::mem::take(&mut self.pending_chunk_terrain)
+    }
+
+    /// Broadcast a chunk manifest so peers can compare and send us newer chunks.
+    pub fn broadcast_chunk_manifest(&mut self, entries: Vec<(ChunkId, u64)>) -> Result<()> {
+        let manifest = ChunkManifest { entries };
+        let bytes = manifest.to_bytes()?;
+        if let Err(e) = self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_CHUNK_MANIFEST.to_string(),
+            data: bytes,
+        }) {
+            eprintln!("⚠️ [TERRAIN SYNC] Failed to broadcast manifest: {}", e);
+        }
+        Ok(())
+    }
+
+    /// Receive handler for chunk-manifest messages.
+    /// Queues manifest for the game loop to process (it has access to chunk_streamer).
+    fn handle_chunk_manifest(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
+        let manifest = ChunkManifest::from_bytes(data)?;
+        println!("📋 [TERRAIN SYNC] Received manifest with {} entries", manifest.entries.len());
+        self.pending_chunk_manifests.push(manifest.entries);
+        Ok(())
+    }
+
+    /// Take pending manifests for the game loop to process.
+    /// Game loop compares against its own chunk timestamps and sends newer chunks.
+    pub fn take_pending_chunk_manifests(&mut self) -> Vec<Vec<(ChunkId, u64)>> {
+        std::mem::take(&mut self.pending_chunk_manifests)
     }
 
     /// Request chunk state from all connected peers
@@ -1110,6 +1142,12 @@ fn run_network_thread(
             eprintln!("Failed to subscribe to chunk-terrain: {}", e);
         } else {
             println!("📻 Subscribed to topic: chunk-terrain");
+        }
+
+        if let Err(e) = network.subscribe(TOPIC_CHUNK_MANIFEST) {
+            eprintln!("Failed to subscribe to chunk-manifest: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: chunk-manifest");
         }
         
         println!("🔍 Network thread started - polling for mDNS and connections...");

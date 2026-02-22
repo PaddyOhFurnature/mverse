@@ -631,17 +631,35 @@ impl ChunkStateResponse {
     }
 }
 
-/// Full chunk terrain broadcast — sent once on peer connect.
-/// Receiver replaces locally-generated terrain with this data.
-/// After initial sync, live voxel ops keep state consistent.
+/// Full chunk terrain broadcast — sent when a peer has a newer version of a chunk.
+/// Receiver applies if received last_modified > their own last_modified for that chunk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkTerrainData {
     pub chunk_id: ChunkId,
     /// bincode-serialized Octree bytes (from Octree::to_bytes())
     pub octree_bytes: Vec<u8>,
+    /// Unix timestamp (secs) when this chunk was last modified — newer wins
+    pub last_modified: u64,
 }
 
 impl ChunkTerrainData {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// Chunk manifest — sent on peer connect so each side knows what the other has.
+/// Each entry is (chunk_id, last_modified). After comparing, each side sends
+/// chunks where their last_modified is strictly newer than the peer's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkManifest {
+    pub entries: Vec<(ChunkId, u64)>,
+}
+
+impl ChunkManifest {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(bincode::serialize(self)?)
     }

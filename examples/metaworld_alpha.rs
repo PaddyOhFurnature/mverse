@@ -871,23 +871,16 @@ fn main() {
                         println!("🆕 Detected {} new peers, syncing state...", new_peers.len());
                         let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
 
-                        // Push authoritative chunk terrain so peer uses our octree instead of
-                        // independently-generated terrain (prevents height-difference feedback loop).
-                        for chunk_id in &loaded_chunk_ids {
-                            if let Some(chunk_data) = chunk_streamer.get_chunk(chunk_id) {
-                                match chunk_data.octree.to_bytes() {
-                                    Ok(bytes) => {
-                                        if let Err(e) = multiplayer.broadcast_chunk_terrain(*chunk_id, bytes) {
-                                            eprintln!("   ⚠️  Failed to push terrain for {:?}: {}", chunk_id, e);
-                                        }
-                                    }
-                                    Err(e) => eprintln!("   ⚠️  Failed to serialize chunk {:?}: {}", chunk_id, e),
-                                }
-                            }
+                        // Send our chunk manifest so peer knows what we have and when.
+                        // Each side sends manifests; each side sends chunks where theirs is newer.
+                        // This prevents mutual overwrite and the terrain cliff feedback loop.
+                        let manifest = chunk_streamer.chunk_manifest();
+                        println!("📋 Broadcasting chunk manifest ({} entries)", manifest.len());
+                        if let Err(e) = multiplayer.broadcast_chunk_manifest(manifest) {
+                            eprintln!("   ⚠️  Failed to broadcast manifest: {}", e);
                         }
-                        println!("📦 Pushed terrain for {} chunks to new peer(s)", loaded_chunk_ids.len());
 
-                        // Request their state (pull)
+                        // Request their op state (pull)
                         if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids.clone()) {
                             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
                         }
@@ -941,17 +934,47 @@ fn main() {
                         }
                     }
 
-                    // Apply received chunk terrain data (replaces locally-generated octree)
+                    // Process received chunk manifests — send chunks where we are newer
+                    let manifests = multiplayer.take_pending_chunk_manifests();
+                    for peer_manifest in manifests {
+                        let peer_map: std::collections::HashMap<ChunkId, u64> = peer_manifest.into_iter().collect();
+                        let mut sent = 0;
+                        for chunk_id in chunk_streamer.loaded_chunk_ids() {
+                            if let Some(chunk) = chunk_streamer.get_chunk(&chunk_id) {
+                                let peer_ts = peer_map.get(&chunk_id).copied().unwrap_or(0);
+                                if chunk.last_modified > peer_ts {
+                                    // We have a newer version — send it
+                                    match chunk.octree.to_bytes() {
+                                        Ok(bytes) => {
+                                            if let Err(e) = multiplayer.broadcast_chunk_terrain(chunk_id, bytes, chunk.last_modified) {
+                                                eprintln!("   ⚠️  Failed to send terrain for {:?}: {}", chunk_id, e);
+                                            } else {
+                                                sent += 1;
+                                            }
+                                        }
+                                        Err(e) => eprintln!("   ⚠️  Failed to serialize chunk {:?}: {}", chunk_id, e),
+                                    }
+                                }
+                            }
+                        }
+                        if sent > 0 {
+                            println!("📦 [TERRAIN SYNC] Sent {} chunks newer than peer", sent);
+                        } else {
+                            println!("📋 [TERRAIN SYNC] Peer has same or newer terrain, no chunks sent");
+                        }
+                    }
+
+                    // Apply received chunk terrain data — only if received timestamp is newer than ours
                     let terrain_updates = multiplayer.take_pending_chunk_terrain();
                     if !terrain_updates.is_empty() {
-                        println!("🌍 [TERRAIN SYNC] Applying {} chunk terrain updates from peers", terrain_updates.len());
-                        for (chunk_id, octree_bytes) in terrain_updates {
+                        println!("🌍 [TERRAIN SYNC] Processing {} chunk terrain updates from peers", terrain_updates.len());
+                        for (chunk_id, octree_bytes, last_modified) in terrain_updates {
                             match metaverse_core::voxel::Octree::from_bytes(&octree_bytes) {
                                 Ok(octree) => {
-                                    if chunk_streamer.replace_chunk_octree(&chunk_id, octree) {
-                                        println!("   ✅ Applied terrain for chunk {:?}", chunk_id);
+                                    if chunk_streamer.replace_chunk_octree(&chunk_id, octree, last_modified) {
+                                        println!("   ✅ Applied newer terrain for chunk {:?} (t={})", chunk_id, last_modified);
                                     } else {
-                                        println!("   ⏭️  Chunk {:?} not loaded yet, skipping terrain sync", chunk_id);
+                                        println!("   ⏭️  Chunk {:?} rejected (our version same/newer, or not loaded)", chunk_id);
                                     }
                                 }
                                 Err(e) => eprintln!("   ⚠️  Failed to deserialize terrain for {:?}: {}", chunk_id, e),
