@@ -285,6 +285,45 @@ fn main() {
         std::fs::create_dir_all(&world_dir).expect("Failed to create world data directory");
         println!("📁 Created world data directory: {:?}", world_dir);
     }
+
+    // Load persisted voxel ops from disk into user_content so chunk_manager
+    // can include them in state sync with reconnecting peers.
+    {
+        let mut uc = user_content.lock().unwrap();
+        let chunks_dir = world_dir.join("chunks");
+        if chunks_dir.exists() {
+            // Discover all saved chunk dirs and load their ops
+            let mut chunk_ids_to_load: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    // chunk dir names are like "chunk_44753_44780_116080"
+                    let parts: Vec<&str> = name_str.split('_').collect();
+                    if parts.len() == 4 && parts[0] == "chunk" {
+                        if let (Ok(x), Ok(y), Ok(z)) = (
+                            parts[1].parse::<i64>(),
+                            parts[2].parse::<i64>(),
+                            parts[3].parse::<i64>(),
+                        ) {
+                            chunk_ids_to_load.push(metaverse_core::chunk::ChunkId { x, y, z });
+                        }
+                    }
+                }
+            }
+            if !chunk_ids_to_load.is_empty() {
+                match uc.load_chunks(&world_dir, &chunk_ids_to_load) {
+                    Ok(counts) => {
+                        let total: usize = counts.values().sum();
+                        if total > 0 {
+                            println!("📂 Loaded {} persisted voxel ops from {} chunks", total, counts.len());
+                        }
+                    }
+                    Err(e) => eprintln!("⚠️  Failed to load persisted ops: {}", e),
+                }
+            }
+        }
+    }
     
     // Create chunk streamer with dynamic loading and REAL terrain generation
     println!("🔄 Initializing chunk streaming system...");
@@ -708,6 +747,7 @@ fn main() {
                         
                         // Try raycasting in each loaded chunk to find hit
                         let mut hit_coord = None;
+                        let mut hit_chunk_id = None;
                         for chunk_data in chunk_streamer.loaded_chunks_mut() {
                             if let Some(hit) = metaverse_core::voxel::raycast_voxels(
                                 &chunk_data.octree,
@@ -716,12 +756,15 @@ fn main() {
                                 10.0
                             ) {
                                 hit_coord = Some(hit.voxel);
+                                hit_chunk_id = Some(chunk_data.id);
                                 // Dig the voxel
                                 chunk_data.octree.set_voxel(hit.voxel, MaterialId::AIR);
                                 chunk_data.dirty = true;
-                                chunk_streamer.touch_chunk(&chunk_id);
                                 break;
                             }
+                        }
+                        if let Some(id) = hit_chunk_id {
+                            chunk_streamer.touch_chunk(&id);
                         }
                         
                         if let Some(dug) = hit_coord {
