@@ -120,6 +120,18 @@ optional = false
 version = "4"
 features = ["derive"]
 
+# Terminal UI for relay dashboard
+[dependencies.ratatui]
+version = "0.29"
+
+[dependencies.crossterm]
+version = "0.28"
+features = ["event-stream"]
+
+# System metrics (CPU%, RAM%) for relay TUI
+[dependencies.sysinfo]
+version = "0.33"
+
 [[bin]]
 name = "metaverse-relay"
 path = "examples/metaverse_relay.rs"
