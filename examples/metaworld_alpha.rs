@@ -86,6 +86,7 @@ use metaverse_core::{
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
+    vector_clock::VectorClock,
     voxel::VoxelCoord,
 };
 use glam::{Mat4, Vec3};
@@ -534,6 +535,7 @@ fn main() {
     let mut frame_count = 0;
     let mut fps_timer = Instant::now();
     let mut last_stats_print = Instant::now();
+    let mut last_state_resync = Instant::now();
     
     let mut cursor_grabbed = false;
     
@@ -845,32 +847,48 @@ fn main() {
                         println!("   ✅ Applied {} operations (after deduplication)", applied);
                     }
                     
-                    // Check for newly discovered peers and request state
+                    // Check for newly discovered peers and perform full bidirectional state sync
                     if multiplayer.has_new_peers() {
                         let new_peers = multiplayer.get_new_peers();
-                        println!("🆕 Detected {} new peers, requesting state...", new_peers.len());
+                        println!("🆕 Detected {} new peers, syncing state...", new_peers.len());
                         let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
-                        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
+
+                        // Request their state (pull)
+                        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids.clone()) {
                             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
                         }
-                        
-                        // Also send our state to new peers
-                        println!("📤 Sending our operations to new peers...");
-                        let our_ops = user_content.lock().unwrap().op_log().to_vec();
+
+                        // Push our ops proactively so they don't have to wait for request round-trip
+                        let our_ops: std::collections::HashMap<_, _> = {
+                            let cl = VectorClock::new(); // empty clock = send all
+                            chunk_manager.filter_operations_for_chunks(&loaded_chunk_ids, &cl)
+                        };
                         if !our_ops.is_empty() {
-                            // Send via state response (they requested, we're responding)
-                            // TODO: This should use a proper state sync message
-                            println!("   → Broadcasting {} operations to network", our_ops.len());
+                            let count: usize = our_ops.values().map(|v| v.len()).sum();
+                            println!("📤 Pushing {} ops to new peer(s)", count);
+                            if let Err(e) = multiplayer.send_chunk_state_response(our_ops) {
+                                eprintln!("   ⚠️  Failed to push state: {}", e);
+                            }
                         }
+                        last_state_resync = Instant::now();
                     }
-                    
+
+                    // Periodic resync: every 60s re-exchange ops with peers to recover any missed packets
+                    if multiplayer.peer_count() > 0 && last_state_resync.elapsed().as_secs() >= 60 {
+                        println!("🔁 Periodic state resync with peers...");
+                        let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
+                        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
+                            eprintln!("   ⚠️  Periodic resync request failed: {}", e);
+                        }
+                        last_state_resync = Instant::now();
+                    }
+
                     // Handle state requests from peers
                     let state_requests = multiplayer.take_pending_state_requests();
                     for (peer_id, request) in state_requests {
                         println!("📨 Processing state request from {} for {} chunks",
                             peer_id, request.chunk_ids.len());
                         
-                        // Filter our operations for requested chunks using ChunkManager
                         let filtered_ops = chunk_manager.filter_operations_for_chunks(
                             &request.chunk_ids,
                             &request.requester_clock
@@ -881,12 +899,11 @@ fn main() {
                                 filtered_ops.values().map(|v| v.len()).sum::<usize>(),
                                 filtered_ops.len()
                             );
-                            
                             if let Err(e) = multiplayer.send_chunk_state_response(filtered_ops) {
                                 eprintln!("   ⚠️  Failed to send state response: {}", e);
                             }
                         } else {
-                            println!("   → No new operations to send (peer is up to date)");
+                            println!("   → No new operations to send");
                         }
                     }
                     

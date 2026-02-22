@@ -154,6 +154,9 @@ pub struct MultiplayerSystem {
     
     /// Peers we've requested state from (to avoid duplicate requests)
     state_requested_from: HashSet<PeerId>,
+
+    /// Peers that just connected and need a chunk state sync
+    peers_needing_sync: Vec<PeerId>,
     
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
@@ -234,6 +237,7 @@ impl MultiplayerSystem {
             pending_state_ops: Vec::new(),
             pending_state_requests: Vec::new(),
             state_requested_from: HashSet::new(),
+            peers_needing_sync: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -544,6 +548,9 @@ impl MultiplayerSystem {
             NetworkEvent::PeerConnected { peer_id, address } => {
                 println!("🔗 Peer connected: {} @ {}", peer_id, address);
                 self.connected_peers.insert(peer_id);
+                if !self.state_requested_from.contains(&peer_id) {
+                    self.peers_needing_sync.push(peer_id);
+                }
             }
             
             NetworkEvent::PeerDisconnected { peer_id } => {
@@ -560,11 +567,8 @@ impl MultiplayerSystem {
             NetworkEvent::PeerDiscovered { peer_id } => {
                 println!("🔍 Peer discovered: {}", peer_id);
                 self.connected_peers.insert(peer_id);
-                
-                // Mark that we need to request state from this new peer
-                // Game loop will handle the actual request (needs loaded chunk IDs)
                 if !self.state_requested_from.contains(&peer_id) {
-                    println!("   ⏰ Will request state from {} on next update", peer_id);
+                    self.peers_needing_sync.push(peer_id);
                 }
             }
             
@@ -825,6 +829,12 @@ impl MultiplayerSystem {
     /// and send responses back using send_chunk_state_response().
     pub fn take_pending_state_requests(&mut self) -> Vec<(PeerId, ChunkStateRequest)> {
         std::mem::take(&mut self.pending_state_requests)
+    }
+
+    /// Returns peers that just connected and need a full chunk state sync.
+    /// Game loop should call request_chunk_state() for loaded chunks when this is non-empty.
+    pub fn take_peers_needing_sync(&mut self) -> Vec<PeerId> {
+        std::mem::take(&mut self.peers_needing_sync)
     }
     
     /// Send chunk state response to a peer.

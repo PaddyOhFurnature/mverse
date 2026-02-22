@@ -388,7 +388,7 @@ impl ChunkManager {
     pub fn filter_operations_for_chunks(
         &self,
         chunk_ids: &[ChunkId],
-        requester_clock: &VectorClock,
+        _requester_clock: &VectorClock, // Clock hint kept for API compat but not used for filtering
     ) -> HashMap<ChunkId, Vec<VoxelOperation>> {
         let mut result: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
         
@@ -398,19 +398,20 @@ impl ChunkManager {
         println!("🔍 Filtering from {} total operations for {} requested chunks", 
             all_ops.len(), chunk_ids.len());
         
+        let chunk_set: std::collections::HashSet<&ChunkId> = chunk_ids.iter().collect();
+
         for op in all_ops {
-            // Check if requester already has this operation
-            // If their vector clock happened-after this op's clock, they have it
-            if requester_clock.happens_after(&op.vector_clock) {
-                continue; // Requester already has this
-            }
-            
+            // NOTE: Do NOT filter by vector clock here. Vector clock "happens_after" only means
+            // the requester has seen causal predecessors — NOT that they received this specific op.
+            // Missed ops (packet loss) would never be recovered if we filter by clock.
+            // Let the RECEIVER deduplicate by op signature instead (already done in handle_state_response).
+
             // Find all chunks affected by this operation
             let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
             
             // Add to result if any affected chunk is in requested list
             for chunk_id in affected_chunks {
-                if chunk_ids.contains(&chunk_id) {
+                if chunk_set.contains(&chunk_id) {
                     result.entry(chunk_id)
                         .or_insert_with(Vec::new)
                         .push(op.clone());
