@@ -248,9 +248,12 @@ impl TerrainGenerator {
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
                 
-                // Convert to voxel Y coordinate
-                let surface_offset = surface_elevation - self.origin_gps.alt;
-                let surface_voxel_y = self.origin_voxel.y + surface_offset as i64;
+                // Convert to voxel Y coordinate using absolute ECEF→voxel conversion.
+                // This is deterministic across all clients regardless of origin_gps.alt source.
+                // Using origin-relative offset (surface_elevation - origin_alt) would cause
+                // 1-voxel differences when origin_alt differs slightly between clients (NAS vs API).
+                let surface_gps = crate::coordinates::GPS::new(sample_gps.lat, sample_gps.lon, surface_elevation);
+                let surface_voxel_y = VoxelCoord::from_ecef(&surface_gps.to_ecef()).y;
                 
                 // Generate vertical column
                 const BEDROCK_DEPTH: i64 = 200;

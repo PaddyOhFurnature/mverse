@@ -253,6 +253,9 @@ pub struct NetworkNode {
 
     /// Peers we know are relay nodes - listen on circuit when connected
     relay_nodes: HashSet<PeerId>,
+
+    /// Known base address for each relay node (for circuit re-registration)
+    relay_addrs: HashMap<PeerId, Multiaddr>,
 }
 
 impl NetworkNode {
@@ -284,6 +287,7 @@ impl NetworkNode {
             event_queue: Vec::new(),
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
+            relay_addrs: HashMap::new(),
         })
     }
     
@@ -314,6 +318,7 @@ impl NetworkNode {
             event_queue: Vec::new(),
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
+            relay_addrs: HashMap::new(),
         })
     }
     
@@ -524,6 +529,19 @@ impl NetworkNode {
 
         // Kick off DHT bootstrap query
         self.swarm.behaviour_mut().kademlia.bootstrap().ok();
+
+        // Re-register circuit relay for every currently connected relay node.
+        // If relay TCP is still up but circuit reservation expired, calling listen_via_relay()
+        // again requests a fresh reservation. ConnectionEstablished won't fire for already-connected
+        // relays, so we must do this explicitly on every reconnect attempt.
+        let relay_pairs: Vec<(PeerId, Multiaddr)> = self.relay_addrs.iter()
+            .filter(|(p, _)| self.connected_peers.contains(*p))
+            .map(|(p, a)| (*p, a.clone()))
+            .collect();
+        for (relay_peer_id, relay_base) in relay_pairs {
+            println!("[relay] Re-registering circuit with connected relay {}", relay_peer_id);
+            self.listen_via_relay(relay_peer_id, relay_base);
+        }
     }
 
     /// Listen on a relay circuit - makes this peer reachable through the relay.
@@ -698,6 +716,8 @@ impl NetworkNode {
                     let relay_base: Multiaddr = remote_addr.iter()
                         .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                         .collect();
+                    // Store for later circuit re-registration on reconnect
+                    self.relay_addrs.insert(peer_id, relay_base.clone());
                     self.listen_via_relay(peer_id, relay_base);
                 }
 
