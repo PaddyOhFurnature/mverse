@@ -1073,6 +1073,8 @@ fn run_network_thread(
         let mut heartbeat_counter = 0u64;
         let mut last_peer_seen = tokio::time::Instant::now();
         let mut last_reconnect = tokio::time::Instant::now();
+        // Queue for retrying failed publishes (voxel ops that failed due to no mesh peers)
+        let mut publish_retry_queue: Vec<(String, Vec<u8>, tokio::time::Instant)> = Vec::new();
         
         // Main loop: process commands and poll network
         loop {
@@ -1119,10 +1121,20 @@ fn run_network_thread(
                         }
                     }
                     NetworkCommand::Publish { topic, data } => {
-                        if let Err(e) = network.publish(&topic, data) {
-                            // Suppress "no peers" error
-                            if !e.to_string().contains("NoPeersSubscribedToTopic") {
-                                eprintln!("Failed to publish to {}: {}", topic, e);
+                        match network.publish(&topic, data.clone()) {
+                            Ok(()) => {
+                                // Delivered - remove from retry queue if it was there
+                            }
+                            Err(e) => {
+                                let e_str = e.to_string();
+                                // Queue voxel ops for retry - they're one-shot and must not be lost
+                                if topic == "voxel-ops" && 
+                                   (e_str.contains("InsufficientPeers") || e_str.contains("NoPeers")) {
+                                    println!("⚠️  [NETWORK] voxel-op publish failed ({}), queuing retry", e_str);
+                                    publish_retry_queue.push((topic, data, tokio::time::Instant::now()));
+                                } else if !e_str.contains("NoPeers") {
+                                    eprintln!("Failed to publish to {}: {}", topic, e_str);
+                                }
                             }
                         }
                     }
@@ -1161,6 +1173,27 @@ fn run_network_thread(
                 println!("🔄 [Network] No peers for {}s, reconnecting to bootstrap...", time_since_peer);
                 network.connect_to_bootstrap().await;
                 last_reconnect = tokio::time::Instant::now();
+            }
+
+            // Retry queued voxel ops - retry every 2s, give up after 30s
+            if network.connected_peer_count() > 0 && !publish_retry_queue.is_empty() {
+                let now = tokio::time::Instant::now();
+                publish_retry_queue.retain(|(topic, data, queued_at)| {
+                    if now.duration_since(*queued_at).as_secs() > 30 {
+                        eprintln!("⚠️  [NETWORK] Dropping voxel-op after 30s retry timeout");
+                        return false; // drop
+                    }
+                    true // keep
+                });
+                // Try sending all queued ops
+                let to_retry: Vec<_> = publish_retry_queue.drain(..).collect();
+                for (topic, data, queued_at) in to_retry {
+                    match network.publish(&topic, data.clone()) {
+                        Ok(()) => println!("✅ [NETWORK] Retried voxel-op delivered after {}ms",
+                            now.duration_since(queued_at).as_millis()),
+                        Err(_) => publish_retry_queue.push((topic, data, queued_at)), // keep retrying
+                    }
+                }
             }
             
             // Small sleep to avoid busy-waiting
