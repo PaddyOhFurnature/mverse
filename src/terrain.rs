@@ -238,29 +238,19 @@ impl TerrainGenerator {
                 let voxel_x = min_voxel.x + i;
                 let voxel_z = min_voxel.z + k;
                 
-                // Convert voxel position to GPS.
-                // Snap to 1m grid (SRTM ~30m, but we sample per-voxel for accurate terrain shape).
-                // CRITICAL: use the exact voxel center, not min corner, so chunk boundaries
-                // on both sides produce the same GPS coordinate and the same elevation query.
-                let sample_ecef = VoxelCoord::new(voxel_x, self.origin_voxel.y, voxel_z).to_ecef();
+                // Convert voxel position to GPS
+                let sample_voxel = VoxelCoord::new(voxel_x, self.origin_voxel.y, voxel_z);
+                let sample_ecef = sample_voxel.to_ecef();
                 let sample_gps = sample_ecef.to_gps();
-                // Round lat/lon to 6 decimal places (~0.1m precision) to ensure deterministic
-                // SRTM tile lookup regardless of floating-point path from either chunk side.
-                let stable_gps = crate::coordinates::GPS::new(
-                    (sample_gps.lat * 1_000_000.0).round() / 1_000_000.0,
-                    (sample_gps.lon * 1_000_000.0).round() / 1_000_000.0,
-                    sample_gps.alt,
-                );
                 
                 // Query SRTM elevation (thread-safe with brief internal locks)
-                let surface_elevation = elevation.lock().unwrap().query(&stable_gps)
+                let surface_elevation = elevation.lock().unwrap().query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
                 
-                // Convert to voxel Y coordinate using absolute ECEF→voxel conversion.
-                // Deterministic across all clients regardless of origin_gps.alt source.
-                let surface_gps = crate::coordinates::GPS::new(stable_gps.lat, stable_gps.lon, surface_elevation);
-                let surface_voxel_y = VoxelCoord::from_ecef(&surface_gps.to_ecef()).y;
+                // Convert to voxel Y coordinate
+                let surface_offset = surface_elevation - self.origin_gps.alt;
+                let surface_voxel_y = self.origin_voxel.y + surface_offset as i64;
                 
                 // Generate vertical column
                 const BEDROCK_DEPTH: i64 = 200;
