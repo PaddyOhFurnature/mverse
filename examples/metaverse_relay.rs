@@ -67,8 +67,8 @@ struct Args {
     #[arg(long, default_value = "3600")]
     max_circuit_duration: u64,
 
-    /// Maximum bytes per circuit (1MB default)
-    #[arg(long, default_value = "1048576")]
+    /// Maximum bytes per circuit (1GB default — chunk terrain sync can be several MB per session)
+    #[arg(long, default_value = "1073741824")]
     max_circuit_bytes: u64,
 }
 
@@ -154,7 +154,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             })
         })?
         .with_swarm_config(|c: libp2p::swarm::Config| {
-            c.with_idle_connection_timeout(Duration::from_secs(300))
+            // 60s idle timeout — prevents stale connections from accumulating when
+            // clients are reconnecting frequently. Reservations renew before expiry.
+            c.with_idle_connection_timeout(Duration::from_secs(60))
         })
         .build();
 
@@ -178,9 +180,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("👂 Listening for connections...\n");
 
     // Connection statistics
-    let mut active_connections = 0;
-    let mut total_connections = 0;
-    let mut active_circuits = 0;
+    let mut active_connections: i64 = 0;
+    let mut total_connections: u64 = 0;
+    let mut active_circuits: i64 = 0;
 
     // Event loop
     loop {
