@@ -258,6 +258,31 @@ pub struct NetworkNode {
     relay_addrs: HashMap<PeerId, Multiaddr>,
 }
 
+/// Returns true if this address is useful to advertise in DHT.
+/// Filters out loopback, link-local, and virtual bridge addresses
+/// that are unreachable from other machines.
+fn is_routable_addr(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback()           { return false; } // 127.x
+                if ip.is_link_local()         { return false; } // 169.254.x
+                // Filter common virtual bridge ranges (libvirt, docker, vmware)
+                let octets = ip.octets();
+                if octets[0] == 192 && octets[1] == 168 && octets[2] == 122 { return false; } // libvirt
+                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31   { return false; } // docker
+                if octets[0] == 10  && octets[1] == 0   && octets[2] == 2   { return false; } // VirtualBox NAT
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback()    { return false; }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
 impl NetworkNode {
     /// Create a new NetworkNode with the given identity
     ///
@@ -749,9 +774,11 @@ impl NetworkNode {
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Identify(
                 identify::Event::Received { peer_id, info, .. }
             )) => {
-                // Add peer's listen addresses to Kademlia
+                // Add peer's listen addresses to Kademlia — skip virtual/loopback addrs
                 for addr in &info.listen_addrs {
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                    if is_routable_addr(addr) {
+                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                    }
                 }
                 // If peer advertises circuit relay v2 support, mark as relay and listen via it
                 let relay_proto = libp2p::core::upgrade::Version::V1;
