@@ -46,6 +46,7 @@ use futures::StreamExt;
 use std::error::Error;
 use std::time::Duration;
 use clap::Parser;
+use reqwest;
 
 #[derive(Parser, Debug)]
 #[command(name = "metaverse-relay")]
@@ -70,6 +71,11 @@ struct Args {
     /// Maximum bytes per circuit (1GB default — chunk terrain sync can be several MB per session)
     #[arg(long, default_value = "1073741824")]
     max_circuit_bytes: u64,
+
+    /// Other relay nodes to peer with — dial these at startup so relays form a DHT mesh.
+    /// Can be specified multiple times: --peer /ip4/x.x.x.x/tcp/4001/p2p/12D3...
+    #[arg(long)]
+    peer: Vec<String>,
 }
 
 /// Relay server behavior
@@ -79,6 +85,31 @@ struct RelayBehaviour {
     ping: libp2p::ping::Behaviour,
     kademlia: kad::Behaviour<MemoryStore>,
     identify: identify::Behaviour,
+}
+
+/// Try several public IP detection services in order, return first success.
+async fn detect_public_ip() -> Option<String> {
+    let services = [
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    for url in &services {
+        if let Ok(resp) = client.get(*url).send().await {
+            if let Ok(text) = resp.text().await {
+                let ip = text.trim().to_string();
+                // Basic validation: looks like an IPv4 address
+                if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[tokio::main]
@@ -170,14 +201,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(ws_addr.parse()?)?;
     println!("🌐 WebSocket port: {}", ws_port);
 
-    // If external address provided, add it
-    if let Some(external) = args.external_addr {
-        swarm.add_external_address(external.parse()?);
-        println!("📍 External address: {}", external);
+    // Resolve external address — use provided value or auto-detect via HTTP
+    let external_ip = match args.external_addr {
+        Some(ref addr) => {
+            println!("📍 External address: {} (provided)", addr);
+            Some(addr.clone())
+        }
+        None => {
+            print!("🌐 Auto-detecting public IP... ");
+            let ip = detect_public_ip().await;
+            match &ip {
+                Some(detected) => println!("detected: {}", detected),
+                None => println!("failed — run with --external-addr /ip4/YOUR_IP/tcp/{}", args.port),
+            }
+            ip.map(|ip| format!("/ip4/{}/tcp/{}", ip, args.port))
+        }
+    };
+    if let Some(ref external) = external_ip {
+        if let Ok(addr) = external.parse() {
+            swarm.add_external_address(addr);
+        }
+        // Also advertise WebSocket external address
+        let ws_external = external.replace(&format!("/tcp/{}", args.port), &format!("/tcp/{}/ws", ws_port));
+        if let Ok(addr) = ws_external.parse() {
+            swarm.add_external_address(addr);
+        }
     }
 
     println!("\n✅ Relay server started");
     println!("👂 Listening for connections...\n");
+
+    // Dial peer relays so they share DHT state from the start.
+    // Without this, two isolated relays can't help clients find each other.
+    if !args.peer.is_empty() {
+        println!("🔗 Dialing {} peer relay(s)...", args.peer.len());
+        for peer_addr in &args.peer {
+            match peer_addr.parse::<Multiaddr>() {
+                Ok(addr) => {
+                    // Add to DHT routing table
+                    if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = addr.iter().last() {
+                        swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                    }
+                    match swarm.dial(addr.clone()) {
+                        Ok(()) => println!("   Dialing peer relay: {}", peer_addr),
+                        Err(e) => eprintln!("   Failed to dial {}: {}", peer_addr, e),
+                    }
+                }
+                Err(e) => eprintln!("   Invalid peer address {}: {}", peer_addr, e),
+            }
+        }
+        swarm.behaviour_mut().kademlia.bootstrap().ok();
+    }
 
     // Connection statistics
     let mut active_connections: i64 = 0;
