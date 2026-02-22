@@ -852,14 +852,19 @@ impl NetworkNode {
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Kademlia(event)) => {
                 match event {
                     kad::Event::RoutingUpdated { peer, addresses, .. } => {
-                        // New peer found in DHT - dial it so we can exchange gossipsub messages
+                        // New peer found in DHT - dial via circuit address preferentially
                         if !self.connected_peers.contains(&peer) {
-                            for addr in addresses.iter() {
-                                let dial_addr = addr.clone()
+                            let all_addrs: Vec<_> = addresses.iter().collect();
+                            // Prefer circuit address (works through CGNAT/VPN/Starlink)
+                            // over direct IPs which may be unreachable
+                            let preferred = all_addrs.iter()
+                                .find(|a| a.to_string().contains("p2p-circuit"))
+                                .or_else(|| all_addrs.first());
+                            if let Some(addr) = preferred {
+                                let dial_addr = (*addr).clone()
                                     .with(libp2p::multiaddr::Protocol::P2p(peer));
                                 println!("🔍 [DHT] Found peer {}, dialing {}", peer, dial_addr);
                                 self.swarm.dial(dial_addr).ok();
-                                break; // dial one address, libp2p handles fallback
                             }
                         }
                         None
