@@ -892,6 +892,11 @@ impl NetworkNode {
     pub fn connected_peer_count(&self) -> usize {
         self.connected_peers.len()
     }
+
+    /// Count only non-relay game peers (relay nodes don't count as "connected players")
+    pub fn game_peer_count(&self) -> usize {
+        self.connected_peers.iter().filter(|p| !self.relay_nodes.contains(*p)).count()
+    }
     
     /// Get list of connected peers
     pub fn connected_peers(&self) -> Vec<PeerId> {
