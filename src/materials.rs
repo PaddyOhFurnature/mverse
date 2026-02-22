@@ -5,7 +5,7 @@
 
 /// Material identifier (256 possible materials)
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MaterialId {
     /// Empty space (most common - optimize for this)
     AIR = 0,

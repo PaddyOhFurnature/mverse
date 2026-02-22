@@ -526,6 +526,19 @@ impl ChunkStreamer {
     pub fn loaded_chunk_ids(&self) -> Vec<ChunkId> {
         self.loaded_chunks.keys().copied().collect()
     }
+
+    /// Replace a chunk's octree with authoritative data received from a peer.
+    /// Returns true if the chunk was loaded and replaced, false if not in memory.
+    /// The chunk is marked dirty so its mesh and collision get rebuilt.
+    pub fn replace_chunk_octree(&mut self, chunk_id: &ChunkId, octree: crate::voxel::Octree) -> bool {
+        if let Some(chunk) = self.loaded_chunks.get_mut(chunk_id) {
+            chunk.octree = octree;
+            chunk.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
     
     /// Get statistics
     pub fn stats(&self) -> &StreamerStats {

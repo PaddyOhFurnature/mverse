@@ -490,8 +490,6 @@ impl ChatMessage {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkStateRequest {
-    /// List of chunk IDs to request operations for
-    ///
     /// Only request chunks that are currently loaded. This provides natural
     /// bandwidth limiting and prevents requesting data for the entire planet.
     pub chunk_ids: Vec<ChunkId>,
@@ -628,6 +626,25 @@ impl ChunkStateResponse {
     }
     
     /// Deserialize from bytes received from network
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
+/// Full chunk terrain broadcast — sent once on peer connect.
+/// Receiver replaces locally-generated terrain with this data.
+/// After initial sync, live voxel ops keep state consistent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkTerrainData {
+    pub chunk_id: ChunkId,
+    /// bincode-serialized Octree bytes (from Octree::to_bytes())
+    pub octree_bytes: Vec<u8>,
+}
+
+impl ChunkTerrainData {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         Ok(bincode::deserialize(data)?)
     }

@@ -871,6 +871,22 @@ fn main() {
                         println!("🆕 Detected {} new peers, syncing state...", new_peers.len());
                         let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
 
+                        // Push authoritative chunk terrain so peer uses our octree instead of
+                        // independently-generated terrain (prevents height-difference feedback loop).
+                        for chunk_id in &loaded_chunk_ids {
+                            if let Some(chunk_data) = chunk_streamer.get_chunk(chunk_id) {
+                                match chunk_data.octree.to_bytes() {
+                                    Ok(bytes) => {
+                                        if let Err(e) = multiplayer.broadcast_chunk_terrain(*chunk_id, bytes) {
+                                            eprintln!("   ⚠️  Failed to push terrain for {:?}: {}", chunk_id, e);
+                                        }
+                                    }
+                                    Err(e) => eprintln!("   ⚠️  Failed to serialize chunk {:?}: {}", chunk_id, e),
+                                }
+                            }
+                        }
+                        println!("📦 Pushed terrain for {} chunks to new peer(s)", loaded_chunk_ids.len());
+
                         // Request their state (pull)
                         if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids.clone()) {
                             eprintln!("   ⚠️  Failed to request chunk state: {}", e);
@@ -922,6 +938,24 @@ fn main() {
                             }
                         } else {
                             println!("   → No new operations to send");
+                        }
+                    }
+
+                    // Apply received chunk terrain data (replaces locally-generated octree)
+                    let terrain_updates = multiplayer.take_pending_chunk_terrain();
+                    if !terrain_updates.is_empty() {
+                        println!("🌍 [TERRAIN SYNC] Applying {} chunk terrain updates from peers", terrain_updates.len());
+                        for (chunk_id, octree_bytes) in terrain_updates {
+                            match metaverse_core::voxel::Octree::from_bytes(&octree_bytes) {
+                                Ok(octree) => {
+                                    if chunk_streamer.replace_chunk_octree(&chunk_id, octree) {
+                                        println!("   ✅ Applied terrain for chunk {:?}", chunk_id);
+                                    } else {
+                                        println!("   ⏭️  Chunk {:?} not loaded yet, skipping terrain sync", chunk_id);
+                                    }
+                                }
+                                Err(e) => eprintln!("   ⚠️  Failed to deserialize terrain for {:?}: {}", chunk_id, e),
+                            }
                         }
                     }
                     

@@ -73,7 +73,7 @@ impl VoxelCoord {
 }
 
 /// Sparse voxel octree node
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum OctreeNode {
     /// Empty region (all AIR) - most common, optimize for this
     Empty,
@@ -136,6 +136,7 @@ impl OctreeNode {
 }
 
 /// Sparse voxel octree for world storage
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Octree {
     root: OctreeNode,
     max_depth: u8,
@@ -148,6 +149,16 @@ impl Octree {
             root: OctreeNode::Empty,
             max_depth: 23,  // ~1.5m leaf size
         }
+    }
+
+    /// Serialize octree to bytes for network transmission or disk storage.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Deserialize octree from bytes received over network or from disk.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, bincode::Error> {
+        bincode::deserialize(bytes)
     }
     
     /// Get material at voxel position
