@@ -872,15 +872,34 @@ impl NetworkNode {
                         if !self.connected_peers.contains(&peer) {
                             let all_addrs: Vec<_> = addresses.iter().collect();
                             // Prefer circuit address (works through CGNAT/VPN/Starlink)
-                            // over direct IPs which may be unreachable
-                            let preferred = all_addrs.iter()
-                                .find(|a| a.to_string().contains("p2p-circuit"))
-                                .or_else(|| all_addrs.first());
-                            if let Some(addr) = preferred {
+                            let circuit_addr = all_addrs.iter()
+                                .find(|a| a.to_string().contains("p2p-circuit"));
+                            if let Some(addr) = circuit_addr {
                                 let dial_addr = (*addr).clone()
                                     .with(libp2p::multiaddr::Protocol::P2p(peer));
-                                println!("🔍 [DHT] Found peer {}, dialing {}", peer, dial_addr);
+                                println!("🔍 [DHT] Found peer {}, dialing via circuit: {}", peer, dial_addr);
                                 self.swarm.dial(dial_addr).ok();
+                            } else {
+                                // No circuit address yet — try dialing via all known relays
+                                // The peer may not have announced its circuit addr to DHT yet
+                                let mut dialed_via_relay = false;
+                                for (relay_peer, relay_addr) in &self.relay_addrs {
+                                    let circuit = relay_addr.clone()
+                                        .with(libp2p::multiaddr::Protocol::P2pCircuit)
+                                        .with(libp2p::multiaddr::Protocol::P2p(peer));
+                                    println!("🔍 [DHT] Found peer {} (no circuit addr yet), trying via relay {}", peer, relay_peer);
+                                    self.swarm.dial(circuit).ok();
+                                    dialed_via_relay = true;
+                                }
+                                if !dialed_via_relay {
+                                    // No relay known, try direct (last resort)
+                                    if let Some(addr) = all_addrs.first() {
+                                        let dial_addr = (*addr).clone()
+                                            .with(libp2p::multiaddr::Protocol::P2p(peer));
+                                        println!("🔍 [DHT] Found peer {}, dialing direct: {}", peer, dial_addr);
+                                        self.swarm.dial(dial_addr).ok();
+                                    }
+                                }
                             }
                         }
                         None
