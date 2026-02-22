@@ -220,13 +220,10 @@ fn main() {
     
     let mut elevation_pipeline = ElevationPipeline::new();
     
-    // Add NAS file source if available
-    if let Some(nas_source) = NasFileSource::new() {
-        elevation_pipeline.add_source(Box::new(nas_source));
-    }
-    
-    // Add OpenTopography API source (with cache)
-    // Cache dir: $METAVERSE_DATA_DIR/elevation_cache or ./elevation_cache
+    // Standardise on OpenTopography API only — ensures all clients generate
+    // identical terrain from the same source data. NAS file is excluded because
+    // different SRTM datasets (NAS vs API) produce slightly different heights,
+    // causing 1-2 block offsets between clients even at the same GPS coordinates.
     let data_dir = std::env::var("METAVERSE_DATA_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::current_dir().unwrap());
@@ -234,6 +231,8 @@ fn main() {
     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").ok();
     if let Some(key) = api_key {
         elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
+    } else {
+        println!("⚠️  No OPENTOPOGRAPHY_API_KEY set — terrain will be flat");
     }
     
     // Convert GPS origin to voxel coordinates  
