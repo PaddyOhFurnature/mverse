@@ -719,6 +719,7 @@ fn main() {
                                 // Dig the voxel
                                 chunk_data.octree.set_voxel(hit.voxel, MaterialId::AIR);
                                 chunk_data.dirty = true;
+                                chunk_streamer.touch_chunk(&chunk_id);
                                 break;
                             }
                         }
@@ -798,6 +799,7 @@ fn main() {
                             if let Some(place_chunk) = chunk_streamer.get_chunk_mut(&place_chunk_id) {
                                 place_chunk.octree.set_voxel(place_voxel, MaterialId::STONE);
                                 place_chunk.dirty = true;
+                                chunk_streamer.touch_chunk(&place_chunk_id);
                                 
                                 println!("🧱 Placed voxel at {:?}", place_voxel);
                                 
@@ -1041,6 +1043,18 @@ fn main() {
                     
                     // Always process queues (poll completed chunks even if queue empty)
                     chunk_streamer.process_queues(FRAME_BUDGET_MS);
+
+                    // Broadcast newly loaded chunk manifests to connected peers.
+                    // This lets peers replace their independently-generated terrain with ours
+                    // if they haven't loaded this chunk yet (or ours is newer due to user edits).
+                    if !chunk_streamer.newly_loaded_chunks.is_empty() && multiplayer.peer_count() > 0 {
+                        let new_entries: Vec<_> = chunk_streamer.newly_loaded_chunks.iter()
+                            .filter_map(|id| chunk_streamer.get_chunk(id).map(|c| (*id, c.last_modified)))
+                            .collect();
+                        if !new_entries.is_empty() {
+                            let _ = multiplayer.broadcast_chunk_manifest(new_entries);
+                        }
+                    }
                     
                     // Debug: Log streaming activity (not every frame, too spammy)
                     if frame_count % 120 == 0 {

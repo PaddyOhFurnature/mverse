@@ -166,6 +166,9 @@ pub struct ChunkStreamer {
     /// Last player position (for detecting movement)
     last_player_pos: Option<ECEF>,
     
+    /// Chunks that finished loading this frame — game loop uses this to broadcast terrain to peers
+    pub newly_loaded_chunks: Vec<ChunkId>,
+
     /// Statistics
     pub stats: StreamerStats,
 }
@@ -205,6 +208,7 @@ impl ChunkStreamer {
             user_content,
             world_dir,
             last_player_pos: None,
+            newly_loaded_chunks: Vec::new(),
             stats: StreamerStats::default(),
         }
     }
@@ -222,9 +226,10 @@ impl ChunkStreamer {
     ///
     /// Call this every frame. Calculates which chunks should be loaded/unloaded.
     pub fn update(&mut self, player_pos: ECEF) {
-        // Reset frame stats
+        // Reset frame stats and newly-loaded list
         self.stats.chunks_unloaded_this_frame = 0;
         self.stats.chunks_loaded_this_frame = 0;
+        self.newly_loaded_chunks.clear();
         
         // Calculate desired chunks (within load radius)
         let desired_chunks = self.chunks_in_radius(player_pos, self.config.load_radius_m);
@@ -381,6 +386,7 @@ impl ChunkStreamer {
                     last_modified: now_secs(),
                 };
                 self.loaded_chunks.insert(result.chunk_id, chunk);
+                self.newly_loaded_chunks.push(result.chunk_id);
                 self.stats.chunks_loaded_this_frame += 1;
                 
                 // Log when chunks complete (for debugging parallel loading)
