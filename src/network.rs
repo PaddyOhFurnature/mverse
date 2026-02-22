@@ -256,6 +256,10 @@ pub struct NetworkNode {
 
     /// Known base address for each relay node (for circuit re-registration)
     relay_addrs: HashMap<PeerId, Multiaddr>,
+
+    /// Known game peers and their last seen address — used to redial after reconnect
+    /// since RoutingUpdated only fires for NEW DHT entries, not already-known peers
+    known_game_peers: HashMap<PeerId, Multiaddr>,
 }
 
 /// Returns true if this address is useful to advertise in DHT.
@@ -313,6 +317,7 @@ impl NetworkNode {
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
+            known_game_peers: HashMap::new(),
         })
     }
     
@@ -344,6 +349,7 @@ impl NetworkNode {
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
+            known_game_peers: HashMap::new(),
         })
     }
     
@@ -567,6 +573,44 @@ impl NetworkNode {
             println!("[relay] Re-registering circuit with connected relay {}", relay_peer_id);
             self.listen_via_relay(relay_peer_id, relay_base);
         }
+
+        // Redial known game peers that we've dropped.
+        // RoutingUpdated only fires for NEW DHT entries — peers already in our routing
+        // table won't trigger it again, so we dial them explicitly.
+        self.redial_known_game_peers();
+    }
+
+    /// Redial any known game peers we're no longer connected to.
+    pub fn redial_known_game_peers(&mut self) {
+        let to_dial: Vec<(PeerId, Multiaddr)> = self.known_game_peers
+            .iter()
+            .filter(|(peer, _)| !self.connected_peers.contains(*peer))
+            .map(|(p, a)| (*p, a.clone()))
+            .collect();
+
+        for (peer_id, addr) in to_dial {
+            // Prefer dialing via relay circuit if we have one
+            let dial_addr = if addr.to_string().contains("p2p-circuit") {
+                // Address is already a circuit addr
+                addr.with(libp2p::multiaddr::Protocol::P2p(peer_id))
+            } else {
+                // Try via each known relay
+                let relay_circuit: Option<Multiaddr> = self.relay_addrs.iter()
+                    .find(|(rp, _)| self.connected_peers.contains(*rp))
+                    .map(|(relay_peer_id, relay_base)| {
+                        relay_base.clone()
+                            .with(libp2p::multiaddr::Protocol::P2p(*relay_peer_id))
+                            .with(libp2p::multiaddr::Protocol::P2pCircuit)
+                            .with(libp2p::multiaddr::Protocol::P2p(peer_id))
+                    });
+                match relay_circuit {
+                    Some(c) => c,
+                    None => addr.with(libp2p::multiaddr::Protocol::P2p(peer_id)),
+                }
+            };
+            println!("🔄 [Network] Redialing known peer {} via {}", peer_id, dial_addr);
+            self.swarm.dial(dial_addr).ok();
+        }
     }
 
     /// Listen on a relay circuit - makes this peer reachable through the relay.
@@ -744,6 +788,12 @@ impl NetworkNode {
                     // Store for later circuit re-registration on reconnect
                     self.relay_addrs.insert(peer_id, relay_base.clone());
                     self.listen_via_relay(peer_id, relay_base);
+                } else {
+                    // Game peer — remember their address so we can redial after reconnect.
+                    // RoutingUpdated only fires for NEW DHT entries; if we drop and
+                    // reconnect, the peer is already in our routing table and won't re-fire,
+                    // so we dial them explicitly using this saved address.
+                    self.known_game_peers.insert(peer_id, remote_addr.clone());
                 }
 
                 Some(NetworkEvent::PeerConnected {
