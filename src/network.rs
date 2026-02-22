@@ -369,6 +369,10 @@ impl NetworkNode {
                     .heartbeat_interval(Duration::from_secs(1))
                     .validation_mode(ValidationMode::Strict)
                     .max_transmit_size(1024 * 1024) // 1 MB max message size (for state sync)
+                    .flood_publish(true) // Send to all peers when mesh is small (< D peers)
+                    .mesh_n_low(1)       // Allow mesh with just 1 peer
+                    .mesh_n(2)           // Target mesh size of 2
+                    .mesh_n_high(4)      // Max mesh size before pruning
                     .message_id_fn(|msg| {
                         use sha2::{Sha256, Digest};
                         let mut hasher = Sha256::new();
