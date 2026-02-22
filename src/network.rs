@@ -225,7 +225,6 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) identify: identify::Behaviour,
     pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) relay_server: relay::Behaviour,
-    pub(crate) dcutr: dcutr::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
 }
 
@@ -404,7 +403,8 @@ impl NetworkNode {
                 );
                 
                 // DCUtR for hole punching
-                let dcutr = dcutr::Behaviour::new(local_peer_id);
+                // DCUtR disabled - breaks CGNAT connections (carrier NAT is not hole-punchable)
+                // Relay circuit is sufficient and stable
                 
                 // Configure Relay Server - enables this peer to relay for others
                 // Conservative limits for client nodes (not dedicated relays)
@@ -444,7 +444,6 @@ impl NetworkNode {
                     identify,
                     relay_client: relay_behaviour,
                     relay_server,
-                    dcutr,
                     autonat,
                 })
             })
@@ -805,13 +804,6 @@ impl NetworkNode {
                         None
                     }
                 }
-            }
-            
-            // DCUtR events - Direct connection upgrade (hole punching)
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => {
-                // DCUtR events vary by version - just log for now
-                println!("🎯 [DCUTR] Hole punching event: {:?}", event);
-                None
             }
             
             // AutoNAT events - Detect our NAT status
