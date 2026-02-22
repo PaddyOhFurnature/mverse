@@ -1,14 +1,14 @@
 {
   "schema_version": "1.0",
   "network": "mainnet",
-  "updated_at": "2026-02-21T15:07:00Z",
+  "updated_at": "2026-02-22T11:00:00Z",
   "min_client_version": "0.1.0",
   "ttl_seconds": 3600,
 
   "bootstrap_nodes": [
     {
       "id": "home-relay-tcp",
-      "name": "Home Relay - TCP",
+      "name": "Home Relay 1 - TCP",
       "description": "Dev machine - TCP transport",
       "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
       "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
@@ -18,7 +18,7 @@
     },
     {
       "id": "home-relay-ws",
-      "name": "Home Relay - WebSocket",
+      "name": "Home Relay 1 - WebSocket",
       "description": "Dev machine - WebSocket transport (works through VPN/firewall/CGNAT)",
       "multiaddr": "/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
       "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
@@ -27,13 +27,23 @@
       "verified": true
     },
     {
-      "id": "phone-relay",
-      "name": "Phone Relay",
-      "description": "Android phone relay",
-      "multiaddr": "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
-      "capabilities": ["relay", "dht"],
+      "id": "relay2-tcp",
+      "name": "Home Relay 2 - TCP",
+      "description": "Second relay node - TCP transport",
+      "multiaddr": "/ip4/103.216.220.190/tcp/4001/p2p/12D3KooWEVntE1LWekdyNJec7u9tKhPtFoRJsxddSJTsgUXC9UD2",
+      "capabilities": ["relay", "bootstrap", "dht"],
       "region": "AU",
-      "priority": 50,
+      "priority": 90,
+      "verified": true
+    },
+    {
+      "id": "relay2-ws",
+      "name": "Home Relay 2 - WebSocket",
+      "description": "Second relay node - WebSocket transport",
+      "multiaddr": "/ip4/103.216.220.190/tcp/9001/ws/p2p/12D3KooWEVntE1LWekdyNJec7u9tKhPtFoRJsxddSJTsgUXC9UD2",
+      "capabilities": ["relay", "bootstrap", "dht"],
+      "region": "AU",
+      "priority": 85,
       "verified": true
     }
   ],
