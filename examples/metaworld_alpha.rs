@@ -216,7 +216,7 @@ fn main() {
     println!("🗺️  Setting up chunk-based terrain generation...");
     let start = Instant::now();
     
-    let origin_gps = GPS::new(-27.4705, 153.0260, 50.0); // Brisbane
+    let origin_gps = GPS::new(-27.4820, 153.0200, 5.0); // Brisbane South Bank riverfront (flat, ~5m ASL)
     
     let mut elevation_pipeline = ElevationPipeline::new();
     
