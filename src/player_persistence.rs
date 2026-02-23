@@ -253,6 +253,7 @@ mod tests {
     fn test_save_and_load() {
         let temp_dir = tempdir().unwrap();
         let world_dir = temp_dir.path();
+        let identity = crate::identity::Identity::generate();
         
         // Create state
         let position = ECEF::new(1000.0, 2000.0, 6371000.0);
@@ -264,10 +265,10 @@ mod tests {
         );
         
         // Save
-        state.save(world_dir).unwrap();
+        state.save(world_dir, &identity).unwrap();
         
         // Load
-        let loaded = PlayerPersistence::load(world_dir);
+        let loaded = PlayerPersistence::load(world_dir, &identity);
         
         // Verify
         assert_eq!(loaded.position.x, position.x);
@@ -281,9 +282,9 @@ mod tests {
     fn test_default_spawn() {
         let state = PlayerPersistence::default();
         
-        // Should spawn at Mount Everest
-        assert!((state.gps.lat - 27.9881).abs() < 0.01);
-        assert!((state.gps.lon - 86.9250).abs() < 0.01);
-        assert!((state.gps.alt - 8848.86).abs() < 1.0);
+        // Should spawn at Brisbane, Australia (default spawn point)
+        assert!((state.gps.lat - (-27.4705)).abs() < 0.01);
+        assert!((state.gps.lon - 153.0260).abs() < 0.01);
+        assert!((state.gps.alt - 50.0).abs() < 1.0);
     }
 }

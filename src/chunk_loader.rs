@@ -197,10 +197,19 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
+    use crate::{elevation::ElevationPipeline, coordinates::GPS, voxel::VoxelCoord,
+                terrain::TerrainGenerator};
+    use std::sync::{Arc, Mutex};
+
+    fn make_loader() -> ChunkLoader {
+        let pipeline = ElevationPipeline::new();
+        let terrain_gen = TerrainGenerator::new(pipeline, GPS::new(0.0, 0.0, 0.0), VoxelCoord::new(0, 0, 0));
+        ChunkLoader::new(Arc::new(Mutex::new(terrain_gen)), 2)
+    }
     
     #[test]
     fn test_chunk_loader_basic() {
-        let mut loader = ChunkLoader::new();
+        let mut loader = make_loader();
         
         // Request a chunk
         let chunk_id = ChunkId::new(0, 0, 0);
@@ -219,7 +228,7 @@ mod tests {
     
     #[test]
     fn test_chunk_loader_multiple() {
-        let mut loader = ChunkLoader::new();
+        let mut loader = make_loader();
         
         // Request multiple chunks
         for i in 0..5 {
@@ -242,7 +251,7 @@ mod tests {
     
     #[test]
     fn test_chunk_loader_stats() {
-        let mut loader = ChunkLoader::new();
+        let mut loader = make_loader();
         
         // Load some chunks
         for i in 0..3 {

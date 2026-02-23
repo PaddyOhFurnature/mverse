@@ -778,12 +778,14 @@ mod tests {
     fn test_voxel_operation_signature() {
         let identity = Identity::generate();
         let coord = VoxelCoord::new(10, 20, 30);
+        let vc = crate::vector_clock::VectorClock::new();
         
         let mut op = VoxelOperation::new(
             coord,
             Material::Stone,
             identity.peer_id().clone(),
             100,
+            vc,
         );
         
         // Sign operation
@@ -802,16 +804,17 @@ mod tests {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
         let coord = VoxelCoord::new(5, 5, 5);
+        let vc = crate::vector_clock::VectorClock::new();
         
         // Later timestamp wins
-        let op1 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100);
-        let op2 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 101);
+        let op1 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100, vc.clone());
+        let op2 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 101, vc.clone());
         assert!(op2.wins_over(&op1));
         assert!(!op1.wins_over(&op2));
         
         // Same timestamp: tie-break by PeerId
-        let op3 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100);
-        let op4 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 100);
+        let op3 = VoxelOperation::new(coord, Material::Stone, id1.peer_id().clone(), 100, vc.clone());
+        let op4 = VoxelOperation::new(coord, Material::Dirt, id2.peer_id().clone(), 100, vc.clone());
         let winner = if op3.wins_over(&op4) { &op3 } else { &op4 };
         // Deterministic winner based on PeerId ordering
         assert!(winner.author.to_bytes() > if winner.author == op3.author { op4.author } else { op3.author }.to_bytes());

@@ -1440,7 +1440,7 @@ mod tests {
     
     #[test]
     fn test_multiplayer_system_creation() {
-        let identity = Identity::generate().unwrap();
+        let identity = Identity::generate();
         let mp = MultiplayerSystem::new_with_runtime(identity);
         assert!(mp.is_ok());
         // Give background thread time to initialize
@@ -1449,7 +1449,7 @@ mod tests {
     
     #[test]
     fn test_voxel_op_deduplication() {
-        let identity = Identity::generate().unwrap();
+        let identity = Identity::generate();
         let mut mp = MultiplayerSystem::new_with_runtime(identity.clone()).unwrap();
         
         // Give background thread time to initialize

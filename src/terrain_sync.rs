@@ -87,7 +87,7 @@ mod tests {
         let octree = loader.generate_chunk_with_terrain(&chunk_id).unwrap();
         
         // Octree should not be empty (should have terrain)
-        // This is just a smoke test
-        assert!(octree.is_empty() == false || octree.is_empty() == true); // Will compile
+        // This is just a smoke test — generation succeeded if we got here
+        let _ = octree; // use the value
     }
 }

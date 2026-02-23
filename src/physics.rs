@@ -1454,7 +1454,7 @@ mod tests {
         assert_eq!(octree.get_voxel(target), MaterialId::STONE);
         
         // Dig the block
-        let dug = player.dig_voxel(&mut octree, 10.0);
+        let dug = player.dig_voxel(&physics, &mut octree, 10.0);
         
         // Should have dug a voxel (might be slightly different due to octree collapse)
         assert!(dug.is_some(), "Should have dug a voxel");
@@ -1485,7 +1485,7 @@ mod tests {
         octree.set_voxel(VoxelCoord::new(200, 100, 100), MaterialId::STONE);
         
         // Try to dig with limited reach
-        let dug = player.dig_voxel(&mut octree, 5.0); // Only 5m reach
+        let dug = player.dig_voxel(&physics, &mut octree, 5.0); // Only 5m reach
         
         // Should fail (too far)
         assert!(dug.is_none(), "Should not dig distant block");
@@ -1502,7 +1502,7 @@ mod tests {
         player.position = VoxelCoord::new(100, 100, 100).to_ecef();
         
         // Try to dig (nothing there)
-        let dug = player.dig_voxel(&mut octree, 10.0);
+        let dug = player.dig_voxel(&physics, &mut octree, 10.0);
         
         assert!(dug.is_none(), "Should not dig empty space");
     }
@@ -1526,7 +1526,7 @@ mod tests {
         octree.set_voxel(surface, MaterialId::STONE);
         
         // Place a dirt block on the surface
-        let placed = player.place_voxel(&mut octree, MaterialId::DIRT, 10.0);
+        let placed = player.place_voxel(&physics, &mut octree, MaterialId::DIRT, 10.0);
         
         // Should have placed a voxel
         assert!(placed.is_some(), "Should have placed a voxel");
@@ -1557,7 +1557,7 @@ mod tests {
         }
         
         // Try to place (should hit first block, but placement spot is also solid)
-        let placed = player.place_voxel(&mut octree, MaterialId::DIRT, 10.0);
+        let _placed = player.place_voxel(&physics, &mut octree, MaterialId::DIRT, 10.0);
         
         // Might fail due to occupied space, or succeed in a gap
         // This test just ensures no crash - behavior depends on octree collapse
@@ -1581,7 +1581,7 @@ mod tests {
         octree.set_voxel(VoxelCoord::new(101, 99, 99), MaterialId::STONE);
         
         // Try to place on it (would be at 100, 100, 100 - player's feet!)
-        let placed = player.place_voxel(&mut octree, MaterialId::DIRT, 5.0);
+        let placed = player.place_voxel(&physics, &mut octree, MaterialId::DIRT, 5.0);
         
         // Should fail (too close to player)
         assert!(placed.is_none(), "Should not place voxel inside player");
@@ -1604,14 +1604,14 @@ mod tests {
         octree.set_voxel(initial, MaterialId::STONE);
         
         // Dig it
-        let dug = player.dig_voxel(&mut octree, 15.0);
+        let dug = player.dig_voxel(&physics, &mut octree, 15.0);
         assert!(dug.is_some(), "Should dig block");
         
         // Now place a new block where we dug (or nearby)
-        let placed = player.place_voxel(&mut octree, MaterialId::GRASS, 15.0);
+        let placed = player.place_voxel(&physics, &mut octree, MaterialId::GRASS, 15.0);
         
         // Might succeed or fail depending on octree state, but shouldn't crash
-        let _placed = player.place_voxel(&mut octree, MaterialId::GRASS, 15.0);
+        let _placed = player.place_voxel(&physics, &mut octree, MaterialId::GRASS, 15.0);
         // This tests the full interaction loop
     }
     

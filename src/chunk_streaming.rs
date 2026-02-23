@@ -585,13 +585,36 @@ impl ChunkStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_test_streamer_default() -> ChunkStreamer {
+        use crate::{elevation::ElevationPipeline, coordinates::GPS, voxel::VoxelCoord,
+                    terrain::TerrainGenerator, user_content::UserContentLayer};
+        use std::sync::{Arc, Mutex};
+        let pipeline = ElevationPipeline::new();
+        let terrain_gen = TerrainGenerator::new(pipeline, GPS::new(0.0, 0.0, 0.0), VoxelCoord::new(0, 0, 0));
+        let tg = Arc::new(Mutex::new(terrain_gen));
+        let uc = Arc::new(Mutex::new(UserContentLayer::new()));
+        ChunkStreamer::new_default(tg, uc, std::path::PathBuf::from("./world_data"))
+    }
+
+    fn make_test_streamer(config: ChunkStreamerConfig) -> ChunkStreamer {
+        use crate::{elevation::ElevationPipeline, coordinates::GPS, voxel::VoxelCoord,
+                    terrain::TerrainGenerator, user_content::UserContentLayer};
+        use std::sync::{Arc, Mutex};
+        let pipeline = ElevationPipeline::new();
+        let terrain_gen = TerrainGenerator::new(pipeline, GPS::new(0.0, 0.0, 0.0), VoxelCoord::new(0, 0, 0));
+        let tg = Arc::new(Mutex::new(terrain_gen));
+        let uc = Arc::new(Mutex::new(UserContentLayer::new()));
+        ChunkStreamer::new(config, tg, uc, std::path::PathBuf::from("./world_data"))
+    }
     
     #[test]
     fn test_chunks_in_radius() {
-        let streamer = ChunkStreamer::new_default();
+        let streamer = make_test_streamer_default();
         let center = ECEF::new(0.0, 0.0, 6371000.0);
         
-        let chunks = streamer.chunks_in_radius(center, 100.0);
+        // Use 300m radius — chunk height is 200m so center can be ~100m offset
+        let chunks = streamer.chunks_in_radius(center, 300.0);
         
         // Should have at least player's chunk
         assert!(!chunks.is_empty());
@@ -599,13 +622,13 @@ mod tests {
         // All chunks should be within radius
         for chunk_id in chunks {
             let dist = chunk_id.center_ecef().distance_to(&center);
-            assert!(dist <= 100.0);
+            assert!(dist <= 300.0);
         }
     }
     
     #[test]
     fn test_safe_zone() {
-        let streamer = ChunkStreamer::new_default();
+        let streamer = make_test_streamer_default();
         let player_pos = ECEF::new(0.0, 0.0, 6371000.0);
         let player_chunk = ChunkId::from_ecef(&player_pos);
         
@@ -627,7 +650,7 @@ mod tests {
             max_loaded_chunks: 10,
             ..Default::default()
         };
-        let mut streamer = ChunkStreamer::new(config);
+        let mut streamer = make_test_streamer(config);
         
         // Load 20 chunks manually
         for i in 0..20 {

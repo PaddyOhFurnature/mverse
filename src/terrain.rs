@@ -361,7 +361,9 @@ mod tests {
         }
         pipeline.add_source(Box::new(api));
         
-        let mut generator = TerrainGenerator::new(pipeline);
+        let origin_gps = GPS::new(0.0, 0.0, 0.0);
+        let origin_voxel = VoxelCoord::new(0, 0, 0);
+        let mut generator = TerrainGenerator::new(pipeline, origin_gps, origin_voxel);
         let mut octree = Octree::new();
         
         // Generate terrain column
@@ -398,7 +400,9 @@ mod tests {
         let mut pipeline = ElevationPipeline::new();
         pipeline.add_source(Box::new(api));
         
-        let mut generator = TerrainGenerator::new(pipeline);
+        let origin_gps = GPS::new(0.0, 0.0, 0.0);
+        let origin_voxel = VoxelCoord::new(0, 0, 0);
+        let mut generator = TerrainGenerator::new(pipeline, origin_gps, origin_voxel);
         let mut octree = Octree::new();
         
         // Generate a 10m × 10m grid
@@ -449,7 +453,9 @@ mod tests {
         }
         pipeline.add_source(Box::new(api));
         
-        let mut generator = TerrainGenerator::new(pipeline);
+        let origin_gps = GPS::new(0.0, 0.0, 0.0);
+        let origin_voxel = VoxelCoord::new(0, 0, 0);
+        let mut generator = TerrainGenerator::new(pipeline, origin_gps, origin_voxel);
         let mut octree = Octree::new();
         
         // Generate 10m × 10m grid (100 columns)
