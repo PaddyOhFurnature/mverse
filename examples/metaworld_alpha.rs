@@ -1579,17 +1579,14 @@ fn run_headless_mode() {
     let mut player = Player::new(&mut physics, player_persistence.gps, player_persistence.yaw);
     player.position = player_persistence.position;
 
-    // Pre-load spawn area
-    println!("\n⏳ Pre-loading spawn area...");
+    // Kick off spawn area loading (background — server goes live immediately, serves as loaded)
+    println!("\n⏳ Kick-starting spawn area load...");
     chunk_streamer.update(origin_ecef);
-    loop {
-        chunk_streamer.process_queues(5000.0);
-        chunk_streamer.stats.chunks_loaded = chunk_streamer.loaded_chunks().count();
-        if chunk_streamer.stats.chunks_loaded >= 50 || chunk_streamer.stats.chunks_queued == 0 {
-            break;
-        }
-    }
-    println!("   ✅ {} chunks loaded", chunk_streamer.stats.chunks_loaded);
+    // Process one batch (up to 50ms) so first chunks are in flight — rest loads during tick loop
+    chunk_streamer.process_queues(50.0);
+    chunk_streamer.stats.chunks_loaded = chunk_streamer.loaded_chunks().count();
+    println!("   {} chunks loaded so far, {} queued (loading continues in tick loop)",
+        chunk_streamer.stats.chunks_loaded, chunk_streamer.stats.chunks_queued);
 
     // Register initial chunk state with multiplayer
     if multiplayer.peer_count() > 0 {
