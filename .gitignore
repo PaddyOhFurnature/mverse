@@ -38,3 +38,4 @@ screenshot/*.png
 /bin/metaworld_alpha
 /bin/metaverse-relay
 /bin/metaverse-server
+/bin/server.log
