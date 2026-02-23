@@ -42,6 +42,11 @@ if [ "$CLIENT_ONLY" = false ]; then
   gh release download --repo "$REPO" --pattern "metaverse-relay" --clobber
   chmod +x metaverse-relay
   echo "  ✓ metaverse-relay"
+
+  echo "Downloading metaverse-server..."
+  gh release download --repo "$REPO" --pattern "metaverse-server" --clobber
+  chmod +x metaverse-server
+  echo "  ✓ metaverse-server"
 fi
 
 echo ""
@@ -49,3 +54,4 @@ echo "Done. Installed to $INSTALL_DIR"
 echo ""
 echo "Run the client:  $INSTALL_DIR/metaworld_alpha"
 echo "Run the relay:   $INSTALL_DIR/metaverse-relay --port 4001"
+echo "Run the server:  $INSTALL_DIR/metaverse-server"

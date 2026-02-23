@@ -33,3 +33,8 @@ test_*
 # Screenshots
 screenshot/*.png
 !screenshot/.gitkeep
+
+# Built binaries (use scripts/build.sh to populate)
+/bin/metaworld_alpha
+/bin/metaverse-relay
+/bin/metaverse-server

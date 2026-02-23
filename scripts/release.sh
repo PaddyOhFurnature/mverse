@@ -14,7 +14,19 @@ if ! command -v gh &>/dev/null; then
 fi
 
 echo "Building release binaries..."
-cargo build --release 2>&1 | grep -E "Compiling|Finished|error"
+cargo build --release \
+  --bin metaverse-relay \
+  --bin metaverse-server \
+  --example metaworld_alpha \
+  2>&1 | grep -E "^error|Compiling metaverse|Finished"
+
+echo ""
+echo "Copying to bin/..."
+mkdir -p bin
+cp target/release/metaverse-relay           bin/metaverse-relay
+cp target/release/metaverse-server          bin/metaverse-server
+cp target/release/examples/metaworld_alpha  bin/metaworld_alpha
+chmod +x bin/metaverse-relay bin/metaverse-server bin/metaworld_alpha
 
 echo ""
 echo "Creating GitHub release $VERSION..."
@@ -25,8 +37,9 @@ gh release create "$VERSION" \
 
 echo "Uploading binaries..."
 gh release upload "$VERSION" \
-  target/release/metaworld_alpha \
-  target/release/metaverse-relay \
+  bin/metaworld_alpha \
+  bin/metaverse-relay \
+  bin/metaverse-server \
   --repo "$REPO" \
   --clobber
 
