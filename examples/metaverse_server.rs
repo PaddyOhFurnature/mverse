@@ -47,12 +47,13 @@ use std::{
 };
 use clap::Parser;
 use axum::{
-    extract::State,
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
+use rusqlite::{params, Connection};
 #[cfg(unix)]
 use libc;
 
@@ -358,6 +359,7 @@ pub struct SharedState {
     pub total_connections: u64,
     pub total_reservations: u64,
     pub dht_peer_count: usize,
+    pub key_count: usize,
     pub world: WorldStats,
     pub net: NetStats,
     pub cpu_pct: f32,
@@ -367,6 +369,9 @@ pub struct SharedState {
     pub shedding_relay: bool,
     pub relay_port: u16,
     pub version: String,
+    /// Key registry database handle (not serialised — accessed via REST).
+    #[serde(skip)]
+    pub key_db: Option<KeyDatabase>,
 }
 
 impl Default for SharedState {
@@ -375,12 +380,13 @@ impl Default for SharedState {
             local_peer_id: String::new(), public_ip: String::new(), uptime_secs: 0,
             node_name: String::new(), node_type: "server".to_string(),
             peers: vec![], circuit_count: 0, total_connections: 0,
-            total_reservations: 0, dht_peer_count: 0,
+            total_reservations: 0, dht_peer_count: 0, key_count: 0,
             world: WorldStats::default(), net: NetStats::default(),
             cpu_pct: 0.0, ram_used_mb: 0, ram_total_mb: 0, ram_pct: 0.0,
             shedding_relay: false,
             relay_port: 4001,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            key_db: None,
         }
     }
 }
@@ -492,6 +498,9 @@ impl AppState {
             s.ram_total_mb = self.ram_total_mb;
             s.ram_pct = ram_pct;
             s.shedding_relay = self.shedding_relay;
+            if let Some(ref db) = s.key_db {
+                s.key_count = db.count();
+            }
         }
         self.last_shared_sync = Instant::now();
     }
@@ -515,7 +524,126 @@ fn world_data_size_mb(world_dir: &std::path::Path) -> f64 {
     total as f64 / 1_048_576.0
 }
 
-// ─── Swarm event handler ─────────────────────────────────────────────────────
+// ─── Key Database ─────────────────────────────────────────────────────────────
+
+/// SQLite-backed persistent key registry for the server.
+///
+/// Receives `KeyRecord` updates via the key-registry gossipsub topic and persists
+/// them so clients can query the full registry via REST. Uses WAL mode for
+/// concurrent reads while the event loop is writing.
+///
+/// `Clone` is cheap — the internal connection is behind `Arc<Mutex<>>`.
+#[derive(Clone)]
+struct KeyDatabase {
+    conn: Arc<std::sync::Mutex<Connection>>,
+}
+
+impl KeyDatabase {
+    /// Open (or create) the key registry database at `path`.
+    fn open(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch("
+            PRAGMA journal_mode=WAL;
+            CREATE TABLE IF NOT EXISTS key_records (
+                peer_id      TEXT    PRIMARY KEY,
+                record_bytes BLOB    NOT NULL,
+                key_type     TEXT    NOT NULL,
+                display_name TEXT,
+                created_at   INTEGER NOT NULL DEFAULT 0,
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                revoked      INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_key_type   ON key_records (key_type);
+            CREATE INDEX IF NOT EXISTS idx_updated_at ON key_records (updated_at);
+        ")?;
+        Ok(Self { conn: Arc::new(std::sync::Mutex::new(conn)) })
+    }
+
+    /// Insert or update a key record.
+    ///
+    /// Only replaces an existing record if `updated_at` is strictly newer,
+    /// preventing replay of stale records over the wire.
+    fn upsert(
+        &self,
+        peer_id: &str, record_bytes: &[u8],
+        key_type: &str, display_name: Option<&str>,
+        created_at: i64, updated_at: i64, revoked: bool,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO key_records
+                (peer_id, record_bytes, key_type, display_name, created_at, updated_at, revoked)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(peer_id) DO UPDATE SET
+                record_bytes = excluded.record_bytes,
+                key_type     = excluded.key_type,
+                display_name = excluded.display_name,
+                updated_at   = excluded.updated_at,
+                revoked      = excluded.revoked
+             WHERE excluded.updated_at > key_records.updated_at",
+            params![peer_id, record_bytes, key_type, display_name,
+                    created_at, updated_at, revoked as i32],
+        );
+    }
+
+    /// Count stored (non-revoked) records.
+    fn count(&self) -> usize {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COUNT(*) FROM key_records WHERE revoked = 0", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as usize
+    }
+
+    /// List records as JSON objects, optionally filtered by `key_type`.
+    fn list(&self, key_type_filter: Option<&str>) -> Vec<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+        let mut rows = vec![];
+        let result: Result<(), rusqlite::Error> = (|| {
+            if let Some(kt) = key_type_filter {
+                let mut stmt = conn.prepare(
+                    "SELECT peer_id, key_type, display_name, created_at, updated_at, revoked
+                     FROM key_records WHERE key_type = ?1 ORDER BY updated_at DESC"
+                )?;
+                for row in stmt.query_map(params![kt], key_record_to_json)?.flatten() {
+                    rows.push(row);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT peer_id, key_type, display_name, created_at, updated_at, revoked
+                     FROM key_records ORDER BY updated_at DESC"
+                )?;
+                for row in stmt.query_map([], key_record_to_json)?.flatten() {
+                    rows.push(row);
+                }
+            }
+            Ok(())
+        })();
+        let _ = result;
+        rows
+    }
+
+    /// Get the raw serialised `KeyRecord` bytes for a specific peer.
+    fn get_bytes(&self, peer_id: &str) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT record_bytes FROM key_records WHERE peer_id = ?1",
+            params![peer_id],
+            |r| r.get(0),
+        ).ok()
+    }
+}
+
+fn key_record_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusqlite::Error> {
+    Ok(serde_json::json!({
+        "peer_id":      row.get::<_, String>(0)?,
+        "key_type":     row.get::<_, String>(1)?,
+        "display_name": row.get::<_, Option<String>>(2)?,
+        "created_at":   row.get::<_, i64>(3)?,
+        "updated_at":   row.get::<_, i64>(4)?,
+        "revoked":      row.get::<_, i32>(5)? != 0,
+    }))
+}
+
+
 
 enum SwarmAction {
     AddKadAddress(PeerId, Multiaddr),
@@ -630,6 +758,37 @@ fn handle_swarm_event(
             if topic.contains("state-request") {
                 state.net.state_requests_in += 1;
                 state.log(format!("📩 State request ({} bytes)", message.data.len()));
+            } else if topic == "key-registry" {
+                // Deserialise and store incoming key records into SQLite.
+                // We check self_sig on every record before persisting.
+                use metaverse_core::key_registry::KeyRegistryMessage;
+                use metaverse_core::identity::KeyRecord;
+                if let Ok(msg) = bincode::deserialize::<KeyRegistryMessage>(&message.data) {
+                    let records: Vec<KeyRecord> = match msg {
+                        KeyRegistryMessage::Publish(r)  => vec![r],
+                        KeyRegistryMessage::Batch(rs)   => rs,
+                    };
+                    let mut stored = 0usize;
+                    if let Ok(s) = state.shared.read() {
+                        if let Some(ref db) = s.key_db {
+                            for rec in &records {
+                                if rec.verify_self_sig() {
+                                    let peer_id   = rec.peer_id.to_string();
+                                    let key_type  = format!("{}", rec.key_type);
+                                    let disp_name = rec.display_name.as_deref();
+                                    let bytes     = bincode::serialize(rec).unwrap_or_default();
+                                    db.upsert(&peer_id, &bytes, &key_type, disp_name,
+                                              rec.created_at as i64, rec.updated_at as i64,
+                                              rec.revoked);
+                                    stored += 1;
+                                }
+                            }
+                        }
+                    }
+                    if stored > 0 {
+                        state.log(format!("🔑 Key registry: stored {} record(s)", stored));
+                    }
+                }
             }
         }
         // A peer subscribed to a topic — mirror that subscription so the server stays in
@@ -919,6 +1078,78 @@ async fn web_api_health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
+/// GET /api/keys[?type=<key_type>]  — list all key records (or filter by type)
+async fn web_api_keys(
+    State(s): State<WebState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => {
+            let filter = params.get("type").map(|s| s.as_str());
+            Json(db.list(filter)).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+    }
+}
+
+/// GET /api/keys/relays  — shortcut for relay keys
+async fn web_api_keys_relays(State(s): State<WebState>) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => Json(db.list(Some("Relay"))).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+    }
+}
+
+/// GET /api/keys/servers  — shortcut for server keys
+async fn web_api_keys_servers(State(s): State<WebState>) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => Json(db.list(Some("Server"))).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+    }
+}
+
+/// GET /api/keys/:peer_id  — get full key record for a specific peer
+async fn web_api_key_by_id(
+    State(s): State<WebState>,
+    Path(peer_id): Path<String>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => {
+            match db.get_bytes(&peer_id) {
+                Some(bytes) => {
+                    // Deserialise to full KeyRecord and return as JSON
+                    match bincode::deserialize::<metaverse_core::identity::KeyRecord>(&bytes) {
+                        Ok(rec) => {
+                            let json = serde_json::json!({
+                                "peer_id":      rec.peer_id.to_string(),
+                                "key_type":     format!("{}", rec.key_type),
+                                "display_name": rec.display_name,
+                                "bio":          rec.bio,
+                                "created_at":   rec.created_at,
+                                "updated_at":   rec.updated_at,
+                                "expires_at":   rec.expires_at,
+                                "revoked":      rec.revoked,
+                                "issued_by":    rec.issued_by.map(|p| p.to_string()),
+                            });
+                            Json(json).into_response()
+                        }
+                        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
+                                   Json(serde_json::json!({"error":"failed to deserialise record"}))).into_response(),
+                    }
+                }
+                None => (StatusCode::NOT_FOUND,
+                         Json(serde_json::json!({"error":"peer not found"}))).into_response(),
+            }
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+    }
+}
+
 fn render_dashboard_html(st: &SharedState) -> String {
     let uptime_h = st.uptime_secs / 3600;
     let uptime_m = (st.uptime_secs % 3600) / 60;
@@ -978,6 +1209,7 @@ fn render_dashboard_html(st: &SharedState) -> String {
     <div class="stat"><span>Active circuits</span><span class="val">{circuits}</span></div>
     <div class="stat"><span>Total connections</span><span class="val">{total_conns}</span></div>
     <div class="stat"><span>DHT peers</span><span class="val">{dht}</span></div>
+    <div class="stat"><span>Registered keys</span><span class="val">{key_count}</span></div>
     <div class="stat"><span>Gossip msgs in</span><span class="val">{gmsg}</span></div>
     <div class="stat"><span>State requests</span><span class="val">{sreqs}</span></div>
     <div class="stat"><span>Relay status</span><span class="{shed_class}">{shed_txt}</span></div>
@@ -1013,6 +1245,7 @@ fn render_dashboard_html(st: &SharedState) -> String {
 <footer>
   Auto-refreshes every 10s &nbsp;|&nbsp; API: <a href="/api/status" style="color:var(--cyan)">/api/status</a>
   &nbsp;|&nbsp; <a href="/api/peers" style="color:var(--cyan)">/api/peers</a>
+  &nbsp;|&nbsp; <a href="/api/keys" style="color:var(--cyan)">/api/keys</a>
   &nbsp;|&nbsp; <a href="/health" style="color:var(--cyan)">/health</a>
 </footer>
 </body>
@@ -1027,6 +1260,7 @@ fn render_dashboard_html(st: &SharedState) -> String {
         circuits = st.circuit_count,
         total_conns = st.total_connections,
         dht = st.dht_peer_count,
+        key_count = st.key_count,
         gmsg = st.net.gossip_msgs_in,
         sreqs = st.net.state_requests_in,
         shed_class = shed_class,
@@ -1345,6 +1579,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Key registry database
+    let key_db = {
+        let db_path = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".metaverse")
+            .join("key_registry.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).ok();
+        match KeyDatabase::open(&db_path) {
+            Ok(db) => {
+                println!("🗄️  Key registry DB: {} ({} records)", db_path.display(), db.count());
+                Some(db)
+            }
+            Err(e) => {
+                eprintln!("⚠️  Key registry DB failed to open: {}", e);
+                None
+            }
+        }
+    };
+
     // Shared state for web server
     let shared = Arc::new(RwLock::new(SharedState {
         local_peer_id: local_peer_id.to_string(),
@@ -1352,6 +1605,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_name: config.node_name.clone().unwrap_or_else(|| "server".to_string()),
         node_type: config.node_type.clone(),
         relay_port: config.port,
+        key_db,
         ..Default::default()
     }));
 
@@ -1378,6 +1632,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/status", get(web_api_status))
                 .route("/api/peers", get(web_api_peers))
                 .route("/api/config", get(web_api_config))
+                .route("/api/keys", get(web_api_keys))
+                .route("/api/keys/relays", get(web_api_keys_relays))
+                .route("/api/keys/servers", get(web_api_keys_servers))
+                .route("/api/keys/:peer_id", get(web_api_key_by_id))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);

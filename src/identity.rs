@@ -647,47 +647,131 @@ impl Identity {
 
     /// Load identity from default path, or create and save a new one.
     ///
+    /// On first run, a **Guest** key is generated automatically. This lets the
+    /// player explore and build in free zones immediately without any sign-up
+    /// friction. Guest keys expire after 30 days and cannot claim parcels or
+    /// trade. Use [`Identity::upgrade_key_type`] to promote the key to Personal.
+    ///
     /// Also loads or auto-generates the companion `.keyrec` file.
-    /// On first run, prints a prominent backup warning.
+    /// On first run, prints a prominent onboarding and backup message.
     ///
     /// See `METAVERSE_IDENTITY_FILE` env var for custom path.
     pub fn load_or_create() -> Result<Self> {
         let path = Self::default_path()?;
 
         if path.exists() {
-            eprintln!("[identity] Loading identity from {}", path.display());
             let id = Self::load_from_path(&path)?;
             // Warn if permissions are too open (Unix only)
             #[cfg(unix)]
             id.check_file_permissions(&path);
+            // Ensure .keyrec companion exists; generate one if missing
+            let keyrec_path = Self::keyrec_path_for(&path);
+            if !keyrec_path.exists() {
+                // Load key type from environment hint or default to Personal for existing keys
+                let record = id.create_key_record(KeyType::Personal, None, None, None, None, None);
+                if let Ok(bytes) = record.to_bytes() {
+                    let _ = fs::write(&keyrec_path, bytes);
+                }
+            }
             Ok(id)
         } else {
-            eprintln!("[identity] No identity found — generating new Personal identity...");
-            let identity = Self::generate();
             Self::ensure_metaverse_dir()?;
+            let identity = Self::generate();
             identity.save_to_path(&path)?;
-            eprintln!("[identity] Saved to {}", path.display());
-            eprintln!("[identity] PeerId: {}", identity.peer_id);
-            eprintln!("[identity] ⚠️  CRITICAL: Back up ~/.metaverse/identity.key");
-            eprintln!("[identity] ⚠️  There is NO recovery if you lose this file.");
-            eprintln!("[identity] ⚠️  Losing it means losing your land, buildings, and identity.");
 
-            // Auto-generate a default Personal KeyRecord alongside the keypair
+            // Auto-generate a Guest KeyRecord (30-day expiry, no display name).
+            // The player can upgrade to Personal at any time via upgrade_key_type().
             let keyrec_path = Self::keyrec_path_for(&path);
-            let record = identity.create_key_record(
-                KeyType::Personal,
-                None,  // no display_name yet — user sets this in signup UI
-                None,
-                None,
-                None,
-                None,
-            );
+            let record = identity.create_guest_record();
             if let Ok(bytes) = record.to_bytes() {
                 let _ = fs::write(&keyrec_path, bytes);
             }
 
+            // Prominent first-run onboarding message
+            eprintln!();
+            eprintln!("┌─────────────────────────────────────────────────────────────┐");
+            eprintln!("│  🎮  Welcome to the Metaverse!                              │");
+            eprintln!("│                                                             │");
+            eprintln!("│  A GUEST key has been generated for you.                   │");
+            eprintln!("│  Guest keys expire in 30 days and cannot:                  │");
+            eprintln!("│    • Claim or own parcels                                  │");
+            eprintln!("│    • Trade or sign contracts                               │");
+            eprintln!("│    • Deploy scripts                                        │");
+            eprintln!("│                                                             │");
+            eprintln!("│  To upgrade to a Personal key (full capabilities):         │");
+            eprintln!("│    metaworld_alpha --upgrade-key --name \"Your Name\"        │");
+            eprintln!("│                                                             │");
+            eprintln!("│  ⚠️  CRITICAL: Back up your key file!                      │");
+            eprintln!("│     {}  │", path.display());
+            eprintln!("│  There is NO recovery if you lose this file.               │");
+            eprintln!("│  Losing it means losing your parcels, builds, and coins.   │");
+            eprintln!("└─────────────────────────────────────────────────────────────┘");
+            eprintln!();
+            eprintln!("[identity] Guest PeerId: {}", identity.peer_id);
+
             Ok(identity)
         }
+    }
+
+    /// Upgrade the key to a new type by creating a fresh `KeyRecord`.
+    ///
+    /// The keypair (and therefore `PeerId`) stays the same — only the `KeyRecord`
+    /// changes. The new record gets the current timestamp as `updated_at`, so all
+    /// peers will replace the old record when they receive the update.
+    ///
+    /// # When to use
+    ///
+    /// - Upgrading from Guest → Personal (add `display_name`)
+    /// - Upgrading from Personal → Business (add business name)
+    /// - Changing display name or bio at any time
+    ///
+    /// The resulting record must be published to the network via the key-registry
+    /// topic so other peers learn of the upgrade.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_type` — the new key type (must not downgrade to Guest)
+    /// * `display_name` — required for Personal and Business keys (strongly recommended)
+    /// * `bio` — optional short bio (max 280 chars)
+    /// * `avatar_hash` — optional content-addressed avatar hash
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(InsufficientKeyType)` if attempting to downgrade to Guest or
+    /// Anonymous from a higher-trust type (those require generating a new keypair).
+    pub fn upgrade_key_type(
+        &self,
+        new_type: KeyType,
+        display_name: Option<String>,
+        bio: Option<String>,
+        avatar_hash: Option<[u8; 32]>,
+    ) -> Result<KeyRecord> {
+        // Load existing record to check the current type
+        if let Some(existing) = self.load_key_record() {
+            // Disallow downgrading to Guest or Anonymous (must generate new keypair for that)
+            if (new_type == KeyType::Guest || new_type == KeyType::Anonymous)
+                && existing.key_type != KeyType::Guest
+                && existing.key_type != KeyType::Anonymous
+            {
+                return Err(IdentityError::InsufficientKeyType {
+                    required: existing.key_type,
+                    actual: new_type,
+                });
+            }
+        }
+
+        let record = self.create_key_record(new_type, display_name, bio, avatar_hash, None, None);
+        self.save_key_record(&record)?;
+        Ok(record)
+    }
+
+    /// Returns `true` if the current `.keyrec` has `key_type == Guest`.
+    ///
+    /// Used by the UI to decide whether to prompt the player to upgrade.
+    pub fn is_guest(&self) -> bool {
+        self.load_key_record()
+            .map(|r| r.key_type == KeyType::Guest)
+            .unwrap_or(false) // no .keyrec → treat as unknown, not Guest
     }
 
     /// Load identity from a specific path (raw keypair file).

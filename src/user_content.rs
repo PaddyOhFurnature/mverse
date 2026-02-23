@@ -13,7 +13,7 @@
 
 use crate::{
     chunk::ChunkId,
-    messages::VoxelOperation,
+    messages::{VoxelOperation, SignedOperation},
     voxel::VoxelCoord,
 };
 use libp2p::PeerId;
@@ -70,7 +70,7 @@ impl ParcelBounds {
 #[derive(Debug, Clone)]
 pub struct UserContentLayer {
     /// Operation log for this chunk (append-only)
-    op_log: Vec<VoxelOperation>,
+    op_log: Vec<SignedOperation>,
     
     /// Parcel ownership map
     parcels: HashMap<ParcelBounds, PeerId>,
@@ -105,32 +105,42 @@ impl UserContentLayer {
     /// Err if operation is invalid (bad signature, unauthorized, etc.)
     pub fn apply_operation(
         &mut self,
-        op: VoxelOperation,
-        local_ops: &HashMap<VoxelCoord, VoxelOperation>,
+        op: SignedOperation,
+        local_ops: &HashMap<VoxelCoord, SignedOperation>,
     ) -> Result<bool, ApplyError> {
         // 1. Verify signature (if enabled)
         if self.config.verify_signatures {
-            if !op.verify_signature() {
+            if !op.verify() {
                 return Err(ApplyError::InvalidSignature);
             }
         }
-        
-        // 2. CRDT conflict resolution: check for conflicting local operation
-        if let Some(local_op) = local_ops.get(&op.coord) {
+
+        // 2. Resolve the coord for this op (non-terrain ops bypass octree conflict check)
+        let op_coord = match op.coord() {
+            Some(c) => c,
+            None => {
+                // Non-terrain op: add to log, no octree conflict
+                if self.config.enable_logging { self.op_log.push(op); }
+                return Ok(true);
+            }
+        };
+
+        // 3. CRDT conflict resolution: check for conflicting local operation
+        if let Some(local_op) = local_ops.get(&op_coord) {
             if !op.wins_over(local_op) {
                 // Local operation wins, reject remote
                 return Ok(false);
             }
         }
         
-        // 3. Check permission (if enabled)
+        // 4. Check permission (if enabled)
         if self.config.verify_permissions {
             if !self.check_permission(&op) {
                 return Err(ApplyError::Unauthorized);
             }
         }
         
-        // 4. Append to operation log (if enabled)
+        // 5. Append to operation log (if enabled)
         if self.config.enable_logging {
             self.op_log.push(op);
         }
@@ -139,11 +149,10 @@ impl UserContentLayer {
     }
     
     /// Get all operations affecting a chunk (for applying on load)
-    pub fn operations_for_chunk(&self, chunk_id: &ChunkId) -> Vec<&VoxelOperation> {
+    pub fn operations_for_chunk(&self, chunk_id: &ChunkId) -> Vec<&SignedOperation> {
         self.op_log.iter()
             .filter(|op| {
-                let op_chunk = ChunkId::from_voxel(&op.coord);
-                op_chunk == *chunk_id
+                op.coord().map(|c| ChunkId::from_voxel(&c) == *chunk_id).unwrap_or(false)
             })
             .collect()
     }
@@ -152,12 +161,12 @@ impl UserContentLayer {
     ///
     /// Use this for operations created by the local player.
     /// For received operations from network, use apply_operation().
-    pub fn add_local_operation(&mut self, op: VoxelOperation) {
+    pub fn add_local_operation(&mut self, op: SignedOperation) {
         self.op_log.push(op);
     }
     
     /// Get the operation log
-    pub fn op_log(&self) -> &[VoxelOperation] {
+    pub fn op_log(&self) -> &[SignedOperation] {
         &self.op_log
     }
     
@@ -218,9 +227,8 @@ impl UserContentLayer {
     }
     
     /// Check if operation is permitted
-    fn check_permission(&self, op: &VoxelOperation) -> bool {
-        // Check if author has permission to edit this coordinate
-        self.has_access(op.author, &op.coord)
+    fn check_permission(&self, op: &SignedOperation) -> bool {
+        op.coord().map(|c| self.has_access(op.author, &c)).unwrap_or(true)
     }
     
     /// Save operation log to disk (legacy single-file format)
@@ -239,7 +247,7 @@ impl UserContentLayer {
     /// Note: Operations are loaded but NOT applied - caller must replay them
     pub fn load_op_log<P: AsRef<Path>>(&mut self, path: P) -> std::io::Result<usize> {
         let json = std::fs::read_to_string(path)?;
-        let ops: Vec<VoxelOperation> = serde_json::from_str(&json)?;
+        let ops: Vec<SignedOperation> = serde_json::from_str(&json)?;
         let count = ops.len();
         self.op_log = ops;
         Ok(count)
@@ -266,11 +274,11 @@ impl UserContentLayer {
         let chunks_dir = base_dir.as_ref().join("chunks");
         
         // Group operations by ALL affected chunks (not just the chunk containing the voxel)
-        let mut ops_by_chunk: HashMap<ChunkId, Vec<&VoxelOperation>> = HashMap::new();
+        let mut ops_by_chunk: HashMap<ChunkId, Vec<&SignedOperation>> = HashMap::new();
         
         for op in &self.op_log {
             // Get all chunks that need this operation for proper mesh generation
-            let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
+            let affected_chunks = op.affecting_chunks();
             
             for chunk_id in affected_chunks {
                 ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
@@ -284,10 +292,8 @@ impl UserContentLayer {
             let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
             std::fs::create_dir_all(&chunk_dir)?;
             
-            // Convert &Vec<&VoxelOperation> to Vec<VoxelOperation> for serialization
-            // Sort in causal replay order so files are deterministic and can be replayed
-            // directly from disk in the correct order.
-            let mut ops_owned: Vec<VoxelOperation> = ops.iter().map(|&op| op.clone()).collect();
+            // Convert to owned Vec and sort in causal replay order
+            let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
             ops_owned.sort_by(|a, b| a.replay_cmp(b));
             
             let ops_file = chunk_dir.join("operations.bin");
@@ -321,14 +327,23 @@ impl UserContentLayer {
         }
         
         let bytes = std::fs::read(ops_file)?;
-        let ops: Vec<VoxelOperation> = bincode::deserialize(&bytes)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        let count = ops.len();
-        
-        // Append to existing op log
-        self.op_log.extend(ops);
-        
-        Ok(count)
+
+        // Try new SignedOperation format first
+        if let Ok(ops) = bincode::deserialize::<Vec<SignedOperation>>(&bytes) {
+            let count = ops.len();
+            self.op_log.extend(ops);
+            return Ok(count);
+        }
+        // Fall back: legacy VoxelOperation format (auto-migrate)
+        #[allow(deprecated)]
+        if let Ok(legacy_ops) = bincode::deserialize::<Vec<VoxelOperation>>(&bytes) {
+            let count = legacy_ops.len();
+            for op in legacy_ops {
+                self.op_log.push(SignedOperation::from(op));
+            }
+            return Ok(count);
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize operations"))
     }
     
     /// Load operations from multiple chunks
@@ -369,12 +384,14 @@ impl UserContentLayer {
     ///
     /// # Returns
     /// HashMap mapping chunk ID to operations in that chunk (sorted for replay)
-    pub fn get_chunks_with_ops(&self) -> HashMap<ChunkId, Vec<VoxelOperation>> {
-        let mut chunks: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
+    pub fn get_chunks_with_ops(&self) -> HashMap<ChunkId, Vec<SignedOperation>> {
+        let mut chunks: HashMap<ChunkId, Vec<SignedOperation>> = HashMap::new();
         
         for op in &self.op_log {
-            let chunk_id = ChunkId::from_voxel(&op.coord);
-            chunks.entry(chunk_id).or_insert_with(Vec::new).push(op.clone());
+            if let Some(coord) = op.coord() {
+                let chunk_id = ChunkId::from_voxel(&coord);
+                chunks.entry(chunk_id).or_insert_with(Vec::new).push(op.clone());
+            }
         }
         
         // Sort ops within each chunk in causal replay order
@@ -419,7 +436,7 @@ fn bounds_overlap(a: &ParcelBounds, b: &ParcelBounds) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::Material;
+    use crate::messages::{Material, Action, SignedOperation};
     
     #[test]
     fn test_user_content_layer() {
@@ -429,12 +446,13 @@ mod tests {
         // Disable signature verification for test
         layer.config.verify_signatures = false;
         
-        let op = VoxelOperation::new(
-            VoxelCoord::new(10, 20, 30),
-            Material::Stone,
-            PeerId::random(),
+        let coord = VoxelCoord::new(10, 20, 30);
+        let op = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Stone },
             1,
             crate::vector_clock::VectorClock::new(),
+            PeerId::random(),
+            [0u8; 32],
         );
         
         let result = layer.apply_operation(op, &local_ops);
@@ -453,23 +471,23 @@ mod tests {
         let coord = VoxelCoord::new(5, 5, 5);
         
         // Local operation with timestamp 10
-        let local_op = VoxelOperation::new(
-            coord, 
-            Material::Stone, 
-            PeerId::random(), 
+        let local_op = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Stone },
             10,
             crate::vector_clock::VectorClock::new(),
+            PeerId::random(),
+            [0u8; 32],
         );
         let mut local_ops = HashMap::new();
         local_ops.insert(coord, local_op);
         
         // Remote operation with timestamp 5 (older)
-        let remote_op = VoxelOperation::new(
-            coord, 
-            Material::Dirt, 
-            PeerId::random(), 
+        let remote_op = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Dirt },
             5,
             crate::vector_clock::VectorClock::new(),
+            PeerId::random(),
+            [0u8; 32],
         );
         
         // Remote operation should be rejected (local wins)

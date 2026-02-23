@@ -54,8 +54,8 @@ use crate::{
     identity::Identity,
     key_registry::{KeyRegistry, KeyRegistryMessage},
     messages::{
-        ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest, LamportClock, Material, 
-        MovementMode, PlayerStateMessage, VoxelOperation, MessageError,
+        Action, ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest,
+        LamportClock, Material, MovementMode, PlayerStateMessage, SignedOperation, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     player_state::PlayerStateManager,
@@ -109,6 +109,7 @@ pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 pub const TOPIC_CHUNK_TERRAIN: &str = "chunk-terrain";
 pub const TOPIC_CHUNK_MANIFEST: &str = "chunk-manifest";
 pub const TOPIC_KEY_REGISTRY: &str = "key-registry";
+pub const TOPIC_SIGNED_OPS: &str = "signed-ops";
 
 /// Keepalive interval when standing still (prevents peer timeout)
 const PLAYER_STATE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
@@ -155,10 +156,10 @@ pub struct MultiplayerSystem {
     voxel_op_seen: HashSet<[u8; 64]>, // Store signature as ID
     
     /// Pending voxel operations to be applied to world
-    pending_ops: Vec<VoxelOperation>,
+    pending_ops: Vec<SignedOperation>,
     
     /// Pending state synchronization operations (from ChunkStateResponse)
-    pending_state_ops: Vec<VoxelOperation>,
+    pending_state_ops: Vec<SignedOperation>,
     
     /// Pending state requests from peers
     pending_state_requests: Vec<(PeerId, ChunkStateRequest)>,
@@ -479,20 +480,19 @@ impl MultiplayerSystem {
         &mut self,
         coord: VoxelCoord,
         material: Material,
-    ) -> Result<VoxelOperation> {
+    ) -> Result<SignedOperation> {
         // Increment clocks
         let timestamp = self.clock.tick();
         self.vector_clock.increment(self.local_peer_id);
         
-        // Create and sign operation with vector clock
-        let mut op = VoxelOperation::new(
-            coord,
-            material,
-            self.local_peer_id,
+        // Create and sign operation
+        let mut op = SignedOperation::new(
+            Action::SetVoxel { coord, material },
             timestamp,
             self.vector_clock.clone(),
+            self.local_peer_id,
+            self.identity.verifying_key().to_bytes(),
         );
-        
         op.sign(self.identity.signing_key());
         
         // Serialize and send
@@ -770,20 +770,20 @@ impl MultiplayerSystem {
     
     /// Handle incoming voxel operation with CRDT merge and signature verification
     fn handle_voxel_operation(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
-        let op = VoxelOperation::from_bytes(data)?;
+        let legacy_op = VoxelOperation::from_bytes(data)?;
         
         // Log full ECEF coords so we can verify position matches sender
-        let ecef = op.coord.to_ecef();
+        let ecef = legacy_op.coord.to_ecef();
         println!("🔨 Received voxel op from {}: {:?} at voxel={:?} ecef=({:.1},{:.1},{:.1})",
-            peer_id, op.material, op.coord, ecef.x, ecef.y, ecef.z);
+            peer_id, legacy_op.material, legacy_op.coord, ecef.x, ecef.y, ecef.z);
         
         // Check if we've already seen this operation (deduplication)
-        if self.voxel_op_seen.contains(&op.signature) {
+        if self.voxel_op_seen.contains(&legacy_op.signature) {
             return Ok(()); // Already applied
         }
         
-        // Verify signature
-        if !self.verify_operation(&op, &peer_id)? {
+        // Verify signature (legacy path)
+        if !self.verify_operation(&legacy_op, &peer_id)? {
             self.stats.invalid_signatures += 1;
             self.stats.voxel_ops_rejected += 1;
             
@@ -801,17 +801,18 @@ impl MultiplayerSystem {
         }
         
         // Update clocks
-        self.clock.receive(op.timestamp);
-        self.vector_clock.merge(&op.vector_clock);  // Merge vector clocks
-        self.vector_clock.increment(self.local_peer_id); // Increment our counter
+        self.clock.receive(legacy_op.timestamp);
+        self.vector_clock.merge(&legacy_op.vector_clock);
+        self.vector_clock.increment(self.local_peer_id);
         
         // Remember we've seen this operation
-        self.voxel_op_seen.insert(op.signature);
+        self.voxel_op_seen.insert(legacy_op.signature);
         
         self.stats.voxel_ops_received += 1;
         
-        // Queue operation for application by game loop
-        self.pending_ops.push(op);
+        // Convert to SignedOperation and queue
+        #[allow(deprecated)]
+        self.pending_ops.push(SignedOperation::from(legacy_op));
         
         Ok(())
     }
@@ -865,13 +866,6 @@ impl MultiplayerSystem {
         // Flatten operations from all chunks into pending queue
         for (_chunk_id, ops) in response.operations {
             for op in ops {
-                // Verify signature
-                if !op.verify_signature() {
-                    println!("⚠️  Invalid signature in state response from {}", peer_id);
-                    self.stats.invalid_signatures += 1;
-                    continue;
-                }
-                
                 // Check for duplicates (by signature)
                 if self.voxel_op_seen.contains(&op.signature) {
                     continue; // Already have this operation
@@ -927,22 +921,22 @@ impl MultiplayerSystem {
     /// false if it was rejected (lost to a conflicting operation).
     pub fn apply_voxel_operation(
         &mut self,
-        op: VoxelOperation,
+        op: SignedOperation,
         octree: &mut Octree,
-        local_ops: &HashMap<VoxelCoord, VoxelOperation>,
+        local_ops: &HashMap<VoxelCoord, SignedOperation>,
     ) -> bool {
         // CRDT merge: check if there's a local conflicting operation
-        if let Some(local_op) = local_ops.get(&op.coord) {
-            if !op.wins_over(local_op) {
-                // Local operation wins, reject remote
-                self.stats.voxel_ops_rejected += 1;
-                return false;
+        if let Some(coord) = op.coord() {
+            if let Some(local_op) = local_ops.get(&coord) {
+                if !op.wins_over(local_op) {
+                    self.stats.voxel_ops_rejected += 1;
+                    return false;
+                }
+            }
+            if let Some(material) = op.material() {
+                octree.set_voxel(coord, material.to_material_id());
             }
         }
-        
-        // Apply operation
-        let material_id = op.material.to_material_id();
-        octree.set_voxel(op.coord, material_id);
         
         self.stats.voxel_ops_applied += 1;
         true
@@ -951,7 +945,7 @@ impl MultiplayerSystem {
     /// Get all pending voxel operations and clear the queue
     ///
     /// Call this in your game loop to process received operations.
-    pub fn take_pending_operations(&mut self) -> Vec<VoxelOperation> {
+    pub fn take_pending_operations(&mut self) -> Vec<SignedOperation> {
         std::mem::take(&mut self.pending_ops)
     }
     
@@ -961,7 +955,7 @@ impl MultiplayerSystem {
     /// These should be applied to chunks and added to local op_log.
     ///
     /// Called once per frame after update().
-    pub fn take_pending_state_operations(&mut self) -> Vec<VoxelOperation> {
+    pub fn take_pending_state_operations(&mut self) -> Vec<SignedOperation> {
         std::mem::take(&mut self.pending_state_ops)
     }
     
@@ -995,7 +989,7 @@ impl MultiplayerSystem {
     /// Number of messages sent
     pub fn send_chunk_state_response(
         &mut self, 
-        operations_by_chunk: HashMap<ChunkId, Vec<VoxelOperation>>
+        operations_by_chunk: HashMap<ChunkId, Vec<SignedOperation>>
     ) -> Result<usize> {
         if operations_by_chunk.is_empty() {
             return Ok(0); // Nothing to send
@@ -1031,7 +1025,7 @@ impl MultiplayerSystem {
             .as_micros() as u64;
         
         // Flatten operations into single vec for chunking
-        let mut all_ops: Vec<(ChunkId, VoxelOperation)> = Vec::new();
+        let mut all_ops: Vec<(ChunkId, SignedOperation)> = Vec::new();
         for (chunk_id, ops) in operations_by_chunk {
             for op in ops {
                 all_ops.push((chunk_id, op));
@@ -1046,7 +1040,7 @@ impl MultiplayerSystem {
         
         for (i, chunk) in chunks.iter().enumerate() {
             // Rebuild operations_by_chunk for this chunk
-            let mut chunk_ops: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
+            let mut chunk_ops: HashMap<ChunkId, Vec<SignedOperation>> = HashMap::new();
             for (chunk_id, op) in chunk.iter() {
                 chunk_ops.entry(*chunk_id)
                     .or_insert_with(Vec::new)

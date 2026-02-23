@@ -279,6 +279,8 @@ impl Material {
 ///
 /// This ensures all peers converge to the same state without coordination,
 /// while properly handling causal relationships.
+/// Legacy operation type. Use [`SignedOperation`] with [`Action::SetVoxel`] for new code.
+#[deprecated(note = "Use SignedOperation with Action::SetVoxel instead")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoxelOperation {
     /// Voxel coordinate being modified
@@ -585,7 +587,7 @@ pub struct ChunkStateResponse {
     /// Each chunk ID maps to a list of operations that modify that chunk.
     /// Operations are filtered to only include those the requester doesn't have
     /// (based on vector clock comparison).
-    pub operations: HashMap<ChunkId, Vec<VoxelOperation>>,
+    pub operations: HashMap<ChunkId, Vec<SignedOperation>>,
     
     /// Responder's current vector clock
     ///
@@ -605,7 +607,7 @@ pub struct ChunkStateResponse {
 
 impl ChunkStateResponse {
     /// Create a new chunk state response
-    pub fn new(operations: HashMap<ChunkId, Vec<VoxelOperation>>, responder_clock: VectorClock) -> Self {
+    pub fn new(operations: HashMap<ChunkId, Vec<SignedOperation>>, responder_clock: VectorClock) -> Self {
         Self {
             operations,
             responder_clock,
@@ -617,7 +619,7 @@ impl ChunkStateResponse {
     
     /// Create a chunked response (part of multi-message set)
     pub fn new_chunked(
-        operations: HashMap<ChunkId, Vec<VoxelOperation>>,
+        operations: HashMap<ChunkId, Vec<SignedOperation>>,
         responder_clock: VectorClock,
         chunk_index: u32,
         total_chunks: u32,
@@ -721,8 +723,11 @@ pub enum Message {
     /// Player state update
     PlayerState(PlayerStateMessage),
     
-    /// Voxel modification operation
+    /// Voxel modification operation (legacy — use SignedOp for new code)
     VoxelOp(VoxelOperation),
+    
+    /// Signed operation (all action types)
+    SignedOp(SignedOperation),
     
     /// Chat message
     Chat(ChatMessage),
@@ -750,9 +755,352 @@ impl Message {
         match self {
             Message::PlayerState(msg) => msg.timestamp,
             Message::VoxelOp(msg) => msg.timestamp,
+            Message::SignedOp(op) => op.lamport,
             Message::Chat(msg) => msg.timestamp,
             Message::ChunkStateRequest(_) => 0, // State messages don't use Lamport clocks
             Message::ChunkStateResponse(_) => 0,
+        }
+    }
+}
+
+/// Every mutable operation in the metaverse is one of these action types.
+///
+/// The action is the payload of a [`SignedOperation`] — it describes what changed.
+/// All actions are signed by the author's Ed25519 private key.
+///
+/// # Design
+///
+/// - `SetVoxel` / `RemoveVoxel` cover all terrain editing (legacy `VoxelOperation` maps here).
+/// - `FillRegion` is a bulk SetVoxel capped at 32×32×32 (32768 voxels max) to prevent abuse.
+/// - Object actions use a content-addressed `object_id` = first 32 bytes of the creation op's signature.
+/// - Parcel actions use `min`/`max` VoxelCoord to identify the parcel bounds.
+/// - Commerce and identity actions carry their own IDs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Action {
+    // ── Terrain editing ───────────────────────────────────────────────────────
+    /// Set a voxel to a specific material.
+    SetVoxel { coord: VoxelCoord, material: Material },
+    /// Remove a voxel (equivalent to SetVoxel { material: Air }).
+    RemoveVoxel { coord: VoxelCoord },
+    /// Fill a cuboid region with a material.
+    /// Max region: 32×32×32 = 32 768 voxels. Validated on apply.
+    FillRegion { min: VoxelCoord, max: VoxelCoord, material: Material },
+
+    // ── Object placement ──────────────────────────────────────────────────────
+    /// Place a world object. `object_type` is a registry ID (u32).
+    /// `orientation` is a normalised quaternion [x, y, z, w].
+    PlaceObject { position: VoxelCoord, object_type: u32, orientation: [f32; 4] },
+    /// Remove an existing object by its content-addressed ID.
+    RemoveObject { object_id: [u8; 32] },
+    /// Move or rotate an existing object.
+    MoveObject { object_id: [u8; 32], new_position: VoxelCoord, orientation: [f32; 4] },
+    /// Update an object's JSON configuration (max 4096 bytes enforced on apply).
+    ConfigureObject { object_id: [u8; 32], config_json: String },
+
+    // ── Parcel management ─────────────────────────────────────────────────────
+    /// Claim an unclaimed rectangular parcel as owned land.
+    ClaimParcel { min: VoxelCoord, max: VoxelCoord },
+    /// Release ownership of a parcel.
+    AbandonParcel { min: VoxelCoord, max: VoxelCoord },
+    /// Transfer parcel ownership to another peer.
+    TransferOwnership { min: VoxelCoord, max: VoxelCoord, new_owner: PeerId },
+    /// Grant build access to another peer for the duration given (None = permanent).
+    GrantAccess { min: VoxelCoord, max: VoxelCoord, grantee: PeerId, expires_at: Option<u64> },
+    /// Revoke previously granted access.
+    RevokeAccess { min: VoxelCoord, max: VoxelCoord, grantee: PeerId },
+
+    // ── Commerce ──────────────────────────────────────────────────────────────
+    /// Create a listing to sell an item or service.
+    /// `item_id` is the object_id being listed; `price_microcredits` avoids floats.
+    CreateListing { item_id: [u8; 32], price_microcredits: u64, description: String },
+    /// Accept an existing listing (purchase). Initiates the exchange protocol.
+    AcceptListing { listing_id: [u8; 32] },
+    /// Cancel your own listing.
+    CancelListing { listing_id: [u8; 32] },
+    /// Sign a trade or service contract. Both parties must sign the same `contract_id`.
+    SignContract { contract_id: [u8; 32], terms_hash: [u8; 32] },
+
+    // ── Content creation ──────────────────────────────────────────────────────
+    /// Publish a voxel blueprint or model. `data_hash` is the DHT key for the actual data.
+    PublishBlueprint { blueprint_id: [u8; 32], name: String, data_hash: [u8; 32] },
+    /// Import an external asset. `source_uri` is a URI; `data_hash` is its content hash.
+    ImportAsset { asset_id: [u8; 32], source_uri: String, data_hash: [u8; 32] },
+
+    // ── Identity ──────────────────────────────────────────────────────────────
+    /// Publish or update a KeyRecord on the network (raw bincode-serialized bytes).
+    /// Using raw bytes avoids a circular import with the identity module.
+    PublishKeyRecord { record_bytes: Vec<u8> },
+    /// Revoke a key (self-revoke or authority-revoke).
+    RevokeKey { target_peer: PeerId, reason: Option<String> },
+
+    // ── Infrastructure ────────────────────────────────────────────────────────
+    /// Register or update a relay node configuration.
+    RegisterRelay { relay_addr: String, capabilities: Vec<String> },
+}
+
+impl Action {
+    /// Human-readable name of this action type, for logging.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SetVoxel { .. }          => "SetVoxel",
+            Self::RemoveVoxel { .. }       => "RemoveVoxel",
+            Self::FillRegion { .. }        => "FillRegion",
+            Self::PlaceObject { .. }       => "PlaceObject",
+            Self::RemoveObject { .. }      => "RemoveObject",
+            Self::MoveObject { .. }        => "MoveObject",
+            Self::ConfigureObject { .. }   => "ConfigureObject",
+            Self::ClaimParcel { .. }       => "ClaimParcel",
+            Self::AbandonParcel { .. }     => "AbandonParcel",
+            Self::TransferOwnership { .. } => "TransferOwnership",
+            Self::GrantAccess { .. }       => "GrantAccess",
+            Self::RevokeAccess { .. }      => "RevokeAccess",
+            Self::CreateListing { .. }     => "CreateListing",
+            Self::AcceptListing { .. }     => "AcceptListing",
+            Self::CancelListing { .. }     => "CancelListing",
+            Self::SignContract { .. }      => "SignContract",
+            Self::PublishBlueprint { .. }  => "PublishBlueprint",
+            Self::ImportAsset { .. }       => "ImportAsset",
+            Self::PublishKeyRecord { .. }  => "PublishKeyRecord",
+            Self::RevokeKey { .. }         => "RevokeKey",
+            Self::RegisterRelay { .. }     => "RegisterRelay",
+        }
+    }
+
+    /// True if this action modifies the terrain (voxel octree).
+    pub fn is_terrain(&self) -> bool {
+        matches!(self, Self::SetVoxel { .. } | Self::RemoveVoxel { .. } | Self::FillRegion { .. })
+    }
+}
+
+/// The authoritative operation type for the metaverse.
+///
+/// Every mutable action — placing a voxel, claiming a parcel, trading an item,
+/// revoking a key — is wrapped in a `SignedOperation`. The Ed25519 signature
+/// proves the action came from the holder of `public_key`, whose corresponding
+/// `author` PeerId is deterministically derived from that key.
+///
+/// # CRDT semantics
+///
+/// For terrain operations, `SignedOperation` implements Last-Write-Wins (LWW)
+/// with deterministic conflict resolution:
+/// 1. Vector clock causal ordering (causally later wins).
+/// 2. Lamport timestamp (higher wins on concurrent ops).
+/// 3. PeerId tiebreak (lexicographically larger wins on equal timestamp).
+///
+/// # Wire format
+///
+/// Serialized with bincode. The `signature` covers `signable_bytes()`.
+/// The `op_id()` is derived from the signature (no extra storage needed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedOperation {
+    /// Schema version. Current: 1. Increment when signable_bytes() format changes.
+    pub version: u8,
+
+    /// The action being performed.
+    pub action: Action,
+
+    /// Lamport timestamp — provides a total order for concurrent ops.
+    pub lamport: u64,
+
+    /// Vector clock for causal ordering.
+    pub vector_clock: VectorClock,
+
+    /// Unix timestamp (seconds) when this op was created.
+    pub created_at: u64,
+
+    /// Author's PeerId (derived from public_key).
+    pub author: PeerId,
+
+    /// Author's Ed25519 public key (32 bytes).
+    /// Stored explicitly so peers can verify the signature without a KeyRegistry lookup.
+    pub public_key: [u8; 32],
+
+    /// Ed25519 signature over `signable_bytes()`.
+    /// Zero-filled for unsigned ops (test use only — never broadcast unsigned).
+    #[serde(with = "serde_arrays")]
+    pub signature: [u8; 64],
+}
+
+impl SignedOperation {
+    /// Construct an unsigned `SignedOperation`.
+    ///
+    /// Call `sign()` before broadcasting. The `created_at` timestamp is set
+    /// to the current Unix time automatically.
+    pub fn new(action: Action, lamport: u64, vector_clock: VectorClock, author: PeerId, public_key: [u8; 32]) -> Self {
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            version: 1,
+            action,
+            lamport,
+            vector_clock,
+            created_at,
+            author,
+            public_key,
+            signature: [0u8; 64],
+        }
+    }
+
+    /// Sign this operation using the author's Ed25519 signing key.
+    pub fn sign(&mut self, signing_key: &impl Signer<Signature>) {
+        let msg = self.signable_bytes();
+        self.signature = signing_key.sign(&msg).to_bytes();
+    }
+
+    /// Verify the signature against the stored `public_key`.
+    ///
+    /// Returns `false` if the public key is invalid or the signature doesn't match.
+    pub fn verify(&self) -> bool {
+        let Ok(vk) = VerifyingKey::from_bytes(&self.public_key) else { return false; };
+        let sig = Signature::from_bytes(&self.signature);
+        let msg = self.signable_bytes();
+        vk.verify(&msg, &sig).is_ok()
+    }
+
+    /// Canonical bytes signed / verified.
+    ///
+    /// Covers all fields except `signature`. Field order is fixed — changing
+    /// it requires bumping `version` and adding a migration path.
+    fn signable_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(self.version);
+        // Action: length-prefixed bincode
+        let action_bytes = bincode::serialize(&self.action).unwrap_or_default();
+        out.extend_from_slice(&(action_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&action_bytes);
+        // Lamport
+        out.extend_from_slice(&self.lamport.to_le_bytes());
+        // Vector clock: length-prefixed bincode
+        let vc_bytes = bincode::serialize(&self.vector_clock).unwrap_or_default();
+        out.extend_from_slice(&(vc_bytes.len() as u32).to_le_bytes());
+        out.extend_from_slice(&vc_bytes);
+        // created_at
+        out.extend_from_slice(&self.created_at.to_le_bytes());
+        // author
+        out.extend_from_slice(&self.author.to_bytes());
+        // public_key
+        out.extend_from_slice(&self.public_key);
+        out
+    }
+
+    // ── Serialization ──────────────────────────────────────────────────────────
+
+    /// Serialize to bytes for network transmission.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> { Ok(bincode::serialize(self)?) }
+
+    /// Deserialize from bytes received over the network.
+    pub fn from_bytes(data: &[u8]) -> Result<Self> { Ok(bincode::deserialize(data)?) }
+
+    // ── Identity ───────────────────────────────────────────────────────────────
+
+    /// Content-addressed operation ID: first 32 bytes of the signature.
+    ///
+    /// Unique per valid signed operation (no two valid signatures are the same).
+    /// Used as the deduplication key across the network.
+    pub fn op_id(&self) -> [u8; 32] {
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&self.signature[..32]);
+        id
+    }
+
+    // ── Terrain helpers ────────────────────────────────────────────────────────
+
+    /// If this is a terrain operation, return the affected `(VoxelCoord, Material)`.
+    ///
+    /// Returns `None` for non-terrain actions.
+    pub fn as_set_voxel(&self) -> Option<(VoxelCoord, Material)> {
+        match &self.action {
+            Action::SetVoxel { coord, material } => Some((*coord, *material)),
+            Action::RemoveVoxel { coord }         => Some((*coord, Material::Air)),
+            _ => None,
+        }
+    }
+
+    /// Return the primary VoxelCoord for terrain ops. None for non-terrain actions.
+    pub fn coord(&self) -> Option<VoxelCoord> {
+        self.as_set_voxel().map(|(c, _)| c)
+    }
+
+    /// Return the material for terrain ops. None for non-terrain actions.
+    pub fn material(&self) -> Option<Material> {
+        self.as_set_voxel().map(|(_, m)| m)
+    }
+
+    /// Return all ChunkIds affected by this operation.
+    ///
+    /// Terrain ops may touch neighbouring chunks (mesh stitching).
+    /// Non-terrain ops return an empty vec.
+    pub fn affecting_chunks(&self) -> Vec<crate::chunk::ChunkId> {
+        match &self.action {
+            Action::SetVoxel { coord, .. } | Action::RemoveVoxel { coord } => {
+                crate::chunk::ChunkId::affected_by_voxel(coord)
+            }
+            Action::FillRegion { min, max, .. } => {
+                let min_c = crate::chunk::ChunkId::from_voxel(min);
+                let max_c = crate::chunk::ChunkId::from_voxel(max);
+                let mut chunks = Vec::new();
+                for cx in min_c.x..=max_c.x {
+                    for cy in min_c.y..=max_c.y {
+                        for cz in min_c.z..=max_c.z {
+                            chunks.push(crate::chunk::ChunkId::new(cx, cy, cz));
+                        }
+                    }
+                }
+                chunks
+            }
+            _ => vec![],
+        }
+    }
+
+    // ── CRDT ordering ──────────────────────────────────────────────────────────
+
+    /// Returns `true` if this operation should win over `other` in a CRDT conflict.
+    ///
+    /// Resolution order:
+    /// 1. Vector clock causal ordering (causally later wins).
+    /// 2. Lamport timestamp (higher wins when concurrent).
+    /// 3. PeerId tiebreak (lexicographically larger PeerId wins on equal timestamp).
+    pub fn wins_over(&self, other: &SignedOperation) -> bool {
+        if self.vector_clock.happens_after(&other.vector_clock) { return true; }
+        if self.vector_clock.happens_before(&other.vector_clock) { return false; }
+        if self.lamport != other.lamport { return self.lamport > other.lamport; }
+        self.author.to_bytes() > other.author.to_bytes()
+    }
+
+    /// Total ordering for deterministic replay (oldest-first causally).
+    ///
+    /// Inverse of `wins_over`: weakest op comes first so the receiver
+    /// converges to the correct final state when applying sequentially.
+    pub fn replay_cmp(&self, other: &SignedOperation) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        if self.vector_clock.happens_before(&other.vector_clock) { return Ordering::Less; }
+        if self.vector_clock.happens_after(&other.vector_clock) { return Ordering::Greater; }
+        match self.lamport.cmp(&other.lamport) {
+            Ordering::Equal => self.author.to_bytes().cmp(&other.author.to_bytes()),
+            ord => ord,
+        }
+    }
+}
+
+/// Convert a legacy `VoxelOperation` to a `SignedOperation`.
+///
+/// The `public_key` is zeroed (not stored in `VoxelOperation`) so the resulting
+/// `SignedOperation` cannot be re-verified — but this is acceptable for migrating
+/// ops that were already verified when first applied.
+#[allow(deprecated)]
+impl From<VoxelOperation> for SignedOperation {
+    fn from(op: VoxelOperation) -> Self {
+        Self {
+            version: 1,
+            action: Action::SetVoxel { coord: op.coord, material: op.material },
+            lamport: op.timestamp,
+            vector_clock: op.vector_clock,
+            created_at: 0,
+            author: op.author,
+            public_key: [0u8; 32],
+            signature: op.signature,
         }
     }
 }
@@ -868,5 +1216,80 @@ mod tests {
         let bytes = envelope.to_bytes().unwrap();
         let decoded = Message::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.timestamp(), 123);
+    }
+
+    #[test]
+    fn test_signed_operation_sign_verify() {
+        let id = crate::identity::Identity::generate();
+        let coord = VoxelCoord::new(10, 20, 30);
+        let vc = VectorClock::new();
+        let mut op = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Stone },
+            1, vc, *id.peer_id(), id.verifying_key().to_bytes(),
+        );
+        op.sign(id.signing_key());
+        assert!(op.verify(), "signed op must verify");
+    }
+
+    #[test]
+    fn test_signed_operation_tamper_detected() {
+        let id = crate::identity::Identity::generate();
+        let mut op = SignedOperation::new(
+            Action::SetVoxel { coord: VoxelCoord::new(1,1,1), material: Material::Stone },
+            1, VectorClock::new(), *id.peer_id(), id.verifying_key().to_bytes(),
+        );
+        op.sign(id.signing_key());
+        op.action = Action::SetVoxel { coord: VoxelCoord::new(1,1,1), material: Material::Dirt };
+        assert!(!op.verify(), "tampered op must fail verification");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_signed_operation_from_voxel_op() {
+        let id = crate::identity::Identity::generate();
+        let coord = VoxelCoord::new(5, 5, 5);
+        let vc = VectorClock::new();
+        let mut legacy = VoxelOperation::new(coord, Material::Stone, *id.peer_id(), 42, vc);
+        legacy.sign(id.signing_key());
+        let signed = SignedOperation::from(legacy);
+        assert_eq!(signed.coord(), Some(coord));
+        assert_eq!(signed.material(), Some(Material::Stone));
+        assert_eq!(signed.lamport, 42);
+    }
+
+    #[test]
+    fn test_signed_operation_crdt_wins_over() {
+        let id1 = crate::identity::Identity::generate();
+        let id2 = crate::identity::Identity::generate();
+        let coord = VoxelCoord::new(7, 7, 7);
+        let vc = VectorClock::new();
+        let op1 = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Stone },
+            100, vc.clone(), *id1.peer_id(), id1.verifying_key().to_bytes(),
+        );
+        let op2 = SignedOperation::new(
+            Action::SetVoxel { coord, material: Material::Dirt },
+            200, vc.clone(), *id2.peer_id(), id2.verifying_key().to_bytes(),
+        );
+        assert!(op2.wins_over(&op1), "higher lamport wins");
+        assert!(!op1.wins_over(&op2));
+    }
+
+    #[test]
+    fn test_signed_operation_affecting_chunks() {
+        let op = SignedOperation::new(
+            Action::SetVoxel { coord: VoxelCoord::new(0, 0, 0), material: Material::Stone },
+            1, VectorClock::new(), PeerId::random(), [0u8; 32],
+        );
+        let chunks = op.affecting_chunks();
+        assert!(!chunks.is_empty(), "SetVoxel must affect at least one chunk");
+    }
+
+    #[test]
+    fn test_action_is_terrain() {
+        assert!(Action::SetVoxel { coord: VoxelCoord::new(0,0,0), material: Material::Air }.is_terrain());
+        assert!(Action::RemoveVoxel { coord: VoxelCoord::new(0,0,0) }.is_terrain());
+        assert!(!Action::ClaimParcel { min: VoxelCoord::new(0,0,0), max: VoxelCoord::new(10,10,10) }.is_terrain());
+        assert!(!Action::RevokeKey { target_peer: PeerId::random(), reason: None }.is_terrain());
     }
 }

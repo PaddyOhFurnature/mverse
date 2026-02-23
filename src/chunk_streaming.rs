@@ -361,15 +361,9 @@ impl ChunkStreamer {
                 if ops_loaded > 0 {
                     let user_content = self.user_content.lock().unwrap();
                     for op in user_content.operations_for_chunk(&result.chunk_id) {
-                        // Convert Material to MaterialId
-                        let material_id = match op.material {
-                            crate::messages::Material::Air => MaterialId::AIR,
-                            crate::messages::Material::Stone => MaterialId::STONE,
-                            crate::messages::Material::Dirt => MaterialId::DIRT,
-                            crate::messages::Material::Grass => MaterialId::GRASS,
-                            crate::messages::Material::Water => MaterialId::AIR, // TODO: Add water material
-                        };
-                        octree.set_voxel(op.coord, material_id);
+                        if let Some((coord, material)) = op.as_set_voxel() {
+                            octree.set_voxel(coord, material.to_material_id());
+                        }
                     }
                     println!("   📝 Applied {} saved operations to {}", ops_loaded, result.chunk_id);
                 }
