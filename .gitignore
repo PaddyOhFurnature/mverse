@@ -3,6 +3,13 @@
 *.pdb
 .DS_Store
 
+# Docs (curate locally before pushing)
+docs/
+
+# Archive and deploy (removed, kept locally only)
+archive/
+deploy/
+
 # World data directories (per-identity storage)
 world_data/
 world_data_*/
@@ -11,9 +18,6 @@ world_data_*/
 elevation_cache/
 *.tif
 *.hgt
-
-# Compiled binaries (use GitHub Releases for distribution)
-deploy/bin/
 
 # Cache directories
 .metaverse/cache/
