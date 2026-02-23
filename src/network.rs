@@ -746,7 +746,12 @@ impl NetworkNode {
                 for (peer_id, multiaddr) in peers {
                     // Add to Kademlia DHT
                     self.swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr.clone());
-                    
+
+                    // Dial immediately — mDNS gives us a direct LAN address, use it
+                    if !self.connected_peers.contains(&peer_id) {
+                        let _ = self.swarm.dial(multiaddr);
+                    }
+
                     // Queue discovery event
                     self.event_queue.push(NetworkEvent::PeerDiscovered {
                         peer_id: peer_id.clone(),
