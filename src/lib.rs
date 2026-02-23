@@ -15,6 +15,8 @@ pub mod physics;
 
 // Phase 1.5: P2P Networking (Local-First Architecture)
 pub mod identity;
+pub mod key_registry;   // P2P identity registry — distributed database of KeyRecords
+pub mod permissions;    // Permission system — key-type and ownership enforcement
 pub mod network;
 pub mod bootstrap;  // Dynamic bootstrap node discovery
 pub mod http_tunnel;  // HTTP fallback for firewall bypass

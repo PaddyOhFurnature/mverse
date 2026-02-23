@@ -3457,6 +3457,7 @@ dependencies = [
  "gdal-sys",
  "geoconv",
  "glam",
+ "hex",
  "hyper",
  "image",
  "libc",

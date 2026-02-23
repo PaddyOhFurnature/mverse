@@ -52,6 +52,7 @@ use crate::{
     chunk::ChunkId,
     coordinates::ECEF,
     identity::Identity,
+    key_registry::{KeyRegistry, KeyRegistryMessage},
     messages::{
         ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest, LamportClock, Material, 
         MovementMode, PlayerStateMessage, VoxelOperation, MessageError,
@@ -107,6 +108,7 @@ pub const TOPIC_STATE_REQUEST: &str = "state-request";
 pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 pub const TOPIC_CHUNK_TERRAIN: &str = "chunk-terrain";
 pub const TOPIC_CHUNK_MANIFEST: &str = "chunk-manifest";
+pub const TOPIC_KEY_REGISTRY: &str = "key-registry";
 
 /// Keepalive interval when standing still (prevents peer timeout)
 const PLAYER_STATE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
@@ -202,6 +204,9 @@ pub struct MultiplayerSystem {
 
     /// Connected peers (for state exchange)
     connected_peers: HashSet<PeerId>,
+
+    /// P2P identity registry — cached KeyRecords for all known peers
+    pub key_registry: KeyRegistry,
     
     /// Statistics
     stats: MultiplayerStats,
@@ -283,6 +288,11 @@ impl MultiplayerSystem {
             subscribed_chunk_topics: HashSet::new(),
             bandwidth: BandwidthManager::default(),
             connected_peers: HashSet::new(),
+            key_registry: {
+                let mut reg = KeyRegistry::with_local_peer(local_peer_id);
+                reg.load_from_disk().ok();
+                reg
+            },
             stats: MultiplayerStats::default(),
         })
     }
@@ -664,6 +674,7 @@ impl MultiplayerSystem {
                     TOPIC_STATE_RESPONSE => self.handle_state_response(peer_id, &data)?,
                     TOPIC_CHUNK_TERRAIN => self.handle_chunk_terrain(peer_id, &data)?,
                     TOPIC_CHUNK_MANIFEST => self.handle_chunk_manifest(peer_id, &data)?,
+                    TOPIC_KEY_REGISTRY => self.handle_key_registry(peer_id, &data),
                     // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
                     t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
                     t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
@@ -677,6 +688,8 @@ impl MultiplayerSystem {
                 if !self.state_requested_from.contains(&peer_id) {
                     self.peers_needing_sync.push(peer_id);
                 }
+                // Publish our own KeyRecord so the new peer can recognise us
+                self.publish_own_key_record();
             }
             
             NetworkEvent::PeerDisconnected { peer_id } => {
@@ -1116,6 +1129,61 @@ impl MultiplayerSystem {
         Ok(())
     }
 
+    /// Handle an incoming key-registry gossipsub message.
+    ///
+    /// Deserializes a [`KeyRegistryMessage`] and applies each contained
+    /// `KeyRecord` to the local registry. Invalid or stale records are silently
+    /// ignored (the registry logs stats internally).
+    fn handle_key_registry(&mut self, peer_id: PeerId, data: &[u8]) {
+        let msg: KeyRegistryMessage = match bincode::deserialize(data) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("🔑 [KeyRegistry] Failed to deserialize message from {}: {}", peer_id, e);
+                return;
+            }
+        };
+        let records = match msg {
+            KeyRegistryMessage::Publish(record) => vec![record],
+            KeyRegistryMessage::Batch(records) => records,
+        };
+        for record in records {
+            match self.key_registry.apply_update(record) {
+                Ok(true)  => {} // accepted new/updated record — no log spam
+                Ok(false) => {} // idempotent re-insert
+                Err(e)    => eprintln!("🔑 [KeyRegistry] Rejected record from {}: {}", peer_id, e),
+            }
+        }
+    }
+
+    /// Publish our own `KeyRecord` to the key-registry gossipsub topic.
+    ///
+    /// Called on every `PeerConnected` event and at startup. Ensures all peers
+    /// in the network can identify us and check our key type.
+    fn publish_own_key_record(&self) {
+        let record = match self.identity.load_key_record() {
+            Some(r) => r,
+            None => {
+                // No .keyrec file yet — create and publish a minimal Personal record
+                self.identity.create_key_record(
+                    crate::identity::KeyType::Personal,
+                    None, None, None, None, None,
+                )
+            }
+        };
+        let msg = KeyRegistryMessage::Publish(record);
+        let data = match bincode::serialize(&msg) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("🔑 [KeyRegistry] Failed to serialize own KeyRecord: {}", e);
+                return;
+            }
+        };
+        let _ = self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_KEY_REGISTRY.to_string(),
+            data,
+        });
+    }
+
     /// Take pending manifests for the game loop to process.
     /// Game loop compares against its own chunk timestamps and sends newer chunks.
     pub fn take_pending_chunk_manifests(&mut self) -> Vec<Vec<(ChunkId, u64)>> {
@@ -1269,6 +1337,12 @@ fn run_network_thread(
             eprintln!("Failed to subscribe to chunk-manifest: {}", e);
         } else {
             println!("📻 Subscribed to topic: chunk-manifest");
+        }
+
+        if let Err(e) = network.subscribe(TOPIC_KEY_REGISTRY) {
+            eprintln!("Failed to subscribe to key-registry: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: key-registry");
         }
         
         println!("🔍 Network thread started - polling for mDNS and connections...");
