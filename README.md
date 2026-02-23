@@ -53,7 +53,7 @@ Connects to the relay network automatically using `bootstrap.json`. World data i
 - Mouse — look
 - Left click — remove block
 - Right click — place block
-- `Tab` — cycle block type
+- `Q/E` — cycle block type
 - `Esc` — quit
 
 ---
@@ -143,18 +143,11 @@ This builds both binaries in release mode, creates a GitHub release tag, and upl
 
 ## bootstrap.json
 
-Controls which relays clients connect to on startup. Edit this to add/remove relay nodes:
+The **authoritative bootstrap config** is maintained as a GitHub Gist and updated manually until relay propagation is built in:
 
-```json
-{
-  "bootstrap_nodes": [
-    {
-      "multiaddr": "/ip4/103.216.220.190/tcp/4001/p2p/12D3KooW...",
-      ...
-    }
-  ]
-}
-```
+**https://gist.github.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17#file-bootstrap-json**
+
+The `bootstrap.json` in this repo is a local copy — if you're getting connection issues, grab the latest from the Gist above.
 
 WebSocket entries (`/tcp/9001/ws/`) work through VPN, CGNAT, and most firewalls. TCP entries are faster when reachable directly.
 
