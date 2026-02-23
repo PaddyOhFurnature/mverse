@@ -16,7 +16,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use libp2p::{
-    identify, identity, kad, relay,
+    identify, identity, kad, mdns, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId, SwarmBuilder,
 };
@@ -167,6 +167,7 @@ struct RelayBehaviour {
     ping: libp2p::ping::Behaviour,
     kademlia: kad::Behaviour<MemoryStore>,
     identify: identify::Behaviour,
+    mdns: mdns::tokio::Behaviour,
 }
 
 // ─── App state ───────────────────────────────────────────────────────────────
@@ -245,7 +246,7 @@ impl AppState {
 
 // ─── Swarm event handler ─────────────────────────────────────────────────────
 
-enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount }
+enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr) }
 
 fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppState) -> Vec<SwarmAction> {
     let mut actions = vec![];
@@ -289,6 +290,12 @@ fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppSta
             for addr in info.listen_addrs { actions.push(SwarmAction::AddKadAddress(peer_id, addr)); }
             actions.push(SwarmAction::RefreshDhtCount);
         }
+        SwarmEvent::Behaviour(RelayBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
+            for (peer_id, addr) in peers {
+                actions.push(SwarmAction::AddKadAddress(peer_id, addr.clone()));
+                actions.push(SwarmAction::DialPeer(peer_id, addr));
+            }
+        }
         _ => {}
     }
     actions
@@ -302,6 +309,11 @@ fn apply_swarm_actions(actions: Vec<SwarmAction>, state: &mut AppState, swarm: &
             }
             SwarmAction::RefreshDhtCount => {
                 state.dht_peer_count = swarm.behaviour_mut().kademlia.kbuckets().map(|b| b.num_entries()).sum();
+            }
+            SwarmAction::DialPeer(peer_id, addr) => {
+                if !swarm.is_connected(&peer_id) {
+                    let _ = swarm.dial(addr);
+                }
             }
         }
     }
@@ -613,6 +625,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
                 kademlia,
                 identify,
+                mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
+                    .expect("mDNS init failed"),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
