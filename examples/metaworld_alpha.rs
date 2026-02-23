@@ -1093,6 +1093,11 @@ fn main() {
                         if !new_entries.is_empty() {
                             let _ = multiplayer.broadcast_chunk_manifest(new_entries);
                         }
+
+                        // Sync per-chunk AOI topic subscriptions whenever loaded chunks change.
+                        let loaded_set: std::collections::HashSet<metaverse_core::chunk::ChunkId> =
+                            chunk_streamer.loaded_chunk_ids().iter().copied().collect();
+                        let _ = multiplayer.update_subscribed_chunks(&loaded_set);
                     }
                     
                     // Debug: Log streaming activity (not every frame, too spammy)

@@ -33,6 +33,12 @@ pub struct BootstrapNode {
     pub capabilities: Vec<String>,
     pub priority: u8,
     pub verified: bool,
+    /// Geographic region tag (e.g. "AU", "EU", "US-WEST"). Optional — used for relay selection.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Last measured round-trip time in milliseconds (populated at runtime, not in JSON).
+    #[serde(skip)]
+    pub measured_rtt_ms: Option<f64>,
 }
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -59,7 +65,8 @@ fn cache_path() -> PathBuf {
 /// Resolve bootstrap multiaddrs.
 ///
 /// Returns a list of multiaddr strings ready to pass to `network.dial()`.
-/// Sorted by priority (highest first).
+/// Sorted by measured latency (nearest relay first). Falls back to `priority` field when
+/// latency measurement is unavailable (offline start, relay unreachable, etc.).
 ///
 /// This is intentionally synchronous-blocking at startup — bootstrap resolution
 /// must complete before the swarm can meaningfully dial.
@@ -86,13 +93,72 @@ pub async fn resolve_bootstrap_nodes() -> Vec<String> {
         }
     };
 
-    // Sort by priority descending, return multiaddrs
+    // 3. Measure latency to each relay and sort nearest-first.
     let mut nodes = source.bootstrap_nodes;
-    nodes.sort_by(|a, b| b.priority.cmp(&a.priority));
+    measure_relay_latencies(&mut nodes).await;
+
+    // Sort: measured RTT first (ascending), then fall back to priority (descending).
+    nodes.sort_by(|a, b| {
+        match (a.measured_rtt_ms, b.measured_rtt_ms) {
+            (Some(ra), Some(rb)) => ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,    // measured beats unmeasured
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.priority.cmp(&a.priority),    // higher priority first
+        }
+    });
+
+    for n in &nodes {
+        match n.measured_rtt_ms {
+            Some(rtt) => println!("[bootstrap] {} ({}) — {:.0}ms", n.name, n.region.as_deref().unwrap_or("?"), rtt),
+            None => println!("[bootstrap] {} ({}) — latency unknown", n.name, n.region.as_deref().unwrap_or("?")),
+        }
+    }
+
     nodes.into_iter().map(|n| n.multiaddr).collect()
 }
 
 // ─── Remote fetch ────────────────────────────────────────────────────────────
+
+/// Measure TCP connect latency to each relay node.
+///
+/// Extracts the host:port from the multiaddr string and attempts a TCP connection.
+/// The connection time is used as a proxy for network latency (close to RTT/2).
+/// Timeout per relay: 3 seconds. Relays that time out or fail get no RTT recorded.
+async fn measure_relay_latencies(nodes: &mut Vec<BootstrapNode>) {
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+    use std::time::Instant;
+
+    for node in nodes.iter_mut() {
+        // Parse multiaddr to extract host and port.
+        // Format: /ip4/<host>/tcp/<port>/p2p/<peer_id>
+        if let Some(addr) = extract_tcp_addr(&node.multiaddr) {
+            let start = Instant::now();
+            match timeout(Duration::from_secs(3), TcpStream::connect(&addr)).await {
+                Ok(Ok(_)) => {
+                    let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    node.measured_rtt_ms = Some(rtt_ms);
+                }
+                _ => {
+                    // Connection failed or timed out — relay may be unreachable or wrong transport
+                }
+            }
+        }
+    }
+}
+
+/// Extract "host:port" from a libp2p multiaddr string.
+/// Handles `/ip4/<host>/tcp/<port>/...` and `/dns4/<host>/tcp/<port>/...`.
+fn extract_tcp_addr(multiaddr: &str) -> Option<String> {
+    let parts: Vec<&str> = multiaddr.split('/').collect();
+    // parts[0] is empty (leading slash), parts[1] is "ip4"/"dns4", parts[2] is host,
+    // parts[3] is "tcp", parts[4] is port.
+    if parts.len() >= 5 && (parts[1] == "ip4" || parts[1] == "dns4") && parts[3] == "tcp" {
+        Some(format!("{}:{}", parts[2], parts[4]))
+    } else {
+        None
+    }
+}
 
 async fn fetch_remote() -> Result<BootstrapFile, String> {
     let client = reqwest::Client::builder()

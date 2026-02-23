@@ -106,6 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 NetworkEvent::TopicUnsubscribed { topic } => {
                     println!("{}: 📢 Unsubscribed from topic: '{}'", peer_name, topic);
                 }
+                _ => {} // NatStatusChanged, ConnectionUpgraded, DirectConnectionUpgraded
             }
         }
         

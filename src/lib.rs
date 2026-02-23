@@ -31,3 +31,4 @@ pub mod chunk_streaming;
 pub mod chunk_loader;
 pub mod chunk_placeholder;
 pub mod spatial_sharding;
+pub mod bandwidth;  // Bandwidth profiles and message priority (graceful degradation)

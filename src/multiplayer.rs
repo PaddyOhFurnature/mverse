@@ -48,6 +48,7 @@
 //! ```
 
 use crate::{
+    bandwidth::{BandwidthManager, MessagePriority},
     chunk::ChunkId,
     coordinates::ECEF,
     identity::Identity,
@@ -58,7 +59,7 @@ use crate::{
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     player_state::PlayerStateManager,
     spatial_sharding::{SpatialSharding, SpatialConfig},
-    vector_clock::VectorClock,
+    vector_clock,
     voxel::{Octree, VoxelCoord},
     physics::PhysicsWorld,
 };
@@ -107,8 +108,14 @@ pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 pub const TOPIC_CHUNK_TERRAIN: &str = "chunk-terrain";
 pub const TOPIC_CHUNK_MANIFEST: &str = "chunk-manifest";
 
-/// Broadcast interval for player state (20 Hz = 50ms)
-const PLAYER_STATE_BROADCAST_INTERVAL: Duration = Duration::from_millis(50);
+/// Keepalive interval when standing still (prevents peer timeout)
+const PLAYER_STATE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Minimum position change (metres) before we send an update
+const POSITION_DELTA_THRESHOLD: f64 = 0.05;
+
+/// Minimum rotation change (radians ~1°) before we send an update
+const ROTATION_DELTA_THRESHOLD: f32 = 0.017;
 
 /// Maximum allowed invalid signatures before blocking peer
 const MAX_INVALID_SIGNATURES: usize = 5;
@@ -172,9 +179,27 @@ pub struct MultiplayerSystem {
     /// Blocked peers (too many invalid signatures)
     blocked_peers: HashSet<PeerId>,
     
-    /// Timer for player state broadcasts
+    /// Timer for keepalive player state broadcasts (500ms)
     last_state_broadcast: Instant,
-    
+
+    /// Last position we actually transmitted (for delta suppression)
+    last_sent_position: ECEF,
+
+    /// Last yaw we transmitted (for delta suppression)
+    last_sent_yaw: f32,
+
+    /// Last pitch we transmitted (for delta suppression)
+    last_sent_pitch: f32,
+
+    /// Last movement mode we transmitted (always resend on change)
+    last_sent_movement_mode: Option<MovementMode>,
+
+    /// Gossipsub topics we are currently subscribed to for per-chunk AOI
+    subscribed_chunk_topics: HashSet<String>,
+
+    /// Bandwidth profile manager — controls what gets sent under degraded conditions
+    pub bandwidth: BandwidthManager,
+
     /// Connected peers (for state exchange)
     connected_peers: HashSet<PeerId>,
     
@@ -251,6 +276,12 @@ impl MultiplayerSystem {
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
+            last_sent_position: ECEF::new(0.0, 0.0, 0.0),
+            last_sent_yaw: 0.0,
+            last_sent_pitch: 0.0,
+            last_sent_movement_mode: None,
+            subscribed_chunk_topics: HashSet::new(),
+            bandwidth: BandwidthManager::default(),
             connected_peers: HashSet::new(),
             stats: MultiplayerStats::default(),
         })
@@ -320,7 +351,16 @@ impl MultiplayerSystem {
         self.remote_players.remove_stale_players();
     }
     
-    /// Broadcast player state if enough time has elapsed (20 Hz)
+    /// Broadcast player state using delta suppression.
+    ///
+    /// Only transmits when:
+    /// - Position changed more than POSITION_DELTA_THRESHOLD (5cm)
+    /// - Rotation changed more than ROTATION_DELTA_THRESHOLD (~1°)
+    /// - Movement mode changed
+    /// - No transmission in the last PLAYER_STATE_KEEPALIVE_INTERVAL (500ms) — keepalive
+    ///
+    /// Under bandwidth-restricted profiles (LoRa), position is suppressed entirely.
+    /// This reduces idle-player bandwidth ~10× compared to always-on 20Hz broadcasting.
     pub fn broadcast_player_state(
         &mut self,
         position: ECEF,
@@ -329,13 +369,41 @@ impl MultiplayerSystem {
         pitch: f32,
         movement_mode: MovementMode,
     ) -> Result<()> {
-        let now = Instant::now();
-        if now.duration_since(self.last_state_broadcast) < PLAYER_STATE_BROADCAST_INTERVAL {
-            return Ok(()); // Not time yet
+        // Bandwidth profile gate: suppress position under LoRa / very constrained links
+        if !self.bandwidth.allows(MessagePriority::Normal) {
+            return Ok(());
         }
-        
+
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_state_broadcast);
+
+        // Compute deltas
+        let pos_delta = {
+            let dx = position.x - self.last_sent_position.x;
+            let dy = position.y - self.last_sent_position.y;
+            let dz = position.z - self.last_sent_position.z;
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        };
+        let yaw_delta = (yaw - self.last_sent_yaw).abs();
+        let pitch_delta = (pitch - self.last_sent_pitch).abs();
+        let mode_changed = self.last_sent_movement_mode != Some(movement_mode);
+
+        let has_delta = pos_delta > POSITION_DELTA_THRESHOLD
+            || yaw_delta > ROTATION_DELTA_THRESHOLD
+            || pitch_delta > ROTATION_DELTA_THRESHOLD
+            || mode_changed;
+        let keepalive_due = elapsed >= PLAYER_STATE_KEEPALIVE_INTERVAL;
+
+        if !has_delta && !keepalive_due {
+            return Ok(());
+        }
+
         self.last_state_broadcast = now;
-        
+        self.last_sent_position = position;
+        self.last_sent_yaw = yaw;
+        self.last_sent_pitch = pitch;
+        self.last_sent_movement_mode = Some(movement_mode);
+
         // Update local position for spatial sharding
         self.local_position = position;
         let region_changed = if let Some(ref mut sharding) = self.spatial_sharding {
@@ -343,28 +411,26 @@ impl MultiplayerSystem {
         } else {
             false
         };
-        
+
         // If we moved to a new region, resubscribe to new region topics
         if region_changed {
             if let Some(ref sharding) = self.spatial_sharding {
                 println!("📍 Moved to new region: {}", sharding.current_region());
-                
-                // Get topics for new region + neighbors
+
                 let new_topics = sharding.get_subscribe_topics("voxel-ops");
                 let player_topics = sharding.get_subscribe_topics("player-state");
-                
-                // Subscribe to new topics (bulk operation)
+
                 let mut all_topics = new_topics;
                 all_topics.extend(player_topics);
-                
+
                 self.cmd_tx.send(NetworkCommand::SubscribeBulk {
                     topics: all_topics.clone(),
                 }).map_err(|_| MultiplayerError::ChannelSendError)?;
-                
+
                 println!("   ✅ Subscribed to {} regional topics", all_topics.len());
             }
         }
-        
+
         let timestamp = self.clock.tick();
         let msg = PlayerStateMessage::new(
             self.local_peer_id,
@@ -375,22 +441,26 @@ impl MultiplayerSystem {
             movement_mode,
             timestamp,
         );
-        
+
         let data = msg.to_bytes()?;
-        
-        // Publish to region-specific topic if spatial sharding enabled
-        let topic = if let Some(ref sharding) = self.spatial_sharding {
-            sharding.get_publish_topic("player-state")
+
+        // Publish to current chunk topic (AOI) when subscribed, else fall back to regional/global
+        let topic = chunk_player_topic(&ChunkId::from_ecef(&position));
+        if self.subscribed_chunk_topics.contains(&topic) {
+            self.cmd_tx.send(NetworkCommand::Publish { topic, data })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
+        } else if let Some(ref sharding) = self.spatial_sharding {
+            let fallback = sharding.get_publish_topic("player-state");
+            self.cmd_tx.send(NetworkCommand::Publish { topic: fallback, data })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
         } else {
-            TOPIC_PLAYER_STATE.to_string() // Fallback to global topic
-        };
-        
-        self.cmd_tx.send(NetworkCommand::Publish {
-            topic,
-            data,
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+            self.cmd_tx.send(NetworkCommand::Publish {
+                topic: TOPIC_PLAYER_STATE.to_string(),
+                data,
+            }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        }
+
         self.stats.player_states_sent += 1;
-        
         Ok(())
     }
     
@@ -417,12 +487,17 @@ impl MultiplayerSystem {
         
         // Serialize and send
         let data = op.to_bytes()?;
-        
-        // Publish to region-specific topic if spatial sharding enabled
-        let topic = if let Some(ref sharding) = self.spatial_sharding {
+
+        // Publish to the per-chunk topic for this voxel (AOI: only subscribers in that chunk receive it).
+        // Fall back to spatial region topic or global if chunk topics not yet set up.
+        let chunk_id = ChunkId::from_voxel(&coord);
+        let chunk_topic = chunk_voxel_topic(&chunk_id);
+        let topic = if self.subscribed_chunk_topics.contains(&chunk_topic) {
+            chunk_topic
+        } else if let Some(ref sharding) = self.spatial_sharding {
             sharding.get_publish_topic("voxel-ops")
         } else {
-            TOPIC_VOXEL_OPS.to_string() // Fallback to global topic
+            TOPIC_VOXEL_OPS.to_string()
         };
         
         self.cmd_tx.send(NetworkCommand::Publish {
@@ -459,6 +534,45 @@ impl MultiplayerSystem {
     /// Get statistics
     pub fn stats(&self) -> &MultiplayerStats {
         &self.stats
+    }
+
+    /// Synchronise per-chunk AOI topic subscriptions with the current set of loaded chunks.
+    ///
+    /// Call this whenever the chunk streamer's loaded set changes (new chunks loaded or old ones
+    /// unloaded). The multiplayer layer subscribes to the gossipsub topics for each loaded chunk
+    /// so we only receive data relevant to our render distance, and nothing beyond it.
+    ///
+    /// Topic naming:
+    /// - `player-state-{x}-{y}-{z}` — position updates for players in that chunk
+    /// - `voxel-ops-{x}-{y}-{z}`    — block edits in that chunk
+    pub fn update_subscribed_chunks(&mut self, loaded: &HashSet<ChunkId>) -> Result<()> {
+        // Build the full set of topics we want
+        let mut desired: HashSet<String> = HashSet::new();
+        for id in loaded {
+            desired.insert(chunk_player_topic(id));
+            desired.insert(chunk_voxel_topic(id));
+        }
+
+        let to_add: Vec<String> = desired.difference(&self.subscribed_chunk_topics).cloned().collect();
+        let to_remove: Vec<String> = self.subscribed_chunk_topics.difference(&desired).cloned().collect();
+
+        if !to_add.is_empty() {
+            self.cmd_tx.send(NetworkCommand::SubscribeBulk { topics: to_add.clone() })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
+            for t in &to_add {
+                self.subscribed_chunk_topics.insert(t.clone());
+            }
+        }
+
+        if !to_remove.is_empty() {
+            self.cmd_tx.send(NetworkCommand::UnsubscribeBulk { topics: to_remove.clone() })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
+            for t in &to_remove {
+                self.subscribed_chunk_topics.remove(t);
+            }
+        }
+
+        Ok(())
     }
     
     /// Enable spatial sharding with custom configuration
@@ -950,6 +1064,10 @@ impl MultiplayerSystem {
     /// Broadcast chunk terrain (raw octree bytes + timestamp) to all peers.
     /// Peers only apply this if the received timestamp is newer than what they have.
     pub fn broadcast_chunk_terrain(&mut self, chunk_id: ChunkId, octree_bytes: Vec<u8>, last_modified: u64) -> Result<()> {
+        // Bandwidth gate: suppress terrain transfers on constrained/LoRa links
+        if !self.bandwidth.should_send_terrain() {
+            return Ok(());
+        }
         let data = ChunkTerrainData { chunk_id, octree_bytes, last_modified };
         let bytes = data.to_bytes()?;
         if let Err(e) = self.cmd_tx.send(NetworkCommand::Publish {
@@ -1302,6 +1420,18 @@ fn run_network_thread(
 /// Helper to convert ECEF position to local rendering space
 pub fn ecef_to_local(ecef: &ECEF, physics: &PhysicsWorld) -> glam::Vec3 {
     physics.ecef_to_local(ecef)
+}
+
+/// Per-chunk gossipsub topic for player state (AOI).
+/// Only peers subscribed to this chunk's topic receive position updates published here.
+pub fn chunk_player_topic(id: &ChunkId) -> String {
+    format!("player-state-{}-{}-{}", id.x, id.y, id.z)
+}
+
+/// Per-chunk gossipsub topic for voxel operations (AOI).
+/// Only peers subscribed to this chunk's topic receive block-edit events published here.
+pub fn chunk_voxel_topic(id: &ChunkId) -> String {
+    format!("voxel-ops-{}-{}-{}", id.x, id.y, id.z)
 }
 
 #[cfg(test)]
