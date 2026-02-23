@@ -44,14 +44,18 @@ pub struct BootstrapNode {
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 /// Where to fetch bootstrap nodes from. Listed in priority order - first success wins.
+/// - Repo raw file: updated immediately on every push, GitHub raw CDN flushes fast
+/// - Gist: kept as fallback, but can have CDN lag of several minutes after update
 pub const BOOTSTRAP_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/PaddyOhFurnature/mverse/main/bootstrap.json",
     "https://gist.githubusercontent.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17/raw/bootstrap.json",
 ];
 
-/// Hardcoded fallback - used only if all URLs fail and no cache exists.
-pub const HARDCODED_FALLBACK: &[&str] = &[
-    "/ip4/49.182.84.9/tcp/4001/p2p/12D3KooWH6ARmErmjFZPHaUPtHcpCHJ4rwUtWMU4kYnogo3tPymm",
-];
+/// Hardcoded fallback — used only if ALL remote URLs fail AND no local cache exists.
+/// Keep this empty: we don't know what IP the server will have in future, and a stale
+/// hardcoded address is worse than gracefully failing (client just won't connect until
+/// bootstrap is reachable again).
+pub const HARDCODED_FALLBACK: &[&str] = &[];
 
 // ─── Cache path ──────────────────────────────────────────────────────────────
 
@@ -195,7 +199,8 @@ fn load_cache() -> Option<BootstrapFile> {
             Some(file)
         }
         Err(e) => {
-            eprintln!("[bootstrap] Cache parse error: {}", e);
+            eprintln!("[bootstrap] Cache parse error: {} — deleting corrupt cache", e);
+            let _ = std::fs::remove_file(&path);
             None
         }
     }
