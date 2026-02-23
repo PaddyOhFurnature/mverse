@@ -453,6 +453,12 @@ impl ChunkManager {
             }
         }
         
+        // Sort ops within each chunk in causal replay order (oldest first) so the
+        // receiver can apply them sequentially and converge deterministically.
+        for ops in result.values_mut() {
+            ops.sort_by(|a, b| a.replay_cmp(b));
+        }
+
         println!("   → Filtered to {} operations across {} chunks", 
             result.values().map(|v| v.len()).sum::<usize>(),
             result.len());

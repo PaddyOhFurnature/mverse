@@ -413,6 +413,29 @@ impl VoxelOperation {
             self.author.to_bytes() > other.author.to_bytes()
         }
     }
+
+    /// Total ordering for deterministic replay.
+    ///
+    /// Used when sending ops to a peer — sort oldest-first so the receiver can
+    /// apply them in causal order and converge to the correct final state.
+    ///
+    /// Order: causal predecessor first → lower timestamp → smaller PeerId.
+    /// This is the inverse of `wins_over` (weakest op first).
+    pub fn replay_cmp(&self, other: &VoxelOperation) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Causal: happens-before → apply first
+        if self.vector_clock.happens_before(&other.vector_clock) {
+            return Ordering::Less;
+        }
+        if self.vector_clock.happens_after(&other.vector_clock) {
+            return Ordering::Greater;
+        }
+        // Concurrent: lower timestamp first (older write replayed first, newer wins)
+        match self.timestamp.cmp(&other.timestamp) {
+            Ordering::Equal => self.author.to_bytes().cmp(&other.author.to_bytes()),
+            ord => ord,
+        }
+    }
 }
 
 /// Chat message (Priority 2: State Sync)

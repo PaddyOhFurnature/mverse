@@ -285,7 +285,10 @@ impl UserContentLayer {
             std::fs::create_dir_all(&chunk_dir)?;
             
             // Convert &Vec<&VoxelOperation> to Vec<VoxelOperation> for serialization
-            let ops_owned: Vec<VoxelOperation> = ops.iter().map(|&op| op.clone()).collect();
+            // Sort in causal replay order so files are deterministic and can be replayed
+            // directly from disk in the correct order.
+            let mut ops_owned: Vec<VoxelOperation> = ops.iter().map(|&op| op.clone()).collect();
+            ops_owned.sort_by(|a, b| a.replay_cmp(b));
             
             let ops_file = chunk_dir.join("operations.bin");
             let bytes = bincode::serialize(&ops_owned)
@@ -361,16 +364,22 @@ impl UserContentLayer {
     
     /// Get all chunks that have operations
     ///
-    /// Useful for discovering which chunks need to be saved.
+    /// Returns ops sorted in causal replay order (oldest first) so that callers
+    /// can apply them deterministically to reach the correct final state.
     ///
     /// # Returns
-    /// HashMap mapping chunk ID to operations in that chunk
+    /// HashMap mapping chunk ID to operations in that chunk (sorted for replay)
     pub fn get_chunks_with_ops(&self) -> HashMap<ChunkId, Vec<VoxelOperation>> {
         let mut chunks: HashMap<ChunkId, Vec<VoxelOperation>> = HashMap::new();
         
         for op in &self.op_log {
             let chunk_id = ChunkId::from_voxel(&op.coord);
             chunks.entry(chunk_id).or_insert_with(Vec::new).push(op.clone());
+        }
+        
+        // Sort ops within each chunk in causal replay order
+        for ops in chunks.values_mut() {
+            ops.sort_by(|a, b| a.replay_cmp(b));
         }
         
         chunks

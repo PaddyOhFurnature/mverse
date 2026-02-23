@@ -80,7 +80,7 @@ use metaverse_core::{
     mesh::{Mesh, Vertex},
     messages::{Material, MovementMode},
     multiplayer::MultiplayerSystem,
-    physics::{PhysicsWorld, Player},
+    physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
     player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
@@ -722,7 +722,7 @@ fn main() {
                 }
                 
                 WindowEvent::RedrawRequested => {
-                    let dt = 1.0 / 60.0;
+                    let dt = PHYSICS_TIMESTEP;
                     
                     // Update multiplayer system (polls network, interpolates remote players)
                     multiplayer.update(dt);

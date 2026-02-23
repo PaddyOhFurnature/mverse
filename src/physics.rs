@@ -15,6 +15,13 @@ use glam::Vec3;
 use rapier3d::prelude::*;
 use rapier3d::control::{KinematicCharacterController, CharacterAutostep, CharacterLength};
 
+/// Fixed simulation timestep (60 Hz).
+///
+/// All physics integration uses this value. Using a constant prevents drift
+/// between the physics simulation and the game clock, and ensures deterministic
+/// replay across peers.
+pub const PHYSICS_TIMESTEP: f32 = 1.0 / 60.0;
+
 /// Physics world managing all simulation
 /// 
 /// Uses a FloatingOrigin system to handle large-scale coordinates:
@@ -74,7 +81,7 @@ impl PhysicsWorld {
         let mut integration_params = IntegrationParameters::default();
         
         // Fixed 60 Hz timestep for determinism
-        integration_params.dt = 1.0 / 60.0;
+        integration_params.dt = PHYSICS_TIMESTEP;
         
         Self {
             pipeline: PhysicsPipeline::new(),
@@ -1337,7 +1344,7 @@ mod tests {
         
         // Apply forward movement for 1 second (60 frames)
         player.on_ground = true; // Pretend on ground
-        let dt = 1.0 / 60.0;
+        let dt = PHYSICS_TIMESTEP;
         for _ in 0..60 {
             player.apply_movement(
                 &mut physics,
@@ -1372,7 +1379,7 @@ mod tests {
         player.velocity = Vec3::ZERO;
         
         // Apply jump
-        let dt = 1.0 / 60.0;
+        let dt = PHYSICS_TIMESTEP;
         player.apply_movement(
             &mut physics,
             Vec3::ZERO, // No horizontal movement
@@ -1408,7 +1415,7 @@ mod tests {
         let vel_before = player.velocity;
         
         // Try to jump (should not work)
-        let dt = 1.0 / 60.0;
+        let dt = PHYSICS_TIMESTEP;
         player.apply_movement(
             &mut physics,
             Vec3::ZERO,
@@ -1708,7 +1715,7 @@ mod tests {
             ).normalize() * 9.8;
             
             player.update_ground_detection(&physics);
-            player.apply_movement(&mut physics, Vec3::ZERO, false, 1.0/60.0);
+            player.apply_movement(&mut physics, Vec3::ZERO, false, PHYSICS_TIMESTEP);
             player.sync_from_physics(&physics);
             physics.step(gravity);
         }
