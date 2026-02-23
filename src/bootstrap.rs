@@ -11,6 +11,7 @@
 //! The JSON schema is defined in docs/BOOTSTRAP_SCHEMA.md
 
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -30,6 +31,9 @@ pub struct BootstrapNode {
     pub id: String,
     pub name: String,
     pub multiaddr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub local_multiaddr: Option<String>,
     pub capabilities: Vec<String>,
     pub priority: u8,
     pub verified: bool,
@@ -89,7 +93,89 @@ pub async fn resolve_bootstrap_nodes() -> Vec<String> {
     // Sort by priority descending, return multiaddrs
     let mut nodes = source.bootstrap_nodes;
     nodes.sort_by(|a, b| b.priority.cmp(&a.priority));
-    nodes.into_iter().map(|n| n.multiaddr).collect()
+
+    let local_subnets = get_local_subnets();
+    let mut result: Vec<String> = Vec::new();
+
+    for node in &nodes {
+        if let Some(ref lan_ma) = node.local_multiaddr {
+            if let Some(lan_ip) = extract_ip_from_multiaddr(lan_ma) {
+                let on_same_lan = local_subnets
+                    .iter()
+                    .any(|&(lip, prefix)| is_same_subnet(lip, prefix, lan_ip));
+                if on_same_lan {
+                    result.push(lan_ma.clone());
+                }
+            }
+        }
+    }
+
+    for node in nodes {
+        result.push(node.multiaddr);
+    }
+
+    result
+}
+
+// ─── LAN detection ───────────────────────────────────────────────────────────
+
+/// Returns (ip, prefix_len) pairs for all local IPv4 interfaces.
+fn get_local_subnets() -> Vec<(Ipv4Addr, u8)> {
+    let output = match std::process::Command::new("ip").args(["addr"]).output() {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut result = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("inet ") {
+            continue;
+        }
+        // e.g. "inet 192.168.1.111/24 brd ..."
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let cidr = parts[1]; // "192.168.1.111/24"
+        let mut split = cidr.splitn(2, '/');
+        let ip_str = split.next().unwrap_or("");
+        let prefix_str = split.next().unwrap_or("32");
+        let ip: Ipv4Addr = match ip_str.parse() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        let prefix: u8 = prefix_str.parse().unwrap_or(32);
+        result.push((ip, prefix));
+    }
+    result
+}
+
+/// Returns true if `remote_ip` falls within the subnet defined by `local_ip/prefix_len`.
+fn is_same_subnet(local_ip: Ipv4Addr, prefix_len: u8, remote_ip: Ipv4Addr) -> bool {
+    if prefix_len == 0 {
+        return true;
+    }
+    if prefix_len > 32 {
+        return false;
+    }
+    let mask = !((1u32 << (32 - prefix_len)) - 1);
+    (u32::from(local_ip) & mask) == (u32::from(remote_ip) & mask)
+}
+
+/// Parses a multiaddr like `/ip4/192.168.1.182/tcp/4001/...` and returns the IPv4 address.
+fn extract_ip_from_multiaddr(ma: &str) -> Option<Ipv4Addr> {
+    let mut parts = ma.split('/');
+    // skip leading empty string from leading '/'
+    parts.next();
+    while let Some(proto) = parts.next() {
+        if proto == "ip4" {
+            if let Some(addr_str) = parts.next() {
+                return addr_str.parse().ok();
+            }
+        }
+    }
+    None
 }
 
 // ─── Remote fetch ────────────────────────────────────────────────────────────
