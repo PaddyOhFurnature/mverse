@@ -10,6 +10,16 @@ world_data_*/
 # Terrain cache
 elevation_cache/
 *.tif
+*.hgt
+
+# Compiled binaries (use GitHub Releases for distribution)
+deploy/bin/
+
+# Cache directories
+.metaverse/cache/
+
+# SSH/SCP targets
+portable@*
 
 # Debug/test files
 *.log
