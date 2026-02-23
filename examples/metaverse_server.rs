@@ -32,7 +32,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+#[cfg(unix)]
+use libc;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -341,7 +343,7 @@ pub struct NetStats {
 }
 
 #[derive(PartialEq, Clone)]
-enum Tab { Main, Peers, World, Log, Config, Help }
+enum Tab { Main }  // single-screen TUI — kept for headless/log path compatibility
 
 /// Shared state readable by web server and TUI
 #[derive(Clone, Serialize)]
@@ -670,59 +672,65 @@ fn short_addr(addr: &str) -> String {
     if addr.len() > 40 { format!("…{}", &addr[addr.len()-38..]) } else { addr.to_string() }
 }
 
-// ─── TUI rendering ───────────────────────────────────────────────────────────
+// ─── TUI: single htop-style dashboard ────────────────────────────────────────
 
+/// Entry point for all TUI rendering — one screen, no tabs.
 fn draw(frame: &mut Frame, state: &AppState, world: &WorldStats) {
-    match state.tab {
-        Tab::Main   => draw_main(frame, state, world),
-        Tab::Peers  => draw_peers_full(frame, state),
-        Tab::World  => draw_world_full(frame, state, world),
-        Tab::Log    => draw_log_full(frame, state),
-        Tab::Config => draw_config(frame, state),
-        Tab::Help   => draw_help(frame, state),
-    }
-}
+    let area = frame.area();
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),  // header
+            Constraint::Min(6),     // body
+            Constraint::Length(1),  // footer hint
+        ])
+        .split(area);
 
-fn tab_hints(frame: &mut Frame, area: Rect, current: &Tab) {
-    let tabs = [
-        ("m", "Main",   Tab::Main),
-        ("p", "Peers",  Tab::Peers),
-        ("w", "World",  Tab::World),
-        ("l", "Log",    Tab::Log),
-        ("c", "Config", Tab::Config),
-        ("h", "Help",   Tab::Help),
-    ];
-    let mut spans = vec![];
-    for (key, label, t) in &tabs {
-        let active = std::mem::discriminant(current) == std::mem::discriminant(t);
-        let key_style = if active {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Yellow)
-        };
-        let lbl_style = if active {
-            Style::default().fg(Color::Black).bg(Color::Cyan)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-        spans.push(Span::styled(format!("[{}]", key), key_style));
-        spans.push(Span::styled(format!("{} ", label), lbl_style));
-    }
-    spans.push(Span::styled(" [q]", Style::default().fg(Color::Red)));
-    spans.push(Span::styled("Quit", Style::default().fg(Color::DarkGray)));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    draw_header(frame, state, world, rows[0]);
+
+    // Body: left (Network) | right (World)
+    let body_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    let left_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body_cols[0]);
+
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(body_cols[1]);
+
+    draw_system(frame, state, left_rows[0]);
+    draw_network(frame, state, left_rows[1]);
+    draw_world(frame, world, state, right_rows[0]);
+    draw_node_info(frame, state, right_rows[1]);
+
+    // Footer
+    let footer = format!(
+        " [q] Quit   Web: http://{}:{}   Log: server.log ",
+        state.public_ip, state.config.web_port,
+    );
+    frame.render_widget(
+        Paragraph::new(footer)
+            .style(Style::default().fg(Color::DarkGray)),
+        rows[2],
+    );
 }
 
 fn draw_header(frame: &mut Frame, state: &AppState, world: &WorldStats, area: Rect) {
     let e = state.start_time.elapsed().as_secs();
     let name = state.config.node_name.as_deref().unwrap_or("server");
-    let ws_port = state.config.ws_port.unwrap_or(state.config.port + 5000);
+    let short_id = &state.local_peer_id[state.local_peer_id.len().saturating_sub(12)..];
+    let shedding = if state.shedding_relay { "  ⚠️ SHEDDING" } else { "" };
     let text = format!(
-        " 🌍 {}  │  {}:{} (WS:{})  │  …{}  │  ⏱ {:02}h{:02}m{:02}s  │  peers:{} circuits:{} chunks:{} ",
-        name, state.public_ip, state.config.port, ws_port,
-        &state.local_peer_id[state.local_peer_id.len().saturating_sub(10)..],
-        e/3600, (e%3600)/60, e%60,
+        " 🌍 {}  │  {}  │  peers:{}  circuits:{}  chunks:{}  │  ⏱ {:02}h{:02}m{:02}s{}",
+        name, short_id,
         state.connected_peers.len(), state.active_circuits.len(), world.chunks_loaded,
+        e / 3600, (e % 3600) / 60, e % 60, shedding,
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -732,94 +740,50 @@ fn draw_header(frame: &mut Frame, state: &AppState, world: &WorldStats, area: Re
     );
 }
 
-fn draw_main(frame: &mut Frame, state: &AppState, world: &WorldStats) {
-    let area = frame.area();
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Min(8),     // body
-            Constraint::Length(8),  // log tail
-            Constraint::Length(1),  // hints
-        ])
-        .split(area);
-
-    draw_header(frame, state, world, layout[0]);
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(30), Constraint::Percentage(30)])
-        .split(layout[1]);
-
-    draw_net_stats(frame, state, body[0]);
-    draw_world_stats(frame, world, state.config.max_world_data_gb, body[1]);
-    draw_system_stats(frame, state, body[2]);
-    draw_log_tail(frame, state, layout[2]);
-    tab_hints(frame, layout[3], &state.tab);
+fn bar(filled: u8, width: u8) -> String {
+    let n = (filled as usize * width as usize / 100).min(width as usize);
+    format!("[{}{}]", "█".repeat(n), "░".repeat(width as usize - n))
 }
 
-fn draw_net_stats(frame: &mut Frame, state: &AppState, area: Rect) {
-    let rows = vec![
-        Row::new(["Connected peers".into(), format!("{}", state.connected_peers.len())]),
-        Row::new(["Active circuits".into(), format!("{}", state.active_circuits.len())]),
-        Row::new(["Total connections".into(), format!("{}", state.total_connections)]),
-        Row::new(["Total reservations".into(), format!("{}", state.total_reservations)]),
-        Row::new(["DHT peers".into(), format!("{}", state.dht_peer_count)]),
-        Row::new(["Gossip msgs in".into(), format!("{}", state.net.gossip_msgs_in)]),
-        Row::new(["State requests in".into(), format!("{}", state.net.state_requests_in)]),
-        Row::new(["Bytes in".into(), fmt_bytes(state.net.bytes_in)]),
-        Row::new(["Bytes out".into(), fmt_bytes(state.net.bytes_out)]),
-        Row::new(["Relay shedding".into(), if state.shedding_relay { "⚠️ YES".to_string() } else { "No".to_string() }]),
-    ];
-    frame.render_widget(
-        Table::new(rows, [Constraint::Min(20), Constraint::Min(12)])
-            .block(Block::default().title(" Network ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
-        area,
-    );
-}
+fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
+    let cpu_pct = state.cpu_pct as u8;
+    let ram_pct = if state.ram_total_mb > 0 { (state.ram_used_mb * 100 / state.ram_total_mb) as u8 } else { 0 };
 
-fn draw_world_stats(frame: &mut Frame, world: &WorldStats, max_gb: u32, area: Rect) {
-    let max_mb = if max_gb == 0 { f64::INFINITY } else { max_gb as f64 * 1024.0 };
-    let pct = if max_gb == 0 { 0.0 } else { (world.world_data_mb / max_mb * 100.0).min(100.0) };
-    let data_color = if pct > 90.0 { Color::Red } else if pct > 75.0 { Color::Yellow } else { Color::Green };
-    let rows = vec![
-        Row::new(["Chunks loaded".into(), format!("{}", world.chunks_loaded)]),
-        Row::new(["Chunks queued".into(), format!("{}", world.chunks_queued)]),
-        Row::new(["Chunks loading".into(), format!("{}", world.chunks_loading)]),
-        Row::new(["Voxel ops total".into(), format!("{}", world.voxel_ops_total)]),
-        Row::new(["Ops merged".into(), format!("{}", world.ops_merged_total)]),
-        Row::new(["Last save".into(), if world.last_save_secs_ago < 3600 {
-            format!("{}s ago", world.last_save_secs_ago)
-        } else { "never".to_string() }]),
-        Row::new(["Data size".into(),
-            format!("{:.1} MB", world.world_data_mb)
-        ]).style(Style::default().fg(data_color)),
-        Row::new(["Storage limit".into(), if max_gb == 0 { "unlimited".to_string() } else { format!("{} GB", max_gb) }]),
-        Row::new(["Shedding chunks".into(), if world.shedding_chunks { "⚠️ YES".to_string() } else { "No".to_string() }]),
-    ];
-    frame.render_widget(
-        Table::new(rows, [Constraint::Min(16), Constraint::Min(12)])
-            .block(Block::default().title(" World ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn draw_system_stats(frame: &mut Frame, state: &AppState, area: Rect) {
-    let cpu_style = cpu_color(state.cpu_pct);
-    let ram_pct = if state.ram_total_mb > 0 { state.ram_used_mb * 100 / state.ram_total_mb } else { 0 };
+    let cpu_style = if cpu_pct > 80 { Style::default().fg(Color::Red) }
+        else if cpu_pct > 50 { Style::default().fg(Color::Yellow) }
+        else { Style::default().fg(Color::Green) };
     let ram_style = if ram_pct > 85 { Style::default().fg(Color::Red) }
         else if ram_pct > 70 { Style::default().fg(Color::Yellow) }
         else { Style::default().fg(Color::Green) };
-    let lines = vec![
-        stat_line("CPU:   ", &format!("{:.1}%", state.cpu_pct)).style(cpu_style),
-        stat_line("RAM:   ", &format!("{}/{} MB ({}%)", state.ram_used_mb, state.ram_total_mb, ram_pct)).style(ram_style),
-        stat_line("Port:  ", &format!("{}", state.config.port)),
-        stat_line("WS:    ", &format!("{}", state.config.ws_port.unwrap_or(state.config.port + 5000))),
-        stat_line("Web:   ", &format!(":{}", state.config.web_port)),
-        stat_line("Limit: ", &format!("{} circuits", state.config.max_circuits)),
-        stat_line("Peers: ", &format!("{} max", if state.config.max_peers == 0 { "∞".to_string() } else { state.config.max_peers.to_string() })),
-        stat_line("Type:  ", &state.config.node_type),
-        stat_line("Score: ", &format!("{}", state.config.priority_score)),
+
+    let disk_pct: u8 = if state.config.max_world_data_gb > 0 {
+        let used_gb = state.shared.read().map(|s| s.world.world_data_mb).unwrap_or(0.0) / 1024.0;
+        ((used_gb / state.config.max_world_data_gb as f64) * 100.0).min(100.0) as u8
+    } else { 0 };
+    let disk_style = if disk_pct > 90 { Style::default().fg(Color::Red) }
+        else if disk_pct > 75 { Style::default().fg(Color::Yellow) }
+        else { Style::default().fg(Color::Cyan) };
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(format!("CPU  {} ", bar(cpu_pct, 20)), cpu_style),
+            Span::styled(format!("{:3}%", cpu_pct), cpu_style.add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("RAM  {} ", bar(ram_pct, 20)), ram_style),
+            Span::styled(format!("{:3}%  {}/{} MB", ram_pct, state.ram_used_mb, state.ram_total_mb), ram_style),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("DSK  {} ", bar(disk_pct, 20)), disk_style),
+            Span::styled(
+                if state.config.max_world_data_gb > 0 {
+                    format!("{:3}%  {} GB limit", disk_pct, state.config.max_world_data_gb)
+                } else {
+                    "  no limit".to_string()
+                },
+                disk_style,
+            ),
+        ]),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -828,217 +792,66 @@ fn draw_system_stats(frame: &mut Frame, state: &AppState, area: Rect) {
     );
 }
 
-fn draw_peers_full(frame: &mut Frame, state: &AppState) {
-    let area = frame.area();
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
-    let e = state.start_time.elapsed().as_secs();
-    let header_text = format!(
-        " 👥 Connected Peers ({})  │  …{}  │  ⏱ {:02}h{:02}m{:02}s ",
-        state.connected_peers.len(),
-        &state.local_peer_id[state.local_peer_id.len().saturating_sub(10)..],
-        e/3600, (e%3600)/60, e%60,
-    );
-    frame.render_widget(
-        Paragraph::new(header_text)
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL)),
-        parts[0],
-    );
-
-    let rows: Vec<Row> = state.connected_peers.iter().map(|(pid, (at, addr, ptype))| {
-        let age = at.elapsed().as_secs();
-        let age_s = if age < 60 { format!("{}s", age) } else if age < 3600 { format!("{}m", age/60) } else { format!("{}h", age/3600) };
-        let type_color = match ptype.as_str() {
-            "server" => Color::Cyan,
-            "relay" => Color::Blue,
-            "client" => Color::Green,
-            _ => Color::DarkGray,
-        };
-        Row::new(vec![
-            Cell::from(AppState::short(&pid.to_string())).style(Style::default().fg(Color::White)),
-            Cell::from(ptype.clone()).style(Style::default().fg(type_color)),
-            Cell::from(short_addr(addr)).style(Style::default().fg(Color::DarkGray)),
-            Cell::from(age_s).style(Style::default().fg(Color::Yellow)),
-        ])
-    }).collect();
-
-    frame.render_widget(
-        Table::new(rows, [Constraint::Length(14), Constraint::Length(8), Constraint::Min(30), Constraint::Length(6)])
-            .header(Row::new(["Peer ID", "Type", "Address", "Age"])
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
-            .block(Block::default().title(" Peers ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
-        parts[1],
-    );
-    tab_hints(frame, parts[2], &state.tab);
-}
-
-fn draw_world_full(frame: &mut Frame, state: &AppState, world: &WorldStats) {
-    let area = frame.area();
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
-    let header_text = format!(
-        " 🌍 World State  │  {} chunks loaded  │  {:.1} MB  │  {} ops ",
-        world.chunks_loaded, world.world_data_mb, world.voxel_ops_total,
-    );
-    frame.render_widget(
-        Paragraph::new(header_text)
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL)),
-        parts[0],
-    );
-
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(parts[1]);
-
-    let world_lines = vec![
-        stat_line("Chunks loaded:    ", &format!("{}", world.chunks_loaded)),
-        stat_line("Chunks queued:    ", &format!("{}", world.chunks_queued)),
-        stat_line("Chunks loading:   ", &format!("{}", world.chunks_loading)),
-        stat_line("Voxel ops total:  ", &format!("{}", world.voxel_ops_total)),
-        stat_line("Ops merged:       ", &format!("{}", world.ops_merged_total)),
-        stat_line("Last save:        ", &if world.last_save_secs_ago < 3600 {
-            format!("{}s ago", world.last_save_secs_ago) } else { "never".to_string() }),
-        stat_line("Data size:        ", &format!("{:.1} MB", world.world_data_mb)),
-        stat_line("Shedding:         ", if world.shedding_chunks { "YES ⚠️" } else { "No" }),
+fn draw_network(frame: &mut Frame, state: &AppState, area: Rect) {
+    let ws_port = state.config.ws_port.unwrap_or(state.config.port + 5000);
+    let items: Vec<Line> = vec![
+        stat_line("Peers:      ", format!("{}", state.connected_peers.len())),
+        stat_line("Circuits:   ", format!("{}", state.active_circuits.len())),
+        stat_line("Total conn: ", format!("{}", state.total_connections)),
+        stat_line("DHT peers:  ", format!("{}", state.dht_peer_count)),
+        stat_line("Traffic in: ", fmt_bytes(state.net.bytes_in)),
+        stat_line("Traffic out:", fmt_bytes(state.net.bytes_out)),
+        stat_line("TCP port:   ", format!("{}", state.config.port)),
+        stat_line("WS port:    ", format!("{}", ws_port)),
     ];
     frame.render_widget(
-        Paragraph::new(world_lines)
-            .block(Block::default().title(" Chunk Stats ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
-        body[0],
-    );
-
-    let cfg_lines = vec![
-        stat_line("World dir:        ", state.config.world_dir.as_deref().unwrap_or("world_data")),
-        stat_line("Load radius:      ", &format!("{:.0}m", state.config.chunk_load_radius_m)),
-        stat_line("Unload radius:    ", &format!("{:.0}m", state.config.chunk_unload_radius_m)),
-        stat_line("Max chunks:       ", &format!("{}", state.config.max_loaded_chunks)),
-        stat_line("Max storage:      ", &if state.config.max_world_data_gb == 0 {
-            "unlimited".to_string() } else { format!("{} GB", state.config.max_world_data_gb) }),
-        stat_line("Save interval:    ", &format!("{}s", state.config.world_save_interval_secs)),
-        stat_line("World enabled:    ", if state.config.world_enabled { "Yes" } else { "No (relay-only)" }),
-    ];
-    frame.render_widget(
-        Paragraph::new(cfg_lines)
-            .block(Block::default().title(" World Config ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
-        body[1],
-    );
-    tab_hints(frame, parts[2], &state.tab);
-}
-
-fn draw_log_tail(frame: &mut Frame, state: &AppState, area: Rect) {
-    let h = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = state.log.iter().rev().take(h).rev().map(|e| log_line(e)).collect();
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().title(" Log [l] ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(items)
+            .block(Block::default().title(" Network ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
         area,
     );
 }
 
-fn draw_log_full(frame: &mut Frame, state: &AppState) {
-    let area = frame.area();
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let h = parts[0].height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = state.log.iter().rev().take(h).rev().map(|e| log_line(e)).collect();
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().title(" Log ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        parts[0],
-    );
-    tab_hints(frame, parts[1], &state.tab);
-}
-
-fn draw_config(frame: &mut Frame, state: &AppState) {
-    let area = frame.area();
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-
-    frame.render_widget(
-        Paragraph::new(format!(
-            " ⚙️  Configuration  │  Edit {}  then restart to apply  │  Web UI: http://{}:{}",
-            config_paths()[1].display(),
-            state.config.web_bind,
-            state.config.web_port,
-        ))
-        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
-        .block(Block::default().borders(Borders::ALL)),
-        parts[0],
-    );
-
-    let cfg_json = serde_json::to_string_pretty(&state.config).unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(cfg_json)
-            .block(Block::default().title(" server.json (read-only — edit in web UI or file) ").title_style(Style::default().fg(Color::Yellow)).borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        parts[1],
-    );
-    tab_hints(frame, parts[2], &state.tab);
-}
-
-fn draw_help(frame: &mut Frame, state: &AppState) {
-    let area = frame.area();
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let cfg_path = config_paths()[1].display().to_string();
-    let lines = vec![
-        Line::from(Span::styled(" Metaverse Server — Help ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(Span::styled(" Tabs", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from("  m   Main dashboard (peers, world, system)"),
-        Line::from("  p   Peers — connected peers with type and address"),
-        Line::from("  w   World — chunk stats and storage info"),
-        Line::from("  l   Full log"),
-        Line::from("  c   Config — current settings (edit via web UI or file)"),
-        Line::from("  h   This help"),
-        Line::from("  q / Ctrl+C   Quit (saves world state first)"),
-        Line::from(""),
-        Line::from(Span::styled(" Config file", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(format!("  {}", cfg_path)),
-        Line::from("  Edit and restart to apply. Live editing via web UI."),
-        Line::from(""),
-        Line::from(Span::styled(" Web dashboard", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(format!("  http://{}:{}/", state.config.web_bind, state.config.web_port)),
-        Line::from("  Status, peers, world, config editor, live log"),
-        Line::from(""),
-        Line::from(Span::styled(" CLI flags", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from("  --port N          TCP relay port (default 4001)"),
-        Line::from("  --web-port N      Web dashboard port (default 8080)"),
-        Line::from("  --world-dir PATH  World data directory"),
-        Line::from("  --no-world        Relay-only mode (no world state)"),
-        Line::from("  --headless        Plain log, no TUI"),
-        Line::from("  --peer ADDR       Dial a peer relay at startup"),
-        Line::from("  --temp-identity   Non-persistent identity (testing)"),
-        Line::from(""),
-        Line::from(Span::styled(" Node identity", Style::default().add_modifier(Modifier::BOLD))),
-        Line::from(format!("  Peer ID: {}", state.local_peer_id)),
-        Line::from(format!("  Public:  {}:{}", state.public_ip, state.config.port)),
-        Line::from(format!("  Type:    {} (score: {})", state.config.node_type, state.config.priority_score)),
+fn draw_world(frame: &mut Frame, world: &WorldStats, state: &AppState, area: Rect) {
+    let save_str = if world.last_save_secs_ago < 3600 {
+        format!("{}s ago", world.last_save_secs_ago)
+    } else {
+        "not yet".to_string()
+    };
+    let items: Vec<Line> = vec![
+        stat_line("Chunks loaded: ", format!("{}", world.chunks_loaded)),
+        stat_line("Chunks queued: ", format!("{}", world.chunks_queued)),
+        stat_line("Voxel ops:     ", format!("{}", world.voxel_ops_total)),
+        stat_line("Ops merged:    ", format!("{}", world.ops_merged_total)),
+        stat_line("Data size:     ", format!("{:.1} MB", world.world_data_mb)),
+        stat_line("Last save:     ", save_str),
+        stat_line("Shedding:      ",
+            if world.shedding_chunks { "YES ⚠️".to_string() } else { "No".to_string() }),
+        stat_line("World dir:     ",
+            state.config.world_dir.as_deref().unwrap_or("~/.metaverse/world_data").to_string()),
     ];
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().title(" Help ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
-        parts[0],
+        Paragraph::new(items)
+            .block(Block::default().title(" World ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
+        area,
     );
-    tab_hints(frame, parts[1], &state.tab);
+}
+
+fn draw_node_info(frame: &mut Frame, state: &AppState, area: Rect) {
+    let items: Vec<Line> = vec![
+        stat_line("Node type:  ", state.config.node_type.clone()),
+        stat_line("Priority:   ", format!("{}", state.config.priority_score)),
+        stat_line("Max circuits:", format!("{}", state.config.max_circuits)),
+        stat_line("Max peers:  ", if state.config.max_peers == 0 { "∞".to_string() } else { state.config.max_peers.to_string() }),
+        stat_line("Bandwidth:  ", if state.config.max_bandwidth_mbps == 0 { "∞".to_string() } else { format!("{} MB/s", state.config.max_bandwidth_mbps) }),
+        stat_line("Web:        ", format!("http://{}:{}", state.public_ip, state.config.web_port)),
+        stat_line("Peer ID:    ", state.local_peer_id[state.local_peer_id.len().saturating_sub(20)..].to_string()),
+        stat_line("Version:    ", env!("CARGO_PKG_VERSION").to_string()),
+    ];
+    frame.render_widget(
+        Paragraph::new(items)
+            .block(Block::default().title(" Node ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
+        area,
+    );
 }
 
 fn stat_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static> {
@@ -1046,18 +859,6 @@ fn stat_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static
         Span::styled(label.into(), Style::default().fg(Color::DarkGray)),
         Span::styled(value.into(), Style::default().fg(Color::White)),
     ])
-}
-
-fn log_line(line: &str) -> Line {
-    let color = if line.contains("✅") || line.contains("Reservation") { Color::Green }
-        else if line.contains("❌") || line.contains("Disconnected") || line.contains("✗") { Color::Red }
-        else if line.contains("🔄") || line.contains("Circuit") { Color::Blue }
-        else if line.contains("🔗") || line.contains("Connected") { Color::Cyan }
-        else if line.contains("⚠️") || line.contains("shedding") { Color::Yellow }
-        else if line.contains("🚫") || line.contains("Blocked") { Color::Magenta }
-        else if line.contains("📩") || line.contains("State request") { Color::Blue }
-        else { Color::DarkGray };
-    Line::from(Span::styled(line, Style::default().fg(color)))
 }
 
 fn cpu_color(pct: f32) -> Style {
@@ -1663,11 +1464,28 @@ async fn run_tui(
     mut state: AppState,
     mut world: Option<WorldSystems>,
 ) -> Result<(), Box<dyn Error>> {
+    // Redirect stdout → server.log so worker println! doesn't corrupt the terminal.
+    // Ratatui uses stderr, which stays clean.
+    let log_path = state.config.world_dir.as_deref()
+        .map(|d| format!("{}/server.log", d))
+        .unwrap_or_else(|| "server.log".to_string());
+    {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true).append(true).open(&log_path)
+            .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::io::AsRawFd;
+            libc::dup2(log_file.as_raw_fd(), libc::STDOUT_FILENO);
+        }
+    }
+
+    // Use stderr for ratatui — stdout is now the log file, so worker output never touches the screen.
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    execute!(io::stderr(), EnterAlternateScreen)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stderr()))?;
     let mut events = EventStream::new();
-    let refresh_ms = state.config.ui.refresh_ms;
+    let refresh_ms = state.config.ui.refresh_ms.max(500); // don't thrash faster than 2Hz
     let mut tui_tick = tokio::time::interval(Duration::from_millis(refresh_ms));
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
     let world_config = state.config.clone();
@@ -1693,12 +1511,6 @@ async fn run_tui(
                             (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                                 state.should_quit = true;
                             }
-                            (KeyCode::Char('m'), _) | (KeyCode::Esc, _) => { state.tab = Tab::Main; }
-                            (KeyCode::Char('p'), _) => { state.tab = Tab::Peers; }
-                            (KeyCode::Char('w'), _) => { state.tab = Tab::World; }
-                            (KeyCode::Char('l'), _) => { state.tab = Tab::Log; }
-                            (KeyCode::Char('c'), _) => { state.tab = Tab::Config; }
-                            (KeyCode::Char('h'), _) => { state.tab = Tab::Help; }
                             _ => {}
                         }
                     }
@@ -1714,14 +1526,14 @@ async fn run_tui(
     }.await;
 
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stderr(), LeaveAlternateScreen)?;
 
-    // Graceful shutdown — save world
+    // Graceful shutdown — save world (these now go to server.log since stdout is redirected)
     if let Some(ref mut w) = world {
-        println!("💾 Saving world state...");
+        eprintln!("💾 Saving world state...");
         w.shutdown();
-        println!("✅ World saved.");
+        eprintln!("✅ World saved.");
     }
-    println!("👋 Metaverse server stopped.");
+    eprintln!("👋 Metaverse server stopped. Log: {}", log_path);
     result
 }
