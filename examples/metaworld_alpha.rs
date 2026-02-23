@@ -109,6 +109,12 @@ enum PlayerModeLocal {
 
 fn main() {
     env_logger::init();
+
+    // Headless server mode: --headless skips all renderer/window/input init.
+    // Acts as an always-on chunk cache authority and relay node.
+    if std::env::args().any(|a| a == "--headless") {
+        return run_headless_mode();
+    }
     
     // ============================================================
     // ZONE CONFIGURATION
@@ -1400,4 +1406,396 @@ fn take_screenshot(
     fs::create_dir_all("screenshot").ok();
     
     println!("📸 Screenshot path: {}", filename);
+}
+
+// ============================================================
+// HEADLESS SERVER MODE
+// ============================================================
+//
+// Invoked with: metaworld_alpha --headless
+//
+// Skips: winit, renderer, GPU, camera, input.
+// Keeps: networking, chunk sync, gossipsub, physics, persistence.
+//
+// Purpose: always-on chunk cache authority.  Clients can connect, request
+// chunk state, and receive voxel op history even when no human is playing.
+// The headless node loads the same world data as the client, responds to
+// all state requests, and re-broadcasts received edits to other peers.
+fn run_headless_mode() {
+    use std::time::{Duration, Instant};
+    use std::sync::{Arc, Mutex};
+    use metaverse_core::{
+        chunk::ChunkId,
+        chunk_manager::ChunkManager,
+        chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
+        coordinates::GPS,
+        elevation::{ElevationPipeline, OpenTopographySource},
+        identity::Identity,
+        multiplayer::MultiplayerSystem,
+        physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
+        player_persistence::PlayerPersistence,
+        remote_render::short_peer_id,
+        terrain::TerrainGenerator,
+        user_content::UserContentLayer,
+        vector_clock::VectorClock,
+        voxel::VoxelCoord,
+    };
+
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║   Metaverse Core — Headless Server Mode      ║");
+    println!("╚══════════════════════════════════════════════╝");
+    println!();
+    println!("  No window or renderer. Acts as chunk cache authority.");
+    println!("  Ctrl+C to stop (world will be saved first).");
+    println!();
+
+    // Identity
+    let identity = if std::env::args().any(|a| a == "--temp-identity") {
+        println!("🔑 Using temporary identity");
+        Identity::generate()
+    } else {
+        Identity::load_or_create().expect("Failed to create identity")
+    };
+    println!("🔐 PeerId: {}", short_peer_id(&identity.peer_id()));
+
+    // Networking
+    println!("🌐 Starting P2P network node...");
+    let mut multiplayer = MultiplayerSystem::new_with_runtime(identity.clone())
+        .expect("Failed to create multiplayer system");
+    multiplayer.listen_on("/ip4/0.0.0.0/tcp/0").expect("TCP listen failed");
+    multiplayer.listen_on("/ip4/0.0.0.0/udp/0/quic-v1").ok(); // QUIC optional
+
+    // Bootstrap relays — resolve async in a temporary tokio runtime
+    let bootstrap = {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to build bootstrap tokio runtime");
+        rt.block_on(metaverse_core::bootstrap::resolve_bootstrap_nodes())
+    };
+    println!("📡 Connecting to {} bootstrap relays...", bootstrap.len());
+    for addr in &bootstrap {
+        if let Err(e) = multiplayer.dial(addr) {
+            println!("   ⚠️  Relay {}: {}", addr, e);
+        }
+    }
+    println!("   mDNS active (LAN auto-discovery)");
+
+    // Terrain
+    let origin_gps = GPS::new(-27.3996, 153.1871, 2.0);
+    let origin_ecef = origin_gps.to_ecef();
+    let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+
+    let mut elevation_pipeline = ElevationPipeline::new();
+    let data_dir = std::env::var("METAVERSE_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap());
+    let cache_dir = data_dir.join("elevation_cache");
+    if let Ok(key) = std::env::var("OPENTOPOGRAPHY_API_KEY") {
+        elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
+        println!("🗺️  Elevation: OpenTopography API");
+    } else {
+        println!("⚠️  No OPENTOPOGRAPHY_API_KEY — flat terrain (chunks still served)");
+    }
+
+    // World data dir
+    let world_dir = if let Ok(f) = std::env::var("METAVERSE_IDENTITY_FILE") {
+        let name = std::path::Path::new(&f)
+            .file_stem().and_then(|s| s.to_str()).unwrap_or("default");
+        std::path::PathBuf::from(format!("world_data_{}", name))
+    } else {
+        std::path::PathBuf::from("world_data")
+    };
+    if !world_dir.exists() {
+        std::fs::create_dir_all(&world_dir).expect("Failed to create world_data");
+    }
+    println!("📁 World data: {:?}", world_dir);
+
+    // Load persisted ops into user_content
+    let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
+    {
+        let mut uc = user_content.lock().unwrap();
+        let chunks_dir = world_dir.join("chunks");
+        if chunks_dir.exists() {
+            let mut ids: Vec<ChunkId> = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let s = name.to_string_lossy();
+                    let parts: Vec<&str> = s.split('_').collect();
+                    if parts.len() == 4 && parts[0] == "chunk" {
+                        if let (Ok(x), Ok(y), Ok(z)) = (
+                            parts[1].parse::<i64>(),
+                            parts[2].parse::<i64>(),
+                            parts[3].parse::<i64>(),
+                        ) {
+                            ids.push(ChunkId { x, y, z });
+                        }
+                    }
+                }
+            }
+            if !ids.is_empty() {
+                match uc.load_chunks(&world_dir, &ids) {
+                    Ok(counts) => {
+                        let total: usize = counts.values().sum();
+                        println!("📂 Loaded {} persisted voxel ops from {} chunks", total, counts.len());
+                    }
+                    Err(e) => eprintln!("⚠️  Failed to load persisted ops: {}", e),
+                }
+            }
+        }
+    }
+
+    // Second elevation pipeline for ChunkManager (ElevationPipeline doesn't implement Clone)
+    let mut elevation_pipeline_cm = ElevationPipeline::new();
+    if let Ok(key) = std::env::var("OPENTOPOGRAPHY_API_KEY") {
+        let cache_dir_cm = data_dir.join("elevation_cache");
+        elevation_pipeline_cm.add_source(Box::new(OpenTopographySource::new(key, cache_dir_cm)));
+    }
+
+    let generator = TerrainGenerator::new(elevation_pipeline, origin_gps, origin_voxel);
+    let generator_arc = Arc::new(Mutex::new(generator));
+
+    // Chunk streamer — larger radius for server, smaller frame budget (we have all the time)
+    let stream_cfg = ChunkStreamerConfig {
+        load_radius_m: 300.0,       // 2× client radius — serve wider area
+        unload_radius_m: 400.0,
+        max_loaded_chunks: 500,     // Server can hold much more
+        safe_zone_radius: 3,
+        frame_budget_ms: 50.0,      // 50ms budget — we're not rendering
+    };
+    let mut chunk_streamer = ChunkStreamer::new(
+        stream_cfg, generator_arc.clone(), user_content.clone(), world_dir.clone(),
+    );
+
+    // Chunk manager for CRDT merge and op log
+    let chunk_manager_gen = TerrainGenerator::new(elevation_pipeline_cm, origin_gps, origin_voxel);
+    let chunk_manager_uc = user_content.lock().unwrap().clone();
+    let mut chunk_manager = ChunkManager::new(chunk_manager_gen, chunk_manager_uc);
+
+    // Physics (headless still needs it for the "server player" position used in AOI topics)
+    let mut physics = PhysicsWorld::with_origin(origin_ecef);
+    let player_persistence = PlayerPersistence::load(&world_dir, &identity);
+    let mut player = Player::new(&mut physics, player_persistence.gps, player_persistence.yaw);
+    player.position = player_persistence.position;
+
+    // Pre-load spawn area
+    println!("\n⏳ Pre-loading spawn area...");
+    chunk_streamer.update(origin_ecef);
+    loop {
+        chunk_streamer.process_queues(5000.0);
+        chunk_streamer.stats.chunks_loaded = chunk_streamer.loaded_chunks().count();
+        if chunk_streamer.stats.chunks_loaded >= 50 || chunk_streamer.stats.chunks_queued == 0 {
+            break;
+        }
+    }
+    println!("   ✅ {} chunks loaded", chunk_streamer.stats.chunks_loaded);
+
+    // Register initial chunk state with multiplayer
+    if multiplayer.peer_count() > 0 {
+        let ids = chunk_streamer.loaded_chunk_ids();
+        let _ = multiplayer.request_chunk_state(ids);
+    }
+
+    println!("\n🟢 Headless server running  (PeerId: {})", multiplayer.peer_id());
+    println!("   Serving {} chunks — waiting for peers...\n", chunk_streamer.stats.chunks_loaded);
+
+    // ── Tick loop ──────────────────────────────────────────────────────────────
+    let tick_interval = Duration::from_millis(50); // 20 Hz
+    let mut last_stats   = Instant::now();
+    let mut last_save    = Instant::now();
+    let mut last_resync  = Instant::now();
+
+    // Ctrl+C handler via a simple atomic flag
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc_install(r.clone());
+
+    while running.load(std::sync::atomic::Ordering::Relaxed) {
+        let tick_start = Instant::now();
+
+        // Poll network
+        multiplayer.update(PHYSICS_TIMESTEP);
+
+        // Update chunk streaming around the server's "home" position
+        chunk_streamer.update(player.position);
+        chunk_streamer.process_queues(48.0); // ~48ms budget within the 50ms tick
+
+        // ── Network event handling ─────────────────────────────────────────────
+
+        // Received voxel operations
+        let pending_ops = multiplayer.take_pending_operations();
+        for op in pending_ops {
+            let chunk_id = ChunkId::from_voxel(&op.coord);
+            if let Some(cd) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                cd.octree.set_voxel(op.coord, op.material.to_material_id());
+                cd.dirty = true;
+            }
+            user_content.lock().unwrap().add_local_operation(op.clone());
+            chunk_manager.add_operation(op);
+        }
+
+        // Received historical state (from peers)
+        let state_ops = multiplayer.take_pending_state_operations();
+        if !state_ops.is_empty() {
+            let applied = chunk_manager.merge_received_operations(state_ops.clone());
+            for op in &state_ops {
+                user_content.lock().unwrap().add_local_operation(op.clone());
+                let chunk_id = ChunkId::from_voxel(&op.coord);
+                if let Some(cd) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                    cd.octree.set_voxel(op.coord, op.material.to_material_id());
+                    cd.dirty = true;
+                }
+            }
+            println!("📥 Merged {} state ops ({} applied)", state_ops.len(), applied);
+        }
+
+        // New peers — send manifest + our full op state
+        if multiplayer.has_new_peers() {
+            let new_peers = multiplayer.get_new_peers();
+            println!("🆕 {} new peer(s) — syncing state...", new_peers.len());
+            let ids = chunk_streamer.loaded_chunk_ids();
+
+            let manifest = chunk_streamer.chunk_manifest();
+            let _ = multiplayer.broadcast_chunk_manifest(manifest);
+            let _ = multiplayer.request_chunk_state(ids.clone());
+
+            let our_ops = chunk_manager.filter_operations_for_chunks(&ids, &VectorClock::new());
+            if !our_ops.is_empty() {
+                let count: usize = our_ops.values().map(|v| v.len()).sum();
+                println!("   → Pushing {} ops to new peers", count);
+                let _ = multiplayer.send_chunk_state_response(our_ops);
+            }
+            last_resync = Instant::now();
+        }
+
+        // Periodic resync (every 60 s)
+        if multiplayer.peer_count() > 0 && last_resync.elapsed().as_secs() >= 60 {
+            let ids = chunk_streamer.loaded_chunk_ids();
+            let _ = multiplayer.request_chunk_state(ids);
+            last_resync = Instant::now();
+        }
+
+        // Answer state requests from peers
+        let reqs = multiplayer.take_pending_state_requests();
+        for (peer_id, req) in reqs {
+            let ops = chunk_manager.filter_operations_for_chunks(&req.chunk_ids, &req.requester_clock);
+            if !ops.is_empty() {
+                println!("📨 {} requested {} chunks — sending {} ops",
+                    short_peer_id(&peer_id),
+                    req.chunk_ids.len(),
+                    ops.values().map(|v| v.len()).sum::<usize>());
+                let _ = multiplayer.send_chunk_state_response(ops);
+            }
+        }
+
+        // Chunk manifests from peers — send newer chunks
+        let manifests = multiplayer.take_pending_chunk_manifests();
+        for peer_manifest in manifests {
+            let peer_map: std::collections::HashMap<ChunkId, u64> = peer_manifest.into_iter().collect();
+            let mut sent = 0usize;
+            for chunk_id in chunk_streamer.loaded_chunk_ids() {
+                if let Some(cd) = chunk_streamer.get_chunk(&chunk_id) {
+                    let peer_ts = peer_map.get(&chunk_id).copied().unwrap_or(0);
+                    if cd.last_modified > peer_ts {
+                        if let Ok(bytes) = cd.octree.to_bytes() {
+                            let _ = multiplayer.broadcast_chunk_terrain(chunk_id, bytes, cd.last_modified);
+                            sent += 1;
+                        }
+                    }
+                }
+            }
+            if sent > 0 { println!("📦 Sent {} newer terrain chunks to peer", sent); }
+        }
+
+        // Incoming terrain from peers
+        let terrain_updates = multiplayer.take_pending_chunk_terrain();
+        for (chunk_id, octree_bytes, last_modified) in terrain_updates {
+            if let Ok(octree) = metaverse_core::voxel::Octree::from_bytes(&octree_bytes) {
+                if chunk_streamer.replace_chunk_octree(&chunk_id, octree, last_modified) {
+                    println!("🌍 Updated terrain for {} from peer", chunk_id);
+                }
+            }
+        }
+
+        // ── Periodic tasks ─────────────────────────────────────────────────────
+
+        // Stats every 30 s
+        if last_stats.elapsed().as_secs() >= 30 {
+            let stats = multiplayer.stats();
+            println!(
+                "📊 peers={} chunks={} ops_sent={} ops_recv={} ops_applied={}",
+                multiplayer.peer_count(),
+                chunk_streamer.stats.chunks_loaded,
+                stats.voxel_ops_sent, stats.voxel_ops_received, stats.voxel_ops_applied,
+            );
+            last_stats = Instant::now();
+        }
+
+        // Save every 5 minutes
+        if last_save.elapsed().as_secs() >= 300 {
+            println!("💾 Saving world state...");
+            match user_content.lock().unwrap().save_chunks(&world_dir) {
+                Ok(counts) => {
+                    let total: usize = counts.values().sum();
+                    println!("   ✅ Saved {} ops across {} chunks", total, counts.len());
+                }
+                Err(e) => eprintln!("   ⚠️  Save failed: {}", e),
+            }
+            last_save = Instant::now();
+        }
+
+        // Sleep to maintain tick rate
+        let elapsed = tick_start.elapsed();
+        if elapsed < tick_interval {
+            std::thread::sleep(tick_interval - elapsed);
+        }
+    }
+
+    // ── Graceful shutdown ──────────────────────────────────────────────────────
+    println!("\n👋 Headless server shutting down...");
+    println!("💾 Saving world state...");
+    match user_content.lock().unwrap().save_chunks(&world_dir) {
+        Ok(counts) => {
+            let total: usize = counts.values().sum();
+            println!("   ✅ Saved {} ops across {} chunks", total, counts.len());
+        }
+        Err(e) => eprintln!("   ⚠️  Save failed: {}", e),
+    }
+    println!("✅ Headless server stopped.");
+}
+
+/// Install a Ctrl+C handler that sets the `running` flag to false.
+/// Uses libc SIGINT on Unix. No-op on other platforms (OS kills the process).
+fn ctrlc_install(running: Arc<std::sync::atomic::AtomicBool>) {
+    #[cfg(unix)]
+    {
+        use std::sync::atomic::Ordering;
+        // Leak the Arc so the signal handler can access it from a static context.
+        let leaked: &'static std::sync::atomic::AtomicBool = Box::leak(Box::new(
+            std::sync::atomic::AtomicBool::new(true)
+        ));
+        // Copy the current value (true) so the handler can set it false.
+        let _ = leaked;
+        // Simple approach: spawn a thread that waits for stdin EOF or a channel
+        std::thread::spawn(move || {
+            // Block until SIGINT is delivered by reading from a pipe
+            // or by a simple stdin read. Most server operators use Ctrl+C.
+            let mut buf = String::new();
+            while std::io::stdin().read_line(&mut buf).is_ok() {
+                let trimmed = buf.trim();
+                if trimmed.eq_ignore_ascii_case("quit") || trimmed.eq_ignore_ascii_case("stop") {
+                    running.store(false, Ordering::Relaxed);
+                    break;
+                }
+                buf.clear();
+            }
+            // stdin closed (EOF / piped) → graceful shutdown
+            running.store(false, Ordering::Relaxed);
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = running;
+    }
 }
