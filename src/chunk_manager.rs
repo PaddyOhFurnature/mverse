@@ -101,6 +101,10 @@ pub struct ChunkManager {
     /// Deduplication set for operations (by signature)
     /// Prevents applying the same operation multiple times from different sources
     seen_operations: std::collections::HashSet<[u8; 64]>,
+    /// Per-voxel authority map: tracks the current winning operation for each
+    /// modified voxel. Used for CRDT conflict resolution — when two concurrent
+    /// edits target the same coordinate, only the winner is applied to the octree.
+    voxel_authority: HashMap<VoxelCoord, VoxelOperation>,
 }
 
 impl ChunkManager {
@@ -113,6 +117,7 @@ impl ChunkManager {
             load_queue: Vec::new(),
             unload_queue: Vec::new(),
             seen_operations: std::collections::HashSet::new(),
+            voxel_authority: HashMap::new(),
         }
     }
     
@@ -154,12 +159,34 @@ impl ChunkManager {
             }
         };
         
-        // 4. Apply loaded operations to the chunk octree
+        // 4. Apply loaded operations to the chunk octree using CRDT authority
+        //    For each coord, only the winning operation (per wins_over) is applied.
         if loaded_ops > 0 {
+            // Collect ops for this chunk and resolve conflicts per coordinate
+            let mut chunk_authority: HashMap<VoxelCoord, &crate::messages::VoxelOperation> = HashMap::new();
             for op in self.user_content.op_log() {
                 if ChunkId::from_voxel(&op.coord) == chunk_id {
-                    chunk_data.octree.set_voxel(op.coord, op.material.to_material_id());
-                    chunk_data.dirty = true;
+                    let wins = match chunk_authority.get(&op.coord) {
+                        None => true,
+                        Some(&current) => op.wins_over(current),
+                    };
+                    if wins {
+                        chunk_authority.insert(op.coord, op);
+                    }
+                }
+            }
+            // Apply winners to octree and register in global authority map
+            for (coord, op) in chunk_authority {
+                chunk_data.octree.set_voxel(coord, op.material.to_material_id());
+                chunk_data.dirty = true;
+                // Merge into global authority (file load may have older data than already-merged
+                // network ops — keep whichever wins globally)
+                let global_wins = match self.voxel_authority.get(&coord) {
+                    None => true,
+                    Some(current) => op.wins_over(current),
+                };
+                if global_wins {
+                    self.voxel_authority.insert(coord, op.clone());
                 }
             }
         }
@@ -349,14 +376,20 @@ impl ChunkManager {
     /// Add a local voxel operation to the content layer
     ///
     /// This should be called after set_voxel() to ensure the operation
-    /// is persisted to disk. Includes deduplication check.
+    /// is persisted to disk and registered as the authority for this coordinate.
+    /// Includes deduplication check.
     pub fn add_operation(&mut self, op: VoxelOperation) {
         // Check for duplicates
         if self.seen_operations.contains(&op.signature) {
-            return; // Already have this operation
+            return;
         }
-        
         self.seen_operations.insert(op.signature);
+        
+        // Register as authority for this coordinate (local writes always
+        // have a freshly incremented vector clock, so they always win over
+        // any concurrent remote op we might have stored)
+        self.voxel_authority.insert(op.coord, op.clone());
+        
         self.user_content.add_local_operation(op);
     }
     
@@ -436,7 +469,18 @@ impl ChunkManager {
     /// * `operations` - Operations to merge (already signature-verified)
     ///
     /// # Returns
-    /// Number of operations actually applied (after deduplication)
+    /// Number of operations actually applied (after deduplication and CRDT resolution)
+    ///
+    /// # Merge Strategy
+    ///
+    /// Each voxel coordinate is treated as a Last-Write-Wins (LWW) register.
+    /// When two operations target the same coordinate, we pick the winner using:
+    ///
+    /// 1. **Vector clock ordering** — if one causally follows the other, it wins.
+    /// 2. **Lamport timestamp** — higher timestamp wins when concurrent.
+    /// 3. **PeerId tiebreak** — lexicographically larger PeerId wins when timestamps equal.
+    ///
+    /// This is deterministic: every node independently arrives at the same winner.
     ///
     /// # Example
     /// ```rust
@@ -447,39 +491,331 @@ impl ChunkManager {
     pub fn merge_received_operations(&mut self, operations: Vec<VoxelOperation>) -> usize {
         let mut applied_count = 0;
         let mut dirty_chunks = HashSet::new();
-        
+
         for op in operations {
-            // Check for duplicates (by signature)
+            // 1. Dedup by signature (handles exact duplicate retransmissions)
             if self.seen_operations.contains(&op.signature) {
-                continue; // Already have this operation
+                continue;
             }
-            
-            // Mark as seen
             self.seen_operations.insert(op.signature);
-            
-            // Find all chunks affected by this operation
-            let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
-            
-            // Apply to all affected chunks
-            let material_id = op.material.to_material_id();
-            for chunk_id in affected_chunks {
-                if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
-                    chunk_data.octree.set_voxel(op.coord, material_id);
-                    chunk_data.dirty = true;
-                    dirty_chunks.insert(chunk_id);
+
+            // 2. CRDT conflict resolution: does this op beat the current authority?
+            let wins = match self.voxel_authority.get(&op.coord) {
+                None => true,                    // No prior op → this wins by default
+                Some(current) => op.wins_over(current),
+            };
+
+            if wins {
+                // 3a. Update authority map
+                self.voxel_authority.insert(op.coord, op.clone());
+
+                // 3b. Apply to all loaded chunks that contain this voxel
+                let affected_chunks = ChunkId::affected_by_voxel(&op.coord);
+                let material_id = op.material.to_material_id();
+                for chunk_id in affected_chunks {
+                    if let Some(chunk_data) = self.loaded_chunks.get_mut(&chunk_id) {
+                        chunk_data.octree.set_voxel(op.coord, material_id);
+                        chunk_data.dirty = true;
+                        dirty_chunks.insert(chunk_id);
+                    }
                 }
+
+                applied_count += 1;
             }
-            
-            // Add to user content layer for persistence
+            // Even if op doesn't win, add it to the log for CRDT history
+            // (we need the full history for late-joining peers to replay)
             self.user_content.add_local_operation(op);
-            
-            applied_count += 1;
         }
-        
+
         if !dirty_chunks.is_empty() {
             println!("   🔧 Marked {} chunks dirty for regeneration", dirty_chunks.len());
         }
         
         applied_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::messages::{Material, VoxelOperation};
+    use crate::vector_clock::VectorClock;
+    use crate::voxel::VoxelCoord;
+    use libp2p::PeerId;
+
+    /// Build an unsigned VoxelOperation with a fixed (fake) signature derived from
+    /// timestamp + author, so different ops have different signatures.
+    fn make_op(
+        coord: VoxelCoord,
+        material: Material,
+        author: PeerId,
+        timestamp: u64,
+        clock: VectorClock,
+    ) -> VoxelOperation {
+        let mut op = VoxelOperation::new(coord, material, author, timestamp, clock);
+        // Fake signature: fill with timestamp bytes + author bytes for uniqueness
+        let ts_bytes = timestamp.to_le_bytes();
+        let au_bytes = author.to_bytes();
+        for i in 0..8  { op.signature[i]    = ts_bytes[i % 8]; }
+        for i in 0..39 { op.signature[8 + i] = if i < au_bytes.len() { au_bytes[i] } else { 0 }; }
+        op
+    }
+
+    fn make_manager() -> ChunkManager {
+        use crate::{elevation::ElevationPipeline, coordinates::GPS};
+        use crate::terrain::TerrainGenerator;
+        let terrain_gen = TerrainGenerator::new(
+            ElevationPipeline::new(),
+            GPS::new(0.0, 0.0, 0.0),
+            VoxelCoord::new(0, 0, 0),
+        );
+        ChunkManager::new(terrain_gen, UserContentLayer::new())
+    }
+
+    // ── Basic merge ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_single_op_applied() {
+        let mut mgr = make_manager();
+        let peer = PeerId::random();
+        let coord = VoxelCoord::new(100, 100, 100);
+        let mut vc = VectorClock::new();
+        vc.increment(peer);
+
+        let op = make_op(coord, Material::Stone, peer, 1000, vc);
+        let count = mgr.merge_received_operations(vec![op]);
+
+        assert_eq!(count, 1);
+        assert!(mgr.voxel_authority.contains_key(&coord));
+    }
+
+    // ── Deduplication ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_merge_deduplication_by_signature() {
+        let mut mgr = make_manager();
+        let peer = PeerId::random();
+        let coord = VoxelCoord::new(200, 200, 200);
+        let mut vc = VectorClock::new();
+        vc.increment(peer);
+
+        let op = make_op(coord, Material::Stone, peer, 1000, vc);
+        let op2 = op.clone();
+
+        let first  = mgr.merge_received_operations(vec![op]);
+        let second = mgr.merge_received_operations(vec![op2]);
+
+        assert_eq!(first,  1, "first merge should apply");
+        assert_eq!(second, 0, "duplicate should be ignored");
+    }
+
+    // ── Causal ordering: later clock wins ─────────────────────────────────────
+
+    #[test]
+    fn test_merge_causal_ordering_later_wins() {
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let coord = VoxelCoord::new(300, 300, 300);
+
+        // op1: peer_a places Stone at t=1
+        let mut vc1 = VectorClock::new();
+        vc1.increment(peer_a);
+        let op1 = make_op(coord, Material::Stone, peer_a, 1000, vc1.clone());
+
+        // op2: peer_b knows about op1 (vc includes peer_a=1), then places Air at t=2
+        let mut vc2 = vc1.clone();
+        vc2.merge(&vc1);
+        vc2.increment(peer_b);
+        let op2 = make_op(coord, Material::Air, peer_b, 2000, vc2);
+
+        // Receive in causal order: op1 first, then op2
+        mgr.merge_received_operations(vec![op1, op2]);
+
+        // op2 causally follows op1 → op2 (Air) wins
+        let authority = mgr.voxel_authority.get(&coord).expect("should have authority");
+        assert_eq!(authority.material, Material::Air);
+    }
+
+    #[test]
+    fn test_merge_causal_ordering_out_of_order_delivery() {
+        // Same scenario but ops arrive in reverse order (op2 before op1)
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let coord = VoxelCoord::new(400, 400, 400);
+
+        let mut vc1 = VectorClock::new();
+        vc1.increment(peer_a);
+        let op1 = make_op(coord, Material::Stone, peer_a, 1000, vc1.clone());
+
+        let mut vc2 = vc1.clone();
+        vc2.increment(peer_b);
+        let op2 = make_op(coord, Material::Air, peer_b, 2000, vc2);
+
+        // Deliver op2 first (out-of-order network delivery)
+        mgr.merge_received_operations(vec![op2, op1]);
+
+        // op2 still wins (higher causal clock)
+        let authority = mgr.voxel_authority.get(&coord).expect("should have authority");
+        assert_eq!(authority.material, Material::Air);
+    }
+
+    // ── Concurrent ops: timestamp tiebreak ────────────────────────────────────
+
+    #[test]
+    fn test_merge_concurrent_higher_timestamp_wins() {
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let coord = VoxelCoord::new(500, 500, 500);
+
+        // Both peers independently edit the same voxel (concurrent clocks)
+        let mut vc_a = VectorClock::new();
+        vc_a.increment(peer_a);
+        let op_stone = make_op(coord, Material::Stone, peer_a, 1000, vc_a);
+
+        let mut vc_b = VectorClock::new();
+        vc_b.increment(peer_b);
+        let op_sand = make_op(coord, Material::Grass, peer_b, 2000, vc_b); // higher ts
+
+        mgr.merge_received_operations(vec![op_stone, op_sand]);
+
+        // Sand (t=2000) beats Stone (t=1000)
+        let authority = mgr.voxel_authority.get(&coord).expect("should have authority");
+        assert_eq!(authority.material, Material::Grass);
+    }
+
+    #[test]
+    fn test_merge_concurrent_peer_id_tiebreak() {
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let coord = VoxelCoord::new(600, 600, 600);
+
+        // Same timestamp, concurrent clocks → PeerId tiebreak
+        let mut vc_a = VectorClock::new();
+        vc_a.increment(peer_a);
+        let op_a = make_op(coord, Material::Stone, peer_a, 1000, vc_a);
+
+        let mut vc_b = VectorClock::new();
+        vc_b.increment(peer_b);
+        let op_b = make_op(coord, Material::Grass, peer_b, 1000, vc_b);
+
+        // Determine which peer wins the tiebreak
+        let a_wins = peer_a.to_bytes() > peer_b.to_bytes();
+        let expected = if a_wins { Material::Stone } else { Material::Grass };
+
+        mgr.merge_received_operations(vec![op_a, op_b]);
+
+        let authority = mgr.voxel_authority.get(&coord).expect("should have authority");
+        assert_eq!(authority.material, expected,
+            "PeerId tiebreak should be deterministic");
+    }
+
+    // ── Convergence: all orderings produce the same result ────────────────────
+
+    #[test]
+    fn test_merge_convergence_all_orderings() {
+        // 1000 random concurrent ops on the same coord — every ordering must
+        // converge to the same winner.
+        let coord = VoxelCoord::new(700, 700, 700);
+        let materials = [Material::Stone, Material::Grass, Material::Air,
+                         Material::Dirt, Material::Water];
+
+        let peers: Vec<PeerId> = (0..10).map(|_| PeerId::random()).collect();
+
+        let ops: Vec<VoxelOperation> = (0..1000).map(|i| {
+            let peer = peers[i % peers.len()];
+            let mat  = materials[i % materials.len()];
+            let ts   = (i as u64) * 7 + 1000; // varied timestamps
+            let mut vc = VectorClock::new();
+            vc.increment(peer);
+            make_op(coord, mat, peer, ts, vc)
+        }).collect();
+
+        // Find expected winner independently using wins_over chain
+        let expected_winner = ops.iter().max_by(|a, b| {
+            if a.wins_over(b) { std::cmp::Ordering::Greater }
+            else { std::cmp::Ordering::Less }
+        }).expect("at least one op");
+        let expected_material = expected_winner.material;
+
+        // Test forward order
+        let mut mgr1 = make_manager();
+        mgr1.merge_received_operations(ops.clone());
+        assert_eq!(mgr1.voxel_authority[&coord].material, expected_material);
+
+        // Test reverse order
+        let mut reversed = ops.clone();
+        reversed.reverse();
+        let mut mgr2 = make_manager();
+        mgr2.merge_received_operations(reversed);
+        assert_eq!(mgr2.voxel_authority[&coord].material, expected_material,
+            "Reverse order must converge to same winner");
+
+        // Test shuffled order
+        let mut shuffled = ops.clone();
+        // Deterministic shuffle using index-based swapping
+        let n = shuffled.len();
+        for i in (1..n).rev() {
+            let j = (i.wrapping_mul(6364136223846793005usize).wrapping_add(1442695040888963407)) % (i + 1);
+            shuffled.swap(i, j);
+        }
+        let mut mgr3 = make_manager();
+        mgr3.merge_received_operations(shuffled);
+        assert_eq!(mgr3.voxel_authority[&coord].material, expected_material,
+            "Shuffled order must converge to same winner");
+    }
+
+    // ── Multiple coords don't interfere ───────────────────────────────────────
+
+    #[test]
+    fn test_merge_multiple_coords_independent() {
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+
+        let coord_a = VoxelCoord::new(100, 100, 100);
+        let coord_b = VoxelCoord::new(200, 200, 200);
+
+        let mut vc_a = VectorClock::new();
+        vc_a.increment(peer_a);
+        let mut vc_b = VectorClock::new();
+        vc_b.increment(peer_b);
+
+        let op_a = make_op(coord_a, Material::Stone, peer_a, 1000, vc_a);
+        let op_b = make_op(coord_b, Material::Grass,  peer_b, 2000, vc_b);
+
+        mgr.merge_received_operations(vec![op_a, op_b]);
+
+        assert_eq!(mgr.voxel_authority[&coord_a].material, Material::Stone);
+        assert_eq!(mgr.voxel_authority[&coord_b].material, Material::Grass);
+    }
+
+    // ── Op log preserved for history even when op doesn't win ─────────────────
+
+    #[test]
+    fn test_merge_losing_ops_stored_in_log() {
+        let mut mgr = make_manager();
+        let peer_a = PeerId::random();
+        let peer_b = PeerId::random();
+        let coord = VoxelCoord::new(800, 800, 800);
+
+        let mut vc_a = VectorClock::new();
+        vc_a.increment(peer_a);
+        let op_loser = make_op(coord, Material::Stone, peer_a, 500, vc_a);
+
+        let mut vc_b = VectorClock::new();
+        vc_b.increment(peer_b);
+        let op_winner = make_op(coord, Material::Grass, peer_b, 1500, vc_b);
+
+        mgr.merge_received_operations(vec![op_winner, op_loser]);
+
+        // Authority is the winner
+        assert_eq!(mgr.voxel_authority[&coord].material, Material::Grass);
+        // But both ops in the log (for late-joining peers to replay)
+        assert_eq!(mgr.user_content.op_count(), 2,
+            "Both ops must be in log for full CRDT history");
     }
 }
