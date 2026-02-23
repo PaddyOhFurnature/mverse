@@ -30,6 +30,7 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Read;
 
 // Custom serde for [u8; 64] arrays
 mod serde_arrays {
@@ -67,6 +68,9 @@ pub type Result<T> = std::result::Result<T, MessageError>;
 pub enum MessageError {
     #[error("Serialization error: {0}")]
     SerializationError(#[from] bincode::Error),
+
+    #[error("Serialization error: {0}")]
+    Serialization(String),
     
     #[error("Invalid signature")]
     InvalidSignature,
@@ -643,11 +647,29 @@ pub struct ChunkTerrainData {
 }
 
 impl ChunkTerrainData {
+    /// Serialize with zstd compression.
+    /// Format: [1 byte version=1][zstd-compressed bincode]
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
+        let raw = bincode::serialize(self)?;
+        let compressed = zstd::encode_all(raw.as_slice(), 3)
+            .map_err(|e| MessageError::Serialization(e.to_string()))?;
+        let mut out = Vec::with_capacity(1 + compressed.len());
+        out.push(1u8); // version byte
+        out.extend_from_slice(&compressed);
+        Ok(out)
     }
+
+    /// Deserialize — handles both compressed (v1) and legacy uncompressed data.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        Ok(bincode::deserialize(data)?)
+        if data.first() == Some(&1u8) {
+            // v1: zstd compressed
+            let decompressed = zstd::decode_all(&data[1..])
+                .map_err(|e| MessageError::Serialization(e.to_string()))?;
+            Ok(bincode::deserialize(&decompressed)?)
+        } else {
+            // legacy: raw bincode
+            Ok(bincode::deserialize(data)?)
+        }
     }
 }
 
