@@ -137,5 +137,10 @@ name = "metaverse-relay"
 path = "examples/metaverse_relay.rs"
 required-features = []  # Relay doesn't need terrain or client features
 
+[[bin]]
+name = "metaverse-server"
+path = "examples/metaverse_server.rs"
+required-features = []
+
 [dependencies.zstd]
 version = "0.13"
