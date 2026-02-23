@@ -608,6 +608,9 @@ impl MultiplayerSystem {
                     println!("⚡ Direct P2P connection established with: {}", peer_id);
                 }
             }
+            NetworkEvent::DirectConnectionUpgraded { peer_id } => {
+                println!("⚡ [DCUtR] Hole punch succeeded — now direct with: {}", peer_id);
+            }
         }
         
         Ok(())

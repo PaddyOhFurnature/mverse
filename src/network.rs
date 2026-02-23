@@ -196,6 +196,11 @@ pub enum NetworkEvent {
         peer_id: PeerId,
         from_relay: bool,
     },
+
+    /// Direct connection established via DCUtR hole punching
+    DirectConnectionUpgraded {
+        peer_id: PeerId,
+    },
 }
 
 /// Combined network behaviour for libp2p
@@ -226,6 +231,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) relay_server: relay::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
+    pub(crate) dcutr: dcutr::Behaviour,
 }
 
 /// P2P networking node
@@ -473,6 +479,10 @@ impl NetworkNode {
                     },
                 );
                 
+                // DCUtR for hole punching — attempts direct connection upgrade after
+                // meeting via relay. Falls back gracefully on CGNAT/strict NAT.
+                let dcutr = dcutr::Behaviour::new(local_peer_id);
+
                 Ok(MetaverseBehaviour {
                     kademlia,
                     gossipsub,
@@ -481,6 +491,7 @@ impl NetworkNode {
                     relay_client: relay_behaviour,
                     relay_server,
                     autonat,
+                    dcutr,
                 })
             })
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
@@ -952,7 +963,22 @@ impl NetworkNode {
                     }
                 }
             }
-            
+
+            // DCUtR — direct connection upgrade through relay (hole punching)
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => {
+                match event {
+                    dcutr::Event { remote_peer_id, result: Ok(_) } => {
+                        println!("🕳️ [DCUtR] Direct connection established with {}", remote_peer_id);
+                        Some(NetworkEvent::DirectConnectionUpgraded { peer_id: remote_peer_id })
+                    }
+                    dcutr::Event { remote_peer_id, result: Err(e) } => {
+                        // Hole punch failed — staying on relay, this is normal for strict NAT
+                        println!("🕳️ [DCUtR] Hole punch failed with {} ({}), staying on relay", remote_peer_id, e);
+                        None
+                    }
+                }
+            }
+
             // Kademlia DHT events - peer discovery via DHT
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Kademlia(event)) => {
                 match event {
