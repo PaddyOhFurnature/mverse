@@ -53,7 +53,8 @@ Connects to the relay network automatically using `bootstrap.json`. World data i
 - Mouse — look
 - Left click — remove block
 - Right click — place block
-- `Q/E` — cycle block type
+- `Q` — place block
+- `E` — remove block
 - `Esc` — quit
 
 ---
