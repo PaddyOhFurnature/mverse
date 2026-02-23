@@ -1058,16 +1058,16 @@ async fn detect_public_ip() -> String {
 }
 
 // ─── World state integration ─────────────────────────────────────────────────
-// World systems are kept as local state in the async event loop.
-// They're sync structs updated on a 50ms tick.
+// The server holds world state for serving to clients on-demand.
+// It does NOT proactively load terrain — chunks are loaded when clients
+// request them. The ChunkStreamer (player-centric eager loader) belongs
+// in the game client, not the server.
 
 struct WorldSystems {
-    chunk_streamer: metaverse_core::chunk_streaming::ChunkStreamer,
     chunk_manager: metaverse_core::chunk_manager::ChunkManager,
     user_content: std::sync::Arc<std::sync::Mutex<metaverse_core::user_content::UserContentLayer>>,
     world_dir: PathBuf,
     last_save: Instant,
-    origin_ecef: metaverse_core::coordinates::ECEF,
     stats: WorldStats,
     ops_merged: u64,
 }
@@ -1075,10 +1075,9 @@ struct WorldSystems {
 impl WorldSystems {
     fn new(config: &ServerConfig) -> Option<Self> {
         use metaverse_core::{
-            chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
             chunk_manager::ChunkManager,
             coordinates::GPS,
-            elevation::{ElevationPipeline, OpenTopographySource},
+            elevation::ElevationPipeline,
             terrain::TerrainGenerator,
             user_content::UserContentLayer,
             voxel::VoxelCoord,
@@ -1089,18 +1088,7 @@ impl WorldSystems {
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".metaverse").join("world_data"));
         std::fs::create_dir_all(&world_dir).ok()?;
 
-        let origin_gps = GPS::new(-27.3996, 153.1871, 2.0);
-        let origin_ecef = origin_gps.to_ecef();
-        let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
-
-        let cache_dir = world_dir.join("elevation_cache");
-        let mut elevation_pipeline_1 = ElevationPipeline::new();
-        let mut elevation_pipeline_2 = ElevationPipeline::new();
-        if let Ok(key) = std::env::var("OPENTOPOGRAPHY_API_KEY") {
-            elevation_pipeline_1.add_source(Box::new(OpenTopographySource::new(key.clone(), cache_dir.clone())));
-            elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
-        }
-
+        // Load persisted user ops from disk
         let user_content = std::sync::Arc::new(std::sync::Mutex::new(UserContentLayer::new()));
         {
             let mut uc = user_content.lock().unwrap();
@@ -1129,50 +1117,37 @@ impl WorldSystems {
             }
         }
 
-        let terrain_gen_1 = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel);
-        let terrain_gen_2 = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
-        let generator_arc = std::sync::Arc::new(std::sync::Mutex::new(terrain_gen_1));
+        // TerrainGenerator needed by ChunkManager for on-demand generation when a
+        // client requests a chunk that hasn't been persisted yet.
+        let origin_gps = GPS::new(-27.3996, 153.1871, 2.0);
+        let origin_ecef = origin_gps.to_ecef();
+        let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+        let elevation = ElevationPipeline::new(); // no API key on server by default
+        let terrain_gen = TerrainGenerator::new(elevation, origin_gps, origin_voxel);
 
-        let stream_cfg = ChunkStreamerConfig {
-            load_radius_m: config.chunk_load_radius_m,
-            unload_radius_m: config.chunk_unload_radius_m,
-            max_loaded_chunks: config.max_loaded_chunks,
-            safe_zone_radius: 3,
-            frame_budget_ms: 45.0,
-        };
-        let chunk_streamer = ChunkStreamer::new(
-            stream_cfg, generator_arc, user_content.clone(), world_dir.clone(),
-        );
-        let chunk_manager = ChunkManager::new(terrain_gen_2, user_content.lock().unwrap().clone());
+        let chunk_manager = ChunkManager::new(terrain_gen, user_content.lock().unwrap().clone());
 
         Some(WorldSystems {
-            chunk_streamer,
             chunk_manager,
             user_content,
-            world_dir: world_dir.clone(),
+            world_dir,
             last_save: Instant::now(),
-            origin_ecef,
             stats: WorldStats::default(),
             ops_merged: 0,
         })
     }
 
     fn tick(&mut self, config: &ServerConfig) {
-        self.chunk_streamer.update(self.origin_ecef);
-        self.chunk_streamer.process_queues(45.0);
-        self.chunk_streamer.stats.chunks_loaded = self.chunk_streamer.loaded_chunks().count();
-
-        // Storage limit check
+        // No proactive chunk loading — server only loads chunks on client request.
         let data_mb = world_data_size_mb(&self.world_dir);
         let max_mb = if config.max_world_data_gb == 0 { f64::INFINITY } else { config.max_world_data_gb as f64 * 1024.0 };
         let shedding = data_mb > max_mb * 0.95;
-
         let total_ops = self.user_content.lock().unwrap().op_count() as u64;
 
         self.stats = WorldStats {
-            chunks_loaded: self.chunk_streamer.stats.chunks_loaded,
-            chunks_queued: self.chunk_streamer.stats.chunks_queued,
-            chunks_loading: self.chunk_manager.loaded_count(),
+            chunks_loaded: self.chunk_manager.loaded_count(),
+            chunks_queued: 0,
+            chunks_loading: 0,
             world_data_mb: data_mb,
             voxel_ops_total: total_ops,
             ops_merged_total: self.ops_merged,
