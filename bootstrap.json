@@ -7,43 +7,23 @@
 
   "bootstrap_nodes": [
     {
-      "id": "home-relay-tcp",
-      "name": "Home Relay 1 - TCP",
-      "description": "Dev machine - TCP transport",
-      "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
-      "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
+      "id": "server1-tcp",
+      "name": "AU Server 1 - TCP",
+      "description": "Primary world server + relay - TCP transport",
+      "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "capabilities": ["relay", "bootstrap", "dht", "world-authority"],
       "region": "AU",
       "priority": 100,
       "verified": true
     },
     {
-      "id": "home-relay-ws",
-      "name": "Home Relay 1 - WebSocket",
-      "description": "Dev machine - WebSocket transport (works through VPN/firewall/CGNAT)",
-      "multiaddr": "/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWLQCiBPR9er97cg66Rv3doKJbXx4SkdBsTQJ3ETdf4nMR",
-      "capabilities": ["relay", "bootstrap", "dht", "dcutr"],
+      "id": "server1-ws",
+      "name": "AU Server 1 - WebSocket",
+      "description": "Primary world server + relay - WebSocket (works through VPN/CGNAT/Starlink)",
+      "multiaddr": "/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "capabilities": ["relay", "bootstrap", "dht", "world-authority"],
       "region": "AU",
       "priority": 95,
-      "verified": true
-    },
-    {
-      "id": "relay2-tcp",
-      "name": "Home Relay 2 - TCP",
-      "description": "Second relay node - TCP transport",
-      "multiaddr": "/ip4/103.216.220.190/tcp/4001/p2p/12D3KooWEVntE1LWekdyNJec7u9tKhPtFoRJsxddSJTsgUXC9UD2",
-      "capabilities": ["relay", "bootstrap", "dht"],
-      "region": "AU",
-      "priority": 90,
-      "verified": true
-    },
-    {
-      "id": "relay2-ws",
-      "name": "Home Relay 2 - WebSocket",
-      "description": "Second relay node - WebSocket transport",
-      "multiaddr": "/ip4/103.216.220.190/tcp/9001/ws/p2p/12D3KooWEVntE1LWekdyNJec7u9tKhPtFoRJsxddSJTsgUXC9UD2",
-      "capabilities": ["relay", "bootstrap", "dht"],
-      "region": "AU",
-      "priority": 85,
       "verified": true
     }
   ],

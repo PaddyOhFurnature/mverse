@@ -521,6 +521,7 @@ enum SwarmAction {
     AddKadAddress(PeerId, Multiaddr),
     RefreshDhtCount,
     DialPeer(PeerId, Multiaddr),
+    SubscribeTopic(String),
 }
 
 fn handle_swarm_event(
@@ -631,6 +632,14 @@ fn handle_swarm_event(
                 state.log(format!("📩 State request ({} bytes)", message.data.len()));
             }
         }
+        // A peer subscribed to a topic — mirror that subscription so the server stays in
+        // the gossipsub mesh and can relay messages for dynamic chunk/region topics.
+        SwarmEvent::Behaviour(ServerBehaviourEvent::Gossipsub(gossipsub::Event::Subscribed {
+            peer_id: _,
+            topic,
+        })) => {
+            actions.push(SwarmAction::SubscribeTopic(topic.as_str().to_string()));
+        }
         SwarmEvent::Behaviour(ServerBehaviourEvent::Kademlia(
             kad::Event::RoutingUpdated { peer, .. }
         )) => {
@@ -663,6 +672,11 @@ fn apply_swarm_actions(
                 if !swarm.is_connected(&peer_id) {
                     let _ = swarm.dial(addr);
                 }
+            }
+            SwarmAction::SubscribeTopic(topic_str) => {
+                let topic = gossipsub::IdentTopic::new(&topic_str);
+                // subscribe() is idempotent — no-op if already subscribed
+                let _ = swarm.behaviour_mut().gossipsub.subscribe(&topic);
             }
         }
     }

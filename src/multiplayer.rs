@@ -1380,12 +1380,16 @@ fn run_network_thread(
                 let _ = event_tx.try_send(event);
             }
 
-            // Auto-reconnect: if no GAME peers (relay doesn't count) for 5s, re-bootstrap
+            // Auto-reconnect: only re-bootstrap when fully isolated (no relay connections either).
+            // If we have a relay connection, circuits to other players will form via DHT — no need
+            // to hammer bootstrap every 10s just because no direct game peers are visible yet.
             let no_game_peers = network.game_peer_count() == 0;
+            let no_relay_peers = network.connected_peer_count() == 0;
             let time_since_peer = last_peer_seen.elapsed().as_secs();
             let time_since_reconnect = last_reconnect.elapsed().as_secs();
-            if no_game_peers && time_since_peer > 5 && time_since_reconnect > 10 {
-                println!("🔄 [Network] No game peers for {}s, reconnecting...", time_since_peer);
+            let reconnect_interval = if no_relay_peers { 10 } else { 60 };
+            if no_game_peers && no_relay_peers && time_since_peer > 5 && time_since_reconnect > reconnect_interval {
+                println!("🔄 [Network] Fully isolated for {}s, reconnecting...", time_since_peer);
                 network.connect_to_bootstrap().await;
                 last_reconnect = tokio::time::Instant::now();
             }
