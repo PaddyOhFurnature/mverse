@@ -244,36 +244,36 @@ pub fn key_type_allows(key_type: KeyType, action: ActionClass) -> bool {
         // ── Free-build zones ──────────────────────────────────────────────────
         BuildInFreeZone => !matches!(key_type, Relay),
 
-        // ── Owned-parcel build: Personal+ only ────────────────────────────────
-        BuildInOwnedParcel => matches!(key_type, Personal | Business | Admin | Server | Genesis),
+        // ── Owned-parcel build: User+ only ────────────────────────────────
+        BuildInOwnedParcel => matches!(key_type, User | Business | Admin | Server | Genesis),
 
-        // ── Parcel claiming: Personal+ only ──────────────────────────────────
-        ClaimParcel => matches!(key_type, Personal | Business | Server | Genesis),
+        // ── Parcel claiming: User+ only ──────────────────────────────────
+        ClaimParcel => matches!(key_type, User | Business | Server | Genesis),
 
-        // ── Parcel abandon: only the owner (Personal+) ────────────────────────
-        AbandonParcel => matches!(key_type, Personal | Business | Server | Genesis),
+        // ── Parcel abandon: only the owner (User+) ────────────────────────
+        AbandonParcel => matches!(key_type, User | Business | Server | Genesis),
 
         // ── Ownership transfer ────────────────────────────────────────────────
-        TransferOwnership => matches!(key_type, Personal | Business | Server | Genesis),
+        TransferOwnership => matches!(key_type, User | Business | Server | Genesis),
 
         // ── Access management ─────────────────────────────────────────────────
-        GrantAccess  => matches!(key_type, Personal | Business | Admin | Server | Genesis),
-        RevokeAccess => matches!(key_type, Personal | Business | Admin | Server | Genesis),
+        GrantAccess  => matches!(key_type, User | Business | Admin | Server | Genesis),
+        RevokeAccess => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Content creation ─────────────────────────────────────────────────
         PublishContent => !matches!(key_type, Guest | Relay),
         ImportAsset    => !matches!(key_type, Guest | Relay),
 
         // ── Commerce ─────────────────────────────────────────────────────────
-        CreateListing => matches!(key_type, Personal | Business | Server | Genesis),
-        SignContract  => matches!(key_type, Personal | Business | Server | Genesis),
+        CreateListing => matches!(key_type, User | Business | Server | Genesis),
+        SignContract  => matches!(key_type, User | Business | Server | Genesis),
 
         // ── Scripts ──────────────────────────────────────────────────────────
-        DeployScript => matches!(key_type, Personal | Business | Admin | Server | Genesis),
+        DeployScript => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Governance ───────────────────────────────────────────────────────
-        Vote           => matches!(key_type, Personal | Business | Admin | Server),
-        CreateProposal => matches!(key_type, Personal | Business | Admin | Server | Genesis),
+        Vote           => matches!(key_type, User | Business | Admin | Server),
+        CreateProposal => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Moderation ───────────────────────────────────────────────────────
         ModerateUser => matches!(key_type, Admin | Server | Genesis),
@@ -442,8 +442,8 @@ mod tests {
     #[test]
     fn test_all_keys_can_explore() {
         for kt in [KeyType::Genesis, KeyType::Server, KeyType::Relay,
-                   KeyType::Admin, KeyType::Business, KeyType::Personal,
-                   KeyType::Anonymous, KeyType::Guest] {
+                   KeyType::Admin, KeyType::Business, KeyType::User,
+                   KeyType::Trial, KeyType::Guest] {
             assert!(key_type_allows(kt, ActionClass::Explore),
                 "{:?} must be able to explore", kt);
         }
@@ -456,12 +456,12 @@ mod tests {
 
     #[test]
     fn test_anonymous_cannot_claim_parcel() {
-        assert!(!key_type_allows(KeyType::Anonymous, ActionClass::ClaimParcel));
+        assert!(!key_type_allows(KeyType::Trial, ActionClass::ClaimParcel));
     }
 
     #[test]
     fn test_personal_can_claim_parcel() {
-        assert!(key_type_allows(KeyType::Personal, ActionClass::ClaimParcel));
+        assert!(key_type_allows(KeyType::User, ActionClass::ClaimParcel));
     }
 
     #[test]
@@ -482,7 +482,7 @@ mod tests {
 
     #[test]
     fn test_personal_can_sign_contract() {
-        assert!(key_type_allows(KeyType::Personal, ActionClass::SignContract));
+        assert!(key_type_allows(KeyType::User, ActionClass::SignContract));
     }
 
     #[test]
@@ -490,7 +490,7 @@ mod tests {
         assert!(key_type_allows(KeyType::Server, ActionClass::IssueKey));
         assert!(key_type_allows(KeyType::Genesis, ActionClass::IssueKey));
         for kt in [KeyType::Relay, KeyType::Admin, KeyType::Business,
-                   KeyType::Personal, KeyType::Anonymous, KeyType::Guest] {
+                   KeyType::User, KeyType::Trial, KeyType::Guest] {
             assert!(!key_type_allows(kt, ActionClass::IssueKey),
                 "{:?} must not be able to issue keys", kt);
         }
@@ -500,13 +500,13 @@ mod tests {
     fn test_only_admin_plus_can_moderate() {
         assert!(key_type_allows(KeyType::Admin, ActionClass::ModerateUser));
         assert!(key_type_allows(KeyType::Server, ActionClass::ModerateUser));
-        assert!(!key_type_allows(KeyType::Personal, ActionClass::ModerateUser));
+        assert!(!key_type_allows(KeyType::User, ActionClass::ModerateUser));
         assert!(!key_type_allows(KeyType::Guest, ActionClass::ModerateUser));
     }
 
     #[test]
     fn test_any_key_can_publish_own_record() {
-        for kt in [KeyType::Guest, KeyType::Anonymous, KeyType::Personal,
+        for kt in [KeyType::Guest, KeyType::Trial, KeyType::User,
                    KeyType::Business, KeyType::Admin, KeyType::Server, KeyType::Relay] {
             assert!(key_type_allows(kt, ActionClass::PublishKeyRecord),
                 "{:?} must be able to publish own key record", kt);
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn test_check_record_permission_valid_personal() {
         let id = Identity::generate();
-        let rec = record(&id, KeyType::Personal);
+        let rec = record(&id, KeyType::User);
         let cfg = PermissionConfig::default();
         let result = check_record_permission(&rec, ActionClass::ClaimParcel, &cfg);
         assert!(result.is_allowed());
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn test_check_record_permission_revoked_denied() {
         let id = Identity::generate();
-        let original = record(&id, KeyType::Personal);
+        let original = record(&id, KeyType::User);
         let revoked = id.self_revoke(&original, None).unwrap();
         let cfg = PermissionConfig::default();
         let result = check_record_permission(&revoked, ActionClass::ClaimParcel, &cfg);
@@ -559,7 +559,7 @@ mod tests {
         let past = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
             .saturating_sub(3600); // 1 hour ago
-        let mut rec = id.create_key_record(KeyType::Personal, None, None, None, Some(past), None);
+        let mut rec = id.create_key_record(KeyType::User, None, None, None, Some(past), None);
         // Re-sign with expiry in the past
         let _ = id.update_key_record(&rec, None, None, None); // just to get a valid sig
         // Manually set expires_at in past and re-sign

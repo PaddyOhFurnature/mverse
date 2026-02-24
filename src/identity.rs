@@ -23,10 +23,10 @@
 //!        ├─ Relay   ── routing infrastructure
 //!        └─ Admin   ── region moderator
 //! ─────────────────────────── (user keys, self-registered) ──────────────────
-//! Business  ── organisation / brand identity
-//! Personal  ── standard named user (full gameplay capabilities)
-//! Anonymous ── pseudonymous, no parcel ownership
-//! Guest     ── auto-generated, ephemeral, play-only
+//! Business  ── organisation / brand identity (created under a User account)
+//! User      ── full account (earned from Guest after 30 days or invite)
+//! Guest     ── free account, verified email, home plot, public chat
+//! Trial     ── walk-around only, hourly reset, no persistent identity
 //! ```
 //!
 //! # KeyRecord propagation
@@ -170,16 +170,20 @@ pub enum KeyType {
     Business = 4,
 
     /// Standard named user. Full gameplay capabilities:
-    /// own land, build, trade, create content, sign contracts.
-    Personal = 5,
+    /// own land, build, trade, create content, sign contracts, DMs.
+    /// Earned: 30 days good standing as Guest, or invited by an existing User.
+    User = 5,
 
-    /// Pseudonymous user. Consistent identity, no parcel ownership.
-    /// Cannot sign contracts or claim permanent property.
-    Anonymous = 6,
+    /// Free account. Verified email + chosen nickname required.
+    /// Home plot assigned. Public chat (no DMs). Can receive free items.
+    /// Distributed key (published to DHT). Moderatable.
+    /// 30-day minimum before upgrade to User.
+    Guest = 6,
 
-    /// Auto-generated on first run. Ephemeral (30-day expiry).
-    /// Limited to free-build public zones.
-    Guest = 7,
+    /// Walk-around trial. No persistent identity. Keypair regenerated every hour.
+    /// Predefined safe chat only. Cannot build, own property, or trade.
+    /// Forced back to lobby each hour for a fresh key.
+    Trial = 7,
 }
 
 impl KeyType {
@@ -193,26 +197,26 @@ impl KeyType {
             KeyType::Server   => "[Server]",
             KeyType::Relay    => "[Relay]",
             KeyType::Admin    => "[Admin]",
-            KeyType::Business => "[Business]",
-            KeyType::Personal => "",
-            KeyType::Anonymous => "[Anon]",
-            KeyType::Guest    => "[Guest]",
+            KeyType::Business  => "[Business]",
+            KeyType::User      => "",
+            KeyType::Guest     => "[Guest]",
+            KeyType::Trial     => "[Trial]",
         }
     }
 
     /// True if this key type can own parcels permanently.
     pub fn can_own_parcels(self) -> bool {
-        matches!(self, KeyType::Personal | KeyType::Business | KeyType::Server)
+        matches!(self, KeyType::User | KeyType::Business | KeyType::Server)
     }
 
     /// True if this key type can build in owned parcels.
     pub fn can_build_in_owned_parcels(self) -> bool {
-        matches!(self, KeyType::Personal | KeyType::Business | KeyType::Admin | KeyType::Server)
+        matches!(self, KeyType::User | KeyType::Business | KeyType::Admin | KeyType::Server)
     }
 
     /// True if this key type can sign commerce contracts.
     pub fn can_sign_contracts(self) -> bool {
-        matches!(self, KeyType::Personal | KeyType::Business | KeyType::Server)
+        matches!(self, KeyType::User | KeyType::Business | KeyType::Server)
     }
 
     /// True if this key type requires a countersignature from a higher-tier key.
@@ -233,9 +237,9 @@ impl KeyType {
             2 => Some(KeyType::Relay),
             3 => Some(KeyType::Admin),
             4 => Some(KeyType::Business),
-            5 => Some(KeyType::Personal),
-            6 => Some(KeyType::Anonymous),
-            7 => Some(KeyType::Guest),
+            5 => Some(KeyType::User),
+            6 => Some(KeyType::Guest),
+            7 => Some(KeyType::Trial),
             _ => None,
         }
     }
@@ -690,7 +694,7 @@ impl Identity {
             let keyrec_path = Self::keyrec_path_for(&path);
             if !keyrec_path.exists() {
                 // Load key type from environment hint or default to Personal for existing keys
-                let record = id.create_key_record(KeyType::Personal, None, None, None, None, None);
+                let record = id.create_key_record(KeyType::User, None, None, None, None, None);
                 if let Ok(bytes) = record.to_bytes() {
                     let _ = fs::write(&keyrec_path, bytes);
                 }
@@ -771,9 +775,9 @@ impl Identity {
         // Load existing record to check the current type
         if let Some(existing) = self.load_key_record() {
             // Disallow downgrading to Guest or Anonymous (must generate new keypair for that)
-            if (new_type == KeyType::Guest || new_type == KeyType::Anonymous)
+            if (new_type == KeyType::Guest || new_type == KeyType::Trial)
                 && existing.key_type != KeyType::Guest
-                && existing.key_type != KeyType::Anonymous
+                && existing.key_type != KeyType::Trial
             {
                 return Err(IdentityError::InsufficientKeyType {
                     required: existing.key_type,
@@ -1130,8 +1134,8 @@ mod tests {
         use std::collections::HashSet;
         let types = [
             KeyType::Genesis, KeyType::Server, KeyType::Relay,
-            KeyType::Admin, KeyType::Business, KeyType::Personal,
-            KeyType::Anonymous, KeyType::Guest,
+            KeyType::Admin, KeyType::Business, KeyType::User,
+            KeyType::Trial, KeyType::Guest,
         ];
         let discs: HashSet<u8> = types.iter().map(|t| t.discriminant()).collect();
         assert_eq!(discs.len(), types.len(), "discriminants must be unique");
@@ -1148,19 +1152,19 @@ mod tests {
 
     #[test]
     fn test_key_type_permissions() {
-        assert!(KeyType::Personal.can_own_parcels());
+        assert!(KeyType::User.can_own_parcels());
         assert!(KeyType::Business.can_own_parcels());
         assert!(!KeyType::Guest.can_own_parcels());
-        assert!(!KeyType::Anonymous.can_own_parcels());
+        assert!(!KeyType::Trial.can_own_parcels());
         assert!(!KeyType::Relay.can_own_parcels());
 
-        assert!(KeyType::Personal.can_sign_contracts());
+        assert!(KeyType::User.can_sign_contracts());
         assert!(!KeyType::Guest.can_sign_contracts());
-        assert!(!KeyType::Anonymous.can_sign_contracts());
+        assert!(!KeyType::Trial.can_sign_contracts());
 
         assert!(KeyType::Relay.requires_issuance());
         assert!(KeyType::Server.requires_issuance());
-        assert!(!KeyType::Personal.requires_issuance());
+        assert!(!KeyType::User.requires_issuance());
         assert!(!KeyType::Guest.requires_issuance());
     }
 
@@ -1170,7 +1174,7 @@ mod tests {
     fn test_key_record_self_sig_verifies() {
         let id = Identity::generate();
         let record = id.create_key_record(
-            KeyType::Personal,
+            KeyType::User,
             Some("Alice".to_string()),
             Some("Test bio".to_string()),
             None,
@@ -1183,7 +1187,7 @@ mod tests {
     #[test]
     fn test_key_record_self_sig_invalid_after_tamper() {
         let id = Identity::generate();
-        let mut record = id.create_key_record(KeyType::Personal, Some("Bob".to_string()), None, None, None, None);
+        let mut record = id.create_key_record(KeyType::User, Some("Bob".to_string()), None, None, None, None);
         // Tamper with display name
         record.display_name = Some("EvilBob".to_string());
         assert!(!record.verify_self_sig(), "tampered record must fail verification");
@@ -1192,7 +1196,7 @@ mod tests {
     #[test]
     fn test_key_record_canonical_bytes_deterministic() {
         let id = Identity::generate();
-        let record = id.create_key_record(KeyType::Anonymous, None, None, None, None, None);
+        let record = id.create_key_record(KeyType::Trial, None, None, None, None, None);
         // Canonical bytes must be identical on repeated calls
         assert_eq!(
             record.canonical_bytes_for_self_sig(),
@@ -1203,8 +1207,8 @@ mod tests {
     #[test]
     fn test_key_record_different_content_different_bytes() {
         let id = Identity::generate();
-        let r1 = id.create_key_record(KeyType::Personal, Some("Alice".to_string()), None, None, None, None);
-        let r2 = id.create_key_record(KeyType::Personal, Some("Bob".to_string()), None, None, None, None);
+        let r1 = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
+        let r2 = id.create_key_record(KeyType::User, Some("Bob".to_string()), None, None, None, None);
         assert_ne!(r1.canonical_bytes_for_self_sig(), r2.canonical_bytes_for_self_sig());
     }
 
@@ -1244,7 +1248,7 @@ mod tests {
     #[test]
     fn test_key_record_update_preserves_peer_id_and_created_at() {
         let id = Identity::generate();
-        let original = id.create_key_record(KeyType::Personal, Some("Alice".to_string()), None, None, None, None);
+        let original = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
         let updated = id.update_key_record(
             &original,
             Some("Alice Smith".to_string()),
@@ -1263,7 +1267,7 @@ mod tests {
     fn test_key_record_update_wrong_identity_fails() {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
-        let record = id1.create_key_record(KeyType::Personal, Some("Alice".to_string()), None, None, None, None);
+        let record = id1.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
         // id2 should not be able to update id1's record
         assert!(id2.update_key_record(&record, Some("Hacked".to_string()), None, None).is_err());
     }
@@ -1271,7 +1275,7 @@ mod tests {
     #[test]
     fn test_self_revocation() {
         let id = Identity::generate();
-        let record = id.create_key_record(KeyType::Personal, Some("Alice".to_string()), None, None, None, None);
+        let record = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
         let revoked = id.self_revoke(&record, Some("Key compromised".to_string())).unwrap();
 
         assert!(revoked.revoked);
@@ -1286,7 +1290,7 @@ mod tests {
     fn test_self_revoke_wrong_identity_fails() {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
-        let record = id1.create_key_record(KeyType::Personal, None, None, None, None, None);
+        let record = id1.create_key_record(KeyType::User, None, None, None, None, None);
         assert!(id2.self_revoke(&record, None).is_err());
     }
 
@@ -1326,7 +1330,7 @@ mod tests {
     fn test_display_name_truncation() {
         let id = Identity::generate();
         let long_name = "A".repeat(200);
-        let record = id.create_key_record(KeyType::Personal, Some(long_name), None, None, None, None);
+        let record = id.create_key_record(KeyType::User, Some(long_name), None, None, None, None);
         assert_eq!(record.display_name.as_ref().unwrap().len(), 64,
             "display_name must be truncated to 64 chars");
         assert!(record.verify_self_sig());
@@ -1336,7 +1340,7 @@ mod tests {
     fn test_bio_truncation() {
         let id = Identity::generate();
         let long_bio = "B".repeat(500);
-        let record = id.create_key_record(KeyType::Personal, None, Some(long_bio), None, None, None);
+        let record = id.create_key_record(KeyType::User, None, Some(long_bio), None, None, None);
         assert_eq!(record.bio.as_ref().unwrap().len(), 280,
             "bio must be truncated to 280 chars");
         assert!(record.verify_self_sig());
@@ -1353,7 +1357,7 @@ mod tests {
     #[test]
     fn test_is_operationally_valid() {
         let id = Identity::generate();
-        let record = id.create_key_record(KeyType::Personal, None, None, None, None, None);
+        let record = id.create_key_record(KeyType::User, None, None, None, None, None);
         assert!(record.is_operationally_valid());
         // Revoked record
         let revoked = id.self_revoke(&record, None).unwrap();

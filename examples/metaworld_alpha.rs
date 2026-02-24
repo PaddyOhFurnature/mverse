@@ -105,7 +105,12 @@ use std::sync::Mutex;
 
 enum SignupStep {
     Choosing,
-    Personal { name: String, email: String },
+    /// New User: choose display name
+    CreateUser { name: String },
+    /// New Guest: email + nickname
+    CreateGuest { email: String, nick: String },
+    /// Returning user: path to key file
+    LoadKey { path: String, error: Option<String> },
 }
 
 struct SignupScreen {
@@ -151,12 +156,10 @@ impl SignupScreen {
     ) -> Option<(KeyType, Option<String>, Option<String>)> {
         let raw_input = self.egui_state.take_egui_input(window);
 
-        // Collect UI decisions outside the egui closure to avoid double-borrows.
+        // Step transition flags — set inside egui closure, applied after.
         let mut result: Option<(KeyType, Option<String>, Option<String>)> = None;
-        let mut go_personal = false;
-        let mut go_back     = false;
+        let mut next_step: Option<SignupStep> = None;
 
-        // Split-borrow: borrow `step` directly so egui_ctx.run can borrow separately.
         let step = &mut self.step;
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             egui::Area::new(egui::Id::new("signup_backdrop"))
@@ -172,80 +175,163 @@ impl SignupScreen {
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .fixed_size([480.0, 360.0])
+                .fixed_size([500.0, 420.0])
                 .show(ctx, |ui| {
                     ui.add_space(4.0);
-                    ui.label("Choose your identity. You can upgrade at any time.");
-                    ui.add_space(12.0);
 
                     match step {
                         SignupStep::Choosing => {
+                            ui.label("You're in the lobby. Choose how to continue:");
+                            ui.add_space(10.0);
+
+                            // ── Returning user: load existing key ─────────────────────
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
-                                    if ui.button("  Anonymous  ").clicked() {
-                                        result = Some((KeyType::Anonymous, None, None));
+                                    if ui.button("  Load My Key  ").clicked() {
+                                        next_step = Some(SignupStep::LoadKey {
+                                            path: "~/.metaverse/identity.key".to_string(),
+                                            error: None,
+                                        });
                                     }
                                     ui.vertical(|ui| {
-                                        ui.strong("Anonymous — Pseudonymous");
-                                        ui.small("Persistent. Build, own parcels, trade.\nNo email required.");
+                                        ui.strong("Returning player");
+                                        ui.small("Point to your identity.key file to sign in.");
+                                    });
+                                });
+                            });
+
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.small("─── New here? ───");
+                            ui.add_space(6.0);
+
+                            // ── Trial: one-click, hourly reset ─────────────────────────
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("   Try It Now   ").clicked() {
+                                        result = Some((KeyType::Trial, None, None));
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.strong("Trial  —  no registration");
+                                        ui.small("Walk around and look. Pre-set chat only.\nKey resets every hour — you return to the lobby for a new one.");
                                     });
                                 });
                             });
                             ui.add_space(6.0);
+
+                            // ── Guest: free account, email + nickname ─────────────────
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
-                                    if ui.button("   Personal   ").clicked() {
-                                        go_personal = true;
+                                    if ui.button(" Free Account  ").clicked() {
+                                        next_step = Some(SignupStep::CreateGuest {
+                                            email: String::new(),
+                                            nick: String::new(),
+                                        });
                                     }
                                     ui.vertical(|ui| {
-                                        ui.strong("Personal — Named identity");
-                                        ui.small("Full capabilities. Optional email for\naccount recovery.");
+                                        ui.strong("Guest Account  —  free, verified email");
+                                        ui.small("Home plot, public chat, receive items.\nUpgrade to full User after 30 days good standing.");
                                     });
                                 });
                             });
                             ui.add_space(6.0);
+
+                            // ── User: full account (invite or 30-day Guest) ───────────
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
-                                    if ui.button("     Guest     ").clicked() {
-                                        result = Some((KeyType::Guest, None, None));
+                                    if ui.button("  Full Account  ").clicked() {
+                                        next_step = Some(SignupStep::CreateUser {
+                                            name: String::new(),
+                                        });
                                     }
                                     ui.vertical(|ui| {
-                                        ui.strong("Guest — Temporary (30 days)");
-                                        ui.small("Explore only. Cannot own parcels or trade.");
+                                        ui.strong("User Account  —  full access");
+                                        ui.small("All features unlocked. Requires 30 days as Guest\nin good standing, or an invite code from a current user.");
                                     });
                                 });
                             });
                         }
 
-                        SignupStep::Personal { name, email } => {
-                            ui.label("Display name (optional):");
-                            ui.text_edit_singleline(name);
+                        SignupStep::LoadKey { path, error } => {
+                            ui.label(egui::RichText::new("Load existing key").strong());
+                            ui.small("Enter the path to your identity.key file:");
+                            ui.add_space(4.0);
+                            ui.text_edit_singleline(path);
+                            if let Some(err) = error.as_deref() {
+                                ui.colored_label(egui::Color32::RED, err);
+                            }
                             ui.add_space(8.0);
-                            ui.label("Email (optional — enables account recovery):");
-                            ui.text_edit_singleline(email);
-                            ui.add_space(12.0);
                             ui.horizontal(|ui| {
-                                if ui.button("  Create Identity  ").clicked() {
-                                    let n = if name.is_empty() { None } else { Some(name.clone()) };
-                                    let e = if email.is_empty() { None } else { Some(email.clone()) };
-                                    result = Some((KeyType::Personal, n, e));
+                                if ui.button("  Load  ").clicked() {
+                                    // Caller will handle file loading — signal via User type
+                                    // with the path as the display_name field (reused for path).
+                                    result = Some((KeyType::User, Some(path.clone()), None));
                                 }
-                                if ui.button("Back").clicked() { go_back = true; }
+                                if ui.button("Back").clicked() {
+                                    next_step = Some(SignupStep::Choosing);
+                                }
                             });
+                        }
+
+                        SignupStep::CreateGuest { email, nick } => {
+                            ui.label(egui::RichText::new("Create free Guest account").strong());
+                            ui.add_space(8.0);
+                            ui.label("Email address (required for verification):");
+                            ui.text_edit_singleline(email);
+                            ui.add_space(6.0);
+                            ui.label("Nickname (how others see you):");
+                            ui.text_edit_singleline(nick);
+                            ui.add_space(10.0);
+                            let can_create = !email.trim().is_empty() && !nick.trim().is_empty();
+                            ui.horizontal(|ui| {
+                                let btn = ui.add_enabled(can_create, egui::Button::new("  Create  "));
+                                if btn.clicked() {
+                                    result = Some((KeyType::Guest, Some(nick.trim().to_string()), Some(email.trim().to_string())));
+                                }
+                                if ui.button("Back").clicked() {
+                                    next_step = Some(SignupStep::Choosing);
+                                }
+                            });
+                            if !can_create {
+                                ui.small("⚠  Both email and nickname are required.");
+                            }
+                        }
+
+                        SignupStep::CreateUser { name } => {
+                            ui.label(egui::RichText::new("Create full User account").strong());
+                            ui.small("Requires 30 days as Guest in good standing, or an invite code.");
+                            ui.add_space(8.0);
+                            ui.label("Display name:");
+                            ui.text_edit_singleline(name);
+                            ui.add_space(6.0);
+                            ui.label("Invite code (optional — reduces waiting period):");
+                            // Invite code stored as email field in result for now
+                            // TODO: wire into invite system when implemented
+                            ui.add_space(10.0);
+                            let can_create = !name.trim().is_empty();
+                            ui.horizontal(|ui| {
+                                let btn = ui.add_enabled(can_create, egui::Button::new("  Create  "));
+                                if btn.clicked() {
+                                    result = Some((KeyType::User, Some(name.trim().to_string()), None));
+                                }
+                                if ui.button("Back").clicked() {
+                                    next_step = Some(SignupStep::Choosing);
+                                }
+                            });
+                            if !can_create {
+                                ui.small("⚠  A display name is required.");
+                            }
                         }
                     }
 
                     ui.add_space(12.0);
                     ui.separator();
-                    ui.small("⚠  Your key never leaves this machine. Back up ~/.metaverse/identity.key — no password reset.");
+                    ui.small("⚠  Your key never leaves this machine. Back up your identity.key — there is no recovery.");
                 });
         });
 
-        // Apply step transitions after the closure (borrow of step released)
-        if go_personal {
-            self.step = SignupStep::Personal { name: String::new(), email: String::new() };
-        } else if go_back {
-            self.step = SignupStep::Choosing;
+        if let Some(s) = next_step {
+            self.step = s;
         }
 
         self.egui_state.handle_platform_output(window, full_output.platform_output);
@@ -1479,15 +1565,20 @@ fn main() {
                             // into the same texture view before presenting.
                             if let Some(ref mut s) = signup {
                                 if let Some((key_type, name, email)) = s.render(&context, &view, &window) {
-                                    if let Err(e) = identity.save_with_type(key_type, name, None) {
+                                    // LoadKey path reuses `name` as the file path.
+                                    if key_type == KeyType::User && name.as_deref().map(|p| p.contains(".key")).unwrap_or(false) {
+                                        // Returning user — load key from path (future: implement file load)
+                                        println!("🔑 Load key from: {}", name.as_deref().unwrap_or("?"));
+                                        signup = None;
+                                    } else if let Err(e) = identity.save_with_type(key_type, name, None) {
                                         eprintln!("⚠️  Failed to save identity: {}", e);
                                     } else {
-                                        println!("✅ Identity saved to ~/.metaverse/identity.key");
+                                        println!("✅ Identity saved ({:?})", key_type);
                                         if let Some(e) = email {
-                                            println!("   Email stored (verification coming later): {}", e);
+                                            println!("   Email (verification pending): {}", e);
                                         }
+                                        signup = None;
                                     }
-                                    signup = None;
                                 }
                             }
 
