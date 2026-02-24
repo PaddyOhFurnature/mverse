@@ -42,7 +42,7 @@ use std::{
     error::Error,
     io::{self, IsTerminal},
     path::PathBuf,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 use clap::Parser;
@@ -54,6 +54,8 @@ use axum::{
     Json, Router,
 };
 use rusqlite::{params, Connection};
+use sha2::{Sha256, Digest};
+use rand::RngCore;
 #[cfg(unix)]
 use libc;
 
@@ -372,6 +374,17 @@ pub struct SharedState {
     /// Key registry database handle (not serialised — accessed via REST).
     #[serde(skip)]
     pub key_db: Option<KeyDatabase>,
+    /// First 32 bytes of the server's signing key — used to generate stateless auth tokens.
+    /// Not serialised (never sent over the wire).
+    #[serde(skip)]
+    pub server_secret: [u8; 32],
+    /// In-flight auth challenges: nonce_hex → (expires_at_ms, requesting_peer_id).
+    /// Shared between web handlers and the expiry cleaner.
+    #[serde(skip)]
+    pub pending_challenges: Arc<Mutex<HashMap<String, (u64, String)>>>,
+    /// Channel to publish gossipsub messages from web handlers into the event loop.
+    #[serde(skip)]
+    pub gossip_tx: Option<tokio::sync::mpsc::Sender<GossipCommand>>,
 }
 
 impl Default for SharedState {
@@ -387,6 +400,9 @@ impl Default for SharedState {
             relay_port: 4001,
             version: env!("CARGO_PKG_VERSION").to_string(),
             key_db: None,
+            server_secret: [0u8; 32],
+            pending_challenges: Arc::new(Mutex::new(HashMap::new())),
+            gossip_tx: None,
         }
     }
 }
@@ -414,11 +430,14 @@ struct AppState {
     last_shared_sync: Instant,
     net: NetStats,
     shedding_relay: bool,
+    /// Gossip commands from web handlers waiting to be published into the swarm.
+    gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
 }
 
 impl AppState {
     fn new(config: ServerConfig, shared: Arc<RwLock<SharedState>>,
-           local_peer_id: String, public_ip: String) -> Self {
+           local_peer_id: String, public_ip: String,
+           gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
         let cpu_pct = sys.global_cpu_usage();
@@ -436,6 +455,7 @@ impl AppState {
             last_shared_sync: Instant::now(),
             net: NetStats::default(),
             shedding_relay: false,
+            gossip_rx,
         }
     }
 
@@ -645,11 +665,17 @@ fn key_record_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusq
 
 
 
+/// Commands sent from web handlers → event loop to publish via gossipsub.
+enum GossipCommand {
+    Publish { topic: String, data: Vec<u8> },
+}
+
 enum SwarmAction {
     AddKadAddress(PeerId, Multiaddr),
     RefreshDhtCount,
     DialPeer(PeerId, Multiaddr),
     SubscribeTopic(String),
+    PublishGossip { topic: String, data: Vec<u8> },
 }
 
 fn handle_swarm_event(
@@ -836,6 +862,12 @@ fn apply_swarm_actions(
                 let topic = gossipsub::IdentTopic::new(&topic_str);
                 // subscribe() is idempotent — no-op if already subscribed
                 let _ = swarm.behaviour_mut().gossipsub.subscribe(&topic);
+            }
+            SwarmAction::PublishGossip { topic, data } => {
+                let t = gossipsub::IdentTopic::new(&topic);
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(t, data) {
+                    eprintln!("⚠️  [gossip] Failed to publish on '{}': {:?}", topic, e);
+                }
             }
         }
     }
@@ -1044,6 +1076,340 @@ fn fmt_bytes(b: u64) -> String {
     if b < 1024 { format!("{} B", b) }
     else if b < 1_048_576 { format!("{:.1} KB", b as f64 / 1024.0) }
     else { format!("{:.1} MB", b as f64 / 1_048_576.0) }
+}
+
+// ─── API v1 ──────────────────────────────────────────────────────────────────
+//
+// REST API backbone used by game clients, CLI tools, other servers, and the
+// meshsite.  All v1 endpoints are under /api/v1/.
+//
+// Auth: operator-only endpoints require an X-Auth-Token header with a token
+// obtained via POST /api/v1/auth/verify.
+
+/// Token lifetime for operator auth sessions (1 hour).
+const AUTH_TOKEN_TTL_MS: u64 = 60 * 60 * 1_000;
+
+/// Challenge nonce lifetime (5 minutes).
+const CHALLENGE_TTL_MS: u64 = 5 * 60 * 1_000;
+
+/// Generate a stateless auth token for `peer_id` that expires at `expires_at_ms`.
+///
+/// Token = hex(SHA-256(server_secret || "auth:" || peer_id || "|" || expires_at_as_string))
+/// The server can re-derive this to verify without storing state.
+fn make_auth_token(server_secret: &[u8; 32], peer_id: &str, expires_at_ms: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(server_secret);
+    hasher.update(b"auth:");
+    hasher.update(peer_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(expires_at_ms.to_string().as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify a token from an X-Auth-Token header.
+///
+/// Returns the authenticated peer_id on success, or an error HTTP response.
+fn verify_auth_token(
+    s: &SharedState,
+    headers: &HeaderMap,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    // Format: "Bearer <peer_id>:<expires_at_ms>:<token_hex>"
+    let raw = headers.get("X-Auth-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let bearer = raw.strip_prefix("Bearer ").unwrap_or(raw);
+    let parts: Vec<&str> = bearer.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+            "error": "missing or malformed X-Auth-Token"
+        }))));
+    }
+    let (peer_id, expires_str, provided_token) = (parts[0], parts[1], parts[2]);
+    let expires_at_ms: u64 = expires_str.parse().unwrap_or(0);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    if now_ms > expires_at_ms {
+        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+            "error": "token expired"
+        }))));
+    }
+    let expected = make_auth_token(&s.server_secret, peer_id, expires_at_ms);
+    if expected != provided_token {
+        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+            "error": "invalid token"
+        }))));
+    }
+    Ok(peer_id.to_string())
+}
+
+// ── POST /api/v1/keys ─────────────────────────────────────────────────────────
+
+/// Body for POST /api/v1/keys (JSON variant).
+#[derive(Deserialize)]
+struct PostKeyBody {
+    /// Base64-encoded bincode `KeyRecord` bytes.
+    record_b64: String,
+}
+
+/// POST /api/v1/keys — submit a `KeyRecord` for storage and propagation.
+///
+/// Accepts `Content-Type: application/octet-stream` (raw bincode bytes) or
+/// `Content-Type: application/json` with a `{ "record_b64": "<base64>" }` body.
+///
+/// Validates the self-signature on the record before accepting it.
+/// On success stores in SQLite, broadcasts on the key-registry gossipsub topic,
+/// and returns `201 Created` with the accepted record as JSON.
+async fn api_v1_post_keys(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    use metaverse_core::identity::KeyRecord;
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+
+    // Parse body — raw bincode or JSON wrapper
+    let record_bytes: Vec<u8> = {
+        let ct = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if ct.contains("application/json") {
+            match serde_json::from_slice::<PostKeyBody>(&body) {
+                Ok(j) => match BASE64.decode(&j.record_b64) {
+                    Ok(b) => b,
+                    Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                        "error": format!("invalid base64: {}", e)
+                    }))).into_response(),
+                },
+                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                    "error": format!("invalid JSON: {}", e)
+                }))).into_response(),
+            }
+        } else {
+            body.to_vec()
+        }
+    };
+
+    // Deserialise and validate
+    let record = match KeyRecord::from_bytes(&record_bytes) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("failed to deserialize KeyRecord: {}", e)
+        }))).into_response(),
+    };
+
+    if !record.verify_self_sig() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "self-signature verification failed"
+        }))).into_response();
+    }
+
+    let peer_id_str  = record.peer_id.to_string();
+    let key_type_str = format!("{:?}", record.key_type);
+    let display_name = record.display_name.clone();
+    let created_at   = record.created_at as i64;
+    let updated_at   = record.updated_at as i64;
+    let revoked      = record.revoked;
+
+    // Store in SQLite
+    {
+        let st = s.read().unwrap();
+        if let Some(ref db) = st.key_db {
+            db.upsert(
+                &peer_id_str, &record_bytes,
+                &key_type_str, display_name.as_deref(),
+                created_at, updated_at, revoked,
+            );
+        }
+        // Broadcast via gossipsub (best-effort — may fail if no peers yet)
+        if let Some(ref tx) = st.gossip_tx {
+            let _ = tx.try_send(GossipCommand::Publish {
+                topic: "key-registry".to_string(),
+                data: record_bytes.clone(),
+            });
+        }
+    }
+
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "accepted": true,
+        "peer_id":      peer_id_str,
+        "key_type":     key_type_str,
+        "display_name": display_name,
+        "created_at":   created_at,
+        "updated_at":   updated_at,
+        "revoked":      revoked,
+    }))).into_response()
+}
+
+// ── POST /api/v1/auth/challenge ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ChallengeRequest {
+    /// The peer_id of the client requesting an auth token.
+    peer_id: String,
+}
+
+/// POST /api/v1/auth/challenge — issue a one-time nonce for the client to sign.
+///
+/// The caller must have a `KeyRecord` already registered with this server.
+/// Returns `{ nonce: hex, server_peer_id: str, expires_at: u64 }`.
+/// The client must POST /api/v1/auth/verify within 5 minutes.
+async fn api_v1_auth_challenge(
+    State(s): State<WebState>,
+    Json(req): Json<ChallengeRequest>,
+) -> impl IntoResponse {
+    // Verify the peer has a registered key
+    let exists = {
+        let st = s.read().unwrap();
+        st.key_db.as_ref().map(|db| db.get_bytes(&req.peer_id).is_some()).unwrap_or(false)
+    };
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "no key record found for this peer_id — register a key first"
+        }))).into_response();
+    }
+
+    // Generate 32-byte nonce
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let nonce_hex = hex::encode(nonce);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let expires_at = now_ms + CHALLENGE_TTL_MS;
+
+    // Store challenge
+    {
+        let st = s.read().unwrap();
+        let mut map = st.pending_challenges.lock().unwrap();
+        // Prune stale challenges to avoid unbounded growth
+        map.retain(|_, (exp, _)| *exp > now_ms);
+        map.insert(nonce_hex.clone(), (expires_at, req.peer_id.clone()));
+    }
+
+    let server_peer_id = s.read().unwrap().local_peer_id.clone();
+    (StatusCode::OK, Json(serde_json::json!({
+        "nonce":          nonce_hex,
+        "server_peer_id": server_peer_id,
+        "expires_at":     expires_at,
+        "instructions":   "Sign the nonce bytes with your Ed25519 key and POST to /api/v1/auth/verify",
+    }))).into_response()
+}
+
+// ── POST /api/v1/auth/verify ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct VerifyRequest {
+    /// The nonce from /api/v1/auth/challenge (hex).
+    nonce: String,
+    /// The peer_id that is authenticating.
+    peer_id: String,
+    /// Ed25519 signature over the raw nonce bytes (hex).
+    signature: String,
+}
+
+/// POST /api/v1/auth/verify — verify the signed challenge and return a bearer token.
+///
+/// The token format is: `<peer_id>:<expires_at_ms>:<hex_token>`
+/// Include as `Authorization: Bearer <token>` on operator endpoints.
+async fn api_v1_auth_verify(
+    State(s): State<WebState>,
+    Json(req): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    use ed25519_dalek::{VerifyingKey, Signature};
+    use ed25519_dalek::Verifier;
+    use metaverse_core::identity::KeyRecord;
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // Look up and consume the challenge
+    let (challenge_expires, stored_peer_id) = {
+        let st = s.read().unwrap();
+        let mut map = st.pending_challenges.lock().unwrap();
+        match map.remove(&req.nonce) {
+            Some(v) => v,
+            None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": "nonce not found or already used"
+            }))).into_response(),
+        }
+    };
+    if now_ms > challenge_expires {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "challenge expired"
+        }))).into_response();
+    }
+    if stored_peer_id != req.peer_id {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "peer_id mismatch"
+        }))).into_response();
+    }
+
+    // Fetch the client's KeyRecord to get their public key
+    let key_bytes: Vec<u8> = {
+        let st = s.read().unwrap();
+        match st.key_db.as_ref().and_then(|db| db.get_bytes(&req.peer_id)) {
+            Some(b) => b,
+            None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "error": "no key record found for this peer_id"
+            }))).into_response(),
+        }
+    };
+    let record = match KeyRecord::from_bytes(&key_bytes) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("failed to deserialize stored KeyRecord: {}", e)
+        }))).into_response(),
+    };
+
+    // Decode the nonce and signature
+    let nonce_bytes = match hex::decode(&req.nonce) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("invalid nonce hex: {}", e)
+        }))).into_response(),
+    };
+    let sig_bytes = match hex::decode(&req.signature) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("invalid signature hex: {}", e)
+        }))).into_response(),
+    };
+
+    // Verify Ed25519 signature
+    let vk = match VerifyingKey::from_bytes(&record.public_key) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": "invalid public key in key record"
+        }))).into_response(),
+    };
+    let sig = match Signature::from_slice(&sig_bytes) {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "invalid signature bytes (must be 64 bytes)"
+        }))).into_response(),
+    };
+    if vk.verify(&nonce_bytes, &sig).is_err() {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({
+            "error": "signature verification failed"
+        }))).into_response();
+    }
+
+    // Generate token
+    let token_expires_at = now_ms + AUTH_TOKEN_TTL_MS;
+    let server_secret = s.read().unwrap().server_secret;
+    let token_hex = make_auth_token(&server_secret, &req.peer_id, token_expires_at);
+    let bearer = format!("{}:{}:{}", req.peer_id, token_expires_at, token_hex);
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "token":      bearer,
+        "peer_id":    req.peer_id,
+        "expires_at": token_expires_at,
+        "ttl_seconds": AUTH_TOKEN_TTL_MS / 1000,
+    }))).into_response()
 }
 
 // ─── Web dashboard ───────────────────────────────────────────────────────────
@@ -1598,6 +1964,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // Extract server secret key bytes for stateless auth token generation.
+    // We use the first 32 bytes of the ed25519 signing key (the secret scalar).
+    let server_secret: [u8; 32] = {
+        if let Ok(ed) = local_key.clone().try_into_ed25519() {
+            let sk = ed.secret();
+            let bytes: &[u8] = sk.as_ref();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes[..32]);
+            arr
+        } else {
+            // Fallback: hash of the protobuf encoding
+            let mut h = Sha256::new();
+            h.update(&local_key.to_protobuf_encoding().unwrap_or_default());
+            h.finalize().into()
+        }
+    };
+
+    // Channel for web handlers to push gossipsub publishes into the event loop.
+    let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel::<GossipCommand>(256);
+
     // Shared state for web server
     let shared = Arc::new(RwLock::new(SharedState {
         local_peer_id: local_peer_id.to_string(),
@@ -1606,6 +1992,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_type: config.node_type.clone(),
         relay_port: config.port,
         key_db,
+        server_secret,
+        gossip_tx: Some(gossip_tx),
         ..Default::default()
     }));
 
@@ -1636,6 +2024,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/keys/relays", get(web_api_keys_relays))
                 .route("/api/keys/servers", get(web_api_keys_servers))
                 .route("/api/keys/:peer_id", get(web_api_key_by_id))
+                // API v1 endpoints
+                .route("/api/v1/keys", post(api_v1_post_keys))
+                .route("/api/v1/auth/challenge", post(api_v1_auth_challenge))
+                .route("/api/v1/auth/verify", post(api_v1_auth_verify))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);
@@ -1648,7 +2040,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut app_state = AppState::new(
-        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip,
+        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx,
     );
     app_state.log("✅ Metaverse server started");
     if world_enabled && world.is_some() {
@@ -1699,6 +2091,17 @@ async fn run_headless(
             swarm_event = swarm.select_next_some() => {
                 let actions = handle_swarm_event(swarm_event, &mut state);
                 apply_swarm_actions(actions, &mut state, &mut swarm);
+            }
+            // Gossip commands from web handlers (best-effort, non-blocking)
+            Some(cmd) = state.gossip_rx.recv() => {
+                match cmd {
+                    GossipCommand::Publish { topic, data } => {
+                        let t = gossipsub::IdentTopic::new(&topic);
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(t, data) {
+                            eprintln!("⚠️  [gossip] publish '{}': {:?}", topic, e);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1765,6 +2168,17 @@ async fn run_tui(
                 swarm_event = swarm.select_next_some() => {
                     let actions = handle_swarm_event(swarm_event, &mut state);
                     apply_swarm_actions(actions, &mut state, &mut swarm);
+                }
+                // Gossip commands from web handlers (best-effort, non-blocking)
+                Some(cmd) = state.gossip_rx.recv() => {
+                    match cmd {
+                        GossipCommand::Publish { topic, data } => {
+                            let t = gossipsub::IdentTopic::new(&topic);
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(t, data) {
+                                eprintln!("⚠️  [gossip] publish '{}': {:?}", topic, e);
+                            }
+                        }
+                    }
                 }
             }
             if state.should_quit { break; }

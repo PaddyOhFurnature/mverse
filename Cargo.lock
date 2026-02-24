@@ -3466,6 +3466,7 @@ name = "metaverse_core"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "bincode",
  "bytemuck",
  "chacha20poly1305",
