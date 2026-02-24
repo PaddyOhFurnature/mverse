@@ -72,7 +72,7 @@ use metaverse_core::{
     chunk_manager::ChunkManager,
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
     chunk_placeholder::PlaceholderStyle,
-    coordinates::GPS,
+    coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
     identity::Identity,
     marching_cubes::{extract_octree_mesh, extract_chunk_mesh},
@@ -510,6 +510,14 @@ fn main() {
     // PLAYER SETUP - Load last position or use default spawn
     // ============================================================
     
+    // If no local save exists, request the session record from DHT so we can
+    // resume from the exact logout position even on a new machine.
+    let no_local_save = !PlayerPersistence::has_local_save(&world_dir, &identity);
+    if no_local_save {
+        println!("🆕 No local save — requesting last session from DHT...");
+        multiplayer.fetch_session_record();
+    }
+
     // Load saved player state (position, rotation, mode) - encrypted with identity
     let player_state = PlayerPersistence::load(&world_dir, &identity);
     println!("🧍 Setting up player...");
@@ -627,6 +635,20 @@ fn main() {
                         eprintln!("   ⚠️  Failed to save player position: {}", e);
                     } else {
                         println!("   ✅ Saved player position");
+                    }
+
+                    // Also publish session record to DHT so the player can resume
+                    // from this exact spot on any machine that has their identity key.
+                    {
+                        let chunk = ChunkId::from_ecef(&player.position);
+                        let movement_mode_byte = if player_mode == PlayerModeLocal::Walk { 0u8 } else { 1u8 };
+                        multiplayer.publish_session_record(
+                            [player.position.x, player.position.y, player.position.z],
+                            [player.camera_yaw, player.camera_pitch],
+                            movement_mode_byte,
+                            [chunk.x, chunk.y, chunk.z],
+                        );
+                        println!("   ✅ Published session record to DHT");
                     }
                     
                     println!("   Goodbye!");
@@ -856,6 +878,28 @@ fn main() {
                         place_pressed = false;
                     }
                     
+                    // Apply any session record that arrived from DHT (new machine / first login)
+                    if let Some(session) = multiplayer.take_pending_session_record() {
+                        let dht_ecef = ECEF {
+                            x: session.position[0],
+                            y: session.position[1],
+                            z: session.position[2],
+                        };
+                        // Only restore if within 2km of spawn — same sanity check as local save
+                        let dx = dht_ecef.x - spawn_ecef_origin.x;
+                        let dy = dht_ecef.y - spawn_ecef_origin.y;
+                        let dz = dht_ecef.z - spawn_ecef_origin.z;
+                        let dist = (dx*dx + dy*dy + dz*dz).sqrt();
+                        if dist < 2000.0 {
+                            player.position = dht_ecef;
+                            player.camera_yaw   = session.rotation[0];
+                            player.camera_pitch = session.rotation[1];
+                            println!("📍 Restored position from DHT session record ({:.0}m from spawn)", dist);
+                        } else {
+                            println!("📍 DHT session record too far ({:.0}m) — keeping spawn", dist);
+                        }
+                    }
+
                     // Process any received voxel operations
                     let pending_ops = multiplayer.take_pending_operations();
                     if !pending_ops.is_empty() {

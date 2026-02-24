@@ -151,6 +151,14 @@ impl PlayerPersistence {
         let peer_id = identity.peer_id().to_string();
         world_dir.join(&peer_id).join("player_state.bin")
     }
+
+    /// Returns `true` if a local persistence file exists for this identity.
+    ///
+    /// Use this before calling `load()` to decide whether to request a DHT
+    /// session record as a fallback (new machine / first run).
+    pub fn has_local_save(world_dir: &Path, identity: &Identity) -> bool {
+        Self::persistence_path(world_dir, identity).exists()
+    }
     
     /// Encrypt data with identity-derived key
     fn encrypt(plaintext: &[u8], identity: &Identity) -> Result<Vec<u8>, String> {

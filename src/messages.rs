@@ -1109,6 +1109,90 @@ impl From<VoxelOperation> for SignedOperation {
     }
 }
 
+// ─── PlayerSessionRecord ──────────────────────────────────────────────────────
+
+/// Portable session state — signed by the player's key and published to the DHT
+/// on clean logout. Fetched on startup when no local save exists (e.g., new
+/// machine with key on thumbdrive). Ensures the player resumes from their exact
+/// last position regardless of which machine they log in from.
+///
+/// DHT key: SHA-256 of b"session:" + peer_id.to_bytes()
+/// TTL: 90 days (refreshed on every clean logout).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerSessionRecord {
+    /// Protocol version for forward compatibility.
+    pub version: u8,
+
+    /// The player this session belongs to.
+    pub peer_id: PeerId,
+
+    /// Last known position (ECEF metres). Stored as [x, y, z] f64.
+    pub position: [f64; 3],
+
+    /// Yaw and pitch in radians at logout.
+    pub rotation: [f32; 2],
+
+    /// Movement mode at logout (Walk / Fly / etc.)
+    pub movement_mode: u8,
+
+    /// Chunk the player was in — used to request terrain sync on re-login.
+    pub chunk_id: [i64; 3],
+
+    /// Unix milliseconds of the logout timestamp.
+    pub logged_out_at: u64,
+
+    /// Ed25519 public key bytes matching `peer_id`.
+    pub public_key: [u8; 32],
+
+    /// Ed25519 signature over all fields above (excluding this field).
+    /// Signs the canonical bytes produced by `signable_bytes()`.
+    #[serde(with = "serde_arrays")]
+    pub signature: [u8; 64],
+}
+
+impl PlayerSessionRecord {
+    /// Compute the canonical bytes that are signed (everything except signature).
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(128);
+        out.push(self.version);
+        out.extend_from_slice(&self.peer_id.to_bytes());
+        for f in &self.position  { out.extend_from_slice(&f.to_le_bytes()); }
+        for f in &self.rotation  { out.extend_from_slice(&f.to_le_bytes()); }
+        out.push(self.movement_mode);
+        for i in &self.chunk_id  { out.extend_from_slice(&i.to_le_bytes()); }
+        out.extend_from_slice(&self.logged_out_at.to_le_bytes());
+        out.extend_from_slice(&self.public_key);
+        out
+    }
+
+    /// Serialise the full record to bytes for DHT storage.
+    pub fn to_bytes(&self) -> std::result::Result<Vec<u8>, bincode::Error> {
+        bincode::serialize(self)
+    }
+
+    /// Deserialise from bytes fetched from DHT.
+    pub fn from_bytes(data: &[u8]) -> std::result::Result<Self, bincode::Error> {
+        bincode::deserialize(data)
+    }
+
+    /// Verify the self-signature using the embedded public key.
+    pub fn verify(&self) -> bool {
+        let Ok(vk) = VerifyingKey::from_bytes(&self.public_key) else { return false; };
+        let Ok(sig) = Signature::from_slice(&self.signature) else { return false; };
+        vk.verify(&self.signable_bytes(), &sig).is_ok()
+    }
+
+    /// Compute the DHT key for a peer's session record.
+    /// SHA-256 of b"session:" + peer_id_bytes — distinct namespace from KeyRecord DHT keys.
+    pub fn dht_key(peer_id: &PeerId) -> Vec<u8> {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(b"session:");
+        hasher.update(peer_id.to_bytes());
+        hasher.finalize().to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -55,7 +55,8 @@ use crate::{
     key_registry::{KeyRegistry, KeyRegistryMessage},
     messages::{
         Action, ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest,
-        LamportClock, Material, MovementMode, PlayerStateMessage, SignedOperation, VoxelOperation, MessageError,
+        LamportClock, Material, MovementMode, PlayerStateMessage, PlayerSessionRecord,
+        SignedOperation, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     permissions::{action_to_class, check_key_level_permission, PermissionConfig, PermissionResult},
@@ -213,6 +214,10 @@ pub struct MultiplayerSystem {
     
     /// Permission configuration — controls what is checked on incoming ops
     pub perm_config: PermissionConfig,
+
+    /// Fetched session record from DHT — populated when a remote session was found
+    /// on startup. The game loop reads this once to restore the player's last position.
+    pub pending_session_record: Option<PlayerSessionRecord>,
     
     /// Statistics
     stats: MultiplayerStats,
@@ -300,6 +305,7 @@ impl MultiplayerSystem {
                 reg
             },
             perm_config: PermissionConfig::default(),
+            pending_session_record: None,
             stats: MultiplayerStats::default(),
         })
     }
@@ -745,18 +751,39 @@ impl MultiplayerSystem {
                 println!("⚡ [DCUtR] Hole punch succeeded — now direct with: {}", peer_id);
             }
             NetworkEvent::DhtRecordFound { key, value } => {
-                // Attempt to deserialize as a KeyRecord and update the registry
-                match crate::identity::KeyRecord::from_bytes(&value) {
-                    Ok(record) => {
-                        let peer_id = record.peer_id;
-                        match self.key_registry.apply_update(record) {
-                            Ok(true)  => println!("🔑 [DHT] Updated KeyRecord for {} from DHT", peer_id),
-                            Ok(false) => {}  // already had this record
-                            Err(e)    => eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e),
+                // Determine whether this is a KeyRecord or a PlayerSessionRecord by
+                // trying the session namespace key first, then falling back to KeyRecord.
+                let session_key = PlayerSessionRecord::dht_key(&self.local_peer_id);
+                if key == session_key {
+                    // This is our own session record — offer it to the game loop
+                    match PlayerSessionRecord::from_bytes(&value) {
+                        Ok(rec) if rec.verify() => {
+                            println!("📍 [Session] Found last session: pos [{:.1},{:.1},{:.1}] logged out {}s ago",
+                                rec.position[0], rec.position[1], rec.position[2],
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(0)
+                                    .saturating_sub(rec.logged_out_at) / 1000);
+                            self.pending_session_record = Some(rec);
                         }
+                        Ok(_)  => eprintln!("📍 [Session] Session record signature invalid — ignoring"),
+                        Err(e) => eprintln!("📍 [Session] Failed to deserialize session record: {}", e),
                     }
-                    Err(e) => {
-                        eprintln!("🔑 [DHT] Failed to deserialize DHT record ({} bytes): {}", value.len(), e);
+                } else {
+                    // Attempt to deserialize as a KeyRecord and update the registry
+                    match crate::identity::KeyRecord::from_bytes(&value) {
+                        Ok(record) => {
+                            let peer_id = record.peer_id;
+                            match self.key_registry.apply_update(record) {
+                                Ok(true)  => println!("🔑 [DHT] Updated KeyRecord for {} from DHT", peer_id),
+                                Ok(false) => {}  // already had this record
+                                Err(e)    => eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e),
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("🔑 [DHT] Failed to deserialize DHT record ({} bytes): {}", value.len(), e);
+                        }
                     }
                 }
             }
@@ -1203,9 +1230,12 @@ impl MultiplayerSystem {
         let record = match self.identity.load_key_record() {
             Some(r) => r,
             None => {
-                // No .keyrec file yet — create and publish a minimal Personal record
+                // No .keyrec file yet — create a Guest record.
+                // ALL key types (including Guest) are published so that report/ban/invite/msg
+                // work regardless of key type. Guest keys carry key_type=Guest so peers
+                // know to apply Guest-level permissions.
                 self.identity.create_key_record(
-                    crate::identity::KeyType::Personal,
+                    crate::identity::KeyType::Guest,
                     None, None, None, None, None,
                 )
             }
@@ -1251,6 +1281,72 @@ impl MultiplayerSystem {
     pub fn request_dht_key_lookup(&self, peer_id: &PeerId) {
         let key = Self::peer_dht_key(peer_id);
         let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
+    }
+
+    /// Publish a `PlayerSessionRecord` to the DHT on clean logout.
+    ///
+    /// Signs the record with the player's identity key and stores it at the
+    /// well-known session DHT key.  Any machine that loads the same `identity.key`
+    /// can fetch this record on startup and resume from the exact logout position.
+    pub fn publish_session_record(
+        &self,
+        position: [f64; 3],
+        rotation: [f32; 2],
+        movement_mode: u8,
+        chunk_id: [i64; 3],
+    ) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let public_key = self.identity.verifying_key().to_bytes();
+        let mut record = PlayerSessionRecord {
+            version: 1,
+            peer_id: self.local_peer_id,
+            position,
+            rotation,
+            movement_mode,
+            chunk_id,
+            logged_out_at: now,
+            public_key,
+            signature: [0u8; 64],
+        };
+
+        // Sign the canonical bytes
+        let sig = self.identity.sign(&record.signable_bytes());
+        record.signature = sig.to_bytes();
+
+        match record.to_bytes() {
+            Ok(bytes) => {
+                let dht_key = PlayerSessionRecord::dht_key(&self.local_peer_id);
+                let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+                    key: dht_key,
+                    value: bytes,
+                });
+                println!("📍 [Session] Published session record to DHT");
+            }
+            Err(e) => eprintln!("📍 [Session] Failed to serialize session record: {}", e),
+        }
+    }
+
+    /// Fetch our own session record from the DHT on startup.
+    ///
+    /// Call this early in startup when no local save exists (new machine).
+    /// The result arrives asynchronously via `take_pending_session_record()`.
+    pub fn fetch_session_record(&self) {
+        let key = PlayerSessionRecord::dht_key(&self.local_peer_id);
+        let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
+        println!("📍 [Session] Requesting last session from DHT...");
+    }
+
+    /// Take the pending session record (if one arrived from DHT).
+    ///
+    /// Returns `Some(record)` once and then `None` on subsequent calls.
+    /// The game loop should call this after connection and use it to restore
+    /// the player's position if no local save file was found.
+    pub fn take_pending_session_record(&mut self) -> Option<PlayerSessionRecord> {
+        self.pending_session_record.take()
     }
 
     /// Take pending manifests for the game loop to process.
