@@ -43,17 +43,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // Fragment shader
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // world_normal encodes per-vertex colour in this engine.
+    // clamp(0,1) so normals pointing away from positive axes don't go negative.
+    let vertex_color = clamp(in.world_normal, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
+
     // Simple directional lighting
     let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
-    let ambient = 0.3;
-    
+    let ambient = 0.35;
     let normal = normalize(in.world_normal);
     let diffuse = max(dot(normal, light_dir), 0.0);
     let lighting = ambient + (1.0 - ambient) * diffuse;
-    
-    // Base color (gray stone)
-    let base_color = vec3<f32>(0.6, 0.6, 0.6);
-    let final_color = base_color * lighting;
-    
+
+    let final_color = vertex_color * lighting;
     return vec4<f32>(final_color, 1.0);
 }

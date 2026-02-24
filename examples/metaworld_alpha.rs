@@ -332,159 +332,19 @@ fn main() {
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone(), user_content.clone(), world_dir.clone());
     
-    // ============================================================
-    // LOADING PHASE - Pre-load spawn area before gameplay starts
-    // ============================================================
-    println!("\n🌍 Loading spawn area...");
-    println!("   Generating terrain from SRTM elevation data...");
-    let load_start = Instant::now();
-    
+    // Queue spawn area chunks for background loading — actual loading happens
+    // inside the event loop during the Loading phase so the window stays responsive.
     let spawn_ecef = origin_gps.to_ecef();
     chunk_streamer.update(spawn_ecef);
     
-    // Load chunks until we have enough around spawn (respecting max limit).
-    // Use a short per-iteration budget so render_loading_frame() gets called
-    // each iteration, keeping the window visually responsive.
-    let target_chunks = 30;
-    let mut last_loaded = 0;
-    loop {
-        chunk_streamer.process_queues(80.0); // ~80ms budget per iter → ~12 fps during load
-        chunk_streamer.stats.chunks_loaded = chunk_streamer.loaded_chunks().count();
-
-        if chunk_streamer.stats.chunks_loaded != last_loaded {
-            render_loading_frame(&context, &pipeline, chunk_streamer.stats.chunks_loaded, target_chunks);
-            last_loaded = chunk_streamer.stats.chunks_loaded;
-        }
-
-        if chunk_streamer.stats.chunks_loaded >= target_chunks || chunk_streamer.stats.chunks_queued == 0 {
-            break;
-        }
-    }
-    
-    let load_elapsed = load_start.elapsed();
-    println!("   ✅ Spawn area loaded: {} chunks in {:.1}s", 
-        chunk_streamer.stats.chunks_loaded,
-        load_elapsed.as_secs_f32()
-    );
-    
     // Keep chunk manager for user edits and voxel operations tracking only
-    // (not for terrain loading - ChunkStreamer handles that now)
-    // Clone the inner UserContentLayer for ChunkManager
     let chunk_manager_user_content = user_content.lock().unwrap().clone();
     let mut chunk_manager = ChunkManager::new(chunk_manager_generator, chunk_manager_user_content);
-    
-    // Request historical chunk state from all connected peers
-    // This ensures we get edits made by other players before we joined
-    if multiplayer.peer_count() > 0 {
-        println!("🔄 Requesting historical state for loaded chunks from {} peers...", 
-            multiplayer.peer_count());
-        let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
-        if let Err(e) = multiplayer.request_chunk_state(loaded_chunk_ids) {
-            eprintln!("   ⚠️  Failed to request chunk state: {}", e);
-        }
-    };
-    
-    // Generate meshes and collision for loaded chunks
-    println!("🔺 Generating meshes and collision for loaded chunks...");
-    let mesh_start = Instant::now();
 
-    // Show loading screen at 100% during mesh build (still blocking, but brief)
-    render_loading_frame(&context, &pipeline, target_chunks, target_chunks);
-    
-    // Initialize physics world with FloatingOrigin at origin
+    // Initialize physics world (empty — terrain colliders added as chunks build in-loop)
     let origin_voxel_ecef = origin_voxel.to_ecef();
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
-    
-    let mut total_vertices = 0;
-    for chunk_data in chunk_streamer.loaded_chunks_mut() {
-        // Generate mesh for chunk using exact voxel bounds
-        let min_voxel = chunk_data.id.min_voxel();
-        let max_voxel = chunk_data.id.max_voxel();
-        let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
-        total_vertices += mesh.vertices.len();
-        
-        // Only create mesh buffer and collision if chunk has geometry
-        if !mesh.vertices.is_empty() {
-            // Offset mesh vertices to position chunk correctly in world
-            let offset = Vec3::new(
-                (chunk_center.x - origin_voxel.x) as f32,
-                (chunk_center.y - origin_voxel.y) as f32,
-                (chunk_center.z - origin_voxel.z) as f32,
-            );
-            
-            println!("   {} min=({},{},{}) max=({},{},{}) center=({},{},{}) offset=({:.1},{:.1},{:.1})", 
-                chunk_data.id,
-                min_voxel.x, min_voxel.y, min_voxel.z,
-                max_voxel.x, max_voxel.y, max_voxel.z,
-                chunk_center.x, chunk_center.y, chunk_center.z,
-                offset.x, offset.y, offset.z);
-            
-            for vertex in &mut mesh.vertices {
-                vertex.position.x += offset.x;
-                vertex.position.y += offset.y;
-                vertex.position.z += offset.z;
-            }
-            
-            chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
-            
-            // Create collision from the offset mesh
-            let collider = metaverse_core::physics::create_collision_from_mesh(
-                &mut physics,
-                &mesh,
-                &origin_voxel,
-                None,
-            );
-            chunk_data.collider = Some(collider);
-        }
-        chunk_data.dirty = false;
-    }
-    
-    println!("   Meshes generated in {:.2}s ({} total vertices)", 
-        mesh_start.elapsed().as_secs_f32(),
-        total_vertices
-    );
-    
-    // Find ground level at spawn by sampling spawn chunk
-    let mut ground_y: f32 = 0.0;
-    if let Some(spawn_chunk_data) = chunk_streamer.get_chunk(&spawn_chunk) {
-        // Sample voxels around spawn point to find ground
-        let mut found_ground = false;
-        for x_off in -5..=5 {
-            for z_off in -5..=5 {
-                let test_voxel = VoxelCoord::new(
-                    origin_voxel.x + x_off,
-                    origin_voxel.y,
-                    origin_voxel.z + z_off,
-                );
-                
-                // Search upward and downward for first air block above solid ground
-                for y_off in -100..100 {
-                    let check_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off, test_voxel.z);
-                    let below_voxel = VoxelCoord::new(test_voxel.x, test_voxel.y + y_off - 1, test_voxel.z);
-                    
-                    let is_air = spawn_chunk_data.octree.get_voxel(check_voxel) == MaterialId::AIR;
-                    let below_is_solid = spawn_chunk_data.octree.get_voxel(below_voxel) != MaterialId::AIR;
-                    
-                    if is_air && below_is_solid {
-                        ground_y = ground_y.max((y_off - 1) as f32);
-                        found_ground = true;
-                        break;
-                    }
-                }
-            }
-        }
-        
-        if !found_ground {
-            println!("   WARNING: No ground found near spawn, defaulting to 0m");
-        }
-    }
-    
-    if ground_y < -50.0 {
-        ground_y = 0.0;
-    }
-    
-    println!("   Ground level at spawn: {:.1}m", ground_y);
-    
+
     // Create player model (visible cube) - green for local player
     let player_mesh = create_local_player_cube();
     let _player_model_buffer = MeshBuffer::from_mesh(&context.device, &player_mesh);
@@ -597,11 +457,15 @@ fn main() {
     
     // Track local voxel operations for CRDT merge
     let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::SignedOperation> = HashMap::new();
-    
-    println!("\n🎮 Demo running!");
-    println!("   Waiting for peers to connect...");
-    println!("   (Run another instance to test P2P)\n");
-    
+
+    // Loading phase: true until enough spawn-area chunks have meshes and collision built.
+    // The event loop renders the loading bar while this is true.
+    const LOADING_TARGET: usize = 30;
+    let mut game_loading = true;
+
+    println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
+    println!("   Target: {} chunks before gameplay starts", LOADING_TARGET);
+
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { event, .. } => match event {
@@ -740,7 +604,70 @@ fn main() {
                 
                 WindowEvent::RedrawRequested => {
                     let dt = PHYSICS_TIMESTEP;
-                    
+
+                    // ── Loading phase ──────────────────────────────────────────────
+                    if game_loading {
+                        // Keep streaming chunks and building meshes each frame
+                        chunk_streamer.update(player.position);
+                        chunk_streamer.process_queues(80.0);
+
+                        // Build mesh + collider for any chunks that finished loading
+                        let new_chunks: Vec<_> = chunk_streamer.newly_loaded_chunks.drain(..).collect();
+                        for chunk_id in new_chunks {
+                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                                let min_v = chunk_data.id.min_voxel();
+                                let max_v = chunk_data.id.max_voxel();
+                                let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
+                                if !mesh.vertices.is_empty() {
+                                    let offset = Vec3::new(
+                                        (chunk_center.x - origin_voxel.x) as f32,
+                                        (chunk_center.y - origin_voxel.y) as f32,
+                                        (chunk_center.z - origin_voxel.z) as f32,
+                                    );
+                                    for v in &mut mesh.vertices { v.position += offset; }
+                                    chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
+                                    let collider = metaverse_core::physics::create_collision_from_mesh(
+                                        &mut physics, &mesh, &origin_voxel, None);
+                                    chunk_data.collider = Some(collider);
+                                }
+                                chunk_data.dirty = false;
+                            }
+                        }
+
+                        // Render loading screen
+                        let loaded = chunk_streamer.stats.chunks_loaded;
+                        if let Ok(output) = context.surface.get_current_texture() {
+                            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let mut encoder = context.device.create_command_encoder(
+                                &wgpu::CommandEncoderDescriptor { label: Some("loading") });
+                            let loading_mesh = create_loading_screen_mesh(loaded as f32 / LOADING_TARGET as f32);
+                            let buf = MeshBuffer::from_mesh(&context.device, &loading_mesh);
+                            {
+                                let mut rp = pipeline.begin_frame(&mut encoder, &view);
+                                pipeline.set_pipeline(&mut rp);
+                                pipeline.write_camera_identity(&context.queue);
+                                pipeline.update_model(&context.queue, &Mat4::IDENTITY);
+                                buf.render(&mut rp);
+                            }
+                            context.queue.submit(std::iter::once(encoder.finish()));
+                            output.present();
+                        }
+
+                        // Transition to game once we have enough terrain
+                        if loaded >= LOADING_TARGET || chunk_streamer.stats.chunks_queued == 0 {
+                            println!("✅ Spawn area loaded ({} chunks) — starting game", loaded);
+                            // Request historical state from peers now that we have chunks
+                            if multiplayer.peer_count() > 0 {
+                                let ids = chunk_streamer.loaded_chunk_ids();
+                                let _ = multiplayer.request_chunk_state(ids);
+                            }
+                            println!("🎮 Game started! Waiting for peers...");
+                            game_loading = false;
+                        }
+                        return;
+                    }
+                    // ── End loading phase ─────────────────────────────────────────
+
                     // Update multiplayer system (polls network, interpolates remote players)
                     multiplayer.update(dt);
                     
@@ -1424,14 +1351,16 @@ fn create_loading_screen_mesh(progress: f32) -> Mesh {
     let mut mesh = Mesh::new();
     let p = progress.clamp(0.0, 1.0);
 
-    // Helper: add a solid quad (two CW triangles) at the given NDC bounds with colour.
+    // Helper: add a solid quad (two CCW triangles) at the given NDC bounds with colour.
+    // CCW winding (viewed from -Z / camera direction) = normal faces camera = not culled.
     let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, col: Vec3| {
-        let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y0, 0.0), col));
-        let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y0, 0.0), col));
-        let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, 0.0), col));
-        let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y1, 0.0), col));
-        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v1, v2));
-        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v2, v3));
+        let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y0, 0.0), col)); // bottom-left
+        let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y0, 0.0), col)); // bottom-right
+        let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, 0.0), col)); // top-right
+        let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y1, 0.0), col)); // top-left
+        // CCW: v0 → v2 → v1 and v0 → v3 → v2 (normal points in -Z = toward camera)
+        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v2, v1));
+        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v3, v2));
     };
 
     // Dark background covering the whole screen
@@ -1461,51 +1390,6 @@ fn create_loading_screen_mesh(progress: f32) -> Mesh {
     add_quad(-0.5, 0.12, 0.5, 0.145, Vec3::new(0.10, 0.80, 0.90));
 
     mesh
-}
-
-/// Render a single loading frame directly to the surface.
-///
-/// Called during the pre-event-loop blocking load phase so the window
-/// shows a live progress bar instead of appearing frozen.
-fn render_loading_frame(
-    context: &RenderContext,
-    pipeline: &RenderPipeline,
-    loaded: usize,
-    total: usize,
-) {
-    let progress = (loaded as f32 / total as f32).min(1.0);
-    let mesh = create_loading_screen_mesh(progress);
-
-    if mesh.triangles.is_empty() {
-        return;
-    }
-
-    let buf = MeshBuffer::from_mesh(&context.device, &mesh);
-
-    let output = match context.surface.get_current_texture() {
-        Ok(t) => t,
-        Err(_) => return, // surface not ready yet — skip frame
-    };
-    let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = context.device.create_command_encoder(
-        &wgpu::CommandEncoderDescriptor { label: Some("loading_encoder") }
-    );
-
-    {
-        let mut rp = pipeline.begin_frame(&mut encoder, &view);
-        pipeline.set_pipeline(&mut rp);
-        // Identity view-proj so our NDC-space loading geometry renders correctly
-        pipeline.write_camera_identity(&context.queue);
-        let identity = Mat4::IDENTITY;
-        pipeline.update_model(&context.queue, &identity);
-        buf.render(&mut rp);
-    }
-
-    context.queue.submit(std::iter::once(encoder.finish()));
-    output.present();
-
-    println!("   [{:3.0}%] Loaded {} / {} chunks",
-        progress * 100.0, loaded, total);
 }
 
 /// Take screenshot (simplified - just print message for now)
