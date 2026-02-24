@@ -279,6 +279,12 @@ impl RenderPipeline {
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
     }
 
+    /// Write identity view-projection — use before rendering screen-space overlays.
+    pub fn write_camera_identity(&self, queue: &wgpu::Queue) {
+        let identity = CameraUniform::new(); // default is identity
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[identity]));
+    }
+
     /// Update model matrix uniform
     pub fn update_model(&self, queue: &wgpu::Queue, model_matrix: &glam::Mat4) {
         queue.write_buffer(&self.model_buffer, 0, bytemuck::cast_slice(model_matrix.as_ref()));

@@ -342,28 +342,20 @@ fn main() {
     let spawn_ecef = origin_gps.to_ecef();
     chunk_streamer.update(spawn_ecef);
     
-    // Load chunks until we have enough around spawn (respecting max limit)
-    let target_chunks = 30;  // Load 30 for immediate spawn area
-    println!("   Target: {} chunks (max capacity: 100)", target_chunks);
-    
+    // Load chunks until we have enough around spawn (respecting max limit).
+    // Use a short per-iteration budget so render_loading_frame() gets called
+    // each iteration, keeping the window visually responsive.
+    let target_chunks = 30;
     let mut last_loaded = 0;
     loop {
-        // Process chunks with large budget
-        chunk_streamer.process_queues(10000.0);  // 10 second budget = ~30 chunks
-        
-        // Update stats manually (normally done in update())
+        chunk_streamer.process_queues(80.0); // ~80ms budget per iter → ~12 fps during load
         chunk_streamer.stats.chunks_loaded = chunk_streamer.loaded_chunks().count();
-        
+
         if chunk_streamer.stats.chunks_loaded != last_loaded {
-            let progress = (chunk_streamer.stats.chunks_loaded as f32 / target_chunks as f32 * 100.0).min(100.0);
-            println!("   [{:3.0}%] Loaded {} / {} chunks", 
-                progress, 
-                chunk_streamer.stats.chunks_loaded,
-                target_chunks);
+            render_loading_frame(&context, &pipeline, chunk_streamer.stats.chunks_loaded, target_chunks);
             last_loaded = chunk_streamer.stats.chunks_loaded;
         }
-        
-        // Exit once we have enough or no more queued
+
         if chunk_streamer.stats.chunks_loaded >= target_chunks || chunk_streamer.stats.chunks_queued == 0 {
             break;
         }
@@ -395,6 +387,9 @@ fn main() {
     // Generate meshes and collision for loaded chunks
     println!("🔺 Generating meshes and collision for loaded chunks...");
     let mesh_start = Instant::now();
+
+    // Show loading screen at 100% during mesh build (still blocking, but brief)
+    render_loading_frame(&context, &pipeline, target_chunks, target_chunks);
     
     // Initialize physics world with FloatingOrigin at origin
     let origin_voxel_ecef = origin_voxel.to_ecef();
@@ -1414,6 +1409,103 @@ fn create_crosshair() -> Mesh {
     mesh.add_line(v2, v3);
     
     mesh
+}
+
+// ─── Loading screen ──────────────────────────────────────────────────────────
+
+/// Build screen-space loading overlay geometry.
+///
+/// All coordinates are in NDC clip space (x: -1..1, y: -1..1, z: 0).
+/// - Background: full-screen dark panel
+/// - Bar background: grey outline rect  
+/// - Bar fill: cyan fill scaled by `progress` (0.0 – 1.0)
+/// - Four corner dots (aesthetic)
+fn create_loading_screen_mesh(progress: f32) -> Mesh {
+    let mut mesh = Mesh::new();
+    let p = progress.clamp(0.0, 1.0);
+
+    // Helper: add a solid quad (two CW triangles) at the given NDC bounds with colour.
+    let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, col: Vec3| {
+        let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y0, 0.0), col));
+        let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y0, 0.0), col));
+        let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, 0.0), col));
+        let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y1, 0.0), col));
+        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v1, v2));
+        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v2, v3));
+    };
+
+    // Dark background covering the whole screen
+    add_quad(-1.0, -1.0, 1.0, 1.0, Vec3::new(0.04, 0.06, 0.10));
+
+    // Bar trough (grey)
+    add_quad(-0.5, -0.06, 0.5, 0.06, Vec3::new(0.20, 0.22, 0.24));
+
+    // Bar fill (cyan, width scales with progress)
+    if p > 0.001 {
+        add_quad(-0.5, -0.06, -0.5 + p, 0.06, Vec3::new(0.10, 0.80, 0.90));
+    }
+
+    // Thin white border lines for the bar
+    let bx0 = -0.5f32;
+    let bx1 =  0.5f32;
+    let by0 = -0.06f32;
+    let by1 =  0.06f32;
+    let bw  =  0.004f32;
+    let bc  = Vec3::new(0.80, 0.82, 0.85);
+    add_quad(bx0,        by0,        bx1,        by0 + bw, bc); // bottom
+    add_quad(bx0,        by1 - bw,   bx1,        by1,      bc); // top
+    add_quad(bx0,        by0,        bx0 + bw,   by1,      bc); // left
+    add_quad(bx1 - bw,   by0,        bx1,        by1,      bc); // right
+
+    // Title bar accent (thin horizontal rule above the progress bar)
+    add_quad(-0.5, 0.12, 0.5, 0.145, Vec3::new(0.10, 0.80, 0.90));
+
+    mesh
+}
+
+/// Render a single loading frame directly to the surface.
+///
+/// Called during the pre-event-loop blocking load phase so the window
+/// shows a live progress bar instead of appearing frozen.
+fn render_loading_frame(
+    context: &RenderContext,
+    pipeline: &RenderPipeline,
+    loaded: usize,
+    total: usize,
+) {
+    let progress = (loaded as f32 / total as f32).min(1.0);
+    let mesh = create_loading_screen_mesh(progress);
+
+    if mesh.triangles.is_empty() {
+        return;
+    }
+
+    let buf = MeshBuffer::from_mesh(&context.device, &mesh);
+
+    let output = match context.surface.get_current_texture() {
+        Ok(t) => t,
+        Err(_) => return, // surface not ready yet — skip frame
+    };
+    let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = context.device.create_command_encoder(
+        &wgpu::CommandEncoderDescriptor { label: Some("loading_encoder") }
+    );
+
+    {
+        let mut rp = pipeline.begin_frame(&mut encoder, &view);
+        pipeline.set_pipeline(&mut rp);
+        // Identity view-proj so our NDC-space loading geometry renders correctly
+        pipeline.write_camera_identity(&context.queue);
+        let identity = Mat4::IDENTITY;
+        pipeline.update_model(&context.queue, &identity);
+        buf.render(&mut rp);
+    }
+
+    context.queue.submit(std::iter::once(encoder.finish()));
+    output.present();
+
+    println!("   [{:3.0}%] Loaded {} / {} chunks",
+        progress * 100.0, loaded, total);
 }
 
 /// Take screenshot (simplified - just print message for now)
