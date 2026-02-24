@@ -601,7 +601,7 @@ fn main() {
     let mut cursor_grabbed = false;
     
     // Track local voxel operations for CRDT merge
-    let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::VoxelOperation> = HashMap::new();
+    let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::SignedOperation> = HashMap::new();
     
     println!("\n🎮 Demo running!");
     println!("   Waiting for peers to connect...");
@@ -906,22 +906,24 @@ fn main() {
                         println!("📦 Processing {} received voxel operations", pending_ops.len());
                         for op in pending_ops {
                             // Apply to the appropriate chunk
-                            let chunk_id = ChunkId::from_voxel(&op.coord);
-                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
-                                let material_id = op.material.to_material_id();
-                                chunk_data.octree.set_voxel(op.coord, material_id);
-                                chunk_data.dirty = true;
-                                
-                                // Save to BOTH user_content (for ChunkStreamer persistence) AND chunk_manager (for CRDT)
-                                user_content.lock().unwrap().add_local_operation(op.clone());
-                                chunk_manager.add_operation(op.clone());
-                                
-                                println!("✅ Applied remote voxel operation at {:?}", op.coord);
-                            } else {
-                                // Operation for unloaded chunk - still save it for when chunk loads
-                                user_content.lock().unwrap().add_local_operation(op.clone());
-                                chunk_manager.add_operation(op.clone());
-                                println!("⚠️  Remote operation for unloaded chunk {} - saved for later", chunk_id);
+                            if let (Some(coord), Some(material)) = (op.coord(), op.material()) {
+                                let chunk_id = ChunkId::from_voxel(&coord);
+                                if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                                    let material_id = material.to_material_id();
+                                    chunk_data.octree.set_voxel(coord, material_id);
+                                    chunk_data.dirty = true;
+
+                                    // Save to BOTH user_content (for ChunkStreamer persistence) AND chunk_manager (for CRDT)
+                                    user_content.lock().unwrap().add_local_operation(op.clone());
+                                    chunk_manager.add_operation(op.clone());
+
+                                    println!("✅ Applied remote voxel operation at {:?}", coord);
+                                } else {
+                                    // Operation for unloaded chunk - still save it for when chunk loads
+                                    user_content.lock().unwrap().add_local_operation(op.clone());
+                                    chunk_manager.add_operation(op.clone());
+                                    println!("⚠️  Remote operation for unloaded chunk {} - saved for later", chunk_id);
+                                }
                             }
                         }
                     }
@@ -937,13 +939,15 @@ fn main() {
                         // Also save to user_content for persistence
                         for op in &state_ops {
                             user_content.lock().unwrap().add_local_operation(op.clone());
-                            
+
                             // Apply to loaded chunks if they're in memory
-                            let chunk_id = ChunkId::from_voxel(&op.coord);
-                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
-                                let material_id = op.material.to_material_id();
-                                chunk_data.octree.set_voxel(op.coord, material_id);
-                                chunk_data.dirty = true;
+                            if let (Some(coord), Some(material)) = (op.coord(), op.material()) {
+                                let chunk_id = ChunkId::from_voxel(&coord);
+                                if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                                    let material_id = material.to_material_id();
+                                    chunk_data.octree.set_voxel(coord, material_id);
+                                    chunk_data.dirty = true;
+                                }
                             }
                         }
                         
