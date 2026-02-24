@@ -638,34 +638,10 @@ fn main() {
 
                         loading_frames += 1;
 
-                        // Show a plain background while loading — update window title with progress
                         let loaded = chunk_streamer.stats.chunks_loaded;
-                        let title = format!(
-                            "Metaverse — Loading chunks... {}/{} (player chunk: {})",
-                            loaded,
-                            LOADING_TARGET,
-                            if chunk_streamer.get_chunk(&player_chunk).map(|c| c.collider.is_some()).unwrap_or(false) {
-                                "ready ✓"
-                            } else {
-                                "waiting..."
-                            }
-                        );
-                        window.set_title(&title);
-
-                        if let Ok(output) = context.surface.get_current_texture() {
-                            let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                            let mut encoder = context.device.create_command_encoder(
-                                &wgpu::CommandEncoderDescriptor { label: Some("loading") });
-                            {
-                                // Just clear to background — terrain shader handles the rest when game starts
-                                let _rp = pipeline.begin_frame(&mut encoder, &view);
-                            }
-                            context.queue.submit(std::iter::once(encoder.finish()));
-                            output.present();
-                        }
 
                         // Transition to game only when:
-                        //  1. Minimum frames shown so the player sees the loading screen
+                        //  1. Minimum frames elapsed
                         //  2. The chunk the player is ACTUALLY standing in has a collider
                         //     (prevents falling through terrain on first physics step)
                         //  3. Enough surrounding chunks are also ready (or queue drained)
@@ -680,7 +656,6 @@ fn main() {
 
                         if loading_frames >= 20 && player_chunk_ready && (enough_chunks || queue_drained) {
                             println!("✅ Spawn area loaded ({} chunks), player chunk ready — starting game", loaded);
-                            window.set_title("Metaverse");
 
                             // Request historical state from peers now that we have chunks
                             if multiplayer.peer_count() > 0 {
