@@ -638,21 +638,27 @@ fn main() {
 
                         loading_frames += 1;
 
-                        // Render loading screen (show progress toward LOADING_TARGET)
+                        // Show a plain background while loading — update window title with progress
                         let loaded = chunk_streamer.stats.chunks_loaded;
-                        let progress = (loaded as f32 / LOADING_TARGET as f32).min(1.0);
+                        let title = format!(
+                            "Metaverse — Loading chunks... {}/{} (player chunk: {})",
+                            loaded,
+                            LOADING_TARGET,
+                            if chunk_streamer.get_chunk(&player_chunk).map(|c| c.collider.is_some()).unwrap_or(false) {
+                                "ready ✓"
+                            } else {
+                                "waiting..."
+                            }
+                        );
+                        window.set_title(&title);
+
                         if let Ok(output) = context.surface.get_current_texture() {
                             let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let mut encoder = context.device.create_command_encoder(
                                 &wgpu::CommandEncoderDescriptor { label: Some("loading") });
-                            let loading_mesh = create_loading_screen_mesh(progress);
-                            let buf = MeshBuffer::from_mesh(&context.device, &loading_mesh);
                             {
-                                let mut rp = pipeline.begin_frame(&mut encoder, &view);
-                                pipeline.set_pipeline(&mut rp);
-                                pipeline.write_camera_identity(&context.queue);
-                                pipeline.update_model(&context.queue, &Mat4::IDENTITY);
-                                buf.render(&mut rp);
+                                // Just clear to background — terrain shader handles the rest when game starts
+                                let _rp = pipeline.begin_frame(&mut encoder, &view);
                             }
                             context.queue.submit(std::iter::once(encoder.finish()));
                             output.present();
@@ -674,6 +680,7 @@ fn main() {
 
                         if loading_frames >= 20 && player_chunk_ready && (enough_chunks || queue_drained) {
                             println!("✅ Spawn area loaded ({} chunks), player chunk ready — starting game", loaded);
+                            window.set_title("Metaverse");
 
                             // Request historical state from peers now that we have chunks
                             if multiplayer.peer_count() > 0 {
@@ -1366,51 +1373,6 @@ fn create_crosshair() -> Mesh {
 /// - Bar background: grey outline rect  
 /// - Bar fill: cyan fill scaled by `progress` (0.0 – 1.0)
 /// - Four corner dots (aesthetic)
-fn create_loading_screen_mesh(progress: f32) -> Mesh {
-    let mut mesh = Mesh::new();
-    let p = progress.clamp(0.0, 1.0);
-
-    // Helper: add a solid quad (two CCW triangles) at the given NDC bounds with colour.
-    // CCW winding (viewed from -Z / camera direction) = normal faces camera = not culled.
-    let mut add_quad = |x0: f32, y0: f32, x1: f32, y1: f32, col: Vec3| {
-        let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y0, 0.0), col)); // bottom-left
-        let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y0, 0.0), col)); // bottom-right
-        let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y1, 0.0), col)); // top-right
-        let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y1, 0.0), col)); // top-left
-        // CCW: v0 → v2 → v1 and v0 → v3 → v2 (normal points in -Z = toward camera)
-        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v2, v1));
-        mesh.add_triangle(metaverse_core::mesh::Triangle::new(v0, v3, v2));
-    };
-
-    // Dark background covering the whole screen
-    add_quad(-1.0, -1.0, 1.0, 1.0, Vec3::new(0.04, 0.06, 0.10));
-
-    // Bar trough (grey)
-    add_quad(-0.5, -0.06, 0.5, 0.06, Vec3::new(0.20, 0.22, 0.24));
-
-    // Bar fill (cyan, width scales with progress)
-    if p > 0.001 {
-        add_quad(-0.5, -0.06, -0.5 + p, 0.06, Vec3::new(0.10, 0.80, 0.90));
-    }
-
-    // Thin white border lines for the bar
-    let bx0 = -0.5f32;
-    let bx1 =  0.5f32;
-    let by0 = -0.06f32;
-    let by1 =  0.06f32;
-    let bw  =  0.004f32;
-    let bc  = Vec3::new(0.80, 0.82, 0.85);
-    add_quad(bx0,        by0,        bx1,        by0 + bw, bc); // bottom
-    add_quad(bx0,        by1 - bw,   bx1,        by1,      bc); // top
-    add_quad(bx0,        by0,        bx0 + bw,   by1,      bc); // left
-    add_quad(bx1 - bw,   by0,        bx1,        by1,      bc); // right
-
-    // Title bar accent (thin horizontal rule above the progress bar)
-    add_quad(-0.5, 0.12, 0.5, 0.145, Vec3::new(0.10, 0.80, 0.90));
-
-    mesh
-}
-
 /// Take screenshot (simplified - just print message for now)
 fn take_screenshot(
     _context: &RenderContext,
