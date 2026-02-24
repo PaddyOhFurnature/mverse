@@ -58,6 +58,7 @@ use crate::{
         LamportClock, Material, MovementMode, PlayerStateMessage, SignedOperation, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
+    permissions::{action_to_class, check_key_level_permission, PermissionConfig, PermissionResult},
     player_state::PlayerStateManager,
     spatial_sharding::{SpatialSharding, SpatialConfig},
     vector_clock,
@@ -68,6 +69,7 @@ use libp2p::PeerId;
 use crossbeam::channel::{self, Sender, Receiver};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use sha2::{Sha256, Digest as _};
 
 /// Result type for multiplayer operations
 pub type Result<T> = std::result::Result<T, MultiplayerError>;
@@ -209,6 +211,9 @@ pub struct MultiplayerSystem {
     /// P2P identity registry — cached KeyRecords for all known peers
     pub key_registry: KeyRegistry,
     
+    /// Permission configuration — controls what is checked on incoming ops
+    pub perm_config: PermissionConfig,
+    
     /// Statistics
     stats: MultiplayerStats,
 }
@@ -294,6 +299,7 @@ impl MultiplayerSystem {
                 reg.load_from_disk().ok();
                 reg
             },
+            perm_config: PermissionConfig::default(),
             stats: MultiplayerStats::default(),
         })
     }
@@ -738,6 +744,22 @@ impl MultiplayerSystem {
             NetworkEvent::DirectConnectionUpgraded { peer_id } => {
                 println!("⚡ [DCUtR] Hole punch succeeded — now direct with: {}", peer_id);
             }
+            NetworkEvent::DhtRecordFound { key, value } => {
+                // Attempt to deserialize as a KeyRecord and update the registry
+                match crate::identity::KeyRecord::from_bytes(&value) {
+                    Ok(record) => {
+                        let peer_id = record.peer_id;
+                        match self.key_registry.apply_update(record) {
+                            Ok(true)  => println!("🔑 [DHT] Updated KeyRecord for {} from DHT", peer_id),
+                            Ok(false) => {}  // already had this record
+                            Err(e)    => eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e),
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("🔑 [DHT] Failed to deserialize DHT record ({} bytes): {}", value.len(), e);
+                    }
+                }
+            }
         }
         
         Ok(())
@@ -770,50 +792,76 @@ impl MultiplayerSystem {
     
     /// Handle incoming voxel operation with CRDT merge and signature verification
     fn handle_voxel_operation(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
-        let legacy_op = VoxelOperation::from_bytes(data)?;
-        
-        // Log full ECEF coords so we can verify position matches sender
-        let ecef = legacy_op.coord.to_ecef();
-        println!("🔨 Received voxel op from {}: {:?} at voxel={:?} ecef=({:.1},{:.1},{:.1})",
-            peer_id, legacy_op.material, legacy_op.coord, ecef.x, ecef.y, ecef.z);
-        
-        // Check if we've already seen this operation (deduplication)
-        if self.voxel_op_seen.contains(&legacy_op.signature) {
-            return Ok(()); // Already applied
+        // Try new SignedOperation format first; fall back to legacy VoxelOperation
+        let op: SignedOperation = if let Ok(signed) = SignedOperation::from_bytes(data) {
+            signed
+        } else {
+            #[allow(deprecated)]
+            match VoxelOperation::from_bytes(data) {
+                Ok(legacy) => {
+                    self.clock.receive(legacy.timestamp);
+                    self.vector_clock.merge(&legacy.vector_clock);
+                    self.vector_clock.increment(self.local_peer_id);
+                    #[allow(deprecated)]
+                    SignedOperation::from(legacy)
+                }
+                Err(e) => {
+                    eprintln!("⚠️  [VoxelOp] Failed to deserialize from {}: {}", peer_id, e);
+                    return Ok(());
+                }
+            }
+        };
+
+        let ecef = op.coord().map(|c| c.to_ecef());
+        if let Some(ecef) = ecef {
+            println!("🔨 Received voxel op from {}: {:?} at ecef=({:.1},{:.1},{:.1})",
+                peer_id, op.action.name(), ecef.x, ecef.y, ecef.z);
         }
-        
-        // Verify signature (legacy path)
-        if !self.verify_operation(&legacy_op, &peer_id)? {
-            self.stats.invalid_signatures += 1;
+
+        // Deduplication
+        if self.voxel_op_seen.contains(&op.signature) {
+            return Ok(());
+        }
+
+        // Author sanity check
+        if op.author != peer_id {
+            eprintln!("⚠️  [VoxelOp] Author mismatch: claimed {}, received from {}", op.author, peer_id);
             self.stats.voxel_ops_rejected += 1;
-            
-            // Track reputation
+            return Ok(());
+        }
+
+        // Permission check: sig + key type + expiry + revocation
+        let action_class = action_to_class(&op.action);
+        let op_bytes = op.signable_bytes();
+        let perm = check_key_level_permission(
+            &mut self.key_registry,
+            &op.author,
+            &op.public_key,
+            &op_bytes,
+            &op.signature,
+            action_class,
+            &self.perm_config,
+        );
+        if perm.is_denied() {
+            eprintln!("🔒 [VoxelOp] Op from {} denied: {}", peer_id, perm);
+            self.stats.voxel_ops_rejected += 1;
             let count = self.peer_reputation.entry(peer_id).or_insert(0);
             *count += 1;
-            
             if *count >= MAX_INVALID_SIGNATURES {
-                eprintln!("⚠️ Blocking malicious peer {}: too many invalid signatures", peer_id);
+                eprintln!("⚠️  Blocking peer {}: too many denied ops", peer_id);
                 self.blocked_peers.insert(peer_id);
-                return Err(MultiplayerError::MaliciousPeer(peer_id));
             }
-            
-            return Err(MultiplayerError::InvalidSignature(peer_id));
+            return Ok(());
         }
-        
-        // Update clocks
-        self.clock.receive(legacy_op.timestamp);
-        self.vector_clock.merge(&legacy_op.vector_clock);
+
+        self.clock.receive(op.lamport);
+        self.vector_clock.merge(&op.vector_clock);
         self.vector_clock.increment(self.local_peer_id);
-        
-        // Remember we've seen this operation
-        self.voxel_op_seen.insert(legacy_op.signature);
-        
+
+        self.voxel_op_seen.insert(op.signature);
         self.stats.voxel_ops_received += 1;
-        
-        // Convert to SignedOperation and queue
-        #[allow(deprecated)]
-        self.pending_ops.push(SignedOperation::from(legacy_op));
-        
+        self.pending_ops.push(op);
+
         Ok(())
     }
     
@@ -868,9 +916,27 @@ impl MultiplayerSystem {
             for op in ops {
                 // Check for duplicates (by signature)
                 if self.voxel_op_seen.contains(&op.signature) {
-                    continue; // Already have this operation
+                    continue;
                 }
-                
+
+                // Permission check: sig + key type + expiry + revocation
+                let action_class = action_to_class(&op.action);
+                let op_bytes = op.signable_bytes();
+                let perm = check_key_level_permission(
+                    &mut self.key_registry,
+                    &op.author,
+                    &op.public_key,
+                    &op_bytes,
+                    &op.signature,
+                    action_class,
+                    &self.perm_config,
+                );
+                if perm.is_denied() {
+                    eprintln!("🔒 [StateSync] Op from {} denied: {}", op.author, perm);
+                    self.stats.voxel_ops_rejected += 1;
+                    continue;
+                }
+
                 // Mark as seen and queue for application
                 self.voxel_op_seen.insert(op.signature);
                 self.pending_state_ops.push(op);
@@ -885,34 +951,14 @@ impl MultiplayerSystem {
         Ok(())
     }
     
-    /// Verify voxel operation signature
+    /// Check whether the local player's key is allowed to perform an action.
     ///
-    /// This is critical security - prevents griefing and ensures operations
-    /// are from legitimate peers.
-    fn verify_operation(&self, op: &VoxelOperation, peer_id: &PeerId) -> Result<bool> {
-        // TODO: Extract VerifyingKey from PeerId
-        // For now, we verify that the signature matches the embedded author
-        // Full verification requires mapping PeerId -> VerifyingKey
-        
-        // The operation already has the author's peer_id embedded
-        if &op.author != peer_id {
-            eprintln!("⚠️ Operation author mismatch: claimed {}, received from {}", 
-                op.author, peer_id);
-            return Ok(false);
-        }
-        
-        // Signature verification needs the public key
-        // Since we derive PeerId from Ed25519 public key, we can reconstruct it
-        // For Phase 1.5, we trust that peer_id matches (libp2p validates connection)
-        // Phase 2 will add full public key verification
-        
-        // TODO: Implement full Ed25519 verification
-        // let verifying_key = extract_verifying_key_from_peer_id(peer_id)?;
-        // Ok(op.verify(&verifying_key)?)
-        
-        // For now: Trust libp2p's connection authentication
-        // The signature is there and can be verified when we add key distribution
-        Ok(true)
+    /// Call this before creating and broadcasting a local operation.
+    /// Returns `PermissionResult::Allowed` if the action is permitted.
+    pub fn check_local_op_permission(&mut self, action: &Action) -> PermissionResult {
+        let record = self.key_registry.get_or_default(self.local_peer_id);
+        let class = action_to_class(action);
+        crate::permissions::check_record_permission(&record, class, &self.perm_config)
     }
     
     /// Apply a received voxel operation to the octree with CRDT merge
@@ -1176,6 +1222,35 @@ impl MultiplayerSystem {
             topic: TOPIC_KEY_REGISTRY.to_string(),
             data,
         });
+
+        // Also push to the DHT so newly joining peers that miss the gossipsub
+        // announcement can still discover our KeyRecord.
+        if let KeyRegistryMessage::Publish(ref raw_record) = msg {
+            if let Ok(record_bytes) = raw_record.to_bytes() {
+                let dht_key = Self::peer_dht_key(&self.local_peer_id);
+                let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+                    key: dht_key.clone(),
+                    value: record_bytes,
+                });
+                let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey {
+                    key: dht_key,
+                });
+            }
+        }
+    }
+
+    /// Derive the deterministic Kademlia key for a peer's KeyRecord.
+    /// SHA-256 of the peer's raw PeerId bytes gives a 32-byte DHT key.
+    fn peer_dht_key(peer_id: &PeerId) -> Vec<u8> {
+        Sha256::digest(peer_id.to_bytes()).to_vec()
+    }
+
+    /// Request a peer's KeyRecord from the DHT.
+    /// The result is returned later as a `NetworkEvent::DhtRecordFound` and handled in
+    /// `handle_network_event()`.
+    pub fn request_dht_key_lookup(&self, peer_id: &PeerId) {
+        let key = Self::peer_dht_key(peer_id);
+        let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
     }
 
     /// Take pending manifests for the game loop to process.
@@ -1424,6 +1499,15 @@ fn run_network_thread(
                     NetworkCommand::Shutdown => {
                         println!("Network thread shutting down");
                         return;
+                    }
+                    NetworkCommand::PutDhtRecord { key, value } => {
+                        network.put_dht_record(key, value);
+                    }
+                    NetworkCommand::StartProvidingKey { key } => {
+                        network.start_providing_key(key);
+                    }
+                    NetworkCommand::GetDhtRecord { key } => {
+                        network.get_dht_record(key);
                     }
                 }
             }

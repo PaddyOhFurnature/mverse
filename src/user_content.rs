@@ -14,35 +14,14 @@
 use crate::{
     chunk::ChunkId,
     messages::{VoxelOperation, SignedOperation},
+    permissions::{action_to_class, check_record_permission, PermissionConfig, PermissionResult},
     voxel::VoxelCoord,
 };
+use crate::identity::{KeyRecord, KeyType};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-
-/// Configuration flags for verification (can be toggled for testing)
-#[derive(Debug, Clone)]
-pub struct VerificationConfig {
-    /// Verify Ed25519 signatures on operations
-    pub verify_signatures: bool,
-    
-    /// Verify parcel ownership permissions
-    pub verify_permissions: bool,
-    
-    /// Enable operation logging
-    pub enable_logging: bool,
-}
-
-impl Default for VerificationConfig {
-    fn default() -> Self {
-        Self {
-            verify_signatures: true,
-            verify_permissions: false, // Not implemented yet
-            enable_logging: true,
-        }
-    }
-}
 
 /// Parcel ownership bounds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -78,18 +57,18 @@ pub struct UserContentLayer {
     /// Access grants
     access_grants: HashMap<(ParcelBounds, PeerId), bool>,
     
-    /// Verification configuration
-    config: VerificationConfig,
+    /// Permission configuration (replaces old VerificationConfig)
+    pub config: PermissionConfig,
 }
 
 impl UserContentLayer {
     /// Create a new empty user content layer
     pub fn new() -> Self {
-        Self::with_config(VerificationConfig::default())
+        Self::with_config(PermissionConfig::default())
     }
     
-    /// Create with custom verification config
-    pub fn with_config(config: VerificationConfig) -> Self {
+    /// Create with custom permission config
+    pub fn with_config(config: PermissionConfig) -> Self {
         Self {
             op_log: Vec::new(),
             parcels: HashMap::new(),
@@ -108,7 +87,7 @@ impl UserContentLayer {
         op: SignedOperation,
         local_ops: &HashMap<VoxelCoord, SignedOperation>,
     ) -> Result<bool, ApplyError> {
-        // 1. Verify signature (if enabled)
+        // 1. Verify Ed25519 signature (if enabled)
         if self.config.verify_signatures {
             if !op.verify() {
                 return Err(ApplyError::InvalidSignature);
@@ -120,7 +99,7 @@ impl UserContentLayer {
             Some(c) => c,
             None => {
                 // Non-terrain op: add to log, no octree conflict
-                if self.config.enable_logging { self.op_log.push(op); }
+                self.op_log.push(op);
                 return Ok(true);
             }
         };
@@ -128,22 +107,50 @@ impl UserContentLayer {
         // 3. CRDT conflict resolution: check for conflicting local operation
         if let Some(local_op) = local_ops.get(&op_coord) {
             if !op.wins_over(local_op) {
-                // Local operation wins, reject remote
                 return Ok(false);
             }
         }
         
-        // 4. Check permission (if enabled)
-        if self.config.verify_permissions {
-            if !self.check_permission(&op) {
+        // 4. Permission check via key-type table (if enabled)
+        // Uses a synthetic Guest record when author's real record is unknown
+        if self.config.verify_key_types || self.config.verify_expiry || self.config.verify_revocation {
+            // Build a minimal guest record for checking key-type permissions
+            // (full sig + registry check happens in multiplayer.rs before ops reach here)
+            let guest_record = KeyRecord {
+                version: 1,
+                peer_id: op.author,
+                public_key: op.public_key,
+                key_type: crate::identity::KeyType::Personal, // assume Personal for layer check
+                display_name: None,
+                bio: None,
+                avatar_hash: None,
+                created_at: 0,
+                expires_at: None,
+                updated_at: 0,
+                issued_by: None,
+                issuer_sig: None,
+                revoked: false,
+                revoked_at: None,
+                revoked_by: None,
+                revocation_reason: None,
+                self_sig: [0u8; 64],
+            };
+            let class = action_to_class(&op.action);
+            let result = check_record_permission(&guest_record, class, &self.config);
+            if result.is_denied() {
+                return Err(ApplyError::Unauthorized);
+            }
+        }
+
+        // 5. Spatial ownership check (if enabled)
+        if self.config.verify_ownership {
+            if !self.check_ownership(&op) {
                 return Err(ApplyError::Unauthorized);
             }
         }
         
-        // 5. Append to operation log (if enabled)
-        if self.config.enable_logging {
-            self.op_log.push(op);
-        }
+        // 6. Append to operation log
+        self.op_log.push(op);
         
         Ok(true)
     }
@@ -159,10 +166,39 @@ impl UserContentLayer {
     
     /// Add a local operation to the log
     ///
-    /// Use this for operations created by the local player.
-    /// For received operations from network, use apply_operation().
-    pub fn add_local_operation(&mut self, op: SignedOperation) {
-        self.op_log.push(op);
+    /// Use this for operations created by the local player (already verified by
+    /// the multiplayer layer before being passed here). For received operations
+    /// from the network, use apply_operation().
+    ///
+    /// Returns `PermissionResult::Allowed` on success, or the denial reason.
+    /// The caller is responsible for not applying denied ops to the octree.
+    pub fn add_local_operation(&mut self, op: SignedOperation) -> PermissionResult {
+        // Build a minimal record from the op's embedded public key for key-type check
+        let record = KeyRecord {
+            version: 1,
+            peer_id: op.author,
+            public_key: op.public_key,
+            key_type: crate::identity::KeyType::Personal, // local ops are at least Personal
+            display_name: None,
+            bio: None,
+            avatar_hash: None,
+            created_at: 0,
+            expires_at: None,
+            updated_at: 0,
+            issued_by: None,
+            issuer_sig: None,
+            revoked: false,
+            revoked_at: None,
+            revoked_by: None,
+            revocation_reason: None,
+            self_sig: [0u8; 64],
+        };
+        let class = action_to_class(&op.action);
+        let result = check_record_permission(&record, class, &self.config);
+        if result.is_allowed() {
+            self.op_log.push(op);
+        }
+        result
     }
     
     /// Get the operation log
@@ -226,8 +262,8 @@ impl UserContentLayer {
         true
     }
     
-    /// Check if operation is permitted
-    fn check_permission(&self, op: &SignedOperation) -> bool {
+    /// Check if operation is permitted based on parcel ownership
+    fn check_ownership(&self, op: &SignedOperation) -> bool {
         op.coord().map(|c| self.has_access(op.author, &c)).unwrap_or(true)
     }
     

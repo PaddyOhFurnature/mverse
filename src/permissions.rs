@@ -40,6 +40,7 @@
 
 use crate::identity::{KeyRecord, KeyType};
 use crate::key_registry::KeyRegistry;
+use crate::messages::Action;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -372,6 +373,57 @@ pub fn check_record_permission(
         return PermissionResult::KeyTypeNotAllowed;
     }
     PermissionResult::Allowed
+}
+
+// ─── Action → ActionClass mapping ────────────────────────────────────────────
+
+/// Map a concrete [`Action`] to its permission [`ActionClass`].
+///
+/// This is the bridge between the gameplay `Action` enum (which has 21 concrete
+/// variants covering every mutable game operation) and the 20-class permission
+/// table that determines what each key type is allowed to do.
+///
+/// The mapping is conservative: when a voxel edit could be in either a free
+/// zone or an owned parcel, we use `BuildInFreeZone` here and rely on the
+/// ownership check (in `user_content.rs`) to elevate it to `BuildInOwnedParcel`
+/// when the target coordinate is inside a parcel.
+pub fn action_to_class(action: &Action) -> ActionClass {
+    match action {
+        // Terrain edits default to free-zone build; ownership layer upgrades when needed
+        Action::SetVoxel { .. }       => ActionClass::BuildInFreeZone,
+        Action::RemoveVoxel { .. }    => ActionClass::BuildInFreeZone,
+        Action::FillRegion { .. }     => ActionClass::BuildInFreeZone,
+
+        // Object manipulation also defaults to free-zone
+        Action::PlaceObject { .. }    => ActionClass::BuildInFreeZone,
+        Action::RemoveObject { .. }   => ActionClass::BuildInFreeZone,
+        Action::MoveObject { .. }     => ActionClass::BuildInFreeZone,
+        Action::ConfigureObject { .. }=> ActionClass::BuildInFreeZone,
+
+        // Parcel management
+        Action::ClaimParcel { .. }    => ActionClass::ClaimParcel,
+        Action::AbandonParcel { .. }  => ActionClass::AbandonParcel,
+        Action::TransferOwnership { .. } => ActionClass::TransferOwnership,
+        Action::GrantAccess { .. }    => ActionClass::GrantAccess,
+        Action::RevokeAccess { .. }   => ActionClass::RevokeAccess,
+
+        // Commerce
+        Action::CreateListing { .. }  => ActionClass::CreateListing,
+        Action::AcceptListing { .. }  => ActionClass::SignContract,
+        Action::CancelListing { .. }  => ActionClass::TransferOwnership,
+        Action::SignContract { .. }   => ActionClass::SignContract,
+
+        // Content creation
+        Action::PublishBlueprint { .. } => ActionClass::PublishContent,
+        Action::ImportAsset { .. }      => ActionClass::ImportAsset,
+
+        // Identity management
+        Action::PublishKeyRecord { .. } => ActionClass::PublishKeyRecord,
+        Action::RevokeKey { .. }        => ActionClass::RevokeKey,
+
+        // Infrastructure
+        Action::RegisterRelay { .. }    => ActionClass::ManageRelay,
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

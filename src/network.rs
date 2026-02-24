@@ -98,6 +98,25 @@ pub enum NetworkCommand {
         data: Vec<u8>,
     },
     
+    /// Publish own KeyRecord to the Kademlia DHT (value = bincode bytes of KeyRecord).
+    /// Key = SHA-256 of the local PeerId bytes, making lookups deterministic.
+    PutDhtRecord {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+
+    /// Advertise ourselves as a provider for a DHT content key.
+    /// Used so others can discover our KeyRecord via `get_providers`.
+    StartProvidingKey {
+        key: Vec<u8>,
+    },
+
+    /// Request a value from the DHT by content key.
+    /// Result is returned as a `NetworkEvent::DhtRecordFound`.
+    GetDhtRecord {
+        key: Vec<u8>,
+    },
+
     /// Shutdown the network thread
     Shutdown,
 }
@@ -200,6 +219,12 @@ pub enum NetworkEvent {
     /// Direct connection established via DCUtR hole punching
     DirectConnectionUpgraded {
         peer_id: PeerId,
+    },
+
+    /// A DHT record was found for a previously requested key.
+    DhtRecordFound {
+        key: Vec<u8>,
+        value: Vec<u8>,
     },
 }
 
@@ -1028,6 +1053,34 @@ impl NetworkNode {
                         }
                         None
                     }
+                    // DHT record found — emit event so multiplayer can update key registry
+                    kad::Event::OutboundQueryProgressed {
+                        result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(
+                            kad::PeerRecord { record, .. }
+                        ))),
+                        ..
+                    } => {
+                        println!("🔑 [DHT] Record found for key ({} bytes)", record.value.len());
+                        Some(NetworkEvent::DhtRecordFound {
+                            key: record.key.to_vec(),
+                            value: record.value,
+                        })
+                    }
+                    // DHT put/provide results — log only on failure
+                    kad::Event::OutboundQueryProgressed {
+                        result: kad::QueryResult::PutRecord(Err(e)),
+                        ..
+                    } => {
+                        eprintln!("⚠️  [DHT] PutRecord failed: {:?}", e);
+                        None
+                    }
+                    kad::Event::OutboundQueryProgressed {
+                        result: kad::QueryResult::StartProviding(Err(e)),
+                        ..
+                    } => {
+                        eprintln!("⚠️  [DHT] StartProviding failed: {:?}", e);
+                        None
+                    }
                     _ => None,
                 }
             }
@@ -1065,6 +1118,34 @@ impl NetworkNode {
     /// Get list of subscribed topics
     pub fn subscribed_topics(&self) -> Vec<String> {
         self.subscribed_topics.keys().cloned().collect()
+    }
+
+    /// Store a value in the Kademlia DHT under the given key.
+    pub fn put_dht_record(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        use kad::{Record, RecordKey, Quorum};
+        let record = Record {
+            key: RecordKey::new(&key),
+            value,
+            publisher: Some(self.local_peer_id),
+            expires: None,
+        };
+        if let Err(e) = self.swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+            eprintln!("⚠️  [DHT] put_record failed: {:?}", e);
+        }
+    }
+
+    /// Advertise ourselves as a provider for the given DHT key.
+    pub fn start_providing_key(&mut self, key: Vec<u8>) {
+        use kad::RecordKey;
+        if let Err(e) = self.swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
+            eprintln!("⚠️  [DHT] start_providing failed: {:?}", e);
+        }
+    }
+
+    /// Request a value from the DHT by key. Result comes back as `NetworkEvent::DhtRecordFound`.
+    pub fn get_dht_record(&mut self, key: Vec<u8>) {
+        use kad::RecordKey;
+        self.swarm.behaviour_mut().kademlia.get_record(RecordKey::new(&key));
     }
 }
 

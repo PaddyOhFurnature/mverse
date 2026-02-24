@@ -379,21 +379,28 @@ impl ChunkManager {
     /// This should be called after set_voxel() to ensure the operation
     /// is persisted to disk and registered as the authority for this coordinate.
     /// Includes deduplication check.
-    pub fn add_operation(&mut self, op: SignedOperation) {
+    pub fn add_operation(&mut self, op: SignedOperation) -> bool {
         // Check for duplicates
         if self.seen_operations.contains(&op.signature) {
-            return;
+            return false;
         }
         self.seen_operations.insert(op.signature);
+        
+        // Permission check via key-type table (uses key type from op's embedded public_key)
+        let result = self.user_content.add_local_operation(op.clone());
+        if result.is_denied() {
+            eprintln!("🔒 [Permission] Local op denied: {}", result);
+            return false;
+        }
         
         // Register as authority for this coordinate (local writes always
         // have a freshly incremented vector clock, so they always win over
         // any concurrent remote op we might have stored)
         if let Some(coord) = op.coord() {
-            self.voxel_authority.insert(coord, op.clone());
+            self.voxel_authority.insert(coord, op);
         }
         
-        self.user_content.add_local_operation(op);
+        true
     }
     
     /// Get list of loaded chunk IDs
@@ -528,8 +535,10 @@ impl ChunkManager {
                 // Non-terrain ops: count as applied but don't affect octree
                 applied_count += 1;
             }
-            // Even if op doesn't win, add it to the log for CRDT history
-            self.user_content.add_local_operation(op);
+            // Even if op doesn't win CRDT, add it to the log for CRDT history
+            // (add_local_operation does a key-type check; ignore denial here since
+            //  the full permission check already ran in multiplayer.rs before queuing)
+            let _ = self.user_content.add_local_operation(op);
         }
 
         if !dirty_chunks.is_empty() {

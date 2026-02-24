@@ -963,7 +963,11 @@ impl SignedOperation {
     ///
     /// Covers all fields except `signature`. Field order is fixed — changing
     /// it requires bumping `version` and adding a migration path.
-    fn signable_bytes(&self) -> Vec<u8> {
+    /// Canonical bytes that are signed/verified.
+    ///
+    /// Covers all fields except `signature`. Field order is fixed — changing
+    /// it requires bumping `version` and adding a migration path.
+    pub fn signable_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.push(self.version);
         // Action: length-prefixed bincode
