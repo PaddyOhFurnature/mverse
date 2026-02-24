@@ -516,7 +516,21 @@ impl ChunkStreamer {
     pub fn get_chunk(&self, chunk_id: &ChunkId) -> Option<&LoadedChunk> {
         self.loaded_chunks.get(chunk_id)
     }
-    
+
+    /// Push a chunk to the front of the loading queue, bypassing distance sorting.
+    /// Use for the chunk the player is currently standing in so it is submitted
+    /// to a worker thread on the very next process_queues call.
+    pub fn queue_priority(&mut self, chunk_id: ChunkId) {
+        if self.loaded_chunks.contains_key(&chunk_id)
+            || self.loading_in_progress.contains(&chunk_id)
+        {
+            return; // already loaded or already in a worker
+        }
+        // Remove from queue if present to avoid duplicates, then push to front
+        self.loading_queue.retain(|id| *id != chunk_id);
+        self.loading_queue.push_front(chunk_id);
+    }
+
     /// Get mutable loaded chunk
     pub fn get_chunk_mut(&mut self, chunk_id: &ChunkId) -> Option<&mut LoadedChunk> {
         self.loaded_chunks.get_mut(chunk_id)

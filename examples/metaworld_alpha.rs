@@ -255,10 +255,6 @@ fn main() {
     }
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
     
-    // Calculate spawn chunk
-    let spawn_chunk = ChunkId::from_voxel(&origin_voxel);
-    println!("   Spawn chunk: {}", spawn_chunk);
-    
     // User content layer - separates edits from base terrain
     let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
     
@@ -401,19 +397,24 @@ fn main() {
     player.camera_yaw = player_state.yaw;
     player.camera_pitch = player_state.pitch;
     
-    // Calculate spawn position (3m above ground at player's location)
+    // Offset player slightly above their saved Y so they land on terrain
+    // (avoids spawning inside a voxel if save was taken at ground level)
     let origin_local = physics.ecef_to_local(&player.position);
-    let ground_y = origin_local.y;
-    let spawn_local = Vec3::new(origin_local.x, ground_y + 3.0, origin_local.z);
+    let spawn_local = Vec3::new(origin_local.x, origin_local.y + 2.0, origin_local.z);
     let spawn_ecef = physics.local_to_ecef(spawn_local);
     player.position = spawn_ecef;
-    
     if let Some(body) = physics.bodies.get_mut(player.body_handle) {
         body.set_translation(vector![spawn_local.x, spawn_local.y, spawn_local.z], true);
     }
-    
+
+    // Determine which chunk the player is actually standing in and prioritise it
+    // so it is dispatched to a worker thread before any surrounding chunks.
+    let player_chunk = ChunkId::from_ecef(&player.position);
+    chunk_streamer.queue_priority(player_chunk);
+    println!("   Player chunk: {} — queued with priority", player_chunk);
+
     let player_local = physics.ecef_to_local(&player.position);
-    println!("✅ Player spawned at local: ({:.1}, {:.1}, {:.1})", 
+    println!("✅ Player position at local: ({:.1}, {:.1}, {:.1})", 
         player_local.x, player_local.y, player_local.z);
     
     // Camera setup - first person from player eyes
@@ -658,11 +659,12 @@ fn main() {
                         }
 
                         // Transition to game only when:
-                        //  1. Minimum frames shown (so player sees the screen)
-                        //  2. Enough chunks loaded OR all queued chunks finished
-                        //  3. Spawn chunk specifically has a collider (player won't fall)
-                        let spawn_ready = chunk_streamer
-                            .get_chunk(&spawn_chunk)
+                        //  1. Minimum frames shown so the player sees the loading screen
+                        //  2. The chunk the player is ACTUALLY standing in has a collider
+                        //     (prevents falling through terrain on first physics step)
+                        //  3. Enough surrounding chunks are also ready (or queue drained)
+                        let player_chunk_ready = chunk_streamer
+                            .get_chunk(&player_chunk)
                             .map(|c| c.collider.is_some())
                             .unwrap_or(false);
                         let enough_chunks = loaded >= LOADING_TARGET;
@@ -670,42 +672,8 @@ fn main() {
                             && chunk_streamer.stats.chunks_queued == 0
                             && loaded > 0;
 
-                        if loading_frames >= 20 && spawn_ready && (enough_chunks || queue_drained) {
-                            println!("✅ Spawn area loaded ({} chunks) — repositioning player", loaded);
-
-                            // Scan spawn chunk to find actual ground height at player's X,Z
-                            // This prevents the player falling through un-loaded terrain on first step
-                            if let Some(spawn_data) = chunk_streamer.get_chunk(&spawn_chunk) {
-                                let min_v = spawn_data.id.min_voxel();
-                                let max_v = spawn_data.id.max_voxel();
-                                let target_x = origin_voxel.x;
-                                let target_z = origin_voxel.z;
-                                let vx = target_x.clamp(min_v.x, max_v.x - 1);
-                                let vz = target_z.clamp(min_v.z, max_v.z - 1);
-                                // Walk from top of chunk down to find highest solid voxel
-                                let mut ground_voxel_y = min_v.y;
-                                for vy in (min_v.y..max_v.y).rev() {
-                                    let mat = spawn_data.octree.get_voxel(
-                                        metaverse_core::voxel::VoxelCoord::new(vx, vy, vz));
-                                    if mat != metaverse_core::materials::MaterialId::AIR {
-                                        ground_voxel_y = vy;
-                                        break;
-                                    }
-                                }
-                                // Convert voxel Y to local space and position player 2m above
-                                let ground_ecef = metaverse_core::voxel::VoxelCoord::new(vx, ground_voxel_y, vz).to_ecef();
-                                let ground_local = physics.ecef_to_local(&ground_ecef);
-                                let safe_local = Vec3::new(ground_local.x, ground_local.y + 2.5, ground_local.z);
-                                let safe_ecef  = physics.local_to_ecef(safe_local);
-                                player.position = safe_ecef;
-                                if let Some(body) = physics.bodies.get_mut(player.body_handle) {
-                                    body.set_translation(
-                                        vector![safe_local.x, safe_local.y, safe_local.z], true);
-                                    body.set_linvel(vector![0.0, 0.0, 0.0], true);
-                                }
-                                println!("   Player repositioned above ground Y={} → local Y={:.1}",
-                                    ground_voxel_y, safe_local.y);
-                            }
+                        if loading_frames >= 20 && player_chunk_ready && (enough_chunks || queue_drained) {
+                            println!("✅ Spawn area loaded ({} chunks), player chunk ready — starting game", loaded);
 
                             // Request historical state from peers now that we have chunks
                             if multiplayer.peer_count() > 0 {
