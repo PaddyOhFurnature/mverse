@@ -465,6 +465,7 @@ fn main() {
 
     println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
     println!("   Target: {} chunks, spawn chunk must have collider", LOADING_TARGET);
+    println!("   Progress will print every second. Window title shows loading status.");
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -640,6 +641,22 @@ fn main() {
                         loading_frames += 1;
 
                         let loaded = chunk_streamer.stats.chunks_loaded;
+                        let generating = chunk_streamer.stats.chunks_loading;
+                        let queued    = chunk_streamer.stats.chunks_queued;
+
+                        // Progress feedback every second (~60 frames) so the user
+                        // can see the black loading window is actually doing work.
+                        if loading_frames % 60 == 1 {
+                            let player_status = if chunk_streamer
+                                .get_chunk(&player_chunk)
+                                .map(|c| c.collider.is_some())
+                                .unwrap_or(false) { "ready" } else { "waiting" };
+                            println!("⏳ Loading chunks: {}/{} | generating: {} | queued: {} | player chunk: {}",
+                                loaded, LOADING_TARGET, generating, queued, player_status);
+                            let _ = window.set_title(&format!(
+                                "Metaverse — Loading {}/{} chunks (player: {})",
+                                loaded, LOADING_TARGET, player_status));
+                        }
 
                         // Transition to game only when:
                         //  1. Minimum frames elapsed
@@ -657,6 +674,7 @@ fn main() {
 
                         if loading_frames >= 20 && player_chunk_ready && (enough_chunks || queue_drained) {
                             println!("✅ Spawn area loaded ({} chunks), player chunk ready — starting game", loaded);
+                            let _ = window.set_title("Metaverse");
 
                             // Request historical state from peers now that we have chunks
                             if multiplayer.peer_count() > 0 {
@@ -665,10 +683,11 @@ fn main() {
                             }
                             println!("🎮 Game started!");
                             game_loading = false;
-                        } else if loading_frames >= 1800 {
-                            // Safety timeout (~30s) — start anyway if something is stuck
-                            println!("⚠️  Loading timeout — starting game with {} chunks (player chunk ready: {})",
-                                loaded, player_chunk_ready);
+                        } else if loading_frames >= 600 {
+                            // Safety timeout (~10s at 60fps) — start anyway if stuck
+                            println!("⚠️  Loading timeout — starting with {} chunks (generating: {}, player chunk: {})",
+                                loaded, generating, player_chunk_ready);
+                            let _ = window.set_title("Metaverse");
                             if multiplayer.peer_count() > 0 {
                                 let ids = chunk_streamer.loaded_chunk_ids();
                                 let _ = multiplayer.request_chunk_state(ids);
