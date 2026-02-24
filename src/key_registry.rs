@@ -384,6 +384,35 @@ impl KeyRegistry {
         Ok(written)
     }
 
+    /// Mark a peer's record as revoked in the in-memory registry.
+    ///
+    /// Called when processing a valid [`KeyRegistryMessage::Revocation`] from the network.
+    /// The `self_sig` on the underlying record is no longer valid after this mutation;
+    /// peers should treat revoked records as read-only tombstones — present to prevent
+    /// re-propagation of the old live record, but not trusted for any capability checks.
+    ///
+    /// Returns `true` if the record existed and was not already revoked.
+    pub fn mark_revoked(
+        &mut self,
+        target: &PeerId,
+        revoked_by: &PeerId,
+        reason: Option<String>,
+        revoked_at_ms: u64,
+    ) -> bool {
+        if let Some(record) = self.records.get_mut(target) {
+            if record.revoked {
+                return false; // already revoked — idempotent
+            }
+            record.revoked = true;
+            record.revoked_at = Some(revoked_at_ms);
+            record.revoked_by = Some(*revoked_by);
+            record.revocation_reason = reason;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Evict old records from the disk cache (records not updated in `max_age_secs`).
     ///
     /// Call periodically to prevent unbounded cache growth. Keeps revoked records
@@ -480,7 +509,7 @@ impl KeyRegistry {
 
 // ─── Gossipsub message type ───────────────────────────────────────────────────
 
-/// A message on the `"key-registry"` gossipsub topic.
+/// A message on the `"key-registry"` or `"key-revocations"` gossipsub topics.
 ///
 /// Peers broadcast this when publishing a new or updated `KeyRecord`.
 /// The envelope type allows the topic to carry future message variants
@@ -492,6 +521,65 @@ pub enum KeyRegistryMessage {
 
     /// A batch of `KeyRecord`s (used by servers syncing to newly connected peers).
     Batch(Vec<KeyRecord>),
+
+    /// A signed revocation notice.
+    ///
+    /// Recipients verify the Ed25519 signature, confirm the revoker has authority
+    /// (Admin/Server/Genesis/Relay key type OR the target itself for self-revocation),
+    /// then call [`KeyRegistry::mark_revoked()`].
+    Revocation {
+        /// Raw bytes of the target `PeerId`.
+        target_peer_id_bytes: Vec<u8>,
+        /// Raw bytes of the revoking peer's `PeerId`.
+        revoker_peer_id_bytes: Vec<u8>,
+        /// Human-readable reason (optional, may be empty).
+        reason: Option<String>,
+        /// Unix timestamp in milliseconds when the revocation was decided.
+        revoked_at_ms: u64,
+        /// Ed25519 signature over `revocation_signable_bytes(target, revoker, reason, revoked_at_ms)`.
+        #[serde(with = "serde_sig")]
+        sig: [u8; 64],
+        /// Revoker's Ed25519 public key (32 bytes).
+        revoker_public_key: [u8; 32],
+    },
+}
+
+/// Canonical byte string that `Revocation::sig` covers.
+///
+/// Layout: `"revoke:v1"` || len32LE(target) || target_bytes
+///         || len32LE(revoker) || revoker_bytes
+///         || revoked_at_ms as u64 LE
+///         || len32LE(reason) || reason_bytes
+pub fn revocation_signable_bytes(
+    target: &[u8],
+    revoker: &[u8],
+    reason: Option<&str>,
+    revoked_at_ms: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128);
+    out.extend_from_slice(b"revoke:v1");
+    out.extend_from_slice(&(target.len() as u32).to_le_bytes());
+    out.extend_from_slice(target);
+    out.extend_from_slice(&(revoker.len() as u32).to_le_bytes());
+    out.extend_from_slice(revoker);
+    out.extend_from_slice(&revoked_at_ms.to_le_bytes());
+    let r = reason.unwrap_or("");
+    out.extend_from_slice(&(r.len() as u32).to_le_bytes());
+    out.extend_from_slice(r.as_bytes());
+    out
+}
+
+// Serde helper for [u8; 64] in Revocation variant (mirrors serde_arrays in messages.rs)
+mod serde_sig {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+        bytes.serialize(s)
+    }
+    pub fn deserialize<'de, D>(d: D) -> Result<[u8; 64], D::Error> where D: Deserializer<'de> {
+        let v: Vec<u8> = Vec::deserialize(d)?;
+        if v.len() != 64 { return Err(serde::de::Error::custom(format!("expected 64 bytes, got {}", v.len()))); }
+        let mut a = [0u8; 64]; a.copy_from_slice(&v); Ok(a)
+    }
 }
 
 impl KeyRegistryMessage {

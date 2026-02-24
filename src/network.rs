@@ -226,6 +226,22 @@ pub enum NetworkEvent {
         key: Vec<u8>,
         value: Vec<u8>,
     },
+
+    /// A peer's key has been revoked — emitted after a valid revocation notice is received.
+    KeyRevoked {
+        target_peer_id: PeerId,
+        revoker_peer_id: PeerId,
+    },
+
+    /// The server has assigned a compact 2-byte session ID to a peer.
+    ///
+    /// After receiving this event the game loop can map `PeerId` ↔ `session_id`
+    /// locally. Hot-path compact messages use the session ID instead of the
+    /// full 39-byte PeerId, saving ~37 bytes per packet (critical for LoRa).
+    SessionIdAssigned {
+        peer_id: PeerId,
+        session_id: u16,
+    },
 }
 
 /// Combined network behaviour for libp2p

@@ -52,11 +52,11 @@ use crate::{
     chunk::ChunkId,
     coordinates::ECEF,
     identity::Identity,
-    key_registry::{KeyRegistry, KeyRegistryMessage},
+    key_registry::{KeyRegistry, KeyRegistryMessage, revocation_signable_bytes},
     messages::{
         Action, ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest,
-        LamportClock, Material, MovementMode, PlayerStateMessage, PlayerSessionRecord,
-        SignedOperation, VoxelOperation, MessageError,
+        CompactPlayerState, LamportClock, Material, MovementMode, PlayerStateMessage,
+        PlayerSessionRecord, SignedOperation, VoxelOperation, MessageError,
     },
     network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
     permissions::{action_to_class, check_key_level_permission, PermissionConfig, PermissionResult},
@@ -112,7 +112,10 @@ pub const TOPIC_STATE_RESPONSE: &str = "state-response";
 pub const TOPIC_CHUNK_TERRAIN: &str = "chunk-terrain";
 pub const TOPIC_CHUNK_MANIFEST: &str = "chunk-manifest";
 pub const TOPIC_KEY_REGISTRY: &str = "key-registry";
+pub const TOPIC_KEY_REVOCATIONS: &str = "key-revocations";
 pub const TOPIC_SIGNED_OPS: &str = "signed-ops";
+/// Compact player state — replaces full `PlayerStateMessage` on degraded/LoRa links.
+pub const TOPIC_PLAYER_STATE_COMPACT: &str = "player-state-compact";
 
 /// Keepalive interval when standing still (prevents peer timeout)
 const PLAYER_STATE_KEEPALIVE_INTERVAL: Duration = Duration::from_millis(500);
@@ -218,7 +221,22 @@ pub struct MultiplayerSystem {
     /// Fetched session record from DHT — populated when a remote session was found
     /// on startup. The game loop reads this once to restore the player's last position.
     pub pending_session_record: Option<PlayerSessionRecord>,
-    
+
+    /// Compact 2-byte session IDs assigned to each known peer.
+    ///
+    /// Hot-path messages (position updates on degraded links) use these instead
+    /// of the full 39-byte `PeerId`, saving ~37 bytes per packet.
+    /// IDs are assigned on first `PlayerStateMessage` receipt from a new peer.
+    session_ids: HashMap<PeerId, u16>,
+    /// Reverse map: session_id → PeerId (for decoding compact messages).
+    session_id_map: HashMap<u16, PeerId>,
+    /// Monotonically increasing counter for assigning session IDs.
+    /// Starts at 1 (0 is reserved as "unassigned").
+    next_session_id: u16,
+
+    /// Pending key revocation events — drained by `take_key_revocations()`.
+    pending_revocations: Vec<(PeerId, PeerId)>,
+
     /// Statistics
     stats: MultiplayerStats,
 }
@@ -306,6 +324,10 @@ impl MultiplayerSystem {
             },
             perm_config: PermissionConfig::default(),
             pending_session_record: None,
+            session_ids: HashMap::new(),
+            session_id_map: HashMap::new(),
+            next_session_id: 1,
+            pending_revocations: Vec::new(),
             stats: MultiplayerStats::default(),
         })
     }
@@ -687,6 +709,8 @@ impl MultiplayerSystem {
                     TOPIC_CHUNK_TERRAIN => self.handle_chunk_terrain(peer_id, &data)?,
                     TOPIC_CHUNK_MANIFEST => self.handle_chunk_manifest(peer_id, &data)?,
                     TOPIC_KEY_REGISTRY => self.handle_key_registry(peer_id, &data),
+                    TOPIC_KEY_REVOCATIONS => self.handle_key_revocation(peer_id, &data),
+                    TOPIC_PLAYER_STATE_COMPACT => self.handle_compact_player_state(peer_id, &data)?,
                     // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
                     t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
                     t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
@@ -750,8 +774,9 @@ impl MultiplayerSystem {
             NetworkEvent::DirectConnectionUpgraded { peer_id } => {
                 println!("⚡ [DCUtR] Hole punch succeeded — now direct with: {}", peer_id);
             }
+            // These events are generated locally (not from the network thread) — no-op here.
+            NetworkEvent::KeyRevoked { .. } | NetworkEvent::SessionIdAssigned { .. } => {}
             NetworkEvent::DhtRecordFound { key, value } => {
-                // Determine whether this is a KeyRecord or a PlayerSessionRecord by
                 // trying the session namespace key first, then falling back to KeyRecord.
                 let session_key = PlayerSessionRecord::dht_key(&self.local_peer_id);
                 if key == session_key {
@@ -799,6 +824,12 @@ impl MultiplayerSystem {
         println!("📥 Received player state from {}: pos=({:.1}, {:.1}, {:.1})", 
             peer_id, msg.position.x, msg.position.y, msg.position.z);
         
+        // Assign a session ID on first contact — used by compact hot-path messages.
+        if !self.session_ids.contains_key(&peer_id) {
+            let sid = self.assign_session_id(peer_id);
+            println!("🔢 [SessionID] Assigned session_id={} to {}", sid, peer_id);
+        }
+
         // Update Lamport clock
         self.clock.receive(msg.timestamp);
         
@@ -1212,6 +1243,11 @@ impl MultiplayerSystem {
         let records = match msg {
             KeyRegistryMessage::Publish(record) => vec![record],
             KeyRegistryMessage::Batch(records) => records,
+            KeyRegistryMessage::Revocation { .. } => {
+                // Revocations should arrive on TOPIC_KEY_REVOCATIONS, but handle gracefully
+                self.handle_key_revocation(peer_id, data);
+                return;
+            }
         };
         for record in records {
             match self.key_registry.apply_update(record) {
@@ -1220,6 +1256,159 @@ impl MultiplayerSystem {
                 Err(e)    => eprintln!("🔑 [KeyRegistry] Rejected record from {}: {}", peer_id, e),
             }
         }
+    }
+
+    /// Handle an incoming key-revocations gossipsub message.
+    ///
+    /// Verifies the Ed25519 signature on the revocation notice, checks that the
+    /// revoker has authority (Admin/Server/Genesis/Relay or self-revocation), then
+    /// calls `KeyRegistry::mark_revoked()` and emits a `NetworkEvent::KeyRevoked`.
+    fn handle_key_revocation(&mut self, peer_id: PeerId, data: &[u8]) {
+        use ed25519_dalek::{VerifyingKey, Signature as DalekSig, Verifier};
+
+        let msg: KeyRegistryMessage = match bincode::deserialize(data) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("🔑 [KeyRevocations] Failed to deserialize from {}: {}", peer_id, e);
+                return;
+            }
+        };
+        let (target_bytes, revoker_bytes, reason, revoked_at_ms, sig, revoker_pub) = match msg {
+            KeyRegistryMessage::Revocation {
+                target_peer_id_bytes, revoker_peer_id_bytes,
+                reason, revoked_at_ms, sig, revoker_public_key,
+            } => (target_peer_id_bytes, revoker_peer_id_bytes, reason, revoked_at_ms, sig, revoker_public_key),
+            _ => {
+                eprintln!("🔑 [KeyRevocations] Unexpected message type on revocations topic from {}", peer_id);
+                return;
+            }
+        };
+
+        // Verify Ed25519 signature
+        let vk = match VerifyingKey::from_bytes(&revoker_pub) {
+            Ok(v) => v,
+            Err(_) => {
+                eprintln!("🔑 [KeyRevocations] Invalid revoker public key from {}", peer_id);
+                return;
+            }
+        };
+        let signable = revocation_signable_bytes(&target_bytes, &revoker_bytes, reason.as_deref(), revoked_at_ms);
+        let signature = DalekSig::from_bytes(&sig);
+        if vk.verify(&signable, &signature).is_err() {
+            eprintln!("🔑 [KeyRevocations] Invalid signature from {}", peer_id);
+            return;
+        }
+
+        // Decode PeerIds
+        let Ok(target_peer_id) = PeerId::from_bytes(&target_bytes) else {
+            eprintln!("🔑 [KeyRevocations] Invalid target PeerId from {}", peer_id);
+            return;
+        };
+        let Ok(revoker_peer_id) = PeerId::from_bytes(&revoker_bytes) else {
+            eprintln!("🔑 [KeyRevocations] Invalid revoker PeerId from {}", peer_id);
+            return;
+        };
+
+        // Authority check: self-revocation OR Admin/Server/Genesis/Relay key type
+        let is_self_revoke = revoker_peer_id == target_peer_id;
+        let has_authority = is_self_revoke || {
+            use crate::identity::KeyType;
+            let ktype = self.key_registry.get_or_default(revoker_peer_id).key_type;
+            matches!(ktype, KeyType::Admin | KeyType::Server | KeyType::Genesis | KeyType::Relay)
+        };
+        if !has_authority {
+            eprintln!("🔑 [KeyRevocations] Revoker {} has no authority to revoke {}", revoker_peer_id, target_peer_id);
+            return;
+        }
+
+        if self.key_registry.mark_revoked(&target_peer_id, &revoker_peer_id, reason, revoked_at_ms) {
+            println!("🔑 [KeyRevocations] Revoked key for {} (by {})", target_peer_id, revoker_peer_id);
+            self.pending_revocations.push((target_peer_id, revoker_peer_id));
+        }
+    }
+
+    /// Handle a compact player state message (degraded/LoRa mode).
+    ///
+    /// Translates the `u16` session ID back to a `PeerId` and emits a
+    /// `PlayerState` event as if a full `PlayerStateMessage` had arrived.
+    fn handle_compact_player_state(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
+        let compact = CompactPlayerState::from_bytes(data)
+            .map_err(|e| MultiplayerError::Message(e.into()))?;
+        let Some(&resolved_peer) = self.session_id_map.get(&compact.session_id) else {
+            // Unknown session ID — could be a new peer we haven't seen a full message from yet.
+            // Silently drop; they'll send a full message soon.
+            return Ok(());
+        };
+        // Reconstruct a minimal PlayerStateMessage for the state manager.
+        let full = PlayerStateMessage::new(
+            resolved_peer,
+            crate::coordinates::ECEF::new(
+                compact.position[0] as f64,
+                compact.position[1] as f64,
+                compact.position[2] as f64,
+            ),
+            [0.0, 0.0, 0.0], // velocity not carried in compact form
+            compact.rotation[0],
+            compact.rotation[1],
+            MovementMode::Walk,
+            compact.timestamp_ms as u64,
+        );
+        self.remote_players.handle_message(full);
+        self.stats.player_states_received += 1;
+        Ok(())
+    }
+
+    /// Assign a new 2-byte session ID to a peer (or return their existing one).
+    fn assign_session_id(&mut self, peer: PeerId) -> u16 {
+        if let Some(&existing) = self.session_ids.get(&peer) {
+            return existing;
+        }
+        let sid = self.next_session_id;
+        self.next_session_id = self.next_session_id.wrapping_add(1).max(1); // skip 0
+        self.session_ids.insert(peer, sid);
+        self.session_id_map.insert(sid, peer);
+        sid
+    }
+
+    /// Get the session ID for a peer, if one has been assigned.
+    pub fn session_id_for_peer(&self, peer: &PeerId) -> Option<u16> {
+        self.session_ids.get(peer).copied()
+    }
+
+    /// Get the `PeerId` for a session ID, if known.
+    pub fn peer_for_session_id(&self, session_id: u16) -> Option<&PeerId> {
+        self.session_id_map.get(&session_id)
+    }
+
+    /// Drain any pending key revocations and return them.
+    ///
+    /// The game loop should call this every frame to handle revocations
+    /// (e.g., kick revoked players, clear their parcel rights, etc.).
+    pub fn take_key_revocations(&mut self) -> Vec<(PeerId, PeerId)> {
+        std::mem::take(&mut self.pending_revocations)
+    }
+
+    /// Publish a compact player state update (for degraded / LoRa links).
+    ///
+    /// Only works if a session ID has been assigned for the remote peer via
+    /// `assign_session_id()`.  In normal operation the full `PlayerStateMessage`
+    /// is also sent; on very constrained links only compact is sent.
+    pub fn publish_compact_player_state(
+        &self,
+        session_id: u16,
+        position: [f32; 3],
+        rotation: [f32; 2],
+    ) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u32;
+        let compact = CompactPlayerState { session_id, position, rotation, timestamp_ms: now_ms };
+        let Ok(data) = compact.to_bytes() else { return };
+        let _ = self.cmd_tx.send(NetworkCommand::Publish {
+            topic: TOPIC_PLAYER_STATE_COMPACT.to_string(),
+            data,
+        });
     }
 
     /// Publish our own `KeyRecord` to the key-registry gossipsub topic.
@@ -1508,6 +1697,18 @@ fn run_network_thread(
             eprintln!("Failed to subscribe to key-registry: {}", e);
         } else {
             println!("📻 Subscribed to topic: key-registry");
+        }
+
+        if let Err(e) = network.subscribe(TOPIC_KEY_REVOCATIONS) {
+            eprintln!("Failed to subscribe to key-revocations: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: key-revocations");
+        }
+
+        if let Err(e) = network.subscribe(TOPIC_PLAYER_STATE_COMPACT) {
+            eprintln!("Failed to subscribe to player-state-compact: {}", e);
+        } else {
+            println!("📻 Subscribed to topic: player-state-compact");
         }
         
         println!("🔍 Network thread started - polling for mDNS and connections...");

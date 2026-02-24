@@ -210,6 +210,45 @@ impl PlayerStateMessage {
     }
 }
 
+/// Compact player-state message for bandwidth-constrained links (LoRa, dialup, etc).
+///
+/// After session ID assignment, the server assigns each peer a `u16` token.
+/// Hot-path position/rotation updates use this struct instead of the full
+/// [`PlayerStateMessage`], saving ~37 bytes per packet (critical for 200-byte LoRa frames).
+///
+/// # Wire size
+/// - `session_id`:  2 bytes
+/// - `position`:   12 bytes (3 × f32)
+/// - `rotation`:    8 bytes (2 × f32)
+/// - `timestamp_ms`: 4 bytes (u32, wraps every ~49 days — sufficient for ordering)
+/// **Total: 26 bytes** (vs ~64 bytes for full `PlayerStateMessage`).
+///
+/// # Upgrade path
+/// Clients that don't know the session→peer mapping ignore this message.
+/// Servers that know the mapping translate back to `PlayerState` events.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CompactPlayerState {
+    /// Server-assigned 2-byte session token (non-zero).
+    pub session_id: u16,
+    /// Position in ECEF coordinates — f32 precision (~1m at Earth scale).
+    /// Sufficient for game-world movement; use full `PlayerStateMessage` for
+    /// high-precision applications.
+    pub position: [f32; 3],
+    /// Yaw and pitch in radians.
+    pub rotation: [f32; 2],
+    /// Unix timestamp modulo 2^32 ms (wraps every ~49 days).
+    pub timestamp_ms: u32,
+}
+
+impl CompactPlayerState {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(data)?)
+    }
+}
+
 /// Material type for voxels (network protocol representation)
 ///
 /// This is a simplified material enum for network messages.

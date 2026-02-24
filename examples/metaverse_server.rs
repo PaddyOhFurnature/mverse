@@ -138,6 +138,13 @@ pub struct ServerConfig {
 
     // ── Logging ──────────────────────────────────────────────────────────
     pub log_level: String,
+
+    // ── Server sync ──────────────────────────────────────────────────────
+    /// HTTP base URLs of peer servers to sync key records with.
+    /// Format: "http://192.168.1.100:8080" (no trailing slash).
+    /// On startup and every 10 minutes the server will query
+    /// `GET /api/v1/sync/keys?since=<last_sync_ms>&limit=1000` on each.
+    pub known_servers: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -180,6 +187,7 @@ impl Default for ServerConfig {
             web_username: "admin".to_string(),
             web_password: String::new(),
             log_level: "info".to_string(),
+            known_servers: vec![],
         }
     }
 }
@@ -385,6 +393,9 @@ pub struct SharedState {
     /// Channel to publish gossipsub messages from web handlers into the event loop.
     #[serde(skip)]
     pub gossip_tx: Option<tokio::sync::mpsc::Sender<GossipCommand>>,
+    /// Channel to send a hot-reload `ServerConfig` from web handlers into the event loop.
+    #[serde(skip)]
+    pub config_reload_tx: Option<tokio::sync::mpsc::Sender<ServerConfig>>,
 }
 
 impl Default for SharedState {
@@ -403,6 +414,7 @@ impl Default for SharedState {
             server_secret: [0u8; 32],
             pending_challenges: Arc::new(Mutex::new(HashMap::new())),
             gossip_tx: None,
+            config_reload_tx: None,
         }
     }
 }
@@ -432,12 +444,17 @@ struct AppState {
     shedding_relay: bool,
     /// Gossip commands from web handlers waiting to be published into the swarm.
     gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
+    /// Config reload commands from web handlers / SIGHUP.
+    config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>,
+    /// Peers to disconnect on next world_tick (populated by load-shedding logic).
+    pending_shed: Vec<PeerId>,
 }
 
 impl AppState {
     fn new(config: ServerConfig, shared: Arc<RwLock<SharedState>>,
            local_peer_id: String, public_ip: String,
-           gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>) -> Self {
+           gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
+           config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
         let cpu_pct = sys.global_cpu_usage();
@@ -456,6 +473,8 @@ impl AppState {
             net: NetStats::default(),
             shedding_relay: false,
             gossip_rx,
+            config_reload_rx,
+            pending_shed: Vec::new(),
         }
     }
 
@@ -476,16 +495,47 @@ impl AppState {
         self.ram_total_mb = self.sys.total_memory() / 1_048_576;
         self.last_sys_refresh = Instant::now();
 
-        // Load shedding: relay circuits
         let cpu_thresh = self.config.cpu_shed_threshold_pct;
-        if cpu_thresh > 0 && self.cpu_pct > cpu_thresh as f32 {
+        let ram_thresh = self.config.ram_shed_threshold_pct;
+        let ram_pct = if self.ram_total_mb > 0 {
+            (self.ram_used_mb as f32 / self.ram_total_mb as f32) * 100.0
+        } else { 0.0 };
+
+        let over_cpu = cpu_thresh > 0 && self.cpu_pct > cpu_thresh as f32;
+        let over_ram = ram_thresh > 0 && ram_pct > ram_thresh as f32;
+
+        if over_cpu || over_ram {
             if !self.shedding_relay {
                 self.shedding_relay = true;
-                self.log(format!("⚠️  CPU {}% > {}% — shedding relay circuits", self.cpu_pct as u8, cpu_thresh));
+                self.log(format!(
+                    "⚠️  Load shedding: CPU={:.0}%/{cpu_thresh}% RAM={:.0}%/{ram_thresh}% — dropping oldest relay circuit",
+                    self.cpu_pct, ram_pct,
+                    cpu_thresh = cpu_thresh, ram_thresh = ram_thresh,
+                ));
+            }
+            // Evict the oldest relay circuit (1 per refresh cycle to avoid mass-disconnect)
+            if let Some(oldest) = self.active_circuits.iter()
+                .min_by_key(|c| c.started_at)
+            {
+                // Disconnect the source peer of the oldest circuit
+                self.pending_shed.push(oldest.src);
             }
         } else {
+            if self.shedding_relay {
+                self.log(format!(
+                    "✅ Load below threshold — CPU={:.0}%/{cpu_thresh}% RAM={:.0}%/{ram_thresh}%",
+                    self.cpu_pct, ram_pct,
+                    cpu_thresh = cpu_thresh, ram_thresh = ram_thresh,
+                ));
+            }
             self.shedding_relay = false;
         }
+    }
+
+    /// Drain the list of peers to disconnect (populated by load-shedding).
+    /// The event loop calls this and issues `SwarmAction::DisconnectPeer` for each.
+    fn drain_pending_shed(&mut self) -> Vec<PeerId> {
+        std::mem::take(&mut self.pending_shed)
     }
 
     fn sync_shared(&mut self, world: &WorldStats) {
@@ -592,7 +642,25 @@ impl KeyDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_req_status ON key_requests (status);
             CREATE INDEX IF NOT EXISTS idx_req_peer   ON key_requests (peer_id);
+
+            -- Server-to-server sync tracking
+            CREATE TABLE IF NOT EXISTS server_sync (
+                server_url         TEXT    PRIMARY KEY,
+                last_synced_at     INTEGER NOT NULL DEFAULT 0,
+                records_received   INTEGER NOT NULL DEFAULT 0
+            );
         ")?;
+
+        // Schema migrations: add columns that may not exist in older databases.
+        // SQLite doesn't support IF NOT EXISTS on ALTER TABLE; ignore errors for
+        // duplicate columns (they're harmless).
+        for migration in &[
+            "ALTER TABLE key_records ADD COLUMN revoked_at INTEGER",
+            "ALTER TABLE key_records ADD COLUMN revoked_by TEXT",
+            "ALTER TABLE key_records ADD COLUMN revocation_reason TEXT",
+        ] {
+            let _ = conn.execute(migration, []);
+        }
         Ok(Self { conn: Arc::new(std::sync::Mutex::new(conn)) })
     }
 
@@ -666,6 +734,93 @@ impl KeyDatabase {
             params![peer_id],
             |r| r.get(0),
         ).ok()
+    }
+
+    /// Get the key_type string for a specific peer (returns None if not found).
+    fn get_key_type(&self, peer_id: &str) -> Option<String> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT key_type FROM key_records WHERE peer_id = ?1",
+            params![peer_id],
+            |r| r.get(0),
+        ).ok()
+    }
+
+    /// Mark a key as revoked.
+    ///
+    /// Returns `true` if the record existed and was not already revoked.
+    fn revoke_key_in_db(
+        &self,
+        peer_id: &str,
+        revoked_by: &str,
+        reason: Option<&str>,
+        revoked_at_ms: i64,
+    ) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE key_records
+             SET revoked=1, revoked_at=?1, revoked_by=?2, revocation_reason=?3
+             WHERE peer_id=?4 AND revoked=0",
+            params![revoked_at_ms, revoked_by, reason, peer_id],
+        ).unwrap_or(0) > 0
+    }
+
+    /// Return key records with `updated_at > since_ms`, ordered by `updated_at` ascending,
+    /// up to `limit` rows.
+    ///
+    /// Used by the `GET /api/v1/sync/keys` endpoint so peer servers can pull incremental updates.
+    fn list_since(&self, since_ms: i64, limit: usize) -> Vec<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+        let mut rows = vec![];
+        let result: Result<(), rusqlite::Error> = (|| {
+            let mut stmt = conn.prepare(
+                "SELECT peer_id, key_type, display_name, created_at, updated_at, revoked, record_bytes
+                 FROM key_records WHERE updated_at > ?1 ORDER BY updated_at ASC LIMIT ?2",
+            )?;
+            for row in stmt.query_map(params![since_ms, limit as i64], |r| {
+                let record_bytes: Option<Vec<u8>> = r.get(6)?;
+                Ok(serde_json::json!({
+                    "peer_id":      r.get::<_, String>(0)?,
+                    "key_type":     r.get::<_, String>(1)?,
+                    "display_name": r.get::<_, Option<String>>(2)?,
+                    "created_at":   r.get::<_, i64>(3)?,
+                    "updated_at":   r.get::<_, i64>(4)?,
+                    "revoked":      r.get::<_, i32>(5)? != 0,
+                    "record_b64":   record_bytes.as_deref().map(|b| {
+                                        use base64::{Engine as _, engine::general_purpose::STANDARD};
+                                        STANDARD.encode(b)
+                                    }),
+                }))
+            })?.flatten() {
+                rows.push(row);
+            }
+            Ok(())
+        })();
+        let _ = result;
+        rows
+    }
+
+    /// Update or set the last-synced timestamp for a peer server URL.
+    fn update_server_sync(&self, server_url: &str, last_synced_at: i64, records_received: i64) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO server_sync (server_url, last_synced_at, records_received)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(server_url) DO UPDATE SET
+               last_synced_at = excluded.last_synced_at,
+               records_received = server_sync.records_received + excluded.records_received",
+            params![server_url, last_synced_at, records_received],
+        );
+    }
+
+    /// Get the last-synced timestamp for a peer server URL (0 if never synced).
+    fn get_last_synced_at(&self, server_url: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT last_synced_at FROM server_sync WHERE server_url = ?1",
+            params![server_url],
+            |r| r.get(0),
+        ).unwrap_or(0)
     }
 
     // ── Key request methods ─────────────────────────────────────────────────
@@ -787,6 +942,8 @@ enum SwarmAction {
     DialPeer(PeerId, Multiaddr),
     SubscribeTopic(String),
     PublishGossip { topic: String, data: Vec<u8> },
+    /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
+    DisconnectPeer(PeerId),
 }
 
 fn handle_swarm_event(
@@ -901,29 +1058,67 @@ fn handle_swarm_event(
                 use metaverse_core::key_registry::KeyRegistryMessage;
                 use metaverse_core::identity::KeyRecord;
                 if let Ok(msg) = bincode::deserialize::<KeyRegistryMessage>(&message.data) {
-                    let records: Vec<KeyRecord> = match msg {
-                        KeyRegistryMessage::Publish(r)  => vec![r],
-                        KeyRegistryMessage::Batch(rs)   => rs,
-                    };
-                    let mut stored = 0usize;
-                    if let Ok(s) = state.shared.read() {
-                        if let Some(ref db) = s.key_db {
-                            for rec in &records {
-                                if rec.verify_self_sig() {
-                                    let peer_id   = rec.peer_id.to_string();
-                                    let key_type  = format!("{}", rec.key_type);
-                                    let disp_name = rec.display_name.as_deref();
-                                    let bytes     = bincode::serialize(rec).unwrap_or_default();
-                                    db.upsert(&peer_id, &bytes, &key_type, disp_name,
-                                              rec.created_at as i64, rec.updated_at as i64,
-                                              rec.revoked);
-                                    stored += 1;
+                    match msg {
+                        KeyRegistryMessage::Publish(r)  => {
+                            if let Ok(s) = state.shared.read() {
+                                if let Some(ref db) = s.key_db {
+                                    if r.verify_self_sig() {
+                                        let peer_id   = r.peer_id.to_string();
+                                        let key_type  = format!("{}", r.key_type);
+                                        let disp_name = r.display_name.as_deref();
+                                        let bytes     = bincode::serialize(&r).unwrap_or_default();
+                                        db.upsert(&peer_id, &bytes, &key_type, disp_name,
+                                                  r.created_at as i64, r.updated_at as i64,
+                                                  r.revoked);
+                                    }
                                 }
                             }
                         }
-                    }
-                    if stored > 0 {
-                        state.log(format!("🔑 Key registry: stored {} record(s)", stored));
+                        KeyRegistryMessage::Batch(rs) => {
+                            let mut stored = 0usize;
+                            if let Ok(s) = state.shared.read() {
+                                if let Some(ref db) = s.key_db {
+                                    for rec in &rs {
+                                        if rec.verify_self_sig() {
+                                            let peer_id   = rec.peer_id.to_string();
+                                            let key_type  = format!("{}", rec.key_type);
+                                            let disp_name = rec.display_name.as_deref();
+                                            let bytes     = bincode::serialize(rec).unwrap_or_default();
+                                            db.upsert(&peer_id, &bytes, &key_type, disp_name,
+                                                      rec.created_at as i64, rec.updated_at as i64,
+                                                      rec.revoked);
+                                            stored += 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if stored > 0 {
+                                state.log(format!("🔑 Key registry: stored {} record(s) from batch", stored));
+                            }
+                        }
+                        KeyRegistryMessage::Revocation { target_peer_id_bytes, revoker_peer_id_bytes, reason, revoked_at_ms, .. } => {
+                            // Apply server-side: update SQLite revocation columns.
+                            if let (Ok(target_pid), Ok(revoker_pid)) = (
+                                libp2p::PeerId::from_bytes(&target_peer_id_bytes),
+                                libp2p::PeerId::from_bytes(&revoker_peer_id_bytes),
+                            ) {
+                                let updated = state.shared.read().ok()
+                                    .and_then(|s| s.key_db.as_ref().map(|db| {
+                                        db.revoke_key_in_db(
+                                            &target_pid.to_string(),
+                                            &revoker_pid.to_string(),
+                                            reason.as_deref(),
+                                            revoked_at_ms as i64,
+                                        )
+                                    }))
+                                    .unwrap_or(false);
+                                if updated {
+                                    state.log(format!("🔑 [Revocation] Revoked {} (by {})",
+                                        short_id(&target_pid.to_string()),
+                                        short_id(&revoker_pid.to_string())));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -979,6 +1174,10 @@ fn apply_swarm_actions(
                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(t, data) {
                     eprintln!("⚠️  [gossip] Failed to publish on '{}': {:?}", topic, e);
                 }
+            }
+            SwarmAction::DisconnectPeer(peer_id) => {
+                let _ = swarm.disconnect_peer_id(peer_id);
+                state.log(format!("🔌 [LoadShed] Disconnected {} to relieve load", peer_id));
             }
         }
     }
@@ -1814,7 +2013,7 @@ async fn api_v1_download_key_request(
         Some(bytes) => (
             StatusCode::OK,
             [("content-type", "application/octet-stream"),
-             ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &id[..8]))],
+             ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &id[..8.min(id.len())]))],
             bytes,
         ).into_response(),
         None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -1823,7 +2022,327 @@ async fn api_v1_download_key_request(
     }
 }
 
-// ─── Web dashboard ───────────────────────────────────────────────────────────
+// ── POST /api/v1/keys/{peer_id}/revoke ────────────────────────────────────────
+
+/// Body for `POST /api/v1/keys/{peer_id}/revoke`.
+#[derive(Deserialize, Default)]
+struct RevokeBody {
+    reason: Option<String>,
+}
+
+/// POST /api/v1/keys/{peer_id}/revoke — revoke a key.
+///
+/// Auth rules:
+/// - **Self-revoke**: the caller's bearer token peer_id matches `peer_id` in the path.
+/// - **Operator-revoke**: the caller's key type is Admin, Server, or Genesis.
+///
+/// On success:
+/// 1. Marks `revoked=1` in SQLite.
+/// 2. Signs a [`KeyRegistryMessage::Revocation`] with the server's ed25519 key.
+/// 3. Broadcasts on the `"key-revocations"` gossipsub topic so all peers update their registry.
+async fn api_v1_revoke_key(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    Path(peer_id_str): Path<String>,
+    Json(body): Json<RevokeBody>,
+) -> impl IntoResponse {
+    use metaverse_core::key_registry::{KeyRegistryMessage, revocation_signable_bytes};
+    use ed25519_dalek::{SigningKey, Signer};
+
+    let st = s.read().unwrap();
+    let auth_peer_id = match verify_auth_token(&st, &headers) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    let db = match &st.key_db {
+        Some(db) => db,
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+    };
+
+    // Target key must exist
+    if db.get_bytes(&peer_id_str).is_none() {
+        return (StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"key not found"}))).into_response();
+    }
+
+    // Check authority
+    let is_self = auth_peer_id == peer_id_str;
+    let is_operator = if !is_self {
+        matches!(db.get_key_type(&auth_peer_id).unwrap_or_default().as_str(),
+            "Admin" | "Server" | "Genesis")
+    } else { false };
+
+    if !is_self && !is_operator {
+        return (StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":"insufficient privileges: must be self or Admin/Server/Genesis"}))).into_response();
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+
+    if !db.revoke_key_in_db(&peer_id_str, &auth_peer_id, body.reason.as_deref(), now_ms) {
+        return (StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"already revoked or key not found"}))).into_response();
+    }
+
+    // Build and sign the revocation notice using the server's ed25519 key
+    let server_peer_id_str = st.local_peer_id.clone();
+    let server_secret = st.server_secret;
+    let gossip_tx = st.gossip_tx.clone();
+    drop(st);
+
+    let Ok(target_pid) = peer_id_str.parse::<PeerId>() else {
+        return (StatusCode::OK, Json(serde_json::json!({"revoked":true,"gossip":false}))).into_response();
+    };
+    let Ok(revoker_pid) = server_peer_id_str.parse::<PeerId>() else {
+        return (StatusCode::OK, Json(serde_json::json!({"revoked":true,"gossip":false}))).into_response();
+    };
+
+    let target_bytes = target_pid.to_bytes();
+    let revoker_bytes = revoker_pid.to_bytes();
+    let signable = revocation_signable_bytes(
+        &target_bytes, &revoker_bytes,
+        body.reason.as_deref(),
+        now_ms as u64,
+    );
+    let signing_key = SigningKey::from_bytes(&server_secret);
+    let sig: [u8; 64] = signing_key.sign(&signable).to_bytes();
+    let revoker_public_key: [u8; 32] = signing_key.verifying_key().to_bytes();
+
+    let notice = KeyRegistryMessage::Revocation {
+        target_peer_id_bytes: target_bytes,
+        revoker_peer_id_bytes: revoker_bytes,
+        reason: body.reason.clone(),
+        revoked_at_ms: now_ms as u64,
+        sig,
+        revoker_public_key,
+    };
+    let gossip_sent = if let (Some(tx), Ok(data)) = (gossip_tx, bincode::serialize(&notice)) {
+        tx.try_send(GossipCommand::Publish {
+            topic: "key-revocations".to_string(),
+            data,
+        }).is_ok()
+    } else { false };
+
+    (StatusCode::OK, Json(serde_json::json!({
+        "revoked": true,
+        "peer_id": peer_id_str,
+        "gossip_broadcast": gossip_sent,
+    }))).into_response()
+}
+
+// ── GET /api/v1/sync/keys ─────────────────────────────────────────────────────
+
+/// GET /api/v1/sync/keys?since=<unix_ms>&limit=<n>
+///
+/// Returns up to `limit` key records with `updated_at > since`, ordered by
+/// `updated_at` ascending.  Used by peer servers for incremental sync.
+/// Each record includes a `record_b64` field (base64 bincode) so the receiver
+/// can import the full [`KeyRecord`] without a separate download.
+async fn api_v1_sync_keys(
+    State(s): State<WebState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let since: i64 = params.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000).min(5000);
+
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => Json(db.list_since(since, limit)).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+    }
+}
+
+// ── POST /api/config (hot-reload) ─────────────────────────────────────────────
+
+/// POST /api/config — hot-reload the server configuration.
+///
+/// Accepts a full or partial [`ServerConfig`] JSON body.
+/// **Live fields applied immediately** (no restart needed):
+/// - `max_circuits`, `max_peers`, `max_ping_ms`
+/// - `cpu_shed_threshold_pct`, `ram_shed_threshold_pct`
+/// - `blacklist`, `whitelist`, `priority_peers`
+/// - `known_servers`
+/// - `log_level`, `node_name`
+///
+/// **Fields that require restart** (warn only, not applied):
+/// - `port`, `ws_port`, `external_addr`, `web_port`, `identity_file`
+///
+/// Requires operator auth (`X-Auth-Token: Bearer <token>`).
+async fn api_post_config(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    Json(new_cfg): Json<ServerConfig>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+    let reload_tx = st.config_reload_tx.clone();
+    drop(st);
+
+    let Some(tx) = reload_tx else {
+        return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"config reload channel unavailable"}))).into_response();
+    };
+    match tx.try_send(new_cfg) {
+        Ok(_) => (StatusCode::ACCEPTED, Json(serde_json::json!({
+            "status": "accepted",
+            "note": "live fields applied; port/identity changes require restart"
+        }))).into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"reload channel full or closed"}))).into_response(),
+    }
+}
+
+// ─── Config hot-reload helper ─────────────────────────────────────────────────
+
+/// Spawn a background task that listens for SIGHUP and sends reloaded config into the
+/// config_reload channel. On non-Unix platforms, does nothing.
+fn spawn_sighup_handler(state: &AppState) {
+    let reload_tx = state.shared.read().ok()
+        .and_then(|s| s.config_reload_tx.clone());
+    if let Some(tx) = reload_tx {
+        #[cfg(unix)]
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sig = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("⚠️  SIGHUP handler failed: {e}"); return; }
+            };
+            while sig.recv().await.is_some() {
+                eprintln!("🔄 SIGHUP — reloading config from disk");
+                let new_cfg = load_config();
+                let _ = tx.send(new_cfg).await;
+            }
+        });
+    }
+}
+
+/// Apply live-reloadable fields from `new_cfg` to the running server.
+///
+/// Called from the event loop on both SIGHUP and `POST /api/config`.
+/// Port/identity changes are logged as warnings but not applied.
+fn apply_config_hot_reload(state: &mut AppState, new_cfg: ServerConfig, world_config: &mut ServerConfig) {
+    let mut changed = vec![];
+
+    macro_rules! apply {
+        ($field:ident) => {
+            if state.config.$field != new_cfg.$field {
+                changed.push(stringify!($field));
+                world_config.$field = new_cfg.$field.clone();
+                state.config.$field = new_cfg.$field.clone();
+            }
+        };
+    }
+
+    apply!(max_circuits);
+    apply!(max_peers);
+    apply!(max_ping_ms);
+    apply!(cpu_shed_threshold_pct);
+    apply!(ram_shed_threshold_pct);
+    apply!(blacklist);
+    apply!(whitelist);
+    apply!(priority_peers);
+    apply!(known_servers);
+    apply!(log_level);
+    apply!(node_name);
+    apply!(max_bandwidth_mbps);
+    apply!(max_retries);
+    apply!(world_save_interval_secs);
+    apply!(max_loaded_chunks);
+
+    // Warn about fields that require restart
+    if state.config.port != new_cfg.port {
+        state.log(format!("⚠️  [Config] port change ({} → {}) requires restart — ignored",
+            state.config.port, new_cfg.port));
+    }
+    if state.config.ws_port != new_cfg.ws_port {
+        state.log("⚠️  [Config] ws_port change requires restart — ignored".to_string());
+    }
+    if state.config.web_port != new_cfg.web_port {
+        state.log("⚠️  [Config] web_port change requires restart — ignored".to_string());
+    }
+    if state.config.identity_file != new_cfg.identity_file {
+        state.log("⚠️  [Config] identity_file change requires restart — ignored".to_string());
+    }
+
+    if changed.is_empty() {
+        state.log("🔄 [Config] Hot-reload: no live fields changed".to_string());
+    } else {
+        state.log(format!("🔄 [Config] Hot-reload applied: {}", changed.join(", ")));
+    }
+}
+
+// ─── Server-to-server key sync ────────────────────────────────────────────────
+
+/// Pull incremental key records from all `known_servers` in the config.
+///
+/// For each server, queries `GET /api/v1/sync/keys?since=<last_synced_at>&limit=1000`,
+/// imports any new or updated records into the local SQLite DB, then updates
+/// `server_sync.last_synced_at`.
+///
+/// This is called at startup and every 10 minutes from the event loop.
+async fn sync_keys_from_servers(state: &AppState) {
+    use metaverse_core::identity::KeyRecord;
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+
+    let known_servers = state.config.known_servers.clone();
+    if known_servers.is_empty() { return; }
+
+    let db = match state.shared.read().ok().and_then(|s| s.key_db.clone()) {
+        Some(db) => db,
+        None => return,
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("[ServerSync] Failed to create HTTP client: {}", e); return; }
+    };
+
+    for server_url in &known_servers {
+        let last_synced = db.get_last_synced_at(server_url);
+        let url = format!("{}/api/v1/sync/keys?since={}&limit=1000", server_url, last_synced);
+
+        let response = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => { eprintln!("[ServerSync] {} returned {}", server_url, r.status()); continue; }
+            Err(e) => { eprintln!("[ServerSync] {} unreachable: {}", server_url, e); continue; }
+        };
+
+        let records: Vec<serde_json::Value> = match response.json().await {
+            Ok(v) => v,
+            Err(e) => { eprintln!("[ServerSync] {} bad JSON: {}", server_url, e); continue; }
+        };
+
+        let count = records.len();
+        let mut imported = 0i64;
+        let mut newest_at: i64 = last_synced;
+
+        for rec in &records {
+            let Some(b64) = rec.get("record_b64").and_then(|v| v.as_str()) else { continue };
+            let Ok(bytes) = BASE64.decode(b64) else { continue };
+            let Ok(kr) = KeyRecord::from_bytes(&bytes) else { continue };
+            if !kr.verify_self_sig() { continue; }
+            let updated_at = rec.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
+            if updated_at > newest_at { newest_at = updated_at; }
+            let pid = kr.peer_id.to_base58();
+            let ktype = format!("{:?}", kr.key_type);
+            db.upsert(&pid, &bytes, &ktype, kr.display_name.as_deref(),
+                kr.created_at as i64, kr.updated_at as i64, kr.revoked);
+            imported += 1;
+        }
+
+        if count > 0 {
+            db.update_server_sync(server_url, newest_at, imported);
+            eprintln!("[ServerSync] {} — imported {}/{} records (newest_at={})",
+                server_url, imported, count, newest_at);
+        }
+    }
+}
 
 type WebState = Arc<RwLock<SharedState>>;
 
@@ -2394,6 +2913,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Channel for web handlers to push gossipsub publishes into the event loop.
     let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel::<GossipCommand>(256);
+    // Channel for web handlers / SIGHUP to trigger config hot-reloads.
+    let (config_reload_tx, config_reload_rx) = tokio::sync::mpsc::channel::<ServerConfig>(8);
 
     // Shared state for web server
     let shared = Arc::new(RwLock::new(SharedState {
@@ -2405,6 +2926,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         key_db,
         server_secret,
         gossip_tx: Some(gossip_tx),
+        config_reload_tx: Some(config_reload_tx),
         ..Default::default()
     }));
 
@@ -2430,7 +2952,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/health", get(web_api_health))
                 .route("/api/status", get(web_api_status))
                 .route("/api/peers", get(web_api_peers))
-                .route("/api/config", get(web_api_config))
                 .route("/api/keys", get(web_api_keys))
                 .route("/api/keys/relays", get(web_api_keys_relays))
                 .route("/api/keys/servers", get(web_api_keys_servers))
@@ -2443,6 +2964,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/key-requests/:id/approve", post(api_v1_approve_key_request))
                 .route("/api/v1/key-requests/:id/deny", post(api_v1_deny_key_request))
                 .route("/api/v1/key-requests/:id/download", get(api_v1_download_key_request))
+                .route("/api/v1/keys/:peer_id/revoke", post(api_v1_revoke_key))
+                .route("/api/v1/sync/keys", get(api_v1_sync_keys))
+                // Config (GET = read, POST = hot-reload)
+                .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);
@@ -2455,7 +2980,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut app_state = AppState::new(
-        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx,
+        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx, config_reload_rx,
     );
     app_state.log("✅ Metaverse server started");
     if world_enabled && world.is_some() {
@@ -2476,10 +3001,14 @@ async fn run_headless(
     mut state: AppState,
     mut world: Option<WorldSystems>,
 ) -> Result<(), Box<dyn Error>> {
-    let world_config = state.config.clone();
+    let mut world_config = state.config.clone();
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
     let mut stats_tick = tokio::time::interval(Duration::from_secs(30));
+    let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
     let dummy_world = WorldStats::default();
+
+    // Spawn a SIGHUP handler that sends the reloaded config to config_reload_rx (Unix only).
+    spawn_sighup_handler(&state);
 
     loop {
         tokio::select! {
@@ -2492,6 +3021,10 @@ async fn run_headless(
                     state.refresh_sys();
                     state.sync_shared(&dummy_world);
                 }
+                // Drain load-shedding disconnects
+                for peer in state.drain_pending_shed() {
+                    apply_swarm_actions(vec![SwarmAction::DisconnectPeer(peer)], &mut state, &mut swarm);
+                }
             }
             _ = stats_tick.tick() => {
                 let ws = world.as_ref().map(|w| &w.stats).unwrap_or(&dummy_world);
@@ -2502,6 +3035,10 @@ async fn run_headless(
                     state.cpu_pct, state.ram_used_mb,
                     if state.shedding_relay { " ⚠️SHEDDING" } else { "" },
                 ));
+            }
+            _ = sync_tick.tick() => {
+                // Periodic server-to-server key sync
+                sync_keys_from_servers(&state).await;
             }
             swarm_event = swarm.select_next_some() => {
                 let actions = handle_swarm_event(swarm_event, &mut state);
@@ -2517,6 +3054,10 @@ async fn run_headless(
                         }
                     }
                 }
+            }
+            // Config hot-reload from web handler or SIGHUP task
+            Some(new_cfg) = state.config_reload_rx.recv() => {
+                apply_config_hot_reload(&mut state, new_cfg, &mut world_config);
             }
         }
     }
@@ -2553,8 +3094,12 @@ async fn run_tui(
     let refresh_ms = state.config.ui.refresh_ms.max(500); // don't thrash faster than 2Hz
     let mut tui_tick = tokio::time::interval(Duration::from_millis(refresh_ms));
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
-    let world_config = state.config.clone();
+    let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
+    let mut world_config = state.config.clone();
     let dummy_world = WorldStats::default();
+
+    // Spawn SIGHUP handler — sends reloaded config into config_reload_rx (Unix only).
+    spawn_sighup_handler(&state);
 
     let result: Result<(), Box<dyn Error>> = async {
         loop {
@@ -2564,11 +3109,18 @@ async fn run_tui(
                     let ws = world.as_ref().map(|w| &w.stats).unwrap_or(&dummy_world);
                     terminal.draw(|f| draw(f, &state, ws))?;
                     state.sync_shared(ws);
+                    // Drain load-shedding disconnects
+                    for peer in state.drain_pending_shed() {
+                        apply_swarm_actions(vec![SwarmAction::DisconnectPeer(peer)], &mut state, &mut swarm);
+                    }
                 }
                 _ = world_tick.tick() => {
                     if let Some(ref mut w) = world {
                         w.tick(&world_config);
                     }
+                }
+                _ = sync_tick.tick() => {
+                    sync_keys_from_servers(&state).await;
                 }
                 maybe_ev = events.next() => {
                     if let Some(Ok(Event::Key(k))) = maybe_ev {
@@ -2594,6 +3146,10 @@ async fn run_tui(
                             }
                         }
                     }
+                }
+                // Config hot-reload from web handler or SIGHUP task
+                Some(new_cfg) = state.config_reload_rx.recv() => {
+                    apply_config_hot_reload(&mut state, new_cfg, &mut world_config);
                 }
             }
             if state.should_quit { break; }
