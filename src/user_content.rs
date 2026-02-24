@@ -50,6 +50,9 @@ impl ParcelBounds {
 pub struct UserContentLayer {
     /// Operation log for this chunk (append-only)
     op_log: Vec<SignedOperation>,
+
+    /// Deduplication set — prevents double-adding ops with the same signature
+    seen_sigs: std::collections::HashSet<[u8; 64]>,
     
     /// Parcel ownership map
     parcels: HashMap<ParcelBounds, PeerId>,
@@ -71,6 +74,7 @@ impl UserContentLayer {
     pub fn with_config(config: PermissionConfig) -> Self {
         Self {
             op_log: Vec::new(),
+            seen_sigs: std::collections::HashSet::new(),
             parcels: HashMap::new(),
             access_grants: HashMap::new(),
             config,
@@ -173,6 +177,10 @@ impl UserContentLayer {
     /// Returns `PermissionResult::Allowed` on success, or the denial reason.
     /// The caller is responsible for not applying denied ops to the octree.
     pub fn add_local_operation(&mut self, op: SignedOperation) -> PermissionResult {
+        // Deduplicate by signature before permission check
+        if !self.seen_sigs.insert(op.signature) {
+            return PermissionResult::Allowed; // already present — treat as success, don't re-add
+        }
         // Build a minimal record from the op's embedded public key for key-type check
         let record = KeyRecord {
             version: 1,
@@ -197,6 +205,9 @@ impl UserContentLayer {
         let result = check_record_permission(&record, class, &self.config);
         if result.is_allowed() {
             self.op_log.push(op);
+        } else {
+            // Remove from seen_sigs so a corrected op with same sig could be re-added
+            self.seen_sigs.remove(&record.self_sig);
         }
         result
     }
@@ -308,15 +319,17 @@ impl UserContentLayer {
     /// HashMap mapping chunk ID to number of operations saved
     pub fn save_chunks<P: AsRef<Path>>(&self, base_dir: P) -> std::io::Result<HashMap<ChunkId, usize>> {
         let chunks_dir = base_dir.as_ref().join("chunks");
-        
-        // Group operations by ALL affected chunks (not just the chunk containing the voxel)
+
+        // Group operations by ALL affected chunks, deduplicating by signature
+        // to guard against any duplicate accumulation in the op_log.
         let mut ops_by_chunk: HashMap<ChunkId, Vec<&SignedOperation>> = HashMap::new();
-        
+        let mut seen_sigs: std::collections::HashSet<[u8; 64]> = std::collections::HashSet::new();
+
         for op in &self.op_log {
-            // Get all chunks that need this operation for proper mesh generation
-            let affected_chunks = op.affecting_chunks();
-            
-            for chunk_id in affected_chunks {
+            if !seen_sigs.insert(op.signature) {
+                continue; // skip duplicates
+            }
+            for chunk_id in op.affecting_chunks() {
                 ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
             }
         }
@@ -328,7 +341,7 @@ impl UserContentLayer {
             let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
             std::fs::create_dir_all(&chunk_dir)?;
             
-            // Convert to owned Vec and sort in causal replay order
+            // Sort in causal replay order
             let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
             ops_owned.sort_by(|a, b| a.replay_cmp(b));
             
@@ -366,16 +379,25 @@ impl UserContentLayer {
 
         // Try new SignedOperation format first
         if let Ok(ops) = bincode::deserialize::<Vec<SignedOperation>>(&bytes) {
-            let count = ops.len();
-            self.op_log.extend(ops);
+            let mut count = 0;
+            for op in ops {
+                if self.seen_sigs.insert(op.signature) {
+                    self.op_log.push(op);
+                    count += 1;
+                }
+            }
             return Ok(count);
         }
         // Fall back: legacy VoxelOperation format (auto-migrate)
         #[allow(deprecated)]
         if let Ok(legacy_ops) = bincode::deserialize::<Vec<VoxelOperation>>(&bytes) {
-            let count = legacy_ops.len();
+            let mut count = 0;
             for op in legacy_ops {
-                self.op_log.push(SignedOperation::from(op));
+                let signed = SignedOperation::from(op);
+                if self.seen_sigs.insert(signed.signature) {
+                    self.op_log.push(signed);
+                    count += 1;
+                }
             }
             return Ok(count);
         }

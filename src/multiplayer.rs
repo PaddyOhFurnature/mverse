@@ -527,31 +527,28 @@ impl MultiplayerSystem {
             self.identity.verifying_key().to_bytes(),
         );
         op.sign(self.identity.signing_key());
-        
-        // Serialize and send
-        let data = op.to_bytes()?;
 
-        // Publish to the per-chunk topic for this voxel (AOI: only subscribers in that chunk receive it).
-        // Fall back to spatial region topic or global if chunk topics not yet set up.
-        let chunk_id = ChunkId::from_voxel(&coord);
-        let chunk_topic = chunk_voxel_topic(&chunk_id);
-        let topic = if self.subscribed_chunk_topics.contains(&chunk_topic) {
-            chunk_topic
-        } else if let Some(ref sharding) = self.spatial_sharding {
-            sharding.get_publish_topic("voxel-ops")
-        } else {
-            TOPIC_VOXEL_OPS.to_string()
-        };
-        
-        self.cmd_tx.send(NetworkCommand::Publish {
-            topic,
-            data,
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
-        self.stats.voxel_ops_sent += 1;
-        
-        // Remember we sent this (for deduplication)
+        // Remember we sent this (for deduplication on receive-back)
         self.voxel_op_seen.insert(op.signature);
-        
+
+        // Best-effort publish to peers — network failure must NOT prevent local persistence.
+        // The op is always returned to the caller regardless of publish success.
+        if let Ok(data) = op.to_bytes() {
+            let chunk_id = ChunkId::from_voxel(&coord);
+            let chunk_topic = chunk_voxel_topic(&chunk_id);
+            let topic = if self.subscribed_chunk_topics.contains(&chunk_topic) {
+                chunk_topic
+            } else if let Some(ref sharding) = self.spatial_sharding {
+                sharding.get_publish_topic("voxel-ops")
+            } else {
+                TOPIC_VOXEL_OPS.to_string()
+            };
+            
+            if self.cmd_tx.send(NetworkCommand::Publish { topic, data }).is_ok() {
+                self.stats.voxel_ops_sent += 1;
+            }
+        }
+
         Ok(op)
     }
     
