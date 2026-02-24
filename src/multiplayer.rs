@@ -1786,7 +1786,8 @@ fn run_network_thread(
                                    (e_str.contains("InsufficientPeers") || e_str.contains("NoPeers")) {
                                     println!("⚠️  [NETWORK] voxel-op publish failed ({}), queuing retry", e_str);
                                     publish_retry_queue.push((topic, data, tokio::time::Instant::now()));
-                                } else if !e_str.contains("NoPeers") {
+                                } else if !e_str.contains("NoPeers") && !e_str.contains("AllQueuesFull") {
+                                    // AllQueuesFull is transient gossipsub congestion — not an error
                                     eprintln!("Failed to publish to {}: {}", topic, e_str);
                                 }
                             }

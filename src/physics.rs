@@ -235,7 +235,7 @@ pub fn generate_heightmap_collider(
 pub fn generate_mesh_collider(
     vertices: &[[f32; 3]],
     indices: &[u32],
-    target_triangle_count: usize,
+    _target_triangle_count: usize,
 ) -> (Vec<Point<f32>>, Vec<[u32; 3]>) {
     // For now: Just use the mesh as-is (no simplification yet)
     // TODO: Implement mesh decimation/simplification algorithm
@@ -249,15 +249,6 @@ pub fn generate_mesh_collider(
         .chunks_exact(3)
         .map(|chunk| [chunk[0], chunk[1], chunk[2]])
         .collect();
-    
-    // Warn if too many triangles
-    let triangle_count = rapier_indices.len();
-    if triangle_count > target_triangle_count {
-        eprintln!(
-            "WARNING: Collision mesh has {} triangles (target: {}). May impact performance.",
-            triangle_count, target_triangle_count
-        );
-    }
     
     (rapier_vertices, rapier_indices)
 }
@@ -319,7 +310,7 @@ pub fn create_collision_from_mesh(
     }
     
     if indices.len() > 10_000 {
-        eprintln!("WARNING: Collision mesh has {} triangles (target: 10000). May impact performance.", indices.len());
+        // Large collision mesh — normal for complex terrain
     }
     
     let collider = ColliderBuilder::trimesh(vertices, indices)

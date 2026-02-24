@@ -472,11 +472,14 @@ fn main() {
                 WindowEvent::CloseRequested => {
                     println!("\n👋 Shutting down...");
                     
-                    // Save world state to chunk files before exiting
-                    println!("💾 Saving world state to chunk files...");
-                    match chunk_manager.save_all_chunks(&world_dir) {
-                        Ok(()) => {
-                            println!("   ✅ Saved all modified chunks");
+                    // Save all voxel operations from the live user_content Arc
+                    // (chunk_manager holds a startup clone; saving from the Arc ensures
+                    //  remote ops applied during this session are also persisted)
+                    println!("💾 Saving world state...");
+                    match user_content.lock().unwrap().save_chunks(&world_dir) {
+                        Ok(saved) => {
+                            let total: usize = saved.values().sum();
+                            println!("   ✅ Saved {} operations across {} chunks", total, saved.len());
                         }
                         Err(e) => {
                             eprintln!("   ⚠️  Failed to save chunks: {}", e);
@@ -661,6 +664,16 @@ fn main() {
                                 let _ = multiplayer.request_chunk_state(ids);
                             }
                             println!("🎮 Game started!");
+                            game_loading = false;
+                        } else if loading_frames >= 1800 {
+                            // Safety timeout (~30s) — start anyway if something is stuck
+                            println!("⚠️  Loading timeout — starting game with {} chunks (player chunk ready: {})",
+                                loaded, player_chunk_ready);
+                            if multiplayer.peer_count() > 0 {
+                                let ids = chunk_streamer.loaded_chunk_ids();
+                                let _ = multiplayer.request_chunk_state(ids);
+                            }
+                            println!("🎮 Game started (timeout)!");
                             game_loading = false;
                         }
                         return;
@@ -1166,8 +1179,6 @@ fn main() {
                                 chunk_data.collider = None;
                             }
                             chunk_data.dirty = false;
-                            
-                            println!("🔄 Regenerated mesh and collision for {}", chunk_data.id);
                         }
                     }
                     

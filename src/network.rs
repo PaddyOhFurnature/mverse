@@ -724,8 +724,6 @@ impl NetworkNode {
             .ok_or_else(|| NetworkError::TopicNotSubscribed(topic_name.to_string()))?
             .clone();
         
-        println!("🟢 [NETWORK] Publishing to {}: {} bytes", topic_name, data.len());
-        
         self.swarm.behaviour_mut().gossipsub.publish(topic, data)
             .map_err(|e| NetworkError::PublishError(e.to_string()))?;
         
