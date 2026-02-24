@@ -62,7 +62,6 @@ use crate::{
     permissions::{action_to_class, check_key_level_permission, PermissionConfig, PermissionResult},
     player_state::PlayerStateManager,
     spatial_sharding::{SpatialSharding, SpatialConfig},
-    vector_clock,
     voxel::{Octree, VoxelCoord},
     physics::PhysicsWorld,
 };
@@ -341,7 +340,7 @@ impl MultiplayerSystem {
     /// creates the network node synchronously, which doesn't work
     /// for mDNS auto-discovery.
     #[deprecated(note = "Use new_with_runtime() instead")]
-    pub fn new(identity: Identity) -> Result<Self> {
+    pub fn new(_identity: Identity) -> Result<Self> {
         // This implementation is now broken due to mDNS tokio requirements
         // Keeping it for compatibility but marking as deprecated
         Err(MultiplayerError::RuntimeError(
@@ -1846,7 +1845,7 @@ fn run_network_thread(
             // Retry queued voxel ops - retry every loop, give up after 30s
             if network.game_peer_count() > 0 && !publish_retry_queue.is_empty() {
                 let now = tokio::time::Instant::now();
-                publish_retry_queue.retain(|(topic, data, queued_at)| {
+                publish_retry_queue.retain(|(_, _, queued_at)| {
                     if now.duration_since(*queued_at).as_secs() > 30 {
                         eprintln!("⚠️  [NETWORK] Dropping voxel-op after 30s retry timeout");
                         return false; // drop

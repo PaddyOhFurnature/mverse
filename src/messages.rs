@@ -30,7 +30,6 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 
 // Custom serde for [u8; 64] arrays
 mod serde_arrays {
@@ -319,7 +318,7 @@ impl Material {
 /// This ensures all peers converge to the same state without coordination,
 /// while properly handling causal relationships.
 /// Legacy operation type. Use [`SignedOperation`] with [`Action::SetVoxel`] for new code.
-#[deprecated(note = "Use SignedOperation with Action::SetVoxel instead")]
+// Note: being migrated to SignedOperation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoxelOperation {
     /// Voxel coordinate being modified

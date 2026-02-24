@@ -529,14 +529,9 @@ mod tests {
 /// 
 /// For depth=7: samples 128×128×128 cube = 2,097,152 voxels
 pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> Mesh {
-    use crate::coordinates::ECEF;
-    
     let mut mesh = Mesh::new();
     let size = 1 << depth;  // 2^depth
     let half = size / 2;
-    
-    // Calculate camera origin (for FloatingOrigin)
-    let center_ecef = center.to_ecef();
     
     // Iterate over all cubes in the region
     for x in (-half)..half {

@@ -7,7 +7,7 @@
 //! - Deterministic simulation (P2P requirement)
 
 use crate::coordinates::{ECEF, GPS};
-use crate::voxel::{Octree, VoxelCoord, raycast_voxels, VoxelRaycastHit};
+use crate::voxel::{Octree, VoxelCoord, raycast_voxels};
 use crate::materials::MaterialId;
 use crate::marching_cubes::extract_octree_mesh;
 use crate::mesh::Mesh;
@@ -608,7 +608,7 @@ impl Player {
         // Check for collision (exclude self)
         let filter = QueryFilter::default().exclude_collider(self.collider_handle);
         
-        if let Some((handle, toi)) = physics.query_pipeline.cast_ray(
+        if let Some((_handle, toi)) = physics.query_pipeline.cast_ray(
             &physics.bodies,
             &physics.colliders,
             &ray,

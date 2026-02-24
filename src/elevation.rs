@@ -289,7 +289,7 @@ impl OpenTopographySource {
     fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
         // Rate limiting: 2-second cooldown (thread-safe with Mutex)
         {
-            let mut last_req = self.last_request.lock().unwrap();
+            let last_req = self.last_request.lock().unwrap();
             if let Some(last) = *last_req {
                 let elapsed = last.elapsed();
                 if elapsed < std::time::Duration::from_secs(2) {

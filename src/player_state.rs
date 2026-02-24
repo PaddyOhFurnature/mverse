@@ -75,9 +75,6 @@ struct TimestampedState {
     /// Pitch at this snapshot
     pitch: f32,
     
-    /// Movement mode at this snapshot
-    movement_mode: MovementMode,
-    
     /// Lamport timestamp (for ordering)
     lamport_time: u64,
     
@@ -94,7 +91,6 @@ impl NetworkedPlayer {
             velocity: msg.velocity,
             yaw: msg.yaw,
             pitch: msg.pitch,
-            movement_mode: msg.movement_mode,
             lamport_time: msg.timestamp,
             received_at: now,
         };
@@ -127,7 +123,6 @@ impl NetworkedPlayer {
             velocity: msg.velocity,
             yaw: msg.yaw,
             pitch: msg.pitch,
-            movement_mode: msg.movement_mode,
             lamport_time: msg.timestamp,
             received_at: now,
         };

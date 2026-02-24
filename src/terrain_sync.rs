@@ -28,7 +28,7 @@ impl SyncTerrainLoader {
     ///
     /// Safe to call from main thread. Returns generated octree with real terrain.
     pub fn generate_chunk_with_terrain(&self, chunk_id: &ChunkId) -> Result<Octree, String> {
-        let mut generator = self.generator.lock()
+        let generator = self.generator.lock()
             .map_err(|e| format!("Failed to lock terrain generator: {}", e))?;
         
         generator.generate_chunk(chunk_id)

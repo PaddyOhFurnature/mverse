@@ -50,7 +50,7 @@ use libp2p::{
     relay,
     dcutr,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, quic, websocket, tls, yamux, Multiaddr, PeerId, Swarm, Transport,
+    tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -284,6 +284,7 @@ pub struct NetworkNode {
     pub(crate) swarm: Swarm<MetaverseBehaviour>,
     
     /// Local peer identity
+    #[allow(dead_code)]
     identity: Identity,
     
     /// Local peer ID
@@ -895,7 +896,7 @@ impl NetworkNode {
                     }
                 }
                 // If peer advertises circuit relay v2 support, mark as relay and listen via it
-                let relay_proto = libp2p::core::upgrade::Version::V1;
+                let _relay_proto = libp2p::core::upgrade::Version::V1;
                 let is_relay = info.protocols.iter().any(|p| {
                     p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop")
                 });

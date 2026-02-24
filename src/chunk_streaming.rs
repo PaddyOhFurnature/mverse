@@ -33,19 +33,17 @@
 //! ```
 
 use crate::{
-    chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z},
+    chunk::{ChunkId, CHUNK_SIZE_X},
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
-    materials::MaterialId,
     renderer::MeshBuffer,
     terrain::TerrainGenerator,
-    terrain_sync,
     user_content::UserContentLayer,
     voxel::Octree,
 };
 use rapier3d::prelude::ColliderHandle;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,9 +152,6 @@ pub struct ChunkStreamer {
     /// Background chunk loader (parallel workers)
     chunk_loader: ChunkLoader,
     
-    /// Terrain generator for synchronous terrain generation
-    terrain_generator: Arc<Mutex<TerrainGenerator>>,
-    
     /// User content layer for voxel operations (edits/modifications)
     user_content: Arc<Mutex<UserContentLayer>>,
     
@@ -204,7 +199,6 @@ impl ChunkStreamer {
             unloading_queue: Vec::new(),
             loading_in_progress: HashSet::new(),
             chunk_loader,
-            terrain_generator,
             user_content,
             world_dir,
             last_player_pos: None,
@@ -432,7 +426,7 @@ impl ChunkStreamer {
     }
     
     /// Get all chunks beyond radius (for unloading)
-    fn chunks_beyond_radius(&self, center: ECEF, radius_m: f64) -> Vec<ChunkId> {
+    fn chunks_beyond_radius(&self, _center: ECEF, radius_m: f64) -> Vec<ChunkId> {
         self.loaded_chunks
             .values()
             .filter(|chunk| chunk.distance_m > radius_m)
@@ -441,6 +435,7 @@ impl ChunkStreamer {
     }
     
     /// Check if chunk is in safe zone around player
+    #[cfg(test)]
     fn is_in_safe_zone(&self, chunk_id: &ChunkId, player_pos: &ECEF) -> bool {
         let player_chunk = ChunkId::from_ecef(player_pos);
         let radius = self.config.safe_zone_radius as i64;
@@ -448,28 +443,6 @@ impl ChunkStreamer {
         (chunk_id.x - player_chunk.x).abs() <= radius &&
         (chunk_id.y - player_chunk.y).abs() <= radius &&
         (chunk_id.z - player_chunk.z).abs() <= radius
-    }
-    
-    /// Load chunk immediately (synchronous, will be async later)
-    fn load_chunk_immediate(&mut self, chunk_id: ChunkId) -> Result<LoadedChunk, String> {
-        // Generate real terrain using synchronous terrain generator
-        let generator = self.terrain_generator.lock()
-            .map_err(|e| format!("Failed to lock terrain generator: {}", e))?;
-        
-        let octree = generator.generate_chunk(&chunk_id)
-            .map_err(|e| format!("Failed to generate terrain for {}: {}", chunk_id, e))?;
-        
-        Ok(LoadedChunk {
-            id: chunk_id,
-            octree,
-            mesh_buffer: None,
-            collider: None,
-            dirty: true,  // New chunk needs mesh generation
-            distance_m: 0.0, // Will be updated
-            in_safe_zone: false, // Will be updated
-            state: ChunkLoadState::Loaded,
-            last_modified: now_secs(),
-        })
     }
     
     /// Unload a chunk (saves modifications to disk)

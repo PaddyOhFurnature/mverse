@@ -78,7 +78,7 @@ impl TerrainGenerator {
         println!("Generating {}m × {}m terrain region...", size_meters, size_meters);
         
         // Lock elevation pipeline
-        let mut elevation = self.elevation.lock()
+        let elevation = self.elevation.lock()
             .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // Calculate GPS coordinates for corner points
@@ -294,7 +294,7 @@ impl TerrainGenerator {
     /// - AIR above surface
     pub fn generate_column(&self, octree: &mut Octree, gps: &GPS) -> Result<(), String> {
         // Lock elevation pipeline
-        let mut elevation = self.elevation.lock()
+        let elevation = self.elevation.lock()
             .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // Query elevation at this lat/lon

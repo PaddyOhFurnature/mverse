@@ -5,7 +5,6 @@
 
 use crate::chunk::ChunkId;
 use crate::mesh::{Mesh, Vertex};
-use crate::coordinates::ECEF;
 use glam::Vec3;
 use rapier3d::prelude::*;
 
@@ -117,7 +116,7 @@ fn generate_translucent_cube(_chunk_id: &ChunkId) -> Mesh {
 ///
 /// Simple box collider, prevents player from falling through loading chunks.
 /// Essential for maintaining physics simulation during chunk streaming.
-pub fn generate_placeholder_collider(chunk_id: &ChunkId) -> Collider {
+pub fn generate_placeholder_collider(_chunk_id: &ChunkId) -> Collider {
     use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
     
     // Calculate chunk bounds

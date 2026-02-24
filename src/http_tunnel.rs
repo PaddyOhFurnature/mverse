@@ -176,7 +176,7 @@ impl HttpTunnelServer {
     /// Handle incoming HTTP POST (send message)
     pub async fn handle_send(
         &self,
-        source_peer: PeerId,
+        _source_peer: PeerId,
         dest_peer: PeerId,
         data: Vec<u8>,
     ) -> Result<(), HttpTunnelError> {

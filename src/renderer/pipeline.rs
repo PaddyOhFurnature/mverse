@@ -2,7 +2,6 @@
 
 use super::{Camera, CameraUniform, Vertex};
 use wgpu::util::DeviceExt;
-use glam::Mat4;
 
 /// Complete rendering context with device, queue, surface
 pub struct RenderContext {

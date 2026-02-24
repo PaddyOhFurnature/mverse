@@ -10,7 +10,7 @@ pub use camera::Camera;
 pub use pipeline::{RenderContext, RenderPipeline};
 
 use crate::mesh::Mesh;
-use glam::{Mat4, Vec3};
+use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 /// GPU buffer containing mesh data

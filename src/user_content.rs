@@ -17,11 +17,11 @@ use crate::{
     permissions::{action_to_class, check_record_permission, PermissionConfig, PermissionResult},
     voxel::VoxelCoord,
 };
-use crate::identity::{KeyRecord, KeyType};
+use crate::identity::{KeyRecord};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Parcel ownership bounds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

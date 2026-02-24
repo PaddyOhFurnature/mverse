@@ -58,8 +58,8 @@
 //! }
 //! ```
 
-use crate::chunk::{ChunkId, chunks_in_radius, CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
-use crate::messages::{Material, SignedOperation, VoxelOperation};
+use crate::chunk::{ChunkId, chunks_in_radius};
+use crate::messages::{SignedOperation};
 use crate::renderer::MeshBuffer;
 use crate::terrain::TerrainGenerator;
 use crate::user_content::UserContentLayer;
@@ -202,7 +202,7 @@ impl ChunkManager {
     ///
     /// Saves any voxel operations to chunk file before unloading.
     /// Frees octree, mesh, and collider memory.
-    pub fn unload_chunk(&mut self, chunk_id: &ChunkId, world_dir: &Path) -> Result<(), String> {
+    pub fn unload_chunk(&mut self, chunk_id: &ChunkId, _world_dir: &Path) -> Result<(), String> {
         if let Some(_chunk_data) = self.loaded_chunks.remove(chunk_id) {
             // Save operations (handled by UserContentLayer)
             // Note: Operations are saved globally, not per-chunk unload
