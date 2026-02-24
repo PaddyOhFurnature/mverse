@@ -73,7 +73,7 @@ use metaverse_core::{
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
-    identity::Identity,
+    identity::{Identity, KeyType},
     marching_cubes::extract_chunk_mesh,
     materials::MaterialId,
     mesh::{Mesh, Vertex},
@@ -88,6 +88,7 @@ use metaverse_core::{
     vector_clock::VectorClock,
     voxel::VoxelCoord,
 };
+use egui_wgpu::ScreenDescriptor;
 use glam::{Mat4, Vec3};
 use rapier3d::prelude::*;
 use std::collections::HashMap;
@@ -99,6 +100,198 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
 };
 use std::sync::Mutex;
+
+// ── Signup screen ─────────────────────────────────────────────────────────────
+
+enum SignupStep {
+    Choosing,
+    Personal { name: String, email: String },
+}
+
+struct SignupScreen {
+    step: SignupStep,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+}
+
+impl SignupScreen {
+    fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui_ctx.viewport_id(),
+            window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &context.device,
+            context.config.format,
+            None,
+            1,
+            false,
+        );
+        Self { step: SignupStep::Choosing, egui_ctx, egui_state, egui_renderer }
+    }
+
+    /// Feed a window event to egui. Returns true if egui consumed the event.
+    fn on_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
+        self.egui_state.on_window_event(window, event).consumed
+    }
+
+    /// Render the signup overlay into an already-created texture view.
+    /// Returns the user's choice once confirmed.
+    fn render(
+        &mut self,
+        context: &RenderContext,
+        view: &wgpu::TextureView,
+        window: &winit::window::Window,
+    ) -> Option<(KeyType, Option<String>, Option<String>)> {
+        let raw_input = self.egui_state.take_egui_input(window);
+
+        // Collect UI decisions outside the egui closure to avoid double-borrows.
+        let mut result: Option<(KeyType, Option<String>, Option<String>)> = None;
+        let mut go_personal = false;
+        let mut go_back     = false;
+
+        // Split-borrow: borrow `step` directly so egui_ctx.run can borrow separately.
+        let step = &mut self.step;
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Area::new(egui::Id::new("signup_backdrop"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(
+                        ctx.screen_rect(), 0.0,
+                        egui::Color32::from_black_alpha(210),
+                    );
+                });
+
+            egui::Window::new("Welcome to the Metaverse")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .fixed_size([480.0, 360.0])
+                .show(ctx, |ui| {
+                    ui.add_space(4.0);
+                    ui.label("Choose your identity. You can upgrade at any time.");
+                    ui.add_space(12.0);
+
+                    match step {
+                        SignupStep::Choosing => {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("  Anonymous  ").clicked() {
+                                        result = Some((KeyType::Anonymous, None, None));
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.strong("Anonymous — Pseudonymous");
+                                        ui.small("Persistent. Build, own parcels, trade.\nNo email required.");
+                                    });
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("   Personal   ").clicked() {
+                                        go_personal = true;
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.strong("Personal — Named identity");
+                                        ui.small("Full capabilities. Optional email for\naccount recovery.");
+                                    });
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if ui.button("     Guest     ").clicked() {
+                                        result = Some((KeyType::Guest, None, None));
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.strong("Guest — Temporary (30 days)");
+                                        ui.small("Explore only. Cannot own parcels or trade.");
+                                    });
+                                });
+                            });
+                        }
+
+                        SignupStep::Personal { name, email } => {
+                            ui.label("Display name (optional):");
+                            ui.text_edit_singleline(name);
+                            ui.add_space(8.0);
+                            ui.label("Email (optional — enables account recovery):");
+                            ui.text_edit_singleline(email);
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("  Create Identity  ").clicked() {
+                                    let n = if name.is_empty() { None } else { Some(name.clone()) };
+                                    let e = if email.is_empty() { None } else { Some(email.clone()) };
+                                    result = Some((KeyType::Personal, n, e));
+                                }
+                                if ui.button("Back").clicked() { go_back = true; }
+                            });
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.small("⚠  Your key never leaves this machine. Back up ~/.metaverse/identity.key — no password reset.");
+                });
+        });
+
+        // Apply step transitions after the closure (borrow of step released)
+        if go_personal {
+            self.step = SignupStep::Personal { name: String::new(), email: String::new() };
+        } else if go_back {
+            self.step = SignupStep::Choosing;
+        }
+
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+
+        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
+        }
+        let screen_desc = ScreenDescriptor {
+            size_in_pixels: [context.config.width, context.config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let mut encoder = context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("egui_signup") }
+        );
+        self.egui_renderer.update_buffers(
+            &context.device, &context.queue, &mut encoder, &tris, &screen_desc,
+        );
+        {
+            // forget_lifetime() lets us hold a 'static RenderPass while
+            // egui_renderer (which is 'static in the closure) renders into it.
+            let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui_signup_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load, // overlay on the existing 3D frame
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let mut rpass = rpass.forget_lifetime();
+            self.egui_renderer.render(&mut rpass, &tris, &screen_desc);
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
+        result
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PlayerModeLocal {
@@ -149,18 +342,28 @@ fn main() {
     
     // Initialize P2P networking
     println!("🔐 Initializing cryptographic identity...");
-    
+
+    // Detect first run before creating/loading the identity.
+    // --temp-identity flag skips signup (used for multi-instance testing).
+    let is_temp = std::env::args().any(|arg| arg == "--temp-identity");
+    let needs_signup = !is_temp && !Identity::key_file_exists();
+
     // Check for --temp-identity flag for testing multiple instances
-    let identity = if std::env::args().any(|arg| arg == "--temp-identity") {
+    let identity = if is_temp {
         println!("   Using temporary identity (not saved)");
+        Identity::generate()
+    } else if needs_signup {
+        // First run: generate in-memory, let the user choose type via UI.
+        // The key will be saved to disk after the signup screen completes.
+        println!("   First run — signup screen will appear in-game.");
         Identity::generate()
     } else {
         Identity::load_or_create()
             .expect("Failed to create identity")
     };
-    
+
     println!("   PeerId: {}", short_peer_id(&identity.peer_id()));
-    println!("   Key: ~/.metaverse/identity.key");
+    if !needs_signup { println!("   Key: ~/.metaverse/identity.key"); }
     
     println!("\n🌐 Starting P2P network node...");
     
@@ -210,6 +413,14 @@ fn main() {
     println!("🎨 Initializing renderer...");
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
+
+    // First-run signup screen (shown when no identity key exists on disk)
+    let mut signup: Option<SignupScreen> = if needs_signup {
+        println!("🆕 First run detected — showing identity setup screen.");
+        Some(SignupScreen::new(&context, &window))
+    } else {
+        None
+    };
     
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
@@ -469,6 +680,15 @@ fn main() {
 
     event_loop.run(move |event, elwt| {
         match event {
+            Event::WindowEvent { ref event, .. } => {
+                // Route all window events through egui when the signup screen is active
+                if let Some(ref mut s) = signup {
+                    s.on_event(&window, event);
+                }
+            }
+            _ => {}
+        }
+        match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
                     println!("\n👋 Shutting down...");
@@ -521,6 +741,8 @@ fn main() {
                 }
                 
                 WindowEvent::KeyboardInput { event, .. } => {
+                    // Block game input while the signup screen is visible
+                    if signup.is_some() { return; }
                     if event.state == ElementState::Pressed {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
@@ -595,6 +817,8 @@ fn main() {
                 }
                 
                 WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Pressed, .. } => {
+                    // Don't grab cursor while signup screen is visible
+                    if signup.is_some() { return; }
                     if !cursor_grabbed {
                         let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
                         window.set_cursor_visible(false);
@@ -1250,6 +1474,23 @@ fn main() {
                             }
                             
                             context.queue.submit(std::iter::once(encoder.finish()));
+
+                            // Signup overlay — rendered on top of the 3D world
+                            // into the same texture view before presenting.
+                            if let Some(ref mut s) = signup {
+                                if let Some((key_type, name, email)) = s.render(&context, &view, &window) {
+                                    if let Err(e) = identity.save_with_type(key_type, name, None) {
+                                        eprintln!("⚠️  Failed to save identity: {}", e);
+                                    } else {
+                                        println!("✅ Identity saved to ~/.metaverse/identity.key");
+                                        if let Some(e) = email {
+                                            println!("   Email stored (verification coming later): {}", e);
+                                        }
+                                    }
+                                    signup = None;
+                                }
+                            }
+
                             frame.present();
                         }
                         Err(e) => eprintln!("Surface error: {:?}", e),

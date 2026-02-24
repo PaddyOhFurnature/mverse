@@ -652,6 +652,28 @@ impl Identity {
     /// friction. Guest keys expire after 30 days and cannot claim parcels or
     /// trade. Use [`Identity::upgrade_key_type`] to promote the key to Personal.
     ///
+    /// Returns `true` if an identity key file already exists on disk.
+    /// Used for first-run detection before calling `load_or_create`.
+    pub fn key_file_exists() -> bool {
+        Self::default_path().map(|p| p.exists()).unwrap_or(false)
+    }
+
+    /// Save the identity and write a KeyRecord for the given key type.
+    /// Called after the user completes in-game signup to persist their choice.
+    pub fn save_with_type(
+        &self,
+        key_type: KeyType,
+        display_name: Option<String>,
+        email_hash: Option<[u8; 32]>,
+    ) -> Result<()> {
+        let path = Self::default_path()?;
+        Self::ensure_metaverse_dir()?;
+        self.save_to_path(&path)?;
+        let record = self.create_key_record(key_type, display_name, None, email_hash, None, None);
+        self.save_key_record(&record)?;
+        Ok(())
+    }
+
     /// Also loads or auto-generates the companion `.keyrec` file.
     /// On first run, prints a prominent onboarding and backup message.
     ///
