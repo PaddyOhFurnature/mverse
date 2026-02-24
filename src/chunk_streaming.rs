@@ -342,24 +342,23 @@ impl ChunkStreamer {
             self.loading_in_progress.remove(&result.chunk_id);
             
             if let Some(mut octree) = result.octree {
-                // Load and apply user operations from disk
-                let ops_loaded = match self.user_content.lock().unwrap().load_chunk(&self.world_dir, &result.chunk_id) {
-                    Ok(count) => count,
-                    Err(e) => {
-                        eprintln!("⚠️  Failed to load operations for {}: {}", result.chunk_id, e);
-                        0
-                    }
+                // Apply any saved user operations to the freshly-generated octree.
+                // Ops were already loaded at startup into the shared user_content Arc;
+                // DO NOT call load_chunk() here — that would append duplicates every run.
+                let chunk_ops: Vec<_> = {
+                    let uc = self.user_content.lock().unwrap();
+                    uc.operations_for_chunk(&result.chunk_id)
+                        .into_iter()
+                        .cloned()
+                        .collect()
                 };
-                
-                // Apply loaded operations to octree
-                if ops_loaded > 0 {
-                    let user_content = self.user_content.lock().unwrap();
-                    for op in user_content.operations_for_chunk(&result.chunk_id) {
+                if !chunk_ops.is_empty() {
+                    for op in &chunk_ops {
                         if let Some((coord, material)) = op.as_set_voxel() {
                             octree.set_voxel(coord, material.to_material_id());
                         }
                     }
-                    println!("   📝 Applied {} saved operations to {}", ops_loaded, result.chunk_id);
+                    println!("   📝 Applied {} saved operations to {}", chunk_ops.len(), result.chunk_id);
                 }
                 
                 let chunk = LoadedChunk {

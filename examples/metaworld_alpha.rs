@@ -477,10 +477,9 @@ fn main() {
                     // (chunk_manager holds a startup clone; saving from the Arc ensures
                     //  remote ops applied during this session are also persisted)
                     println!("💾 Saving world state...");
-                    match user_content.lock().unwrap().save_chunks(&world_dir) {
-                        Ok(saved) => {
-                            let total: usize = saved.values().sum();
-                            println!("   ✅ Saved {} operations across {} chunks", total, saved.len());
+                    match chunk_manager.save_all_chunks(&world_dir) {
+                        Ok(()) => {
+                            println!("   ✅ Saved modified chunks");
                         }
                         Err(e) => {
                             eprintln!("   ⚠️  Failed to save chunks: {}", e);
