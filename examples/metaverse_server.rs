@@ -575,6 +575,23 @@ impl KeyDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_key_type   ON key_records (key_type);
             CREATE INDEX IF NOT EXISTS idx_updated_at ON key_records (updated_at);
+
+            -- Key upgrade / relay issuance requests
+            CREATE TABLE IF NOT EXISTS key_requests (
+                id            TEXT    PRIMARY KEY,   -- UUID
+                peer_id       TEXT    NOT NULL,
+                requested_type TEXT   NOT NULL,      -- 'Relay', 'Server', 'Admin' etc.
+                display_name  TEXT,
+                justification TEXT,
+                contact_info  TEXT,
+                status        TEXT    NOT NULL DEFAULT 'pending', -- pending|approved|denied
+                created_at    INTEGER NOT NULL DEFAULT 0,
+                reviewed_at   INTEGER,
+                reviewer_note TEXT,
+                result_bytes  BLOB                   -- signed KeyRecord bytes when approved
+            );
+            CREATE INDEX IF NOT EXISTS idx_req_status ON key_requests (status);
+            CREATE INDEX IF NOT EXISTS idx_req_peer   ON key_requests (peer_id);
         ")?;
         Ok(Self { conn: Arc::new(std::sync::Mutex::new(conn)) })
     }
@@ -650,6 +667,100 @@ impl KeyDatabase {
             |r| r.get(0),
         ).ok()
     }
+
+    // ── Key request methods ─────────────────────────────────────────────────
+
+    /// Insert a new key upgrade request.
+    fn insert_key_request(
+        &self, id: &str, peer_id: &str,
+        requested_type: &str, display_name: Option<&str>,
+        justification: Option<&str>, contact_info: Option<&str>,
+        created_at: i64,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO key_requests
+             (id, peer_id, requested_type, display_name, justification, contact_info, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, peer_id, requested_type, display_name, justification, contact_info, created_at],
+        );
+    }
+
+    /// List key requests, optionally filtered by `status` ("pending", "approved", "denied").
+    fn list_key_requests(&self, status_filter: Option<&str>) -> Vec<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+        let mut rows = vec![];
+        let result: Result<(), rusqlite::Error> = (|| {
+            let sql = "SELECT id, peer_id, requested_type, display_name, justification,
+                              contact_info, status, created_at, reviewed_at, reviewer_note
+                       FROM key_requests ORDER BY created_at DESC";
+            let sql_filtered = "SELECT id, peer_id, requested_type, display_name, justification,
+                                       contact_info, status, created_at, reviewed_at, reviewer_note
+                                FROM key_requests WHERE status = ?1 ORDER BY created_at DESC";
+            if let Some(st) = status_filter {
+                let mut stmt = conn.prepare(sql_filtered)?;
+                for row in stmt.query_map(params![st], key_request_to_json)?.flatten() { rows.push(row); }
+            } else {
+                let mut stmt = conn.prepare(sql)?;
+                for row in stmt.query_map([], key_request_to_json)?.flatten() { rows.push(row); }
+            }
+            Ok(())
+        })();
+        let _ = result;
+        rows
+    }
+
+    /// Get a single key request by ID.
+    fn get_key_request(&self, id: &str) -> Option<serde_json::Value> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, peer_id, requested_type, display_name, justification,
+                    contact_info, status, created_at, reviewed_at, reviewer_note
+             FROM key_requests WHERE id = ?1",
+            params![id],
+            key_request_to_json,
+        ).ok()
+    }
+
+    /// Update a key request to approved/denied with a countersigned record (or None).
+    fn update_key_request_status(
+        &self, id: &str, status: &str,
+        reviewer_note: Option<&str>,
+        reviewed_at: i64,
+        result_bytes: Option<&[u8]>,
+    ) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "UPDATE key_requests SET status=?1, reviewer_note=?2, reviewed_at=?3, result_bytes=?4
+             WHERE id = ?5",
+            params![status, reviewer_note, reviewed_at, result_bytes, id],
+        );
+    }
+
+    /// Get the signed result bytes for an approved request.
+    fn get_key_request_result(&self, id: &str) -> Option<Vec<u8>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT result_bytes FROM key_requests WHERE id = ?1 AND status = 'approved'",
+            params![id],
+            |r| r.get(0),
+        ).ok().flatten()
+    }
+}
+
+fn key_request_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusqlite::Error> {
+    Ok(serde_json::json!({
+        "id":             row.get::<_, String>(0)?,
+        "peer_id":        row.get::<_, String>(1)?,
+        "requested_type": row.get::<_, String>(2)?,
+        "display_name":   row.get::<_, Option<String>>(3)?,
+        "justification":  row.get::<_, Option<String>>(4)?,
+        "contact_info":   row.get::<_, Option<String>>(5)?,
+        "status":         row.get::<_, String>(6)?,
+        "created_at":     row.get::<_, i64>(7)?,
+        "reviewed_at":    row.get::<_, Option<i64>>(8)?,
+        "reviewer_note":  row.get::<_, Option<String>>(9)?,
+    }))
 }
 
 fn key_record_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusqlite::Error> {
@@ -1412,6 +1523,306 @@ async fn api_v1_auth_verify(
     }))).into_response()
 }
 
+// ─── API v1: key requests ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct KeyRequestBody {
+    /// peer_id of the applicant.
+    peer_id: String,
+    /// Key type being requested: "Relay", "Server", "Admin", "Business".
+    requested_type: String,
+    /// Display name to apply to the issued key.
+    display_name: Option<String>,
+    /// Why this key type is needed.
+    justification: Option<String>,
+    /// Contact email/matrix/etc. for follow-up.
+    contact_info: Option<String>,
+}
+
+/// POST /api/v1/key-requests — submit a key upgrade or relay issuance request.
+///
+/// The applicant must have an existing Guest or Personal key registered.
+/// A server operator reviews via GET /api/v1/key-requests and then
+/// POST /api/v1/key-requests/{id}/approve or /deny.
+async fn api_v1_post_key_request(
+    State(s): State<WebState>,
+    Json(req): Json<KeyRequestBody>,
+) -> impl IntoResponse {
+    // Peer must have an existing key record
+    let exists = {
+        let st = s.read().unwrap();
+        st.key_db.as_ref().map(|db| db.get_bytes(&req.peer_id).is_some()).unwrap_or(false)
+    };
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "peer_id has no registered key — submit a Guest/Personal key first via POST /api/v1/keys"
+        }))).into_response();
+    }
+
+    let valid_types = ["Relay", "Server", "Admin", "Business"];
+    if !valid_types.contains(&req.requested_type.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "requested_type must be one of: Relay, Server, Admin, Business"
+        }))).into_response();
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // Generate a UUID-like ID from random bytes
+    let mut id_bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut id_bytes);
+    let id = format!("{}", hex::encode(id_bytes));
+
+    {
+        let st = s.read().unwrap();
+        if let Some(ref db) = st.key_db {
+            db.insert_key_request(
+                &id, &req.peer_id, &req.requested_type,
+                req.display_name.as_deref(),
+                req.justification.as_deref(),
+                req.contact_info.as_deref(),
+                now_ms as i64,
+            );
+        }
+    }
+
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "id":             id,
+        "peer_id":        req.peer_id,
+        "requested_type": req.requested_type,
+        "status":         "pending",
+        "created_at":     now_ms,
+        "message":        "Request submitted. A server operator will review it.",
+    }))).into_response()
+}
+
+/// GET /api/v1/key-requests — list pending (or all) key requests.
+///
+/// Requires operator auth (`X-Auth-Token: Bearer <token>`).
+/// Optional query param: `?status=pending|approved|denied` (default: pending).
+async fn api_v1_list_key_requests(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+    let status_filter = params.get("status").map(|s| s.as_str()).unwrap_or("pending");
+    let rows = st.key_db.as_ref().map(|db| db.list_key_requests(Some(status_filter))).unwrap_or_default();
+    Json(serde_json::json!({ "requests": rows })).into_response()
+}
+
+// ── Approve / Deny ────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ReviewBody {
+    /// Optional note to attach (visible on download too).
+    reviewer_note: Option<String>,
+}
+
+/// POST /api/v1/key-requests/{id}/approve — countersign and broadcast the approved key.
+///
+/// Requires operator auth.  The server countersigns the applicant's existing
+/// `KeyRecord`, upgrades the `key_type` to the requested type, stores the new
+/// signed record in the DB, broadcasts it on gossipsub, and returns the `.keyrec`
+/// bytes as `application/octet-stream` for the operator to forward to the applicant.
+async fn api_v1_approve_key_request(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ReviewBody>,
+) -> impl IntoResponse {
+    use metaverse_core::identity::{KeyRecord, KeyType};
+    use libp2p::identity;
+
+    // Auth check
+    {
+        let st = s.read().unwrap();
+        if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    // Fetch the request and the applicant's current KeyRecord
+    let (req_peer_id, req_type, req_display_name) = {
+        let st = s.read().unwrap();
+        let req = match st.key_db.as_ref().and_then(|db| db.get_key_request(&id)) {
+            Some(r) => r,
+            None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "error": "key request not found"
+            }))).into_response(),
+        };
+        if req["status"] != "pending" {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": format!("request is already {}", req["status"])
+            }))).into_response();
+        }
+        (
+            req["peer_id"].as_str().unwrap_or("").to_string(),
+            req["requested_type"].as_str().unwrap_or("").to_string(),
+            req["display_name"].as_str().map(|s| s.to_string()),
+        )
+    };
+
+    let key_bytes = {
+        let st = s.read().unwrap();
+        st.key_db.as_ref().and_then(|db| db.get_bytes(&req_peer_id))
+    };
+    let key_bytes = match key_bytes {
+        Some(b) => b,
+        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "applicant's KeyRecord not found"
+        }))).into_response(),
+    };
+
+    let mut record = match KeyRecord::from_bytes(&key_bytes) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("failed to deserialize applicant KeyRecord: {}", e)
+        }))).into_response(),
+    };
+
+    // Map requested_type string → KeyType
+    let new_key_type = match req_type.as_str() {
+        "Relay"    => KeyType::Relay,
+        "Server"   => KeyType::Server,
+        "Admin"    => KeyType::Admin,
+        "Business" => KeyType::Business,
+        other => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": format!("unknown key type '{}'", other)
+        }))).into_response(),
+    };
+
+    // Upgrade the key type, apply display name if set, update timestamps
+    record.key_type = new_key_type;
+    if let Some(ref dn) = req_display_name { record.display_name = Some(dn.clone()); }
+    record.updated_at = now_ms;
+    // Set expiry: 1 year from now for infrastructure keys
+    record.expires_at = Some(now_ms + 365 * 24 * 60 * 60 * 1_000);
+
+    let server_peer_id_str = s.read().unwrap().local_peer_id.clone();
+    let server_secret = s.read().unwrap().server_secret;
+
+    // Set issuer PeerId on the record
+    if let Ok(server_pid) = server_peer_id_str.parse::<libp2p::PeerId>() {
+        record.issued_by = Some(server_pid);
+    }
+    // Sign issuer bytes with the server's ed25519 key
+    {
+        use ed25519_dalek::{SigningKey, Signer};
+        let sk = SigningKey::from_bytes(&server_secret);
+        let issuer_bytes = record.canonical_bytes_for_issuer_sig();
+        let sig = sk.sign(&issuer_bytes);
+        record.issuer_sig = Some(sig.to_bytes());
+    }
+
+    let result_bytes = match record.to_bytes() {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+            "error": format!("failed to serialize approved KeyRecord: {}", e)
+        }))).into_response(),
+    };
+
+    // Persist: update request status + upsert upgraded key record + broadcast
+    {
+        let st = s.read().unwrap();
+        if let Some(ref db) = st.key_db {
+            db.update_key_request_status(
+                &id, "approved",
+                body.reviewer_note.as_deref(),
+                now_ms as i64,
+                Some(&result_bytes),
+            );
+            db.upsert(
+                &req_peer_id, &result_bytes,
+                &format!("{:?}", record.key_type),
+                record.display_name.as_deref(),
+                record.created_at as i64,
+                record.updated_at as i64,
+                record.revoked,
+            );
+        }
+        if let Some(ref tx) = st.gossip_tx {
+            let _ = tx.try_send(GossipCommand::Publish {
+                topic: "key-registry".to_string(),
+                data: result_bytes.clone(),
+            });
+        }
+    }
+
+    // Return the signed .keyrec bytes as octet-stream (operator downloads and gives to relay)
+    (
+        StatusCode::OK,
+        [("content-type", "application/octet-stream"),
+         ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &req_peer_id[..8]))],
+        result_bytes,
+    ).into_response()
+}
+
+/// POST /api/v1/key-requests/{id}/deny — reject a key request.
+///
+/// Requires operator auth.
+async fn api_v1_deny_key_request(
+    State(s): State<WebState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<ReviewBody>,
+) -> impl IntoResponse {
+    {
+        let st = s.read().unwrap();
+        if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let exists = {
+        let st = s.read().unwrap();
+        st.key_db.as_ref().map(|db| db.get_key_request(&id).is_some()).unwrap_or(false)
+    };
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "key request not found" }))).into_response();
+    }
+    {
+        let st = s.read().unwrap();
+        if let Some(ref db) = st.key_db {
+            db.update_key_request_status(&id, "denied", body.reviewer_note.as_deref(), now_ms as i64, None);
+        }
+    }
+    Json(serde_json::json!({ "id": id, "status": "denied" })).into_response()
+}
+
+/// GET /api/v1/key-requests/{id}/download — download the signed .keyrec for an approved request.
+///
+/// No auth required — the request ID serves as the one-time download token
+/// (IDs are random 32-hex-char strings, not guessable).
+async fn api_v1_download_key_request(
+    State(s): State<WebState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let result = {
+        let st = s.read().unwrap();
+        st.key_db.as_ref().and_then(|db| db.get_key_request_result(&id))
+    };
+    match result {
+        Some(bytes) => (
+            StatusCode::OK,
+            [("content-type", "application/octet-stream"),
+             ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &id[..8]))],
+            bytes,
+        ).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "error": "no approved result found for this request ID"
+        }))).into_response(),
+    }
+}
+
 // ─── Web dashboard ───────────────────────────────────────────────────────────
 
 type WebState = Arc<RwLock<SharedState>>;
@@ -2028,6 +2439,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/keys", post(api_v1_post_keys))
                 .route("/api/v1/auth/challenge", post(api_v1_auth_challenge))
                 .route("/api/v1/auth/verify", post(api_v1_auth_verify))
+                .route("/api/v1/key-requests", post(api_v1_post_key_request).get(api_v1_list_key_requests))
+                .route("/api/v1/key-requests/:id/approve", post(api_v1_approve_key_request))
+                .route("/api/v1/key-requests/:id/deny", post(api_v1_deny_key_request))
+                .route("/api/v1/key-requests/:id/download", get(api_v1_download_key_request))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);

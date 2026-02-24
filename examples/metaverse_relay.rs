@@ -21,6 +21,7 @@ use libp2p::{
     Multiaddr, PeerId, SwarmBuilder,
 };
 use libp2p::kad::store::MemoryStore;
+use hex;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -146,17 +147,22 @@ struct Args {
     /// Node display name shown in the dashboard header
     #[arg(long)]
     name: Option<String>,
+    /// Initialise relay identity: generate relay.key if it doesn't exist and
+    /// print the public key hex and PeerId needed to submit a key request.
+    /// Does not start the relay — exits after printing.
+    #[arg(long)]
+    init_key: bool,
 }
 
-fn apply_cli_overrides(config: &mut RelayConfig, args: Args) {
+fn apply_cli_overrides(config: &mut RelayConfig, args: &Args) {
     if let Some(v) = args.port                 { config.port = v; }
-    if let Some(v) = args.external_addr        { config.external_addr = Some(v); }
+    if let Some(ref v) = args.external_addr    { config.external_addr = Some(v.clone()); }
     if let Some(v) = args.max_circuits         { config.max_circuits = v; }
     if let Some(v) = args.max_circuit_duration { config.max_circuit_duration = v; }
     if let Some(v) = args.max_circuit_bytes    { config.max_circuit_bytes = v; }
-    if !args.peer.is_empty()                   { config.peers.extend(args.peer); }
+    if !args.peer.is_empty()                   { config.peers.extend(args.peer.iter().cloned()); }
     if args.headless                            { config.headless = true; }
-    if let Some(v) = args.name                 { config.node_name = Some(v); }
+    if let Some(ref v) = args.name             { config.node_name = Some(v.clone()); }
 }
 
 // ─── Network behaviour ───────────────────────────────────────────────────────
@@ -564,8 +570,53 @@ async fn detect_public_ip() -> Option<String> {
 async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let mut config = load_config();
-    apply_cli_overrides(&mut config, args);
+    apply_cli_overrides(&mut config, &args);
     write_default_config_if_missing();
+
+    // ── --init-key: generate/show relay identity then exit ───────────────────
+    if args.init_key {
+        let key_path = dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.key");
+        let keyrec_path = key_path.with_extension("keyrec");
+        std::fs::create_dir_all(key_path.parent().unwrap())?;
+
+        let local_key = if key_path.exists() {
+            println!("🔑 Loading existing relay key from: {}", key_path.display());
+            identity::Keypair::from_protobuf_encoding(&std::fs::read(&key_path)?)?
+        } else {
+            let kp = identity::Keypair::generate_ed25519();
+            std::fs::write(&key_path, kp.to_protobuf_encoding()?)?;
+            println!("🔑 Generated new relay key at: {}", key_path.display());
+            kp
+        };
+        let peer_id = local_key.public().to_peer_id();
+        let pub_key_hex = if let Ok(ed) = local_key.clone().try_into_ed25519() {
+            hex::encode(ed.public().to_bytes())
+        } else {
+            "(non-ed25519 key)".to_string()
+        };
+
+        println!();
+        println!("═══════════════════════════════════════════════════════");
+        println!("  Relay Identity");
+        println!("═══════════════════════════════════════════════════════");
+        println!("  PeerId:          {}", peer_id);
+        println!("  Public key (hex): {}", pub_key_hex);
+        println!("  Key file:        {}", key_path.display());
+        if keyrec_path.exists() {
+            println!("  Key record (.keyrec): {} ✅ (already issued)", keyrec_path.display());
+        } else {
+            println!("  Key record (.keyrec): NOT YET ISSUED");
+        }
+        println!();
+        println!("  To get a Relay key issued:");
+        println!("  1. Send your PeerId and justification to a server operator.");
+        println!("  2. Operator submits or approves via POST /api/v1/key-requests.");
+        println!("  3. Download the signed .keyrec and place it at:");
+        println!("     {}", keyrec_path.display());
+        println!("  4. Restart the relay — it will load and publish the key record.");
+        println!("═══════════════════════════════════════════════════════");
+        return Ok(());
+    }
 
     // Headless if flag/config set, or stdout is not a terminal (piped/redirected)
     let headless = config.headless || !io::stdout().is_terminal();
