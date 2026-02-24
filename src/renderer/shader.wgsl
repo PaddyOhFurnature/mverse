@@ -43,17 +43,25 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 // Fragment shader
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // world_normal encodes per-vertex colour in this engine.
-    // clamp(0,1) so normals pointing away from positive axes don't go negative.
-    let vertex_color = clamp(in.world_normal, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
-
-    // Simple directional lighting
-    let light_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
-    let ambient = 0.35;
     let normal = normalize(in.world_normal);
-    let diffuse = max(dot(normal, light_dir), 0.0);
-    let lighting = ambient + (1.0 - ambient) * diffuse;
 
-    let final_color = vertex_color * lighting;
-    return vec4<f32>(final_color, 1.0);
+    // Slope-based terrain colours: blend between grass (flat tops) and rock (steep sides)
+    let up_dot = dot(normal, vec3<f32>(0.0, 1.0, 0.0)); // 1 = flat top, 0 = vertical
+    let grass = vec3<f32>(0.30, 0.52, 0.18); // green grass
+    let rock  = vec3<f32>(0.52, 0.47, 0.42); // warm gray rock
+    let dirt  = vec3<f32>(0.50, 0.37, 0.22); // brown dirt (mid-slope)
+
+    // grass above ~35°, dirt 15–35°, rock below ~15° from vertical
+    let t_grass = clamp((up_dot - 0.5) * 3.0, 0.0, 1.0);    // smooth 0→1 as slope flattens
+    let t_rock  = clamp((0.3 - up_dot) * 4.0, 0.0, 1.0);    // smooth 0→1 as slope steepens
+    let t_dirt  = 1.0 - t_grass - t_rock;
+    let base_color = grass * t_grass + dirt * clamp(t_dirt, 0.0, 1.0) + rock * t_rock;
+
+    // Directional sun light
+    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.4));
+    let ambient   = 0.40;
+    let diffuse   = max(dot(normal, light_dir), 0.0);
+    let lighting  = ambient + (1.0 - ambient) * diffuse;
+
+    return vec4<f32>(base_color * lighting, 1.0);
 }

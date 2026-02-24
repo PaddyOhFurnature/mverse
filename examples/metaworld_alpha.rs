@@ -462,9 +462,10 @@ fn main() {
     // The event loop renders the loading bar while this is true.
     const LOADING_TARGET: usize = 30;
     let mut game_loading = true;
+    let mut loading_frames: u32 = 0;  // minimum frames before we allow exit
 
     println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
-    println!("   Target: {} chunks before gameplay starts", LOADING_TARGET);
+    println!("   Target: {} chunks, spawn chunk must have collider", LOADING_TARGET);
 
     event_loop.run(move |event, elwt| {
         match event {
@@ -634,13 +635,16 @@ fn main() {
                             }
                         }
 
-                        // Render loading screen
+                        loading_frames += 1;
+
+                        // Render loading screen (show progress toward LOADING_TARGET)
                         let loaded = chunk_streamer.stats.chunks_loaded;
+                        let progress = (loaded as f32 / LOADING_TARGET as f32).min(1.0);
                         if let Ok(output) = context.surface.get_current_texture() {
                             let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                             let mut encoder = context.device.create_command_encoder(
                                 &wgpu::CommandEncoderDescriptor { label: Some("loading") });
-                            let loading_mesh = create_loading_screen_mesh(loaded as f32 / LOADING_TARGET as f32);
+                            let loading_mesh = create_loading_screen_mesh(progress);
                             let buf = MeshBuffer::from_mesh(&context.device, &loading_mesh);
                             {
                                 let mut rp = pipeline.begin_frame(&mut encoder, &view);
@@ -653,15 +657,62 @@ fn main() {
                             output.present();
                         }
 
-                        // Transition to game once we have enough terrain
-                        if loaded >= LOADING_TARGET || chunk_streamer.stats.chunks_queued == 0 {
-                            println!("✅ Spawn area loaded ({} chunks) — starting game", loaded);
+                        // Transition to game only when:
+                        //  1. Minimum frames shown (so player sees the screen)
+                        //  2. Enough chunks loaded OR all queued chunks finished
+                        //  3. Spawn chunk specifically has a collider (player won't fall)
+                        let spawn_ready = chunk_streamer
+                            .get_chunk(&spawn_chunk)
+                            .map(|c| c.collider.is_some())
+                            .unwrap_or(false);
+                        let enough_chunks = loaded >= LOADING_TARGET;
+                        let queue_drained = chunk_streamer.stats.chunks_loading == 0
+                            && chunk_streamer.stats.chunks_queued == 0
+                            && loaded > 0;
+
+                        if loading_frames >= 20 && spawn_ready && (enough_chunks || queue_drained) {
+                            println!("✅ Spawn area loaded ({} chunks) — repositioning player", loaded);
+
+                            // Scan spawn chunk to find actual ground height at player's X,Z
+                            // This prevents the player falling through un-loaded terrain on first step
+                            if let Some(spawn_data) = chunk_streamer.get_chunk(&spawn_chunk) {
+                                let min_v = spawn_data.id.min_voxel();
+                                let max_v = spawn_data.id.max_voxel();
+                                let target_x = origin_voxel.x;
+                                let target_z = origin_voxel.z;
+                                let vx = target_x.clamp(min_v.x, max_v.x - 1);
+                                let vz = target_z.clamp(min_v.z, max_v.z - 1);
+                                // Walk from top of chunk down to find highest solid voxel
+                                let mut ground_voxel_y = min_v.y;
+                                for vy in (min_v.y..max_v.y).rev() {
+                                    let mat = spawn_data.octree.get_voxel(
+                                        metaverse_core::voxel::VoxelCoord::new(vx, vy, vz));
+                                    if mat != metaverse_core::materials::MaterialId::AIR {
+                                        ground_voxel_y = vy;
+                                        break;
+                                    }
+                                }
+                                // Convert voxel Y to local space and position player 2m above
+                                let ground_ecef = metaverse_core::voxel::VoxelCoord::new(vx, ground_voxel_y, vz).to_ecef();
+                                let ground_local = physics.ecef_to_local(&ground_ecef);
+                                let safe_local = Vec3::new(ground_local.x, ground_local.y + 2.5, ground_local.z);
+                                let safe_ecef  = physics.local_to_ecef(safe_local);
+                                player.position = safe_ecef;
+                                if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+                                    body.set_translation(
+                                        vector![safe_local.x, safe_local.y, safe_local.z], true);
+                                    body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                                }
+                                println!("   Player repositioned above ground Y={} → local Y={:.1}",
+                                    ground_voxel_y, safe_local.y);
+                            }
+
                             // Request historical state from peers now that we have chunks
                             if multiplayer.peer_count() > 0 {
                                 let ids = chunk_streamer.loaded_chunk_ids();
                                 let _ = multiplayer.request_chunk_state(ids);
                             }
-                            println!("🎮 Game started! Waiting for peers...");
+                            println!("🎮 Game started!");
                             game_loading = false;
                         }
                         return;
