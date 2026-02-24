@@ -71,11 +71,10 @@ use metaverse_core::{
     chunk::ChunkId,
     chunk_manager::ChunkManager,
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
-    chunk_placeholder::PlaceholderStyle,
     coordinates::{GPS, ECEF},
-    elevation::{ElevationPipeline, NasFileSource, OpenTopographySource},
+    elevation::{ElevationPipeline, OpenTopographySource},
     identity::Identity,
-    marching_cubes::{extract_octree_mesh, extract_chunk_mesh},
+    marching_cubes::extract_chunk_mesh,
     materials::MaterialId,
     mesh::{Mesh, Vertex},
     messages::{Material, MovementMode},
@@ -214,7 +213,6 @@ fn main() {
     
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
-    let start = Instant::now();
     
     let origin_gps = GPS::new(-27.3996, 153.1871, 2.0); // Flat island, Moreton Bay QLD
     
@@ -1228,7 +1226,6 @@ fn main() {
                     // FPS counter and stats
                     frame_count += 1;
                     if fps_timer.elapsed().as_secs() >= 1 {
-                        let stats = multiplayer.stats();
                         let peer_count = multiplayer.peer_count();
                         
                         println!("FPS: {} | Peers: {} | Local: ({:.1}, {:.1}, {:.1}) | Mode: {:?}",
@@ -1341,43 +1338,5 @@ fn create_crosshair() -> Mesh {
 
 // ─── Loading screen ──────────────────────────────────────────────────────────
 
-/// Build screen-space loading overlay geometry.
-///
-/// All coordinates are in NDC clip space (x: -1..1, y: -1..1, z: 0).
-/// - Background: full-screen dark panel
-/// - Bar background: grey outline rect  
-/// - Bar fill: cyan fill scaled by `progress` (0.0 – 1.0)
-/// - Four corner dots (aesthetic)
-/// Take screenshot (simplified - just print message for now)
-fn take_screenshot(
-    _context: &RenderContext,
-    _pipeline: &mut RenderPipeline,
-    _camera: &mut Camera,
-    player: &Player,
-    physics: &PhysicsWorld,
-    _mesh_buffer: &MeshBuffer,
-    _hitbox_buffer: &MeshBuffer,
-    _player_model_bind_group: &wgpu::BindGroup,
-) {
-    use std::fs;
-    
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let player_local = physics.ecef_to_local(&player.position);
-    
-    let filename = format!("screenshot/mp_{}_{:.0}_{:.0}_{:.0}_y{:.1}_p{:.1}.png",
-        timestamp,
-        player_local.x,
-        player_local.y,
-        player_local.z,
-        player.camera_yaw,
-        player.camera_pitch
-    );
-    
-    fs::create_dir_all("screenshot").ok();
-    
-    println!("📸 Screenshot path: {}", filename);
-}
+
+
