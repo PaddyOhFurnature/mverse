@@ -391,6 +391,112 @@ impl SignupScreen {
     }
 }
 
+// ── Debug HUD ─────────────────────────────────────────────────────────────────
+
+struct DebugHud {
+    egui_ctx:      egui::Context,
+    egui_state:    egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+}
+
+impl DebugHud {
+    fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(), egui_ctx.viewport_id(), window,
+            Some(window.scale_factor() as f32), None, None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &context.device, context.config.format, None, 1, false,
+        );
+        Self { egui_ctx, egui_state, egui_renderer }
+    }
+
+    fn on_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
+        self.egui_state.on_window_event(window, event).consumed
+    }
+
+    fn render(
+        &mut self,
+        context: &RenderContext,
+        view: &wgpu::TextureView,
+        window: &winit::window::Window,
+        // Data to display
+        game_mode: &str,
+        pos: (f32, f32, f32),
+        dist_portal: f32,
+        dist_terminal: f32,
+        near_portal: bool,
+        near_terminal: bool,
+    ) {
+        let raw_input = self.egui_state.take_egui_input(window);
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Area::new(egui::Id::new("debug_hud"))
+                .fixed_pos(egui::pos2(8.0, 8.0))
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(160))
+                        .inner_margin(egui::Margin::same(6))
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new(format!("Mode: {}", game_mode))
+                                .color(egui::Color32::WHITE).size(13.0));
+                            ui.label(egui::RichText::new(
+                                format!("Pos: ({:.1}, {:.1}, {:.1})", pos.0, pos.1, pos.2))
+                                .color(egui::Color32::LIGHT_GRAY).size(12.0));
+                            ui.separator();
+
+                            let portal_col = if near_portal { egui::Color32::from_rgb(80, 220, 255) }
+                                             else { egui::Color32::GRAY };
+                            ui.label(egui::RichText::new(
+                                format!("Portal: {:.1}m{}", dist_portal,
+                                    if near_portal { " ◀ WALK THROUGH" } else { "" }))
+                                .color(portal_col).size(12.0));
+
+                            let term_col = if near_terminal { egui::Color32::from_rgb(80, 255, 140) }
+                                           else { egui::Color32::GRAY };
+                            ui.label(egui::RichText::new(
+                                format!("Terminal: {:.1}m{}", dist_terminal,
+                                    if near_terminal { " ◀ PRESS E" } else { "" }))
+                                .color(term_col).size(12.0));
+                        });
+                });
+        });
+
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
+        }
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [context.config.width, context.config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let mut encoder = context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("hud") }
+        );
+        self.egui_renderer.update_buffers(&context.device, &context.queue, &mut encoder, &tris, &screen_desc);
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            }).forget_lifetime();
+            self.egui_renderer.render(&mut rpass, &tris, &screen_desc);
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PlayerModeLocal {
     Walk,  // Physics-based, can walk/jump
@@ -511,6 +617,9 @@ fn main() {
     println!("🎨 Initializing renderer...");
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
+
+    // Always-on debug HUD (top-left overlay)
+    let mut hud = DebugHud::new(&context, &window);
 
     // First-run signup screen (shown when no identity key exists on disk)
     let mut signup: Option<SignupScreen> = if needs_signup {
@@ -812,6 +921,13 @@ fn main() {
     let mut fps_timer = Instant::now();
     let mut last_stats_print = Instant::now();
     let mut last_state_resync = Instant::now();
+
+    // HUD data — updated every physics frame, read by render
+    let mut hud_pos: (f32, f32, f32) = (0.0, 0.0, 0.0);
+    let mut hud_dist_portal:   f32 = 9999.0;
+    let mut hud_dist_terminal: f32 = 9999.0;
+    let mut hud_near_portal:   bool = false;
+    let mut hud_near_terminal: bool = false;
     
     let mut cursor_grabbed = false;
     
@@ -836,6 +952,8 @@ fn main() {
                 if let Some(ref mut s) = signup {
                     s.on_event(&window, event);
                 }
+                // HUD always needs events for egui input tracking
+                hud.on_event(&window, event);
             }
             _ => {}
         }
@@ -1460,14 +1578,18 @@ fn main() {
                     // ── Construct proximity checks ────────────────────────────
                     // Check if player is near an interactive construct object.
                     let ploc = player_local_pos;
-                    let near_signup = {
-                        let d = SIGNUP_TERMINAL_POS - Vec3::new(ploc.x, ploc.y, ploc.z);
-                        d.length() < INTERACT_RADIUS
-                    };
-                    let near_portal = {
-                        let d = WORLD_PORTAL_POS - Vec3::new(ploc.x, ploc.y, ploc.z);
-                        d.length() < INTERACT_RADIUS
-                    };
+                    let ploc3 = Vec3::new(ploc.x, ploc.y, ploc.z);
+                    let dist_portal   = (WORLD_PORTAL_POS   - ploc3).length();
+                    let dist_terminal = (SIGNUP_TERMINAL_POS - ploc3).length();
+                    let near_signup = dist_terminal < INTERACT_RADIUS;
+                    let near_portal = dist_portal   < INTERACT_RADIUS;
+
+                    // Update HUD data every frame
+                    hud_pos = (ploc.x, ploc.y, ploc.z);
+                    hud_dist_portal   = dist_portal;
+                    hud_dist_terminal = dist_terminal;
+                    hud_near_portal   = near_portal;
+                    hud_near_terminal = near_signup;
 
                     // Auto-trigger signup overlay if player walks to terminal
                     // and no identity exists yet.
@@ -1742,6 +1864,18 @@ fn main() {
                                     }
                                 }
                             }
+
+                            // Debug HUD — always visible, top-left corner
+                            let mode_str = match game_mode {
+                                GameMode::Construct  => "Construct",
+                                GameMode::OpenWorld  => "Open World",
+                            };
+                            hud.render(
+                                &context, &view, &window,
+                                mode_str, hud_pos,
+                                hud_dist_portal, hud_dist_terminal,
+                                hud_near_portal, hud_near_terminal,
+                            );
 
                             frame.present();
                         }
