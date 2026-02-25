@@ -71,7 +71,8 @@ use metaverse_core::{
     chunk::ChunkId,
     chunk_manager::ChunkManager,
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
-    construct::{ConstructScene, SIGNUP_TERMINAL_POS, WORLD_PORTAL_POS, INTERACT_RADIUS},
+    construct::{ConstructScene, SIGNUP_TERMINAL_POS, WORLD_PORTAL_POS, INTERACT_RADIUS,
+                MODULE_DOOR_RADIUS, MODULES},
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
     identity::{Identity, KeyType},
@@ -103,11 +104,14 @@ use winit::{
 use std::sync::Mutex;
 
 // ── Game mode — Construct (bundled lobby) vs Open World ───────────────────────
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum GameMode {
     /// Player is in the bundled Construct lobby.
     /// Terrain streaming is paused; only construct geometry renders.
     Construct,
+    /// Player is inside one of the Construct module rooms.
+    /// Index into MODULES. Screen wall overlay shown.
+    ConstructModule(usize),
     /// Player has entered the open world through the portal.
     /// Construct geometry is hidden; terrain streams normally.
     OpenWorld,
@@ -428,6 +432,7 @@ impl DebugHud {
         dist_terminal: f32,
         near_portal: bool,
         near_terminal: bool,
+        near_module: Option<usize>,
     ) {
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
@@ -459,6 +464,15 @@ impl DebugHud {
                                 format!("Terminal: {:.1}m{}", dist_terminal,
                                     if near_terminal { " ◀ PRESS E" } else { "" }))
                                 .color(term_col).size(12.0));
+
+                            if let Some(idx) = near_module {
+                                let name = metaverse_core::construct::MODULES
+                                    .get(idx).map(|m| m.name).unwrap_or("?");
+                                ui.label(egui::RichText::new(
+                                    format!("[ E ]  Enter {}", name))
+                                    .color(egui::Color32::from_rgb(255, 220, 80))
+                                    .size(13.0).strong());
+                            }
                         });
                 });
         });
@@ -495,6 +509,222 @@ impl DebugHud {
             self.egui_renderer.free_texture(id);
         }
     }
+
+    /// Render a full-screen module overlay (the "wall as screen" experience).
+    /// Returns `true` if the player requested to exit (ESC).
+    fn render_module_overlay(
+        &mut self,
+        context: &RenderContext,
+        view: &wgpu::TextureView,
+        window: &winit::window::Window,
+        module_idx: usize,
+        identity: Option<&metaverse_core::identity::Identity>,
+        peer_count: usize,
+        server_addr: &str,
+    ) -> bool {
+        use metaverse_core::construct::MODULES;
+        let module = match MODULES.get(module_idx) {
+            Some(m) => m,
+            None => return true,
+        };
+
+        let mut wants_exit = false;
+
+        let raw_input = self.egui_state.take_egui_input(window);
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            // Dim backdrop
+            egui::Area::new(egui::Id::new("module_backdrop"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(
+                        ctx.screen_rect(), 0.0,
+                        egui::Color32::from_black_alpha(200),
+                    );
+                });
+
+            let sc = module.screen_colour;
+            let accent = egui::Color32::from_rgb(
+                (sc.x * 255.0) as u8, (sc.y * 255.0) as u8, (sc.z * 255.0) as u8,
+            );
+
+            egui::Window::new(format!("◈  {}", module.name))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .fixed_size([680.0, 520.0])
+                .show(ctx, |ui| {
+                    // Module path breadcrumb
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("/construct/{}", module.slug))
+                            .color(egui::Color32::GRAY).monospace().size(11.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✕  ESC").clicked() {
+                                wants_exit = true;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    ui.add_space(6.0);
+
+                    match module.slug {
+                        "login" => render_module_identity(ui, identity, accent),
+                        "signup" => render_module_signup_info(ui, accent),
+                        "forums" => render_module_coming_soon(ui, module.name, "Threaded public discussion, served from the mesh. Read, post and reply without accounts.", accent),
+                        "wiki"   => render_module_coming_soon(ui, module.name, "Community knowledge base. Every article is a signed document stored in the DHT.", accent),
+                        "market" => render_module_coming_soon(ui, module.name, "Buy, sell and trade items, land parcels and blueprints. Trustless escrow via signed operations.", accent),
+                        "post"   => render_module_coming_soon(ui, module.name, "Async player-to-player messages. Like postal mail, not instant chat. Stored in DHT.", accent),
+                        _ => render_module_coming_soon(ui, module.name, "Coming soon.", accent),
+                    }
+
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(
+                            format!("Peers: {}  •  Server: {}  •  ESC to exit",
+                                peer_count,
+                                if server_addr.is_empty() { "standalone" } else { server_addr }))
+                            .color(egui::Color32::DARK_GRAY).size(10.0));
+                    });
+                });
+        });
+
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
+        }
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [context.config.width, context.config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let mut encoder = context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("module_overlay") }
+        );
+        self.egui_renderer.update_buffers(&context.device, &context.queue, &mut encoder, &tris, &screen_desc);
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("module_overlay_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            }).forget_lifetime();
+            self.egui_renderer.render(&mut rpass, &tris, &screen_desc);
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
+        wants_exit
+    }
+}
+
+// ── Construct module content renderers ────────────────────────────────────────
+
+fn render_module_identity(
+    ui: &mut egui::Ui,
+    identity: Option<&metaverse_core::identity::Identity>,
+    accent: egui::Color32,
+) {
+    ui.label(egui::RichText::new("Identity & Keys").color(accent).size(18.0).strong());
+    ui.add_space(8.0);
+
+    if let Some(id) = identity {
+        let pid = id.peer_id().to_string();
+        let short_pid = if pid.len() > 20 {
+            format!("{}…{}", &pid[..8], &pid[pid.len()-8..])
+        } else {
+            pid.clone()
+        };
+
+        egui::Grid::new("identity_grid")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Peer ID:").strong());
+                ui.label(egui::RichText::new(&short_pid).monospace());
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Key type:").strong());
+                ui.label("Ed25519");
+                ui.end_row();
+
+                ui.label(egui::RichText::new("Key file:").strong());
+                let key_path = dirs::home_dir()
+                    .map(|h| h.join(".metaverse").join("identity.key"))
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~/.metaverse/identity.key".to_string());
+                ui.label(egui::RichText::new(key_path).monospace().size(11.0));
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        let mut pid_display = pid.clone();
+        ui.label(egui::RichText::new("Your full Peer ID (for sharing):").color(egui::Color32::GRAY).size(11.0));
+        ui.add(egui::TextEdit::singleline(&mut pid_display).font(egui::TextStyle::Monospace));
+
+        ui.add_space(12.0);
+        if ui.button("📋  Copy Peer ID").clicked() {
+            ui.output_mut(|o| o.copied_text = pid);
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Key backup: keep your .key file safe — it cannot be recovered.").color(egui::Color32::GRAY).size(11.0));
+    } else {
+        ui.colored_label(egui::Color32::YELLOW, "⚠  No identity loaded.");
+        ui.add_space(8.0);
+        ui.label("Walk to the signup terminal in the lobby to create or load an identity.");
+    }
+}
+
+fn render_module_signup_info(ui: &mut egui::Ui, accent: egui::Color32) {
+    ui.label(egui::RichText::new("Account & Identity").color(accent).size(18.0).strong());
+    ui.add_space(8.0);
+    ui.label("To create a new identity or load an existing one:");
+    ui.add_space(6.0);
+    ui.label("• Walk to the glowing terminal near the centre of the lobby");
+    ui.label("• The signup screen opens automatically");
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Identity tiers:").strong());
+    ui.add_space(4.0);
+
+    egui::Grid::new("tiers_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+        ui.label(egui::RichText::new("Trial").color(egui::Color32::LIGHT_YELLOW));
+        ui.label("No registration. Resets every hour. Walk around and look.");
+        ui.end_row();
+        ui.label(egui::RichText::new("Guest").color(egui::Color32::from_rgb(100, 200, 255)));
+        ui.label("Free account with email. Persistent identity. Can build.");
+        ui.end_row();
+        ui.label(egui::RichText::new("User").color(accent));
+        ui.label("Full account. All features. Identity signed by the network.");
+        ui.end_row();
+    });
+
+    ui.add_space(10.0);
+    ui.label(egui::RichText::new("Your key file is your identity — back it up.").color(egui::Color32::GRAY).size(11.0));
+}
+
+fn render_module_coming_soon(ui: &mut egui::Ui, name: &str, description: &str, accent: egui::Color32) {
+    ui.label(egui::RichText::new(name).color(accent).size(18.0).strong());
+    ui.add_space(8.0);
+    ui.label(description);
+    ui.add_space(20.0);
+    ui.separator();
+    ui.add_space(12.0);
+    ui.label(egui::RichText::new("◈  Coming in the next update").color(egui::Color32::GRAY).size(13.0));
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(
+        "This room is here, waiting. The infrastructure is live.\nContent arrives when the server speaks.")
+        .color(egui::Color32::DARK_GRAY).size(11.0).italics());
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -964,6 +1194,7 @@ fn main() {
     let mut hud_dist_terminal: f32 = 9999.0;
     let mut hud_near_portal:   bool = false;
     let mut hud_near_terminal: bool = false;
+    let mut hud_near_module:   Option<usize> = None;
     
     let mut cursor_grabbed = false;
     
@@ -1052,10 +1283,15 @@ fn main() {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
                                 KeyCode::Escape => {
-                                    window.set_cursor_visible(true);
-                                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                                    cursor_grabbed = false;
-                                    println!("🖱️  Mouse released");
+                                    // If in a module overlay, ESC exits back to Construct
+                                    if matches!(game_mode, GameMode::ConstructModule(_)) {
+                                        game_mode = GameMode::Construct;
+                                    } else {
+                                        window.set_cursor_visible(true);
+                                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                        cursor_grabbed = false;
+                                        println!("🖱️  Mouse released");
+                                    }
                                 }
                                 KeyCode::F12 => {
                                     // TODO: Update screenshot to work with multiple chunk meshes
@@ -1105,7 +1341,12 @@ fn main() {
                                     }
                                 }
                                 KeyCode::KeyE => {
-                                    // Reserved for interact (terminals, portals)
+                                    // Interact: module rooms take priority over signup terminal
+                                    if let Some(idx) = hud_near_module {
+                                        game_mode = GameMode::ConstructModule(idx);
+                                    } else if matches!(game_mode, GameMode::Construct) {
+                                        // signup terminal handled by auto-trigger above
+                                    }
                                 }
                                 // Q/E no longer dig/place — use mouse buttons
                                 _ => {}
@@ -1694,6 +1935,13 @@ fn main() {
                     let near_signup = dist_terminal < INTERACT_RADIUS;
                     let near_portal = dist_portal   < INTERACT_RADIUS;
 
+                    // Detect nearest module door within trigger radius
+                    hud_near_module = MODULES.iter().enumerate()
+                        .map(|(i, m)| (i, (m.door_pos() - ploc3).length()))
+                        .filter(|(_, d)| *d < MODULE_DOOR_RADIUS)
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                        .map(|(i, _)| i);
+
                     // Update HUD data every frame
                     hud_pos = (ploc.x, ploc.y, ploc.z);
                     hud_dist_portal   = dist_portal;
@@ -1984,16 +2232,39 @@ fn main() {
                             }
 
                             // Debug HUD — always visible, top-left corner
-                            let mode_str = match game_mode {
-                                GameMode::Construct  => "Construct",
-                                GameMode::OpenWorld  => "Open World",
+                            let mode_str = match &game_mode {
+                                GameMode::Construct        => "Construct",
+                                GameMode::OpenWorld        => "Open World",
+                                GameMode::ConstructModule(_) => "Construct (module)",
+                            };
+                            // Only show module proximity prompt when in Construct walking mode
+                            let near_module_hud = if matches!(game_mode, GameMode::Construct) {
+                                hud_near_module
+                            } else {
+                                None
                             };
                             hud.render(
                                 &context, &view, &window,
                                 mode_str, hud_pos,
                                 hud_dist_portal, hud_dist_terminal,
                                 hud_near_portal, hud_near_terminal,
+                                near_module_hud,
                             );
+
+                            // Module overlay — full-screen panel when inside a module room
+                            if let GameMode::ConstructModule(idx) = game_mode {
+                                let peer_count = multiplayer.peer_count();
+                                let wants_exit = hud.render_module_overlay(
+                                    &context, &view, &window,
+                                    idx,
+                                    Some(&identity),
+                                    peer_count,
+                                    "", // server address (placeholder)
+                                );
+                                if wants_exit {
+                                    game_mode = GameMode::Construct;
+                                }
+                            }
 
                             frame.present();
                         }
