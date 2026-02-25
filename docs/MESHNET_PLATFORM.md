@@ -1,8 +1,8 @@
 # MESHNET PLATFORM — Architecture & Full Roadmap
 
-**Last Updated:** 2026-02-24
+**Last Updated:** 2026-02-25
 **Status:** Living architecture document
-**Companion docs:** DECENTRALISED_PLATFORM.md (content layer), SIGNUP_AND_KEY_PROPAGATION.md (identity)
+**Companion docs:** NETWORKING_ARCHITECTURE.md (transport detail), IDENTITY_SYSTEM.md (identity detail), SPATIAL_SHARDING_DESIGN.md (sharding detail)
 
 ---
 
@@ -53,27 +53,72 @@ These rules cannot be broken by any design decision, ever.
 
 ## 2. CURRENT STATE (What Already Exists)
 
-The foundation is built. The platform layer is not.
-
-### Foundation (Done)
-- 3D voxel world at near-1:1 Earth scale
-- Physics: gravity, collision, terrain streaming
-- P2P networking: libp2p, gossipsub, Kademlia DHT
-- Key system: 8 key types, Ed25519 signing, DHT-propagated KeyRecords
-- Relay nodes: NAT traversal, gossipsub forwarding
+### ✅ Foundation (Built)
+- 3D voxel world at near-1:1 Earth scale (SRTM elevation, OSM data)
+- Physics: gravity, collision, terrain streaming (Rapier 3D)
+- P2P networking: libp2p full stack (TCP + QUIC, Gossipsub, Kademlia DHT, mDNS, Noise+TLS, Yamux, relay/DCUTR hole-punching)
+- Key system: 8 key types (Genesis→Trial), Ed25519 signing, DHT-propagated KeyRecords
+- Relay nodes: NAT traversal, gossipsub forwarding, binary release on GitHub
 - Server nodes: REST API v1, web dashboard, key registry SQLite
 - Multiplayer: player positions, voxel operations, state sync
-- Bootstrap: static JSON + GitHub Gist, relay-based discovery
+- Bootstrap: static JSON + GitHub Gist relay list, relay-based discovery
+- **The Construct**: bundled lobby scene, 6 Meshsite module rooms, world portal, signup terminal, debug HUD
+- **GameMode separation**: Construct vs OpenWorld — terrain/physics gated, clean spawn
+- Identity tiers redesigned: Trial(7)/Guest(6)/User(5)/Business(4) — wire-format stable discriminants
+- Signup screen: egui overlay, all 4 flows, key file generation
 
-### Platform Layer (Not Yet Built)
-- No virtual lobby (game drops straight into terrain)
-- No first-run experience (identity requires CLI setup)
+### ❌ Platform Layer (Not Yet Built)
 - No in-game terminal (no PTY renderer, no mesh browser)
-- No content types beyond voxel ops (no forum/wiki/marketplace)
-- No onion routing (traffic is plaintext P2P over TCP)
-- No transport agnosticism (TCP only)
+- No content types beyond voxel ops (no forum/wiki/marketplace SignedOps)
+- No onion routing (traffic is Noise-encrypted P2P but no anonymisation circuits)
+- No transport agnosticism (TCP + QUIC only — no Tor, no WebRTC, no LoRa)
 - No large-content distribution (no block-chunked DHT)
 - No screen sharing / media streaming
+
+---
+
+## 2.5 DATA LAYER AUDIT (What's Built vs What's Wired)
+
+The data infrastructure components exist in isolation. The **wiring** between them is incomplete.
+
+| Component | Built | Wired | Notes |
+|---|---|---|---|
+| **Chunking** | ✅ ChunkId, ChunkManager, ChunkStreamer, 100³ voxels | ❌ | Not wired to DHT. Edits don't persist across sessions. |
+| **P2P Transport** | ✅ Full libp2p stack (see above) | ✅ | Gossipsub messages, player state, voxel ops — all live |
+| **DHT (Kademlia)** | ✅ Kademlia behaviour in swarm | ❌ | Chunk IDs not advertised as DHT providers. Peers don't fetch missing chunks from DHT. |
+| **Compression** | ✅ zstd on all gossipsub messages | ❌ | Chunk terrain binary not compressed before P2P send |
+| **Encryption in transit** | ✅ Noise protocol (all connections auth + encrypted) | ✅ | |
+| **Encryption at rest** | ❌ | ❌ | Chunk files stored plaintext. ChaCha20 imported but unused. |
+| **Sharding** | ✅ `spatial_sharding.rs`: L0–L3 geographic cells, `redundancy_target=5` | ❌ | Topology built but no runtime subscription/redistribution. |
+| **Signed operations** | ✅ Ed25519 signing on all VoxelOps | ✅ | Verified on receive |
+| **CRDT / vector clocks** | ✅ `vector_clock.rs`, CRDT merge semantics | ❌ | Peers don't persist received ops to disk. No quorum checks. |
+| **Session tokens** | ❌ | ❌ | Ed25519 keypairs exist but no short-lived session tokens. PeerId repeated in every hot-path message (39 bytes). |
+| **Onion routing** | ❌ | ❌ | Not started. Design in section 3 / Layer 2. |
+| **Redundancy** | ✅ Architecture (`redundancy_target=5`, gossipsub propagation) | ❌ | No node actually writes received ops to disk. Data exists only on originating client. |
+
+### The Core Wiring Gap
+
+Everything feeds into `operations.json` (single global file) instead of per-chunk DHT:
+
+```
+Voxel edit → signed op → operations.json   ← works today
+                       ↓
+              DHT publish → peers store per-chunk  ← NOT WIRED
+                       ↓
+              Chunk file ← chunk streamer   ← NOT WIRED
+```
+
+The single highest-value fix: **replace global `operations.json` with per-chunk files stored and fetched via DHT**. Sharding, compression, redundancy, and replication all plug in around that.
+
+### Next Data Layer Work (Sequenced by Dependency)
+
+1. **Chunk→DHT wiring** — ChunkId advertised as DHT provider; peers request missing chunks from DHT, not regenerate locally
+2. **Chunk persistence** — Per-chunk op files survive sessions; new joiner can fetch world state
+3. **Replication** — On voxel edit, write received op to disk + gossip to `redundancy_target` peers
+4. **Chunk compression** — zstd on chunk binary before DHT store/fetch
+5. **At-rest encryption** — Key-derived encryption per parcel/chunk before writing to disk
+6. **Session tokens** — Short-lived 2-byte tokens to replace PeerId in hot-path messages
+7. **Onion routing** — 3-hop circuits through Relay key holders (see Layer 2 below)
 
 ---
 
@@ -518,27 +563,29 @@ Security event timeline:
   T+Xm   Players choose when to re-enter
 ```
 
-### 4.5 Lobby Scene
+### 4.5 Lobby Scene — **✅ BUILT (v0.1.5)**
 
-The lobby is the entry hub of the construct. It loads from data bundled in the
-client binary — no network needed to show the floor. As peers connect in
-background, other players become visible.
+The lobby loads from geometry bundled in the client binary — no network needed. Implemented in `src/construct.rs` + `examples/metaworld_alpha.rs`.
 
 ```
-What the lobby contains:
-  Solid ground from frame 1 (spawn chunk generated synchronously at startup)
-  Signup terminal — active on first run for new players
-  "Load Key" terminal — for returning players pointing to their identity file
-  World portal — the gateway into the main digital earth
-  Notice boards, announcements from server keys
-  Other players visible if present
-  Doors to featured construct modules (bank, marketplace, forums, etc.)
+What the lobby contains (current):
+  60×60 flat collision floor — solid from frame 1
+  Perimeter wall with gaps at module entrances
+  Central plaza with pillars
+  Signup terminal at (0, 0, -6) — active on first run
+  World portal at (0, 0, +14) — teleports to terrain, triggers chunk load
+  6 Meshsite module rooms: Login, Signup, Forums, Wiki, Marketplace, Post Office
+  Debug HUD overlay (mode, position, proximity state)
 
-What the lobby is not:
-  A loading screen
-  A menu
-  A separate game
-  Empty — other players are always here if the network is up
+Game mode separation:
+  Construct mode:  terrain rendering OFF, terrain physics OFF, Construct geometry ON
+  OpenWorld mode:  Construct geometry OFF, terrain/physics ON
+  Portal transition: teleport + sync chunk generation + re-enter loading phase
+
+What still needs building:
+  E key interact → module UI overlay
+  Screen wall content (rendered text/HTML per module)
+  Other player avatars visible in lobby
 ```
 
 ---
@@ -599,18 +646,11 @@ Phases are sequenced by dependency. Each phase is independently useful.
 
 ---
 
-### Phase 1 — Virtual Lobby + First Run
+### Phase 1 — Virtual Lobby + First Run — **✅ DONE (v0.1.5)**
 
 **What:** A lobby scene. First-run signup. No more CLI key setup.
-**Unlocks:** Clean onboarding. Public testing without instructions.
-**Notes:** Signup terminal can be egui overlay first (no PTY yet). PTY comes in Phase 3.
-
-Tasks:
-- Lobby scene definition (signed op set, loads from server)
-- First-run detection (no key file → show signup)
-- Signup egui overlay (key choices → generate → save)
-- Portal object (activate → load main world terrain)
-- Key auto-publish on creation
+**Delivered:** Construct scene, GameMode separation, signup overlay, world portal trigger, module rooms, debug HUD.
+**Remaining polish:** E key interact for module rooms, screen wall content per module.
 
 ---
 
