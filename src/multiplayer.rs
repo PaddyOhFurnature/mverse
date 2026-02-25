@@ -1503,6 +1503,17 @@ impl MultiplayerSystem {
         let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
     }
 
+    /// Publish this client's `NodeCapabilities` to the DHT.
+    ///
+    /// Advertises the client as a `NodeTier::Client` with an optional storage
+    /// budget so servers and other peers can route chunk fetches to it.
+    pub fn publish_node_capabilities(&self, storage_budget_gb: u64) {
+        use crate::node_capabilities::NodeCapabilities;
+        let caps = NodeCapabilities::for_client(storage_budget_gb);
+        let key = NodeCapabilities::dht_key(&self.local_peer_id.to_string());
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key, value: caps.to_bytes() });
+    }
+
     /// Publish a `PlayerSessionRecord` to the DHT on clean logout.
     ///
     /// Signs the record with the player's identity key and stores it at the

@@ -681,6 +681,8 @@ fn main() {
         let enc_key = UserContentLayer::derive_encryption_key(&identity.signing_key().to_bytes());
         user_content.lock().unwrap().set_encryption_key(enc_key);
     }
+    // Advertise this client's capabilities to the DHT (0 = no storage contribution by default)
+    multiplayer.publish_node_capabilities(0);
     
     // World data directory - unique per identity for local testing
     // In production on separate machines, all would use "world_data"

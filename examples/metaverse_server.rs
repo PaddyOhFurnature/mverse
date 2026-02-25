@@ -102,6 +102,8 @@ pub struct ServerConfig {
     pub max_ping_ms: u32,
     /// Retry attempts for failed dials
     pub max_retries: u32,
+    /// Whether this server is expected to be online 24/7 (advertised in NodeCapabilities).
+    pub always_on: bool,
 
     // ── Load shedding ────────────────────────────────────────────────────
     /// Drop Low-priority relay circuits when CPU exceeds this % (0 = disabled)
@@ -167,6 +169,7 @@ impl Default for ServerConfig {
             max_peers: 0,
             max_ping_ms: 0,
             max_retries: 5,
+            always_on: true,
             cpu_shed_threshold_pct: 90,
             ram_shed_threshold_pct: 85,
             world_enabled: true,
@@ -952,6 +955,7 @@ enum SwarmAction {
     SubscribeTopic(String),
     PublishGossip { topic: String, data: Vec<u8> },
     StartProviding(Vec<u8>),
+    PutDhtRecord { key: Vec<u8>, value: Vec<u8> },
     /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
     DisconnectPeer(PeerId),
 }
@@ -1195,6 +1199,18 @@ fn apply_swarm_actions(
                 use libp2p::kad::RecordKey;
                 if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
                     eprintln!("⚠️  [DHT] start_providing failed: {:?}", e);
+                }
+            }
+            SwarmAction::PutDhtRecord { key, value } => {
+                use libp2p::kad::{Record, RecordKey, Quorum};
+                let record = Record {
+                    key: RecordKey::new(&key),
+                    value,
+                    publisher: None,
+                    expires: None,
+                };
+                if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+                    eprintln!("⚠️  [DHT] put_record failed: {:?}", e);
                 }
             }
             SwarmAction::DisconnectPeer(peer_id) => {
@@ -2735,6 +2751,30 @@ impl WorldSystems {
     }
 }
 
+// ─── NodeCapabilities advertisement ──────────────────────────────────────────
+
+fn publish_node_capabilities(
+    peer_id_str: &str,
+    config: &ServerConfig,
+    swarm: &mut libp2p::Swarm<ServerBehaviour>,
+) {
+    use metaverse_core::node_capabilities::NodeCapabilities;
+    use libp2p::kad::{Record, RecordKey, Quorum};
+
+    let caps = NodeCapabilities::for_server(config.max_world_data_gb as u64, config.always_on);
+    let key = NodeCapabilities::dht_key(peer_id_str);
+    let value = caps.to_bytes();
+    let record = Record {
+        key: RecordKey::new(&key),
+        value,
+        publisher: None,
+        expires: None,
+    };
+    if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+        eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -3020,6 +3060,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
         }
     }
+    // Publish NodeCapabilities to DHT immediately (will re-announce every 30 min)
+    publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
+    app_state.log(format!("📡 NodeCapabilities published (tier=server, always_on={})", app_state.config.always_on));
 
     if headless {
         run_headless(swarm, app_state, world).await
@@ -3039,6 +3082,7 @@ async fn run_headless(
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
     let mut stats_tick = tokio::time::interval(Duration::from_secs(30));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
+    let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
     let dummy_world = WorldStats::default();
 
     // Spawn a SIGHUP handler that sends the reloaded config to config_reload_rx (Unix only).
@@ -3127,6 +3171,10 @@ async fn run_headless(
                 // Periodic server-to-server key sync
                 sync_keys_from_servers(&state).await;
             }
+            _ = caps_tick.tick() => {
+                // Re-announce NodeCapabilities to DHT (keeps record alive, updates storage availability)
+                publish_node_capabilities(&state.local_peer_id, &state.config, &mut swarm);
+            }
             swarm_event = swarm.select_next_some() => {
                 let actions = handle_swarm_event(swarm_event, &mut state);
                 apply_swarm_actions(actions, &mut state, &mut swarm);
@@ -3182,6 +3230,7 @@ async fn run_tui(
     let mut tui_tick = tokio::time::interval(Duration::from_millis(refresh_ms));
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
+    let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
     let mut world_config = state.config.clone();
     let dummy_world = WorldStats::default();
 
@@ -3255,6 +3304,9 @@ async fn run_tui(
                 }
                 _ = sync_tick.tick() => {
                     sync_keys_from_servers(&state).await;
+                }
+                _ = caps_tick.tick() => {
+                    publish_node_capabilities(&state.local_peer_id, &state.config, &mut swarm);
                 }
                 maybe_ev = events.next() => {
                     if let Some(Ok(Event::Key(k))) = maybe_ev {

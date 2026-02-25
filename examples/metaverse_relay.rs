@@ -56,6 +56,7 @@ pub struct RelayConfig {
     pub priority_peers: Vec<String>,
     pub node_name: Option<String>,
     pub headless: bool,
+    pub always_on: bool,
     pub ui: UiConfig,
 }
 
@@ -73,6 +74,7 @@ impl Default for RelayConfig {
             priority_peers: vec![],
             node_name: None,
             headless: false,
+            always_on: true,
             ui: UiConfig::default(),
         }
     }
@@ -252,7 +254,7 @@ impl AppState {
 
 // ─── Swarm event handler ─────────────────────────────────────────────────────
 
-enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr) }
+enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr), PutDhtRecord { key: Vec<u8>, value: Vec<u8> } }
 
 fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppState) -> Vec<SwarmAction> {
     let mut actions = vec![];
@@ -319,6 +321,13 @@ fn apply_swarm_actions(actions: Vec<SwarmAction>, state: &mut AppState, swarm: &
             SwarmAction::DialPeer(peer_id, addr) => {
                 if !swarm.is_connected(&peer_id) {
                     let _ = swarm.dial(addr);
+                }
+            }
+            SwarmAction::PutDhtRecord { key, value } => {
+                use libp2p::kad::{Record, RecordKey, Quorum};
+                let record = Record { key: RecordKey::new(&key), value, publisher: None, expires: None };
+                if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+                    eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
                 }
             }
         }
@@ -564,6 +573,23 @@ async fn detect_public_ip() -> Option<String> {
     None
 }
 
+// ─── NodeCapabilities advertisement ──────────────────────────────────────────
+
+fn publish_relay_capabilities(
+    peer_id_str: &str,
+    config: &RelayConfig,
+    swarm: &mut libp2p::Swarm<RelayBehaviour>,
+) {
+    use metaverse_core::node_capabilities::NodeCapabilities;
+    use libp2p::kad::{Record, RecordKey, Quorum};
+    let caps = NodeCapabilities::for_relay(config.always_on);
+    let key = NodeCapabilities::dht_key(peer_id_str);
+    let record = Record { key: RecordKey::new(&key), value: caps.to_bytes(), publisher: None, expires: None };
+    if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+        eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -707,8 +733,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
 
-    let mut state = AppState::new(config, local_peer_id.to_string(), public_ip);
+    let mut state = AppState::new(config.clone(), local_peer_id.to_string(), public_ip);
     state.push_log(format!("✅ Relay started — {}", local_peer_id));
+
+    publish_relay_capabilities(&local_peer_id.to_string(), &config, &mut swarm);
+    state.push_log(format!("📡 NodeCapabilities published (tier=relay, always_on={})", config.always_on));
 
     if headless { run_headless(swarm, state).await } else { run_tui(swarm, state).await }
 }
@@ -716,10 +745,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 // ─── Headless loop ───────────────────────────────────────────────────────────
 
 async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) -> Result<(), Box<dyn Error>> {
+    let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
     loop {
-        let event = swarm.select_next_some().await;
-        let actions = handle_swarm_event(event, &mut state);
-        apply_swarm_actions(actions, &mut state, &mut swarm);
+        tokio::select! {
+            _ = caps_tick.tick() => {
+                publish_relay_capabilities(&state.local_peer_id, &state.config, &mut swarm);
+            }
+            event = swarm.select_next_some() => {
+                let actions = handle_swarm_event(event, &mut state);
+                apply_swarm_actions(actions, &mut state, &mut swarm);
+            }
+        }
     }
 }
 
@@ -731,6 +767,7 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) 
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(state.config.ui.refresh_ms));
+    let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
 
     let result: Result<(), Box<dyn Error>> = async {
         loop {
@@ -738,6 +775,9 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) 
                 _ = tick.tick() => {
                     state.refresh_sys();
                     terminal.draw(|f| draw(f, &state))?;
+                }
+                _ = caps_tick.tick() => {
+                    publish_relay_capabilities(&state.local_peer_id, &state.config, &mut swarm);
                 }
                 maybe_ev = events.next() => {
                     if let Some(Ok(Event::Key(k))) = maybe_ev {
