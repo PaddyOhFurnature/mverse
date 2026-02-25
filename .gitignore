@@ -31,8 +31,11 @@ test_*
 screenshot/*.png
 !screenshot/.gitkeep
 
-# Built binaries (use scripts/build.sh to populate)
-/bin/metaworld_alpha
-/bin/metaverse-relay
-/bin/metaverse-server
+# Docs, config, CI, test files — kept locally only
+.cargo/
+.github/
+docs/
+tests/
+
+# Server log
 /bin/server.log
