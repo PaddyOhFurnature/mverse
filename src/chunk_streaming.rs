@@ -503,6 +503,35 @@ impl ChunkStreamer {
         self.loading_queue.push_front(chunk_id);
     }
 
+    /// Insert a chunk that was generated synchronously (e.g. the spawn/lobby floor).
+    /// Marks it as fully loaded so the background workers skip it and the loading
+    /// progress check immediately counts it as having a collider.
+    pub fn preload_chunk(&mut self, chunk_id: ChunkId, octree: Octree, collider: Option<ColliderHandle>) {
+        // Remove from queue/in-progress so workers don't duplicate work.
+        self.loading_queue.retain(|id| *id != chunk_id);
+        self.loading_in_progress.remove(&chunk_id);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        self.loaded_chunks.insert(chunk_id, LoadedChunk {
+            id: chunk_id,
+            octree,
+            mesh_buffer: None, // GPU mesh built on first render pass
+            collider,
+            dirty: true,       // mark dirty so render pass builds the GPU mesh
+            distance_m: 0.0,
+            in_safe_zone: true,
+            state: ChunkLoadState::Loaded,
+            last_modified: now,
+        });
+        self.stats.chunks_loaded += 1;
+        self.newly_loaded_chunks.push(chunk_id);
+    }
+
+
     /// Get mutable loaded chunk
     pub fn get_chunk_mut(&mut self, chunk_id: &ChunkId) -> Option<&mut LoadedChunk> {
         self.loaded_chunks.get_mut(chunk_id)

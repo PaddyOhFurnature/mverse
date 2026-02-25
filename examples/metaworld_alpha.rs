@@ -708,6 +708,39 @@ fn main() {
     chunk_streamer.queue_priority(player_chunk);
     println!("   Player chunk: {} — queued with priority", player_chunk);
 
+    // ── Synchronously generate and collide the spawn chunk ────────────────────
+    // The lobby (and any spawn point) must have a floor before physics starts.
+    // We generate the player's chunk right now, on the main thread, so the
+    // character is standing on solid ground from frame 1 — no falling.
+    // The surrounding chunks continue loading in the background as normal.
+    {
+        let generator = generator_arc.lock().unwrap();
+        match generator.generate_chunk(&player_chunk) {
+            Ok(octree) => {
+                let min_v = player_chunk.min_voxel();
+                let max_v = player_chunk.max_voxel();
+                let (mut mesh, chunk_center) = extract_chunk_mesh(&octree, &min_v, &max_v);
+                if !mesh.vertices.is_empty() {
+                    let offset = Vec3::new(
+                        (chunk_center.x - origin_voxel.x) as f32,
+                        (chunk_center.y - origin_voxel.y) as f32,
+                        (chunk_center.z - origin_voxel.z) as f32,
+                    );
+                    for v in &mut mesh.vertices { v.position += offset; }
+                    let collider = metaverse_core::physics::create_collision_from_mesh(
+                        &mut physics, &mesh, &origin_voxel, None);
+                    // Store in the streamer so it won't be regenerated redundantly.
+                    // Mark as having a collider so the loading check passes immediately.
+                    chunk_streamer.preload_chunk(player_chunk, octree, Some(collider));
+                    println!("✅ Spawn floor ready — lobby is live");
+                } else {
+                    println!("⚠️  Spawn chunk generated but has no mesh (ocean/void?)");
+                }
+            }
+            Err(e) => eprintln!("⚠️  Could not generate spawn chunk synchronously: {}", e),
+        }
+    }
+
     let player_local = physics.ecef_to_local(&player.position);
     println!("✅ Player position at local: ({:.1}, {:.1}, {:.1})", 
         player_local.x, player_local.y, player_local.z);
