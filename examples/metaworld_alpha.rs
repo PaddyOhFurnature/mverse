@@ -71,6 +71,7 @@ use metaverse_core::{
     chunk::ChunkId,
     chunk_manager::ChunkManager,
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
+    construct::{ConstructScene, SIGNUP_TERMINAL_POS, WORLD_PORTAL_POS, INTERACT_RADIUS},
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
     identity::{Identity, KeyType},
@@ -635,6 +636,24 @@ fn main() {
     // Initialize physics world (empty — terrain colliders added as chunks build in-loop)
     let origin_voxel_ecef = origin_voxel.to_ecef();
     let mut physics = PhysicsWorld::with_origin(origin_voxel_ecef);
+
+    // ── Build the Construct scene ──────────────────────────────────────────────
+    // The Construct is always available — floor, pillars, terminals, portal.
+    // It loads from bundled geometry with no network or terrain dependency.
+    println!("🏛️  Building construct scene...");
+    let construct = ConstructScene::build();
+    let construct_floor_buffer   = MeshBuffer::from_mesh(&context.device, &construct.floor);
+    let construct_pillars_buffer = MeshBuffer::from_mesh(&context.device, &construct.pillars);
+    let construct_terminal_buffer= MeshBuffer::from_mesh(&context.device, &construct.signup_terminal);
+    let construct_portal_buffer  = MeshBuffer::from_mesh(&context.device, &construct.world_portal);
+    let construct_doors_buffer   = MeshBuffer::from_mesh(&context.device, &construct.module_doors);
+
+    // Add the construct floor as a static physics collider so the player
+    // has ground to stand on from frame 1 — no terrain streaming needed.
+    let floor_collision = metaverse_core::construct::build_floor_collision_mesh();
+    metaverse_core::physics::create_collision_from_mesh(
+        &mut physics, &floor_collision, &origin_voxel, None);
+    println!("✅ Construct ready — floor collider active");
 
     // Create player model (visible cube) - green for local player
     let player_mesh = create_local_player_cube();
@@ -1410,13 +1429,32 @@ fn main() {
                         movement_mode,
                     );
                     
-                    // Debug: Print local position every 60 frames
-                    if frame_count % 60 == 0 {
-                        println!("📤 Broadcasting state: ECEF=({:.1}, {:.1}, {:.1}), Local=({:.1}, {:.1}, {:.1})",
-                            player.position.x, player.position.y, player.position.z,
-                            player_local_pos.x, player_local_pos.y, player_local_pos.z);
+                    // ── Construct proximity checks ────────────────────────────
+                    // Check if player is near an interactive construct object.
+                    let ploc = player_local_pos;
+                    let near_signup = {
+                        let d = SIGNUP_TERMINAL_POS - Vec3::new(ploc.x, ploc.y, ploc.z);
+                        d.length() < INTERACT_RADIUS
+                    };
+                    let near_portal = {
+                        let d = WORLD_PORTAL_POS - Vec3::new(ploc.x, ploc.y, ploc.z);
+                        d.length() < INTERACT_RADIUS
+                    };
+
+                    // Auto-trigger signup overlay if player walks to terminal
+                    // and no identity exists yet.
+                    if near_signup && signup.is_none() && !Identity::key_file_exists() {
+                        println!("🖥️  [Construct] Player at signup terminal");
+                        signup = Some(SignupScreen::new(&context, &window));
                     }
-                    
+
+                    // World portal: log for now — full transition to open world next
+                    if near_portal {
+                        if frame_count % 120 == 0 {
+                            println!("🌐 [Construct] Player at world portal — enter world with E");
+                        }
+                    }
+
                     jump_pressed = false;
                     
                     // Update chunk streaming based on player position
@@ -1560,6 +1598,14 @@ fn main() {
                             {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
+
+                                // ── Render Construct scene ────────────────────────────
+                                // Use identity matrix — construct is in local physics space.
+                                construct_floor_buffer.render(&mut render_pass);
+                                construct_pillars_buffer.render(&mut render_pass);
+                                construct_terminal_buffer.render(&mut render_pass);
+                                construct_portal_buffer.render(&mut render_pass);
+                                construct_doors_buffer.render(&mut render_pass);
                                 
                                 // Render all loaded chunks from ChunkStreamer
                                 for chunk_data in chunk_streamer.loaded_chunks() {

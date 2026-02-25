@@ -12,6 +12,7 @@ pub mod terrain_sync;
 pub mod mesh;
 pub mod marching_cubes;
 pub mod physics;
+pub mod construct;  // The Construct — bundled lobby scene, always available offline
 
 // Phase 1.5: P2P Networking (Local-First Architecture)
 pub mod identity;
