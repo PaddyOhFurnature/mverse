@@ -3,9 +3,6 @@
 *.pdb
 .DS_Store
 
-# Docs (curate locally before pushing)
-docs/
-
 # Archive and deploy (removed, kept locally only)
 archive/
 deploy/
