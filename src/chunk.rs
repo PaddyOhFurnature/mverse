@@ -388,6 +388,15 @@ impl ChunkId {
     pub fn to_path_string(&self) -> String {
         format!("chunk_{}_{}_{}", self.x, self.y, self.z)
     }
+
+    /// Stable DHT key for this chunk — used for provider advertisement and lookup.
+    ///
+    /// Format: `b"chunk/<x>/<y>/<z>"` as raw bytes.
+    /// Any peer storing ops for this chunk calls `start_providing(dht_key())`.
+    /// Any peer needing this chunk calls `get_providers(dht_key())`.
+    pub fn dht_key(&self) -> Vec<u8> {
+        format!("chunk/{}/{}/{}", self.x, self.y, self.z).into_bytes()
+    }
 }
 
 impl fmt::Display for ChunkId {

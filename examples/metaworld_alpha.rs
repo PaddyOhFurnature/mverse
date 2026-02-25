@@ -735,8 +735,34 @@ fn main() {
             }
         }
     }
-    
-    // Create chunk streamer with dynamic loading and REAL terrain generation
+
+    // Advertise all chunks we have on disk to the DHT so peers can find us as providers.
+    // This runs after multiplayer is started but before the event loop — DHT bootstrap
+    // will propagate the provider records once we connect to the relay.
+    {
+        let chunks_dir = world_dir.join("chunks");
+        let mut startup_chunk_ids: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                let parts: Vec<&str> = name_str.split('_').collect();
+                if parts.len() == 4 && parts[0] == "chunk" {
+                    if let (Ok(x), Ok(y), Ok(z)) = (
+                        parts[1].parse::<i64>(),
+                        parts[2].parse::<i64>(),
+                        parts[3].parse::<i64>(),
+                    ) {
+                        startup_chunk_ids.push(metaverse_core::chunk::ChunkId { x, y, z });
+                    }
+                }
+            }
+        }
+        if !startup_chunk_ids.is_empty() {
+            println!("🗄️  Advertising {} local chunks to DHT", startup_chunk_ids.len());
+            multiplayer.advertise_chunks(&startup_chunk_ids);
+        }
+    }
     println!("🔄 Initializing chunk streaming system...");
     let stream_config = ChunkStreamerConfig {
         load_radius_m: 150.0,           // ~78 chunks (5 chunk radius)
@@ -919,6 +945,7 @@ fn main() {
     let mut fps_timer = Instant::now();
     let mut last_stats_print = Instant::now();
     let mut last_state_resync = Instant::now();
+    let mut last_periodic_save = Instant::now();
 
     // HUD data — updated every physics frame, read by render
     let mut hud_pos: (f32, f32, f32) = (0.0, 0.0, 0.0);
@@ -1257,6 +1284,10 @@ fn main() {
                                 // Track for CRDT merges
                                 chunk_manager.add_operation(op.clone());
                                 local_voxel_ops.insert(dug, op);
+
+                                // Advertise this chunk to DHT so offline peers can find us later
+                                let edited_chunk = ChunkId::from_voxel(&dug);
+                                multiplayer.advertise_chunks(&[edited_chunk]);
                             }
                         }
                         dig_pressed = false;
@@ -1333,6 +1364,9 @@ fn main() {
                                     // Track for CRDT merges
                                     chunk_manager.add_operation(op.clone());
                                     local_voxel_ops.insert(place_voxel, op);
+
+                                    // Advertise this chunk to DHT
+                                    multiplayer.advertise_chunks(&[place_chunk_id]);
                                 }
                             }
                         }
@@ -1458,6 +1492,21 @@ fn main() {
                             eprintln!("   ⚠️  Periodic resync request failed: {}", e);
                         }
                         last_state_resync = Instant::now();
+                    }
+
+                    // Periodic save every 30s — guard against crash data loss
+                    if last_periodic_save.elapsed().as_secs() >= 30 {
+                        match user_content.lock().unwrap().save_chunks(&world_dir) {
+                            Ok(saved) if !saved.is_empty() => {
+                                let total: usize = saved.values().sum();
+                                println!("💾 [AutoSave] {} ops across {} chunks", total, saved.len());
+                                // Re-advertise chunks we just saved
+                                multiplayer.advertise_chunks(&saved.keys().cloned().collect::<Vec<_>>());
+                            }
+                            Ok(_) => {} // nothing to save
+                            Err(e) => eprintln!("⚠️  [AutoSave] Failed: {}", e),
+                        }
+                        last_periodic_save = Instant::now();
                     }
 
                     // Handle state requests from peers

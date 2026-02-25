@@ -180,6 +180,9 @@ pub struct MultiplayerSystem {
 
     /// Received chunk manifests waiting to be processed (compare + send our newer chunks)
     pending_chunk_manifests: Vec<Vec<(ChunkId, u64)>>,
+
+    /// DHT provider results — (dht_key, providers) from GetProviders queries
+    pending_chunk_providers: Vec<(Vec<u8>, Vec<PeerId>)>,
     
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
@@ -306,6 +309,7 @@ impl MultiplayerSystem {
             peers_needing_sync: Vec::new(),
             pending_chunk_terrain: Vec::new(),
             pending_chunk_manifests: Vec::new(),
+            pending_chunk_providers: Vec::new(),
             peer_reputation: HashMap::new(),
             blocked_peers: HashSet::new(),
             last_state_broadcast: Instant::now(),
@@ -772,6 +776,9 @@ impl MultiplayerSystem {
             }
             // These events are generated locally (not from the network thread) — no-op here.
             NetworkEvent::KeyRevoked { .. } | NetworkEvent::SessionIdAssigned { .. } => {}
+            NetworkEvent::ChunkProvidersFound { key, providers } => {
+                self.pending_chunk_providers.push((key.clone(), providers.clone()));
+            }
             NetworkEvent::DhtRecordFound { key, value } => {
                 // trying the session namespace key first, then falling back to KeyRecord.
                 let session_key = PlayerSessionRecord::dht_key(&self.local_peer_id);
@@ -1534,6 +1541,38 @@ impl MultiplayerSystem {
         self.pending_session_record.take()
     }
 
+    /// Advertise to the DHT that we are a provider for the given chunks.
+    ///
+    /// Call this:
+    /// - At startup after loading chunks from disk
+    /// - After applying a voxel edit (so peers can find the updated chunk)
+    ///
+    /// This lets other peers discover us via `find_chunk_providers()` even
+    /// when we are not connected to them via gossipsub.
+    pub fn advertise_chunks(&self, chunk_ids: &[ChunkId]) {
+        for chunk_id in chunk_ids {
+            let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey {
+                key: chunk_id.dht_key(),
+            });
+        }
+    }
+
+    /// Ask the DHT who has a specific chunk.
+    ///
+    /// Results arrive as `NetworkEvent::ChunkProvidersFound` and are accessible
+    /// via `take_pending_chunk_providers()`.
+    pub fn find_chunk_providers(&self, chunk_id: &ChunkId) {
+        let _ = self.cmd_tx.send(NetworkCommand::GetProviders {
+            key: chunk_id.dht_key(),
+        });
+    }
+
+    /// Take any pending provider results from DHT queries.
+    /// Returns `(dht_key, providers)` pairs.
+    pub fn take_pending_chunk_providers(&mut self) -> Vec<(Vec<u8>, Vec<PeerId>)> {
+        std::mem::take(&mut self.pending_chunk_providers)
+    }
+
     /// Take pending manifests for the game loop to process.
     /// Game loop compares against its own chunk timestamps and sends newer chunks.
     pub fn take_pending_chunk_manifests(&mut self) -> Vec<Vec<(ChunkId, u64)>> {
@@ -1802,6 +1841,9 @@ fn run_network_thread(
                     }
                     NetworkCommand::GetDhtRecord { key } => {
                         network.get_dht_record(key);
+                    }
+                    NetworkCommand::GetProviders { key } => {
+                        network.get_providers(key);
                     }
                 }
             }

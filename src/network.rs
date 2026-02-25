@@ -117,6 +117,12 @@ pub enum NetworkCommand {
         key: Vec<u8>,
     },
 
+    /// Find peers that are providing a content key.
+    /// Result is returned as a `NetworkEvent::ChunkProvidersFound`.
+    GetProviders {
+        key: Vec<u8>,
+    },
+
     /// Shutdown the network thread
     Shutdown,
 }
@@ -225,6 +231,12 @@ pub enum NetworkEvent {
     DhtRecordFound {
         key: Vec<u8>,
         value: Vec<u8>,
+    },
+
+    /// Peers found that are providing a content key (from `GetProviders`).
+    ChunkProvidersFound {
+        key: Vec<u8>,
+        providers: Vec<PeerId>,
     },
 
     /// A peer's key has been revoked — emitted after a valid revocation notice is received.
@@ -1096,6 +1108,23 @@ impl NetworkNode {
                         eprintln!("⚠️  [DHT] StartProviding failed: {:?}", e);
                         None
                     }
+                    // Providers found for a content key
+                    kad::Event::OutboundQueryProgressed {
+                        result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                            key, providers, ..
+                        })),
+                        ..
+                    } => {
+                        if !providers.is_empty() {
+                            println!("🗄️  [DHT] Found {} provider(s) for key", providers.len());
+                            Some(NetworkEvent::ChunkProvidersFound {
+                                key: key.to_vec(),
+                                providers: providers.into_iter().collect(),
+                            })
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 }
             }
@@ -1161,6 +1190,13 @@ impl NetworkNode {
     pub fn get_dht_record(&mut self, key: Vec<u8>) {
         use kad::RecordKey;
         self.swarm.behaviour_mut().kademlia.get_record(RecordKey::new(&key));
+    }
+
+    /// Find peers that are providing a content key.
+    /// Result comes back as `NetworkEvent::ChunkProvidersFound`.
+    pub fn get_providers(&mut self, key: Vec<u8>) {
+        use kad::RecordKey;
+        self.swarm.behaviour_mut().kademlia.get_providers(RecordKey::new(&key));
     }
 }
 
