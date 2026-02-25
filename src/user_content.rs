@@ -62,6 +62,11 @@ pub struct UserContentLayer {
     
     /// Permission configuration (replaces old VerificationConfig)
     pub config: PermissionConfig,
+
+    /// Optional at-rest encryption key (ChaCha20-Poly1305, 32 bytes).
+    /// Derived from user's Ed25519 signing key via SHA-256.
+    /// When set, chunk files are encrypted on save and decrypted on load.
+    encryption_key: Option<[u8; 32]>,
 }
 
 impl UserContentLayer {
@@ -78,6 +83,7 @@ impl UserContentLayer {
             parcels: HashMap::new(),
             access_grants: HashMap::new(),
             config,
+            encryption_key: None,
         }
     }
     
@@ -221,6 +227,26 @@ impl UserContentLayer {
     pub fn op_count(&self) -> usize {
         self.op_log.len()
     }
+
+    /// Set the at-rest encryption key.
+    ///
+    /// Call this after loading the user's identity. The key is derived from the
+    /// Ed25519 signing key via SHA-256("at-rest-v1" || signing_key_bytes) so it
+    /// is stable across sessions without storing a separate key file.
+    pub fn set_encryption_key(&mut self, key: [u8; 32]) {
+        self.encryption_key = Some(key);
+    }
+
+    /// Derive an encryption key from an Ed25519 signing key.
+    ///
+    /// Returns 32 bytes suitable for ChaCha20-Poly1305.
+    pub fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> [u8; 32] {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(b"at-rest-v1");
+        hasher.update(signing_key_bytes);
+        hasher.finalize().into()
+    }
     
     /// Clear operation log (for testing/reset)
     pub fn clear(&mut self) {
@@ -348,7 +374,13 @@ impl UserContentLayer {
             let ops_file = chunk_dir.join("operations.bin");
             let bytes = bincode::serialize(&ops_owned)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            std::fs::write(&ops_file, bytes)?;
+            let out_bytes = if let Some(key) = &self.encryption_key {
+                encrypt_chunk_bytes(&bytes, key, &chunk_id)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+            } else {
+                bytes
+            };
+            std::fs::write(&ops_file, out_bytes)?;
             
             result.insert(chunk_id, ops_owned.len());
         }
@@ -375,7 +407,22 @@ impl UserContentLayer {
             return Ok(0);
         }
         
-        let bytes = std::fs::read(ops_file)?;
+        let raw = std::fs::read(ops_file)?;
+
+        // Decrypt if file is encrypted (magic header 0xCC 0x01)
+        let bytes = if raw.starts_with(&[0xCC, 0x01]) {
+            if let Some(key) = &self.encryption_key {
+                decrypt_chunk_bytes(&raw, key, chunk_id)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Chunk file is encrypted but no key is set",
+                ));
+            }
+        } else {
+            raw
+        };
 
         // Try new SignedOperation format first
         if let Ok(ops) = bincode::deserialize::<Vec<SignedOperation>>(&bytes) {
@@ -489,6 +536,61 @@ fn bounds_overlap(a: &ParcelBounds, b: &ParcelBounds) -> bool {
     !(a.max.x < b.min.x || a.min.x > b.max.x
         || a.max.y < b.min.y || a.min.y > b.max.y
         || a.max.z < b.min.z || a.min.z > b.max.z)
+}
+
+// Magic header for encrypted chunk files (version 1, ChaCha20-Poly1305)
+const ENCRYPT_MAGIC: [u8; 2] = [0xCC, 0x01];
+
+/// Encrypt chunk operation bytes with ChaCha20-Poly1305.
+/// Nonce is derived deterministically from the chunk coordinates (12 bytes).
+/// Output: ENCRYPT_MAGIC (2 bytes) + nonce (12 bytes) + ciphertext + tag
+fn encrypt_chunk_bytes(plaintext: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::aead::{Aead, KeyInit};
+
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    // Deterministic 12-byte nonce from chunk coordinates (low 4 bytes of each i64)
+    let mut nonce_bytes = [0u8; 12];
+    nonce_bytes[0..4].copy_from_slice(&(chunk_id.x as i32).to_le_bytes());
+    nonce_bytes[4..8].copy_from_slice(&(chunk_id.y as i32).to_le_bytes());
+    nonce_bytes[8..12].copy_from_slice(&(chunk_id.z as i32).to_le_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, plaintext)
+        .map_err(|e| format!("Encryption failed: {}", e))?;
+
+    let mut out = Vec::with_capacity(2 + 12 + ciphertext.len());
+    out.extend_from_slice(&ENCRYPT_MAGIC);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ciphertext);
+    Ok(out)
+}
+
+/// Decrypt chunk operation bytes encrypted by `encrypt_chunk_bytes`.
+fn decrypt_chunk_bytes(data: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+    use chacha20poly1305::aead::{Aead, KeyInit};
+
+    if data.len() < 2 + 12 {
+        return Err("Encrypted chunk file too short".to_string());
+    }
+    // Header: 2 magic + 12 nonce + ciphertext
+    let nonce_bytes = &data[2..14];
+    let ciphertext = &data[14..];
+
+    // Verify nonce matches chunk ID (defence against file swapping)
+    let mut expected_nonce = [0u8; 12];
+    expected_nonce[0..4].copy_from_slice(&(chunk_id.x as i32).to_le_bytes());
+    expected_nonce[4..8].copy_from_slice(&(chunk_id.y as i32).to_le_bytes());
+    expected_nonce[8..12].copy_from_slice(&(chunk_id.z as i32).to_le_bytes());
+    if nonce_bytes != expected_nonce {
+        return Err(format!("Chunk nonce mismatch for {}", chunk_id));
+    }
+
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
+    let nonce = Nonce::from_slice(nonce_bytes);
+    cipher.decrypt(nonce, ciphertext)
+        .map_err(|e| format!("Decryption failed for chunk {}: {}", chunk_id, e))
 }
 
 #[cfg(test)]

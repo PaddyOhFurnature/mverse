@@ -676,6 +676,11 @@ fn main() {
     
     // User content layer - separates edits from base terrain
     let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
+    // Derive at-rest encryption key from identity signing key
+    {
+        let enc_key = UserContentLayer::derive_encryption_key(&identity.signing_key().to_bytes());
+        user_content.lock().unwrap().set_encryption_key(enc_key);
+    }
     
     // World data directory - unique per identity for local testing
     // In production on separate machines, all would use "world_data"

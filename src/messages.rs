@@ -687,14 +687,27 @@ impl ChunkStateResponse {
         self.operations.values().map(|ops| ops.len()).sum()
     }
     
-    /// Serialize to bytes for network transmission
+    /// Serialize to bytes for network transmission (zstd compressed)
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
+        let raw = bincode::serialize(self)?;
+        let compressed = zstd::encode_all(raw.as_slice(), 3)
+            .map_err(|e| MessageError::Serialization(e.to_string()))?;
+        let mut out = Vec::with_capacity(1 + compressed.len());
+        out.push(1u8); // version byte
+        out.extend_from_slice(&compressed);
+        Ok(out)
     }
     
     /// Deserialize from bytes received from network
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        Ok(bincode::deserialize(data)?)
+        if data.first() == Some(&1u8) {
+            let decompressed = zstd::decode_all(&data[1..])
+                .map_err(|e| MessageError::Serialization(e.to_string()))?;
+            Ok(bincode::deserialize(&decompressed)?)
+        } else {
+            // legacy: raw bincode (no version byte)
+            Ok(bincode::deserialize(data)?)
+        }
     }
 }
 
