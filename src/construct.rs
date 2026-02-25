@@ -486,14 +486,28 @@ fn add_horiz_quad(mesh: &mut Mesh, a: Vec3, b: Vec3, c_pt: Vec3, d: Vec3, colour
 
 // ── Physics collision data ────────────────────────────────────────────────────
 
-/// A flat collision plane for the construct floor.
-/// Returns vertices + triangle indices in the format expected by
-/// `physics::create_collision_from_mesh`.
+/// A flat collision plane covering the entire construct footprint.
 ///
-/// We generate a simple subdivided floor plane that rapier can use as a
-/// trimesh collider — same approach as terrain chunks.
+/// Uses a single large quad (not the visual mesh) — simpler, more robust,
+/// and covers both the plaza AND all module room floors.
+///
+/// Plaza is 40×40 (-20..+20).  Rooms extend ~9 m outward on each side.
+/// 60×60 (-30..+30) covers everything with margin.
 pub fn build_floor_collision_mesh() -> crate::mesh::Mesh {
-    // Re-use the visual floor mesh for collision — it's already flat quads.
-    // The perimeter walls act as invisible barriers.
-    build_floor()
+    use crate::mesh::{Mesh, Triangle, Vertex};
+    let mut mesh = Mesh::new();
+    let s = 30.0_f32;
+    let y = 0.0_f32;
+    let col = glam::Vec3::ZERO; // colour irrelevant for collision mesh
+    let v0 = mesh.add_vertex(Vertex::new(glam::Vec3::new(-s, y, -s), col));
+    let v1 = mesh.add_vertex(Vertex::new(glam::Vec3::new( s, y, -s), col));
+    let v2 = mesh.add_vertex(Vertex::new(glam::Vec3::new( s, y,  s), col));
+    let v3 = mesh.add_vertex(Vertex::new(glam::Vec3::new(-s, y,  s), col));
+    // CCW from above → normal faces +Y (collides from above)
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
+    // Also add reverse faces so Rapier treats it as two-sided
+    mesh.add_triangle(Triangle::new(v0, v1, v2));
+    mesh.add_triangle(Triangle::new(v0, v2, v3));
+    mesh
 }

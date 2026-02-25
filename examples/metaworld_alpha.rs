@@ -725,7 +725,8 @@ fn main() {
     
     // In Construct mode (always on startup), override position to Construct spawn.
     // Ignore any saved open-world position — Construct has its own floor at local Y=0.
-    let spawn_local = metaverse_core::construct::SPAWN_POINT + glam::Vec3::new(0.0, 1.0, 0.0);
+    // Spawn 2.5 m above floor so the capsule (bottom = spawn_y - 0.9) has clear air.
+    let spawn_local = metaverse_core::construct::SPAWN_POINT + glam::Vec3::new(0.0, 2.5, 0.0);
     let spawn_ecef = physics.local_to_ecef(spawn_local);
     player.position = spawn_ecef;
     if let Some(body) = physics.bodies.get_mut(player.body_handle) {
