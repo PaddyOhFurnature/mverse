@@ -419,79 +419,181 @@ Short version:
 
 ---
 
-## 4. THE VIRTUAL LOBBY
+## 4. THE CONSTRUCT & VIRTUAL LOBBY
 
-The lobby is a persistent 3D space. It loads instantly because it contains no
-terrain — it's a small curated set of signed ops defining a fixed scene.
+### 4.1 What the Construct Is
+
+The **Construct** is a bundled layer that runs beneath and alongside the main
+world. It is NOT a different game, NOT a loading screen, and NOT a menu system.
+It is a real, populated 3D space — the first place every player arrives, and
+one they can return to at any time.
+
+Think of it as the space station you dock at before going planetside. It's real,
+other people are there, things happen there. It just doesn't sit on the digital
+earth's terrain — it has its own bundled scene data, loaded from the client
+binary before any network chunk arrives.
 
 ```
-What it is:
-  A stylised enclosed space (visual design TBD — not decided yet)
-  Visible public terminals near spawn
-  A portal/gateway to the main world
-  A few other players visible if present
+Why the Construct, not a fixed GPS location in the world:
 
-What it enables:
-  First run: you appear HERE, not dropped into random terrain
-  Anonymous exploration: read forums before committing an identity
-  Signup: walk up to terminal, create key, done
-  Orientation: understand the world before entering it
-  Entry points: portals to different world regions
+  PHYSICAL LOCATION             CONSTRUCT LAYER
+  ──────────────────            ──────────────────────────────
+  Subject to chunk lag          Loads from local data instantly
+  Tied to world state           Isolated — world bugs can't reach it
+  Hard to expand safely         Redesign freely, deploy to all clients
+  No global kick mechanism      Security event → global kick here
+  Growth limited by geography   Modules added without world changes
+  Can be griefed/blocked        Fully admin-controlled, always clean
+```
 
-What it is not:
-  A different game
+### 4.2 The Construct is the Backend. The Physical World is the Frontend.
+
+Every real-world service analogue in the game has two parts:
+
+1. **A physical building** in the digital earth — the immersive facade.
+   Players walk past it, see it on the street, can enter for the experience.
+
+2. **A construct module** — the actual functional space where the service runs.
+   The physical building's special door **portals** here.
+
+```
+Physical World (digital earth)          Construct (bundled layer)
+────────────────────────────            ──────────────────────────────
+[Bank building]      ──door──────────→  [/construct/bank]
+[Post Office]        ──door──────────→  [/construct/post]
+[Police Station]     ──door──────────→  [/construct/emergency]
+[Hospital]           ──door──────────→  [/construct/medical]
+[Travel Agent]       ──door──────────→  [/construct/travel]
+[News Agency]        ──door──────────→  [/construct/news]
+[Supermarket]        ──door──────────→  [/construct/marketplace]
+[Any building]       ──door──────────→  [/construct/<module>]
+                     ──/lobby cmd──--→  [/construct/lobby]   ← entry hub
+                     ──first run─────→  [/construct/signup]  ← new players
+```
+
+The door is a **portal trigger**: a collision zone on the door mesh that fires a
+`PortalTo { destination: ConstructModule }` action when the player walks through.
+Players without interest in immersion use chat commands (`/lobby`, `/bank`, etc.)
+to jump directly.
+
+Multiple physical buildings in different cities can all portal to the same
+construct module — there is one bank in the construct, but a thousand bank
+branches in the world.
+
+### 4.3 Construct Modules (Planned)
+
+| Module | Purpose |
+|---|---|
+| `lobby` | Entry hub. Where all players start. Signup terminals. World portals. |
+| `signup` | First-run identity creation (Trial/Guest/User flows) |
+| `bank` | Currency, transfers, escrow for commerce |
+| `marketplace` | Browse/buy/sell items, land listings, blueprints |
+| `post` | Async messaging between players (like postal mail, not DMs) |
+| `forums` | Threaded public discussion, served from meshnet |
+| `wiki` | Community knowledge base |
+| `news` | News agencies, broadcast media, in-world journalism |
+| `travel` | Book passage, teleport tokens, region transit |
+| `emergency` | Police reports, incident filing, moderation appeals |
+| `government` | Region governance, proposals, voting |
+| `settings` | Identity management, key backup, preferences |
+
+New modules are added to the construct without touching world geography.
+
+### 4.4 Security: Global Kick
+
+If a critical security event occurs (exploit, griefing wave, network attack),
+the server sends a signed `GlobalKick` operation. Every connected client
+immediately transitions to `/construct/lobby`. The world state is frozen,
+investigated, and restored. Players wait in the lobby. When the world is safe,
+a `WorldReopen` signal is broadcast and portals re-activate.
+
+```
+Security event timeline:
+  T+0s   Server detects exploit / admin triggers GlobalKick
+  T+1s   Signed GlobalKick broadcast via gossipsub
+  T+2s   All clients receive it, verify server signature
+  T+2s   Every client renders construct/lobby — world frozen
+  T+Xm   World investigated and restored
+  T+Xm   WorldReopen broadcast — portals re-activate
+  T+Xm   Players choose when to re-enter
+```
+
+### 4.5 Lobby Scene
+
+The lobby is the entry hub of the construct. It loads from data bundled in the
+client binary — no network needed to show the floor. As peers connect in
+background, other players become visible.
+
+```
+What the lobby contains:
+  Solid ground from frame 1 (spawn chunk generated synchronously at startup)
+  Signup terminal — active on first run for new players
+  "Load Key" terminal — for returning players pointing to their identity file
+  World portal — the gateway into the main digital earth
+  Notice boards, announcements from server keys
+  Other players visible if present
+  Doors to featured construct modules (bank, marketplace, forums, etc.)
+
+What the lobby is not:
   A loading screen
-  Special-cased — it IS a world, just a small one defined by admin ops
+  A menu
+  A separate game
+  Empty — other players are always here if the network is up
 ```
-
-The lobby's content is defined by a signed op set from a Server key.
-Any peer connecting for the first time receives the lobby op set via gossipsub
-before any terrain streams. Load time: sub-second.
 
 ---
 
 ## 5. FIRST RUN & SIGNUP
 
-Current state: identity requires manual CLI setup (METAVERSE_IDENTITY_FILE=...).
-This must be solved before public testing is possible.
+On first launch (no `~/.metaverse/identity.key` exists), the player appears in
+the lobby. A signup overlay activates automatically. The world continues loading
+in the background. The player stands on solid ground.
 
 ```
-First run flow (no ~/.metaverse/identity.key exists):
+Identity tiers (from least to most commitment — see IDENTITY_SYSTEM.md):
 
-  1. Lobby loads (fast — no terrain)
-  2. Highlighted terminal: "Welcome — Create Your Identity"
-  3. Player walks up (or auto-activates on first run)
-  4. Terminal shows:
+  TRIAL   No registration. Walk around, observe, predefined chat only.
+          Key regenerated every hour → returned to lobby for a new one.
+          Zero abuse surface. No persistent identity at all.
 
-     ┌─ WHO ARE YOU? ──────────────────────────────────────────┐
-     │                                                          │
-     │  [A]  Anonymous                                          │
-     │       Generate a key now. Persistent identity.          │
-     │       No email. No name required.                        │
-     │       Can own property, build, trade.                    │
-     │                                                          │
-     │  [P]  Personal                                           │
-     │       Email verification. Your key, your choice of name. │
-     │       Unlocks full capabilities.                         │
-     │                                                          │
-     │  [G]  Guest (read-only)                                  │
-     │       No key. Can look around, read content.             │
-     │       Cannot build, post, or trade.                      │
-     │                                                          │
-     └──────────────────────────────────────────────────────────┘
+  GUEST   Free account. Verified email + chosen nickname required.
+          Home plot assigned. Public chat (no DMs). Moderatable.
+          Distributed key (published to network). 30-day minimum before upgrade.
 
-  5. Choice made:
-     A/P → keypair generated, saved to ~/.metaverse/identity.key
-     P   → email entered → server sends verify link → click → key upgraded
-     G   → no key, load world as observer
+  USER    Full account. Earned: 30 days Guest in good standing, or invited.
+          All features: DMs, commerce, contracts, full build rights.
+          Additional ID verification. Address verification optional.
 
-  6. Key published to network (gossipsub + DHT)
-  7. "Enter World" portal activates
+  BUSINESS  Created under a User account (like Facebook pages).
+            Organisation identity. User creates it, adds admins/mods.
+```
+
+```
+First run flow:
+
+  1. Client starts → spawn chunk generated synchronously → floor exists
+  2. Network connects in background
+  3. Lobby renders — player is standing, can look around
+  4. Signup overlay appears (egui panel on top of 3D world):
+
+     ┌─ WELCOME ──────────────────────────────────────────────────┐
+     │  [ Load My Key ]   Returning player — point to key file    │
+     │  ─── New here? ──────────────────────────────────────────  │
+     │  [ Try It Now  ]   Trial — no registration, hourly reset   │
+     │  [ Free Account]   Guest — email + nickname required        │
+     │  [ Full Account]   User  — requires Guest + 30 days        │
+     └────────────────────────────────────────────────────────────┘
+
+  5. Choice made → keypair generated locally → key saved to disk
+  6. Key published to network (Guest/User only — Trial stays local)
+  7. Overlay dismissed → player is in the lobby, free to move
+  8. "Enter World" portal visible — step through to the digital earth
 ```
 
 ---
 
 ## 6. IMPLEMENTATION ROADMAP
+
 
 Phases are sequenced by dependency. Each phase is independently useful.
 
