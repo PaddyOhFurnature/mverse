@@ -820,8 +820,9 @@ fn main() {
 
     // Loading phase: true until enough spawn-area chunks have meshes and collision built.
     // The event loop renders the loading bar while this is true.
+    // In Construct mode we skip terrain loading entirely — floor is ready from frame 1.
     const LOADING_TARGET: usize = 30;
-    let mut game_loading = true;
+    let mut game_loading = game_mode != GameMode::Construct;
     let mut loading_frames: u32 = 0;  // minimum frames before we allow exit
 
     println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
@@ -1525,7 +1526,11 @@ fn main() {
                             }
                         }
 
-                        // 4. Kick off surrounding chunk streaming.
+                        // 4. Re-enter loading phase so terrain streams in before gameplay.
+                        game_loading = true;
+                        loading_frames = 0;
+
+                        // 5. Kick off surrounding chunk streaming.
                         chunk_streamer.update(player.position);
 
                         println!("🌍 Open World — local ({:.1}, {:.1}, {:.1})",

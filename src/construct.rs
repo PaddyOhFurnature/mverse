@@ -284,18 +284,18 @@ fn build_portal_arch(pos: Vec3) -> Mesh {
 
     // Left pillar
     add_pillar(&mut mesh,
-        Vec3::new(pos.x - arch_w, pos.y, pos.z),
+        Vec3::new(pos.x - arch_w, pos.y, pos.z - thickness * 0.5),
         thickness, arch_h, PORTAL_COLOUR);
     // Right pillar
     add_pillar(&mut mesh,
-        Vec3::new(pos.x + arch_w, pos.y, pos.z),
+        Vec3::new(pos.x + arch_w, pos.y, pos.z - thickness * 0.5),
         thickness, arch_h, PORTAL_COLOUR);
-    // Lintel (top bar)
+    // Lintel (top bar) — spans full width, centred on pos.z
     add_wall_strip(&mut mesh,
         Vec3::new(pos.x - arch_w - thickness, arch_h, pos.z - thickness),
-        Vec3::new(pos.x + arch_w + thickness, arch_h, pos.z - thickness),
+        Vec3::new(pos.x + arch_w + thickness, arch_h, pos.z + thickness),
         thickness, PORTAL_COLOUR);
-    // Glowing fill inside the arch
+    // Glowing fill inside the arch — faces -Z (toward player spawn at 0,0,0)
     let gx0 = pos.x - arch_w + thickness;
     let gx1 = pos.x + arch_w - thickness;
     let gz  = pos.z;
@@ -305,11 +305,12 @@ fn build_portal_arch(pos: Vec3) -> Mesh {
     let v1 = mesh.add_vertex(Vertex::new(Vec3::new(gx1, gy0, gz), GLOW_COLOUR));
     let v2 = mesh.add_vertex(Vertex::new(Vec3::new(gx1, gy1, gz), GLOW_COLOUR));
     let v3 = mesh.add_vertex(Vertex::new(Vec3::new(gx0, gy1, gz), GLOW_COLOUR));
-    mesh.add_triangle(Triangle::new(v0, v1, v2));
-    mesh.add_triangle(Triangle::new(v0, v2, v3));
-    // Back face (visible when entering from the world side)
+    // Front face (toward spawn, -Z normal = CCW from -Z side)
     mesh.add_triangle(Triangle::new(v0, v2, v1));
     mesh.add_triangle(Triangle::new(v0, v3, v2));
+    // Back face
+    mesh.add_triangle(Triangle::new(v0, v1, v2));
+    mesh.add_triangle(Triangle::new(v0, v2, v3));
 
     mesh
 }
