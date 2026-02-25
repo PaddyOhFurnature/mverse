@@ -2618,8 +2618,9 @@ async fn web_api_key_by_id(
 /// POST /api/v1/content/post  — quick post without pre-computing a signature.
 ///
 /// Takes `{"section":"forums","title":"...","body":"..."}`.
-/// The server computes the id and injects into gossipsub.
-/// Use this for testing content distribution — see results at /meshsite/{section}.
+/// Server computes the id and publishes to gossipsub + DHT.
+/// Content is received by all subscribed nodes and surfaces in-game (Construct module walls).
+/// Confirm distribution with: GET /api/v1/content?section=forums
 #[derive(serde::Deserialize)]
 struct QuickPost {
     section: String,
@@ -2675,7 +2676,7 @@ async fn api_v1_quick_post(
     }
 
     (StatusCode::CREATED,
-     Json(serde_json::json!({"id": id, "status": "published", "view": format!("/meshsite/{}", item.section.as_str())}))).into_response()
+     Json(serde_json::json!({"id": id, "status": "published", "section": item.section.as_str(), "dht_key": item.dht_key()}))).into_response()
 }
 
 /// POST /api/v1/content  — inject a signed content item into the mesh.
@@ -2768,173 +2769,7 @@ async fn api_v1_get_content(
     }
 }
 
-// ─── Meshsite HTML handlers ────────────────────────────────────────────────────
 
-async fn meshsite_root(State(s): State<WebState>) -> Html<String> {
-    let st = s.read().unwrap();
-    let counts = st.key_db.as_ref().map(|db| db.content_counts()).unwrap_or_default();
-    Html(render_meshsite_landing(&st, &counts))
-}
-
-async fn meshsite_section(
-    State(s): State<WebState>,
-    Path(section): Path<String>,
-) -> Html<String> {
-    let st = s.read().unwrap();
-    let items = st.key_db.as_ref()
-        .map(|db| db.list_content(&section))
-        .unwrap_or_default();
-    Html(render_meshsite_section(&st, &section, &items))
-}
-
-fn meshsite_nav(node_name: &str) -> String {
-    format!(r#"<nav class="ms-nav">
-  <a href="/meshsite" class="ms-logo">◈ {node_name}</a>
-  <div class="ms-links">
-    <a href="/meshsite/forums">Forums</a>
-    <a href="/meshsite/wiki">Wiki</a>
-    <a href="/meshsite/marketplace">Marketplace</a>
-    <a href="/meshsite/post">Post Office</a>
-    <a href="/">Server Dashboard</a>
-  </div>
-</nav>"#)
-}
-
-const MESHSITE_CSS: &str = r#"
-  body { margin:0; font-family: 'Segoe UI', system-ui, sans-serif;
-         background: #0a0d12; color: #cdd6f4; }
-  a { color: #89b4fa; text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .ms-nav { display:flex; align-items:center; padding: 12px 24px;
-             background: #11141d; border-bottom: 1px solid #313244; }
-  .ms-logo { font-size: 1.2em; font-weight: bold; color: #cba6f7; margin-right: auto; }
-  .ms-links a { margin-left: 20px; color: #89dceb; }
-  .ms-main { max-width: 900px; margin: 40px auto; padding: 0 20px; }
-  h1 { color: #cba6f7; border-bottom: 1px solid #313244; padding-bottom: 8px; }
-  h2 { color: #89b4fa; }
-  .card { background: #13161f; border: 1px solid #313244; border-radius: 8px;
-          padding: 20px; margin-bottom: 20px; }
-  .card h3 { margin: 0 0 8px; color: #f5c2e7; }
-  .card .meta { font-size: 0.8em; color: #6c7086; margin-bottom: 8px; }
-  .card .body { white-space: pre-wrap; line-height: 1.6; }
-  .section-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
-  .section-card { background: #13161f; border: 1px solid #313244; border-radius: 12px;
-                  padding: 24px; transition: border-color .2s; }
-  .section-card:hover { border-color: #89b4fa; }
-  .section-card h2 { margin: 0 0 8px; }
-  .section-card p { color: #a6adc8; margin: 0 0 16px; font-size: 0.9em; }
-  .section-count { font-size: 0.8em; color: #585b70; }
-  form { background: #13161f; border: 1px solid #313244; border-radius: 8px; padding: 20px; }
-  form label { display:block; margin-bottom: 4px; font-size: 0.85em; color: #a6adc8; }
-  form input, form textarea, form select {
-    width: 100%; box-sizing: border-box; background: #1e2030; border: 1px solid #45475a;
-    color: #cdd6f4; border-radius: 4px; padding: 8px 10px; margin-bottom: 12px;
-    font-family: inherit; font-size: 0.9em; }
-  form textarea { height: 140px; resize: vertical; }
-  button[type=submit] {
-    background: #89b4fa; color: #11111b; border: none; border-radius: 4px;
-    padding: 9px 20px; font-weight: bold; cursor: pointer; }
-  button[type=submit]:hover { background: #b4befe; }
-  .post-note { font-size: 0.8em; color: #585b70; margin-top: 6px; }
-  .empty { color: #585b70; font-style: italic; padding: 20px 0; }
-"#;
-
-fn render_meshsite_landing(
-    st: &SharedState,
-    counts: &std::collections::HashMap<String, usize>,
-) -> String {
-    let nav = meshsite_nav(&st.node_name);
-    let sections = [
-        ("forums",      "Forums",      "Threaded public discussion. Post questions, ideas, reports."),
-        ("wiki",        "Wiki",        "Community knowledge base. Articles stored in the DHT."),
-        ("marketplace", "Marketplace", "Trade items, land parcels and blueprints."),
-        ("post",        "Post Office", "Async player-to-player messages. Stored in the mesh."),
-    ];
-    let cards: String = sections.iter().map(|(slug, name, desc)| {
-        let count = counts.get(*slug).copied().unwrap_or(0);
-        format!(r#"<a href="/meshsite/{slug}" style="color:inherit;text-decoration:none">
-  <div class="section-card">
-    <h2>{name}</h2>
-    <p>{desc}</p>
-    <span class="section-count">{count} item{}</span>
-  </div></a>"#, if count == 1 { "" } else { "s" })
-    }).collect();
-    format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>Meshsite — {name}</title>
-<style>{css}</style></head><body>
-{nav}
-<div class="ms-main">
-  <h1>◈ Meshsite</h1>
-  <p style="color:#a6adc8">Distributed content hosted on <strong>{name}</strong>. Every item is signed and replicated across the mesh.</p>
-  <div class="section-grid">{cards}</div>
-</div></body></html>"#,
-        name = st.node_name, css = MESHSITE_CSS, nav = nav, cards = cards)
-}
-
-fn render_meshsite_section(
-    st: &SharedState,
-    section: &str,
-    items: &[metaverse_core::meshsite::ContentItem],
-) -> String {
-    use metaverse_core::meshsite::Section;
-    let display = Section::from_str(section)
-        .map(|s| s.display_name())
-        .unwrap_or(section);
-    let nav = meshsite_nav(&st.node_name);
-
-    let posts: String = if items.is_empty() {
-        format!(r#"<p class="empty">No posts yet — be the first to post in {display}.</p>"#)
-    } else {
-        items.iter().map(|item| {
-            let short_author = if item.author.len() > 16 {
-                format!("{}…", &item.author[..16])
-            } else {
-                item.author.clone()
-            };
-            format!(r#"<div class="card">
-  <h3>{title}</h3>
-  <div class="meta">by {author} · id: {id_short}…</div>
-  <div class="body">{body}</div>
-</div>"#,
-                title      = html_escape(&item.title),
-                body       = html_escape(&item.body),
-                author     = html_escape(&short_author),
-                id_short   = &item.id[..8],
-            )
-        }).collect()
-    };
-
-    format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<title>{display} — Meshsite</title>
-<style>{css}</style></head><body>
-{nav}
-<div class="ms-main">
-  <h1>{display}</h1>
-  {posts}
-  <h2>Post to {display}</h2>
-  <div class="card" style="border-color:#45475a">
-    <p style="color:#a6adc8;margin:0">Content flows through the P2P mesh — use the API or game client to post:</p>
-    <pre style="background:#0a0d12;padding:12px;border-radius:4px;overflow-x:auto;font-size:0.85em">curl -X POST http://localhost:8080/api/v1/content \
-  -H "Content-Type: application/json" \
-  -d '{{
-    "section": "{section}",
-    "title": "Your title",
-    "body": "Your content",
-    "author": "&lt;your-peer-id&gt;",
-    "signature": "&lt;hex-sig over canonical_bytes&gt;",
-    "created_at": &lt;unix-ms&gt;
-  }}'</pre>
-    <p style="color:#585b70;font-size:0.8em;margin:6px 0 0">The server publishes to gossipsub — all nodes receive and store it automatically.</p>
-  </div>
-</div></body></html>"#,
-        display = display, css = MESHSITE_CSS, nav = nav,
-        posts = posts, section = section)
-}
-
-/// HTML-escape a string for safe embedding.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
 
 fn render_dashboard_html(st: &SharedState) -> String {
     let uptime_h = st.uptime_secs / 3600;
@@ -3493,9 +3328,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
                 .route("/api/v1/content/post", post(api_v1_quick_post))
                 .route("/api/v1/content/:id", get(api_v1_get_content))
-                // ── Meshsite HTML pages ────────────────────────────────────
-                .route("/meshsite", get(meshsite_root))
-                .route("/meshsite/:section", get(meshsite_section))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);
