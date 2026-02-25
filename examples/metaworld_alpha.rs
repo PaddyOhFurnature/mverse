@@ -1477,11 +1477,59 @@ fn main() {
 
                     // World portal: walk through to enter the open world.
                     if near_portal && game_mode == GameMode::Construct {
-                        if frame_count % 120 == 0 {
-                            println!("🌐 [Construct] Player at world portal — transitioning to open world...");
-                        }
+                        println!("🌐 Walking through world portal — entering Open World...");
                         game_mode = GameMode::OpenWorld;
-                        println!("🌍 Entered Open World — terrain streaming active");
+
+                        // 1. Compute open world spawn (GPS origin + 3 m above terrain).
+                        let world_local_raw = physics.ecef_to_local(&spawn_ecef_origin);
+                        let world_spawn_local = Vec3::new(
+                            world_local_raw.x,
+                            world_local_raw.y + 3.0,
+                            world_local_raw.z,
+                        );
+                        let world_spawn_ecef = physics.local_to_ecef(world_spawn_local);
+                        player.position = world_spawn_ecef;
+
+                        // 2. Teleport physics body, zero velocity.
+                        if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+                            body.set_translation(
+                                vector![world_spawn_local.x, world_spawn_local.y, world_spawn_local.z],
+                                true,
+                            );
+                            body.set_linvel(vector![0.0, 0.0, 0.0], true);
+                        }
+
+                        // 3. Synchronously generate spawn chunk so player lands on ground.
+                        let spawn_chunk = ChunkId::from_ecef(&player.position);
+                        chunk_streamer.queue_priority(spawn_chunk);
+                        {
+                            let generator = generator_arc.lock().unwrap();
+                            if let Ok(octree) = generator.generate_chunk(&spawn_chunk) {
+                                let min_v = spawn_chunk.min_voxel();
+                                let max_v = spawn_chunk.max_voxel();
+                                let (mut mesh, chunk_center) = extract_chunk_mesh(&octree, &min_v, &max_v);
+                                if !mesh.vertices.is_empty() {
+                                    let offset = Vec3::new(
+                                        (chunk_center.x - origin_voxel.x) as f32,
+                                        (chunk_center.y - origin_voxel.y) as f32,
+                                        (chunk_center.z - origin_voxel.z) as f32,
+                                    );
+                                    for v in &mut mesh.vertices { v.position += offset; }
+                                    let collider = metaverse_core::physics::create_collision_from_mesh(
+                                        &mut physics, &mesh, &origin_voxel, None);
+                                    chunk_streamer.preload_chunk(spawn_chunk, octree, Some(collider));
+                                    println!("✅ World spawn chunk ready — ground is live");
+                                } else {
+                                    println!("⚠️  Spawn chunk is empty (ocean/void?) — player may fall");
+                                }
+                            }
+                        }
+
+                        // 4. Kick off surrounding chunk streaming.
+                        chunk_streamer.update(player.position);
+
+                        println!("🌍 Open World — local ({:.1}, {:.1}, {:.1})",
+                            world_spawn_local.x, world_spawn_local.y, world_spawn_local.z);
                     }
 
                     jump_pressed = false;
