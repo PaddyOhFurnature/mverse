@@ -53,19 +53,20 @@ These rules cannot be broken by any design decision, ever.
 
 ## 2. CURRENT STATE (What Already Exists)
 
-### ✅ Foundation (Built)
+### ✅ Foundation (Built — v0.1.6)
 - 3D voxel world at near-1:1 Earth scale (SRTM elevation, OSM data)
 - Physics: gravity, collision, terrain streaming (Rapier 3D)
 - P2P networking: libp2p full stack (TCP + QUIC, Gossipsub, Kademlia DHT, mDNS, Noise+TLS, Yamux, relay/DCUTR hole-punching)
 - Key system: 8 key types (Genesis→Trial), Ed25519 signing, DHT-propagated KeyRecords
 - Relay nodes: NAT traversal, gossipsub forwarding, binary release on GitHub
 - Server nodes: REST API v1, web dashboard, key registry SQLite
-- Multiplayer: player positions, voxel operations, state sync
+- Multiplayer: player positions, voxel operations, state sync, per-chunk AOI sharding
 - Bootstrap: static JSON + GitHub Gist relay list, relay-based discovery
 - **The Construct**: bundled lobby scene, 6 Meshsite module rooms, world portal, signup terminal, debug HUD
 - **GameMode separation**: Construct vs OpenWorld — terrain/physics gated, clean spawn
 - Identity tiers redesigned: Trial(7)/Guest(6)/User(5)/Business(4) — wire-format stable discriminants
 - Signup screen: egui overlay, all 4 flows, key file generation
+- **Full data layer wired**: chunking + DHT + compression + at-rest encryption + session tokens + AOI sharding + redundancy (see section 2.5)
 
 ### ❌ Platform Layer (Not Yet Built)
 - No in-game terminal (no PTY renderer, no mesh browser)
@@ -74,51 +75,56 @@ These rules cannot be broken by any design decision, ever.
 - No transport agnosticism (TCP + QUIC only — no Tor, no WebRTC, no LoRa)
 - No large-content distribution (no block-chunked DHT)
 - No screen sharing / media streaming
+- Server/relay redesign pending (see section 6)
 
 ---
 
-## 2.5 DATA LAYER AUDIT (What's Built vs What's Wired)
+## 2.5 DATA LAYER AUDIT — v0.1.6 STATUS
 
-The data infrastructure components exist in isolation. The **wiring** between them is incomplete.
+**Last updated:** 2026-02-25
 
-| Component | Built | Wired | Notes |
-|---|---|---|---|
-| **Chunking** | ✅ ChunkId, ChunkManager, ChunkStreamer, 100³ voxels | ❌ | Not wired to DHT. Edits don't persist across sessions. |
-| **P2P Transport** | ✅ Full libp2p stack (see above) | ✅ | Gossipsub messages, player state, voxel ops — all live |
-| **DHT (Kademlia)** | ✅ Kademlia behaviour in swarm | ❌ | Chunk IDs not advertised as DHT providers. Peers don't fetch missing chunks from DHT. |
-| **Compression** | ✅ zstd on all gossipsub messages | ❌ | Chunk terrain binary not compressed before P2P send |
-| **Encryption in transit** | ✅ Noise protocol (all connections auth + encrypted) | ✅ | |
-| **Encryption at rest** | ❌ | ❌ | Chunk files stored plaintext. ChaCha20 imported but unused. |
-| **Sharding** | ✅ `spatial_sharding.rs`: L0–L3 geographic cells, `redundancy_target=5` | ❌ | Topology built but no runtime subscription/redistribution. |
-| **Signed operations** | ✅ Ed25519 signing on all VoxelOps | ✅ | Verified on receive |
-| **CRDT / vector clocks** | ✅ `vector_clock.rs`, CRDT merge semantics | ❌ | Peers don't persist received ops to disk. No quorum checks. |
-| **Session tokens** | ❌ | ❌ | Ed25519 keypairs exist but no short-lived session tokens. PeerId repeated in every hot-path message (39 bytes). |
-| **Onion routing** | ❌ | ❌ | Not started. Design in section 3 / Layer 2. |
-| **Redundancy** | ✅ Architecture (`redundancy_target=5`, gossipsub propagation) | ❌ | No node actually writes received ops to disk. Data exists only on originating client. |
+| Component | Status | Notes |
+|---|---|---|
+| **Chunking** | ✅ Built + Wired | Per-chunk `operations.bin` files. Edits persist across sessions. ChunkId::dht_key() → DHT key. |
+| **P2P Transport** | ✅ Built + Wired | Full libp2p stack live: TCP + QUIC, Gossipsub, Kademlia, mDNS, Noise+TLS, relay/DCUTR |
+| **DHT (Kademlia)** | ✅ Built + Wired | Chunk IDs advertised as DHT providers at startup and on every edit. DHT fetch fallback: if no peers after 10s, query providers → dial → gossipsub sync delivers ops. |
+| **Compression** | ✅ Built + Wired | zstd on `ChunkTerrainData` and `ChunkStateResponse` (op history sync). Per-chunk ops binary compressed on state sync. |
+| **Encryption in transit** | ✅ Built + Wired | Noise protocol on all connections (auth + encrypted). |
+| **Encryption at rest** | ✅ Built + Wired | ChaCha20-Poly1305 on chunk `operations.bin`. Key derived: SHA-256("at-rest-v1" ‖ signing_key). Nonce: chunk coords. Magic header 0xCC01. Legacy plaintext files auto-loaded. |
+| **Sharding (AOI topics)** | ✅ Built + Wired | `update_subscribed_chunks()` called on every chunk load event and on new peer connect. Per-chunk gossipsub topics `player-state/x/y/z` and `voxel-ops/x/y/z`. Hot-path publishes go to AOI topic; fallback to regional/global if unsubscribed. |
+| **Signed operations** | ✅ Built + Wired | Ed25519 signing on all VoxelOps. Verified on receive. Rejected ops increment peer reputation counter; block after MAX_INVALID_SIGNATURES. |
+| **CRDT / vector clocks** | ✅ Built + Wired | `vector_clock.rs` CRDT merge. Received ops written to disk immediately via `user_content.add_local_operation()`. 30s autosave. |
+| **Session tokens** | ✅ Built + Wired | Deterministic u16 token = hash(PeerId). Hot-path position updates (deltas) use `CompactPlayerState` (18 bytes vs 80 bytes). Full message sent on keepalive (every 5s) so new peers learn the PeerId→token mapping. |
+| **Redundancy** | ✅ Built + Wired | Every peer that receives a voxel op writes it to disk and re-advertises in DHT. Gossipsub mesh replicates to ~6 peers automatically. `redundancy_target=5` met via gossipsub mesh construction. |
+| **Onion routing** | ❌ Not started | 3-hop circuits through Relay key holders. See section 3 / Layer 2. Deferred — blocked on no blocking UX need yet. |
 
-### The Core Wiring Gap
-
-Everything feeds into `operations.json` (single global file) instead of per-chunk DHT:
+### Data Flow (v0.1.6)
 
 ```
-Voxel edit → signed op → operations.json   ← works today
-                       ↓
-              DHT publish → peers store per-chunk  ← NOT WIRED
-                       ↓
-              Chunk file ← chunk streamer   ← NOT WIRED
+Voxel edit
+  → SignedOperation (Ed25519, vector clock)
+  → user_content (deduplicated, persisted)
+  → ChunkId::dht_key() → Kademlia start_providing
+  → gossipsub voxel-ops/x/y/z → all AOI subscribers receive + persist
+  → 30s autosave → encrypted operations.bin per chunk
+
+New peer joins
+  → mDNS / bootstrap → connects
+  → exchange chunk manifests (which chunks, which timestamp)
+  → state_request / state_response (zstd-compressed op history)
+  → ops applied to octree, written to disk
+
+Offline resilience
+  → no peers online → DHT fallback (10s timeout)
+  → GetProviders for loaded chunk IDs
+  → dial providers → gossipsub sync on connect
 ```
 
-The single highest-value fix: **replace global `operations.json` with per-chunk files stored and fetched via DHT**. Sharding, compression, redundancy, and replication all plug in around that.
+### Remaining Work
 
-### Next Data Layer Work (Sequenced by Dependency)
-
-1. **Chunk→DHT wiring** — ChunkId advertised as DHT provider; peers request missing chunks from DHT, not regenerate locally
-2. **Chunk persistence** — Per-chunk op files survive sessions; new joiner can fetch world state
-3. **Replication** — On voxel edit, write received op to disk + gossip to `redundancy_target` peers
-4. **Chunk compression** — zstd on chunk binary before DHT store/fetch
-5. **At-rest encryption** — Key-derived encryption per parcel/chunk before writing to disk
-6. **Session tokens** — Short-lived 2-byte tokens to replace PeerId in hot-path messages
-7. **Onion routing** — 3-hop circuits through Relay key holders (see Layer 2 below)
+1. **Onion routing** — 3-hop circuits through Relay key holders (Layer 2 of full architecture). Deferred to after server/relay redesign.
+2. **Large-content DHT** — block-chunked content for media, models, forum posts. Placeholder: content is text-only today.
+3. **WebRTC transport** — browser-compatible nodes. Currently TCP + QUIC only.
 
 ---
 

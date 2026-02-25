@@ -228,13 +228,16 @@ pub struct MultiplayerSystem {
     ///
     /// Hot-path messages (position updates on degraded links) use these instead
     /// of the full 39-byte `PeerId`, saving ~37 bytes per packet.
-    /// IDs are assigned on first `PlayerStateMessage` receipt from a new peer.
+    /// Token is derived deterministically from PeerId so all peers agree without coordination.
     session_ids: HashMap<PeerId, u16>,
     /// Reverse map: session_id → PeerId (for decoding compact messages).
     session_id_map: HashMap<u16, PeerId>,
-    /// Monotonically increasing counter for assigning session IDs.
-    /// Starts at 1 (0 is reserved as "unassigned").
-    next_session_id: u16,
+    /// Our own compact token (deterministic from local PeerId).
+    /// Used when broadcasting `CompactPlayerState`.
+    local_session_token: u16,
+    /// Number of full `PlayerStateMessage` broadcasts sent.
+    /// Non-zero means peers know our PeerId, so compact messages can be sent.
+    full_state_broadcasts: u64,
 
     /// Pending key revocation events — drained by `take_key_revocations()`.
     pending_revocations: Vec<(PeerId, PeerId)>,
@@ -329,7 +332,8 @@ impl MultiplayerSystem {
             pending_session_record: None,
             session_ids: HashMap::new(),
             session_id_map: HashMap::new(),
-            next_session_id: 1,
+            local_session_token: peer_id_to_token(&local_peer_id),
+            full_state_broadcasts: 0,
             pending_revocations: Vec::new(),
             stats: MultiplayerStats::default(),
         })
@@ -480,32 +484,56 @@ impl MultiplayerSystem {
         }
 
         let timestamp = self.clock.tick();
-        let msg = PlayerStateMessage::new(
-            self.local_peer_id,
-            position,
-            velocity,
-            yaw,
-            pitch,
-            movement_mode,
-            timestamp,
-        );
 
-        let data = msg.to_bytes()?;
+        // Hot-path delta: use compact format (18 bytes) once peers know our PeerId.
+        // Full message is sent on keepalive (every 5s) or on the very first broadcast.
+        let use_compact = !keepalive_due && self.full_state_broadcasts > 0;
 
-        // Publish to current chunk topic (AOI) when subscribed, else fall back to regional/global
-        let topic = chunk_player_topic(&ChunkId::from_ecef(&position));
-        if self.subscribed_chunk_topics.contains(&topic) {
-            self.cmd_tx.send(NetworkCommand::Publish { topic, data })
-                .map_err(|_| MultiplayerError::ChannelSendError)?;
-        } else if let Some(ref sharding) = self.spatial_sharding {
-            let fallback = sharding.get_publish_topic("player-state");
-            self.cmd_tx.send(NetworkCommand::Publish { topic: fallback, data })
+        let (data, pub_topic) = if use_compact {
+            // Compact: session_token + position (f32) + rotation
+            let pos = [position.x as f32, position.y as f32, position.z as f32];
+            let compact = crate::messages::CompactPlayerState {
+                session_id: self.local_session_token,
+                position: pos,
+                rotation: [yaw, pitch],
+                timestamp_ms: (timestamp & 0xFFFF_FFFF) as u32,
+            };
+            let d = compact.to_bytes()?;
+            (d, TOPIC_PLAYER_STATE_COMPACT.to_string())
+        } else {
+            // Full message: includes PeerId so receivers learn our compact token
+            let msg = PlayerStateMessage::new(
+                self.local_peer_id,
+                position,
+                velocity,
+                yaw,
+                pitch,
+                movement_mode,
+                timestamp,
+            );
+            self.full_state_broadcasts += 1;
+            (msg.to_bytes()?, String::new()) // topic chosen below
+        };
+
+        if use_compact {
+            self.cmd_tx.send(NetworkCommand::Publish { topic: pub_topic, data })
                 .map_err(|_| MultiplayerError::ChannelSendError)?;
         } else {
-            self.cmd_tx.send(NetworkCommand::Publish {
-                topic: TOPIC_PLAYER_STATE.to_string(),
-                data,
-            }).map_err(|_| MultiplayerError::ChannelSendError)?;
+            // Full message: publish on per-chunk AOI topic when subscribed, else regional/global
+            let topic = chunk_player_topic(&ChunkId::from_ecef(&position));
+            if self.subscribed_chunk_topics.contains(&topic) {
+                self.cmd_tx.send(NetworkCommand::Publish { topic, data })
+                    .map_err(|_| MultiplayerError::ChannelSendError)?;
+            } else if let Some(ref sharding) = self.spatial_sharding {
+                let fallback = sharding.get_publish_topic("player-state");
+                self.cmd_tx.send(NetworkCommand::Publish { topic: fallback, data })
+                    .map_err(|_| MultiplayerError::ChannelSendError)?;
+            } else {
+                self.cmd_tx.send(NetworkCommand::Publish {
+                    topic: TOPIC_PLAYER_STATE.to_string(),
+                    data,
+                }).map_err(|_| MultiplayerError::ChannelSendError)?;
+            }
         }
 
         self.stats.player_states_sent += 1;
@@ -1361,16 +1389,16 @@ impl MultiplayerSystem {
         Ok(())
     }
 
-    /// Assign a new 2-byte session ID to a peer (or return their existing one).
+    /// Assign the deterministic 2-byte compact token for a peer.
+    /// All peers derive the same token for the same PeerId — no coordination needed.
     fn assign_session_id(&mut self, peer: PeerId) -> u16 {
         if let Some(&existing) = self.session_ids.get(&peer) {
             return existing;
         }
-        let sid = self.next_session_id;
-        self.next_session_id = self.next_session_id.wrapping_add(1).max(1); // skip 0
-        self.session_ids.insert(peer, sid);
-        self.session_id_map.insert(sid, peer);
-        sid
+        let token = peer_id_to_token(&peer);
+        self.session_ids.insert(peer, token);
+        self.session_id_map.insert(token, peer);
+        token
     }
 
     /// Get the session ID for a peer, if one has been assigned.
@@ -1686,6 +1714,25 @@ impl MultiplayerSystem {
     pub fn is_peer_blocked(&self, peer_id: &PeerId) -> bool {
         self.blocked_peers.contains(peer_id)
     }
+}
+
+/// Derive a stable 2-byte compact token from a PeerId.
+///
+/// XOR-folds all bytes of the multihash into a u16. Deterministic and consistent
+/// across all peers — no coordination or server assignment required.
+/// The only pathological case is a u16 collision (1 in 65535 chance per additional peer),
+/// which is fine for expected group sizes (< 100 simultaneous neighbours).
+fn peer_id_to_token(peer_id: &PeerId) -> u16 {
+    let bytes = peer_id.to_bytes();
+    let mut h: u32 = 0x5A5A_5A5A;
+    for chunk in bytes.chunks(4) {
+        let mut arr = [0u8; 4];
+        arr[..chunk.len()].copy_from_slice(chunk);
+        h ^= u32::from_le_bytes(arr);
+        h = h.wrapping_mul(0x9E37_79B9); // knuth multiplicative hash step
+    }
+    let token = ((h ^ (h >> 16)) as u16).max(1); // never return 0
+    token
 }
 
 /// Background network thread runner

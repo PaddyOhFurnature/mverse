@@ -1498,9 +1498,16 @@ fn main() {
                             }
                         }
                         last_state_resync = Instant::now();
-                    }
 
-                    // Periodic resync: every 60s re-exchange ops with peers to recover any missed packets
+                        // Ensure AOI subscriptions are current when a peer arrives.
+                        // Without this, if we loaded chunks while alone (so update_subscribed_chunks
+                        // never ran) we'd miss per-chunk gossipsub messages from this new peer.
+                        if game_mode == GameMode::OpenWorld {
+                            let loaded_set: std::collections::HashSet<metaverse_core::chunk::ChunkId> =
+                                chunk_streamer.loaded_chunk_ids().iter().copied().collect();
+                            let _ = multiplayer.update_subscribed_chunks(&loaded_set);
+                        }
+                    }
                     if multiplayer.peer_count() > 0 && last_state_resync.elapsed().as_secs() >= 60 {
                         println!("🔁 Periodic state resync with peers...");
                         let loaded_chunk_ids = chunk_streamer.loaded_chunk_ids();
@@ -1774,18 +1781,23 @@ fn main() {
                     // Broadcast newly loaded chunk manifests to connected peers.
                     // This lets peers replace their independently-generated terrain with ours
                     // if they haven't loaded this chunk yet (or ours is newer due to user edits).
-                    if !chunk_streamer.newly_loaded_chunks.is_empty() && multiplayer.peer_count() > 0 {
-                        let new_entries: Vec<_> = chunk_streamer.newly_loaded_chunks.iter()
-                            .filter_map(|id| chunk_streamer.get_chunk(id).map(|c| (*id, c.last_modified)))
-                            .collect();
-                        if !new_entries.is_empty() {
-                            let _ = multiplayer.broadcast_chunk_manifest(new_entries);
-                        }
-
-                        // Sync per-chunk AOI topic subscriptions whenever loaded chunks change.
+                    if !chunk_streamer.newly_loaded_chunks.is_empty() {
+                        // Always update AOI subscriptions when loaded chunks change —
+                        // do NOT gate on peer_count because we need to be subscribed
+                        // before the first peer connects, not after.
                         let loaded_set: std::collections::HashSet<metaverse_core::chunk::ChunkId> =
                             chunk_streamer.loaded_chunk_ids().iter().copied().collect();
                         let _ = multiplayer.update_subscribed_chunks(&loaded_set);
+
+                        // Manifest broadcast only makes sense when peers are present
+                        if multiplayer.peer_count() > 0 {
+                            let new_entries: Vec<_> = chunk_streamer.newly_loaded_chunks.iter()
+                                .filter_map(|id| chunk_streamer.get_chunk(id).map(|c| (*id, c.last_modified)))
+                                .collect();
+                            if !new_entries.is_empty() {
+                                let _ = multiplayer.broadcast_chunk_manifest(new_entries);
+                            }
+                        }
                     }
                     
                     // Debug: Log streaming activity (not every frame, too spammy)
