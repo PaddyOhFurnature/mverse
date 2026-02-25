@@ -19,16 +19,18 @@ A voxel-based multiplayer world engine built on libp2p. No central servers — c
 | Binary | Description |
 |--------|-------------|
 | `metaworld_alpha` | Game client — renders the world, lets you move/edit blocks, connects to peers |
-| `metaverse-relay` | Relay server — routes P2P traffic, no world state, run headless |
+| `metaverse-relay` | Relay node — routes P2P traffic, lightweight, run headless |
+| `metaverse-server` | Full server — world data storage, DHT, content hosting |
 
 ---
 
 ## Quick start
 
-### Install (requires `gh` CLI)
+### Download (latest release)
 ```bash
-curl -sSf https://raw.githubusercontent.com/PaddyOhFurnature/mverse/main/scripts/install.sh | bash
+gh release download --repo PaddyOhFurnature/mverse --pattern '*' --dir ./mverse-bin
 ```
+Or grab from: https://github.com/PaddyOhFurnature/mverse/releases/latest
 
 ### Or build from source
 ```bash

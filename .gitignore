@@ -37,5 +37,8 @@ screenshot/*.png
 docs/
 tests/
 
-# Server log
+# Built binaries — distributed via GitHub Releases
+/bin/metaworld_alpha
+/bin/metaverse-relay
+/bin/metaverse-server
 /bin/server.log
