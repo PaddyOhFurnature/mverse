@@ -50,7 +50,7 @@ pub const INTERACT_RADIUS: f32 = 2.0;
 
 /// All static meshes that make up the construct scene.
 pub struct ConstructScene {
-    /// The ground floor and low walls — used for physics collision too.
+    /// The ground floor and low perimeter curb (with gaps for module rooms).
     pub floor: Mesh,
     /// Decorative pillars around the perimeter.
     pub pillars: Mesh,
@@ -58,7 +58,7 @@ pub struct ConstructScene {
     pub signup_terminal: Mesh,
     /// World portal arch.
     pub world_portal: Mesh,
-    /// Module doors (bank, marketplace, forums, post, etc.).
+    /// Module rooms — corridors + enclosed rooms with screen walls.
     pub module_doors: Mesh,
 }
 
@@ -70,7 +70,7 @@ impl ConstructScene {
             pillars:          build_pillars(),
             signup_terminal:  build_terminal(SIGNUP_TERMINAL_POS, TERMINAL_COLOUR),
             world_portal:     build_portal_arch(WORLD_PORTAL_POS),
-            module_doors:     build_module_doors(),
+            module_doors:     build_module_rooms(),
         }
     }
 }
@@ -109,18 +109,83 @@ fn build_floor() -> Mesh {
         }
     }
 
-    // Low perimeter wall — 0.5 m high, keeps players from walking off
+    // Low perimeter curb — 0.5 m high, with gaps where module rooms attach.
     let wall_h = 0.5_f32;
     let s = size;
-    add_wall_strip(&mut mesh, Vec3::new(-s, 0.0, -s), Vec3::new( s, 0.0, -s), wall_h, WALL_COLOUR);
-    add_wall_strip(&mut mesh, Vec3::new( s, 0.0, -s), Vec3::new( s, 0.0,  s), wall_h, WALL_COLOUR);
-    add_wall_strip(&mut mesh, Vec3::new( s, 0.0,  s), Vec3::new(-s, 0.0,  s), wall_h, WALL_COLOUR);
-    add_wall_strip(&mut mesh, Vec3::new(-s, 0.0,  s), Vec3::new(-s, 0.0, -s), wall_h, WALL_COLOUR);
+    let hw = DOOR_WIDTH * 0.5;
+
+    // North wall (z = -s): segments around each module offset on this side
+    add_wall_with_gaps(&mut mesh, 'x', -s, s, -s, wall_h, WALL_COLOUR,
+        &module_gaps_on_side(WallSideId::North), hw);
+    // South wall (z = +s)
+    add_wall_with_gaps(&mut mesh, 'x', -s, s, s, wall_h, WALL_COLOUR,
+        &module_gaps_on_side(WallSideId::South), hw);
+    // East wall (x = +s)
+    add_wall_with_gaps(&mut mesh, 'z', -s, s, s, wall_h, WALL_COLOUR,
+        &module_gaps_on_side(WallSideId::East), hw);
+    // West wall (x = -s)
+    add_wall_with_gaps(&mut mesh, 'z', -s, s, -s, wall_h, WALL_COLOUR,
+        &module_gaps_on_side(WallSideId::West), hw);
 
     mesh
 }
 
-/// Add a vertical wall quad between two floor-level points, extruded up by `height`.
+/// Identifies a wall side (used for gap calculations — avoids re-exporting WallSide).
+#[derive(PartialEq)]
+enum WallSideId { North, South, East, West }
+
+/// Returns the list of door-center offsets for all modules on the given side.
+fn module_gaps_on_side(side: WallSideId) -> Vec<f32> {
+    MODULES.iter()
+        .filter(|m| match (&m.side, &side) {
+            (WallSide::North, WallSideId::North) => true,
+            (WallSide::South, WallSideId::South) => true,
+            (WallSide::East,  WallSideId::East)  => true,
+            (WallSide::West,  WallSideId::West)  => true,
+            _ => false,
+        })
+        .map(|m| m.offset)
+        .collect()
+}
+
+/// Build a wall along one axis, leaving gaps at each `gap_center` ± `half_gap`.
+///
+/// `axis` = 'x' → wall runs along X (constant Z = `fixed`).
+/// `axis` = 'z' → wall runs along Z (constant X = `fixed`).
+fn add_wall_with_gaps(
+    mesh: &mut Mesh, axis: char, from: f32, to: f32, fixed: f32,
+    height: f32, colour: Vec3, gap_centers: &[f32], half_gap: f32,
+) {
+    // Collect sorted gap intervals [center - half_gap, center + half_gap]
+    let mut gaps: Vec<(f32, f32)> = gap_centers.iter()
+        .map(|&c| (c - half_gap, c + half_gap))
+        .collect();
+    gaps.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    let mut cursor = from;
+    for (g0, g1) in &gaps {
+        if *g0 > cursor {
+            // Solid segment before the gap
+            let (a, b) = wall_pts(axis, cursor, *g0, fixed);
+            add_wall_strip(mesh, a, b, height, colour);
+        }
+        cursor = g1.max(cursor);
+    }
+    if cursor < to {
+        let (a, b) = wall_pts(axis, cursor, to, fixed);
+        add_wall_strip(mesh, a, b, height, colour);
+    }
+}
+
+fn wall_pts(axis: char, t0: f32, t1: f32, fixed: f32) -> (Vec3, Vec3) {
+    if axis == 'x' {
+        (Vec3::new(t0, 0.0, fixed), Vec3::new(t1, 0.0, fixed))
+    } else {
+        (Vec3::new(fixed, 0.0, t0), Vec3::new(fixed, 0.0, t1))
+    }
+}
+
+
 /// Emits both front and back faces so the wall is visible from either side.
 fn add_wall_strip(mesh: &mut Mesh, a: Vec3, b: Vec3, height: f32, colour: Vec3) {
     let a_top = Vec3::new(a.x, height, a.z);
@@ -249,37 +314,174 @@ fn build_portal_arch(pos: Vec3) -> Mesh {
     mesh
 }
 
-// ── Module doors ──────────────────────────────────────────────────────────────
+// ── Meshsite module rooms ─────────────────────────────────────────────────────
 
-/// Small door frames around the perimeter leading to construct modules.
-fn build_module_doors() -> Mesh {
+/// A single section of the Meshsite that exists as both a virtual page and a
+/// physical room in the Construct.  Adding an entry here auto-generates:
+///   • a gap in the plaza perimeter wall
+///   • a 3 m corridor leading outward
+///   • an enclosed room with a glowing "screen" wall (content rendered later)
+pub struct MeshsiteModule {
+    /// Human-readable label (used for door markings later)
+    pub name:         &'static str,
+    /// Unique slug — becomes the in-game URL path (/forums, /wiki, etc.)
+    pub slug:         &'static str,
+    /// Structural / door colour
+    pub colour:       Vec3,
+    /// Screen wall accent colour
+    pub screen_colour: Vec3,
+    /// Which perimeter wall this room attaches to
+    pub side:         WallSide,
+    /// Position along the wall (the axis perpendicular to the normal).
+    /// E.g. on North/South walls this is the X offset; on East/West it's Z.
+    pub offset:       f32,
+}
+
+/// Which face of the plaza perimeter a module room extends from.
+pub enum WallSide {
+    /// Attaches to the -Z wall (front, toward signup terminal)
+    North,
+    /// Attaches to the +Z wall (back, toward world portal)
+    South,
+    /// Attaches to the +X wall (right)
+    East,
+    /// Attaches to the -X wall (left)
+    West,
+}
+
+/// The built-in Meshsite modules.  Adding an entry here is all that is needed
+/// to make a new room appear in the Construct.
+pub const MODULES: &[MeshsiteModule] = &[
+    MeshsiteModule {
+        name: "Login", slug: "login",
+        colour:       Vec3::new(0.20, 0.70, 0.40),
+        screen_colour: Vec3::new(0.30, 1.00, 0.60),
+        side: WallSide::North, offset: -10.0,
+    },
+    MeshsiteModule {
+        name: "Signup", slug: "signup",
+        colour:       Vec3::new(0.20, 0.50, 0.90),
+        screen_colour: Vec3::new(0.40, 0.70, 1.00),
+        side: WallSide::North, offset:  10.0,
+    },
+    MeshsiteModule {
+        name: "Forums", slug: "forums",
+        colour:       Vec3::new(0.80, 0.55, 0.10),
+        screen_colour: Vec3::new(1.00, 0.80, 0.20),
+        side: WallSide::East,  offset: -8.0,
+    },
+    MeshsiteModule {
+        name: "Wiki", slug: "wiki",
+        colour:       Vec3::new(0.70, 0.20, 0.70),
+        screen_colour: Vec3::new(1.00, 0.40, 1.00),
+        side: WallSide::East,  offset:  8.0,
+    },
+    MeshsiteModule {
+        name: "Marketplace", slug: "market",
+        colour:       Vec3::new(0.80, 0.20, 0.20),
+        screen_colour: Vec3::new(1.00, 0.40, 0.40),
+        side: WallSide::West,  offset: -8.0,
+    },
+    MeshsiteModule {
+        name: "Post Office", slug: "post",
+        colour:       Vec3::new(0.60, 0.30, 0.10),
+        screen_colour: Vec3::new(0.90, 0.55, 0.20),
+        side: WallSide::West,  offset:  8.0,
+    },
+];
+
+/// Width of the doorway cut into the perimeter wall for each module (metres).
+const DOOR_WIDTH: f32 = 3.2;
+/// How far the corridor extends beyond the perimeter before widening to the room.
+const CORRIDOR_DEPTH: f32 = 3.0;
+/// Full width of the enclosed module room.
+const ROOM_WIDTH: f32 = 8.0;
+/// Depth of the enclosed module room (not counting corridor).
+const ROOM_DEPTH: f32 = 6.0;
+/// Height of corridors and rooms.
+const ROOM_HEIGHT: f32 = 3.0;
+
+/// Build all module rooms as a single merged mesh.
+fn build_module_rooms() -> Mesh {
     let mut mesh = Mesh::new();
-    // Each entry: (position, label_colour) — one door per module for now
-    let doors = [
-        (Vec3::new(-14.0, 0.0, -19.0), Vec3::new(0.9, 0.7, 0.1)),  // bank
-        (Vec3::new( -7.0, 0.0, -19.0), Vec3::new(0.5, 0.9, 0.3)),  // marketplace
-        (Vec3::new(  7.0, 0.0, -19.0), Vec3::new(0.3, 0.6, 0.9)),  // forums
-        (Vec3::new( 14.0, 0.0, -19.0), Vec3::new(0.9, 0.4, 0.2)),  // post
-        (Vec3::new(-19.0, 0.0,   0.0), Vec3::new(0.8, 0.2, 0.2)),  // emergency
-        (Vec3::new( 19.0, 0.0,   0.0), Vec3::new(0.6, 0.3, 0.8)),  // government
-    ];
-    for (pos, colour) in &doors {
-        add_door_frame(&mut mesh, *pos, *colour);
+    for m in MODULES {
+        add_module_room(&mut mesh, m);
     }
     mesh
 }
 
-fn add_door_frame(mesh: &mut Mesh, pos: Vec3, colour: Vec3) {
-    let w = 0.8_f32; let h = 2.2_f32; let t = 0.2_f32;
-    // Left post
-    add_pillar(mesh, Vec3::new(pos.x - w, pos.y, pos.z), t, h, colour);
-    // Right post
-    add_pillar(mesh, Vec3::new(pos.x + w, pos.y, pos.z), t, h, colour);
-    // Top bar
-    add_wall_strip(mesh,
-        Vec3::new(pos.x - w - t, h, pos.z - t),
-        Vec3::new(pos.x + w + t, h, pos.z - t),
-        t, colour);
+/// Append one module's corridor + room geometry to `mesh`.
+fn add_module_room(mesh: &mut Mesh, m: &MeshsiteModule) {
+    let plaza = 20.0_f32; // half-size of plaza floor
+    let hw = DOOR_WIDTH * 0.5;
+    let rh = ROOM_HEIGHT;
+
+    // For each side, define:
+    //   - perimeter point on the wall (where the door is cut)
+    //   - normal direction (outward from plaza)
+    //   - tangent direction (along the wall face, for room width)
+    let (door_center, normal, tangent) = match m.side {
+        WallSide::North => (Vec3::new(m.offset,  0.0, -plaza), Vec3::new(0.0,0.0,-1.0), Vec3::new(1.0,0.0,0.0)),
+        WallSide::South => (Vec3::new(m.offset,  0.0,  plaza), Vec3::new(0.0,0.0, 1.0), Vec3::new(1.0,0.0,0.0)),
+        WallSide::East  => (Vec3::new( plaza, 0.0, m.offset),  Vec3::new( 1.0,0.0,0.0), Vec3::new(0.0,0.0,1.0)),
+        WallSide::West  => (Vec3::new(-plaza, 0.0, m.offset),  Vec3::new(-1.0,0.0,0.0), Vec3::new(0.0,0.0,1.0)),
+    };
+
+    let c = m.colour;
+    let sc = m.screen_colour;
+
+    // ── Corridor (from perimeter to room entrance) ────────────────────────────
+    let corr_end = door_center + normal * CORRIDOR_DEPTH;
+    // Floor
+    add_horiz_quad(mesh, door_center - tangent*hw, corr_end - tangent*hw,
+                         corr_end + tangent*hw, door_center + tangent*hw, c);
+    // Ceiling
+    let ceil_off = Vec3::new(0.0, rh, 0.0);
+    add_horiz_quad(mesh,
+        door_center + tangent*hw + ceil_off, corr_end + tangent*hw + ceil_off,
+        corr_end - tangent*hw + ceil_off, door_center - tangent*hw + ceil_off, c);
+    // Left wall
+    add_wall_strip(mesh, door_center - tangent*hw, corr_end - tangent*hw, rh, c);
+    // Right wall
+    add_wall_strip(mesh, corr_end + tangent*hw, door_center + tangent*hw, rh, c);
+
+    // ── Enclosed room ─────────────────────────────────────────────────────────
+    let room_hw = ROOM_WIDTH * 0.5;
+    let room_start = corr_end;
+    let room_end   = corr_end + normal * ROOM_DEPTH;
+    // Floor
+    add_horiz_quad(mesh,
+        room_start - tangent*room_hw, room_end - tangent*room_hw,
+        room_end   + tangent*room_hw, room_start + tangent*room_hw, c);
+    // Ceiling
+    add_horiz_quad(mesh,
+        room_start + tangent*room_hw + ceil_off, room_end + tangent*room_hw + ceil_off,
+        room_end   - tangent*room_hw + ceil_off, room_start - tangent*room_hw + ceil_off, c);
+    // Left wall
+    add_wall_strip(mesh, room_start - tangent*room_hw, room_end - tangent*room_hw, rh, c);
+    // Right wall
+    add_wall_strip(mesh, room_end + tangent*room_hw, room_start + tangent*room_hw, rh, c);
+    // Screen wall (far face — the "browser" surface, glowing accent colour)
+    add_wall_strip(mesh, room_end + tangent*room_hw, room_end - tangent*room_hw, rh, sc);
+    // Entry wall segments beside the corridor opening (back of the plaza wall thickness)
+    // Left jamb
+    add_wall_strip(mesh, room_start - tangent*room_hw, room_start - tangent*hw, rh, c);
+    // Right jamb
+    add_wall_strip(mesh, room_start + tangent*hw, room_start + tangent*room_hw, rh, c);
+}
+
+/// Add a horizontal (XZ-plane) quad from four corner points (CCW from above).
+fn add_horiz_quad(mesh: &mut Mesh, a: Vec3, b: Vec3, c_pt: Vec3, d: Vec3, colour: Vec3) {
+    let v0 = mesh.add_vertex(Vertex::new(a,    colour));
+    let v1 = mesh.add_vertex(Vertex::new(b,    colour));
+    let v2 = mesh.add_vertex(Vertex::new(c_pt, colour));
+    let v3 = mesh.add_vertex(Vertex::new(d,    colour));
+    // Top face (CCW from above)
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    // Bottom face (for ceilings — CCW from below)
+    mesh.add_triangle(Triangle::new(v0, v2, v3));
+    mesh.add_triangle(Triangle::new(v0, v1, v2));
 }
 
 // ── Physics collision data ────────────────────────────────────────────────────
