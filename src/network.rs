@@ -67,9 +67,15 @@ pub enum NetworkCommand {
         multiaddr: String,
     },
     
-    /// Dial a peer
+    /// Dial a peer by address
     Dial {
         address: String,
+    },
+
+    /// Dial a peer directly by PeerId (uses Kademlia routing table for address resolution).
+    /// Works when the peer's address is already known from DHT routing or mDNS.
+    DialPeer {
+        peer_id: PeerId,
     },
     
     /// Subscribe to a topic
@@ -577,6 +583,19 @@ impl NetworkNode {
             .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
         
         Ok(())
+    }
+
+    /// Dial a peer by PeerId, using addresses from the Kademlia routing table.
+    /// Silently fails if the peer's address is not yet known — will connect automatically
+    /// if the peer shows up via DHT routing updates or mDNS later.
+    pub fn dial_peer_id(&mut self, peer_id: PeerId) {
+        if self.connected_peers.contains(&peer_id) {
+            return; // already connected
+        }
+        if let Err(e) = self.swarm.dial(peer_id) {
+            // Not in routing table yet — not an error, log at trace level only
+            let _ = e; // suppress unused warning
+        }
     }
 
     /// Fetch bootstrap nodes from the remote URL (or cache/fallback) and dial them all.

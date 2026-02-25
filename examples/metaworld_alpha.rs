@@ -946,6 +946,10 @@ fn main() {
     let mut last_stats_print = Instant::now();
     let mut last_state_resync = Instant::now();
     let mut last_periodic_save = Instant::now();
+    // DHT fallback: query providers for loaded chunks if gossipsub sync hasn't
+    // delivered ops after 10s in OpenWorld mode with no peers.
+    let mut dht_fallback_at: Option<Instant> = None;
+    let mut dht_fallback_done = false;
 
     // HUD data — updated every physics frame, read by render
     let mut hud_pos: (f32, f32, f32) = (0.0, 0.0, 0.0);
@@ -1215,6 +1219,10 @@ fn main() {
                             if multiplayer.peer_count() > 0 {
                                 let ids = chunk_streamer.loaded_chunk_ids();
                                 let _ = multiplayer.request_chunk_state(ids);
+                            } else {
+                                // No peers connected — schedule DHT fallback in 10s
+                                dht_fallback_at = Some(Instant::now());
+                                dht_fallback_done = false;
                             }
                             println!("🎮 Game started!");
                             game_loading = false;
@@ -1226,6 +1234,9 @@ fn main() {
                             if multiplayer.peer_count() > 0 {
                                 let ids = chunk_streamer.loaded_chunk_ids();
                                 let _ = multiplayer.request_chunk_state(ids);
+                            } else {
+                                dht_fallback_at = Some(Instant::now());
+                                dht_fallback_done = false;
                             }
                             println!("🎮 Game started (timeout)!");
                             game_loading = false;
@@ -1509,6 +1520,44 @@ fn main() {
                         last_periodic_save = Instant::now();
                     }
 
+                    // DHT fallback: if no peers connected after 10s, query DHT providers
+                    // for all loaded chunks. When providers respond, dial them — once
+                    // connected the regular gossipsub sync delivers their ops.
+                    if !dht_fallback_done && game_mode == GameMode::OpenWorld {
+                        if multiplayer.peer_count() == 0 {
+                            if let Some(fallback_start) = dht_fallback_at {
+                                if fallback_start.elapsed().as_secs() >= 10 {
+                                    let ids = chunk_streamer.loaded_chunk_ids();
+                                    multiplayer.query_missing_chunks(&ids);
+                                    dht_fallback_done = true;
+                                }
+                            }
+                        } else {
+                            // Peers connected — gossipsub sync is handling it
+                            dht_fallback_done = true;
+                        }
+                    }
+
+                    // Process provider results from DHT — dial any unknown providers
+                    let provider_results = multiplayer.take_pending_chunk_providers();
+                    for (key, providers) in provider_results {
+                        // Convert DHT key back to chunk ID for logging
+                        let key_str = String::from_utf8_lossy(&key);
+                        println!("🗄️  [DHT] Got {} provider(s) for {}", providers.len(), key_str);
+                        for provider in providers {
+                            if multiplayer.is_connected_peer(&provider) {
+                                // Already connected — request their ops directly
+                                let ids = chunk_streamer.loaded_chunk_ids();
+                                let _ = multiplayer.request_chunk_state(ids);
+                            } else {
+                                // Not connected — try dialing; once connected the
+                                // peer-connect sync path will request their ops
+                                println!("   → Dialing provider {}", provider);
+                                multiplayer.connect_to_provider(provider);
+                            }
+                        }
+                    }
+
                     // Handle state requests from peers
                     let state_requests = multiplayer.take_pending_state_requests();
                     for (peer_id, request) in state_requests {
@@ -1698,6 +1747,9 @@ fn main() {
                         // 4. Re-enter loading phase so terrain streams in before gameplay.
                         game_loading = true;
                         loading_frames = 0;
+                        // Reset DHT fallback so it re-evaluates after terrain loads
+                        dht_fallback_at = None;
+                        dht_fallback_done = false;
 
                         // 5. Kick off surrounding chunk streaming.
                         chunk_streamer.update(player.position);

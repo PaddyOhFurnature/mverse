@@ -1567,6 +1567,31 @@ impl MultiplayerSystem {
         });
     }
 
+    /// Query DHT providers for all the given chunks.
+    ///
+    /// Call this as a fallback after gossipsub sync hasn't delivered ops for
+    /// some chunks (e.g. 10s after entering OpenWorld with no connected peers).
+    /// Results arrive via `take_pending_chunk_providers()`.
+    pub fn query_missing_chunks(&self, chunk_ids: &[ChunkId]) {
+        for chunk_id in chunk_ids {
+            let _ = self.cmd_tx.send(NetworkCommand::GetProviders {
+                key: chunk_id.dht_key(),
+            });
+        }
+        if !chunk_ids.is_empty() {
+            println!("🔍 [DHT] Querying providers for {} missing chunk(s)", chunk_ids.len());
+        }
+    }
+
+    /// Attempt to connect to a provider peer discovered via DHT.
+    ///
+    /// Uses the Kademlia routing table to resolve their address. If the peer
+    /// is not yet in the routing table this is a no-op — they will be connected
+    /// automatically if they appear via DHT routing updates later.
+    pub fn connect_to_provider(&self, peer_id: PeerId) {
+        let _ = self.cmd_tx.send(NetworkCommand::DialPeer { peer_id });
+    }
+
     /// Take any pending provider results from DHT queries.
     /// Returns `(dht_key, providers)` pairs.
     pub fn take_pending_chunk_providers(&mut self) -> Vec<(Vec<u8>, Vec<PeerId>)> {
@@ -1650,6 +1675,11 @@ impl MultiplayerSystem {
     /// Get number of connected peers
     pub fn peer_count(&self) -> usize {
         self.remote_players.player_count()
+    }
+
+    /// Check if a peer is currently connected
+    pub fn is_connected_peer(&self, peer_id: &PeerId) -> bool {
+        self.connected_peers.contains(peer_id)
     }
     
     /// Check if a peer is blocked
@@ -1844,6 +1874,9 @@ fn run_network_thread(
                     }
                     NetworkCommand::GetProviders { key } => {
                         network.get_providers(key);
+                    }
+                    NetworkCommand::DialPeer { peer_id } => {
+                        network.dial_peer_id(peer_id);
                     }
                 }
             }
