@@ -844,16 +844,16 @@ fn main() {
 
     // Determine which chunk the player is actually standing in and prioritise it
     // so it is dispatched to a worker thread before any surrounding chunks.
+    // Only relevant in OpenWorld mode — in Construct we don't need terrain chunks.
     let player_chunk = ChunkId::from_ecef(&player.position);
-    chunk_streamer.queue_priority(player_chunk);
-    println!("   Player chunk: {} — queued with priority", player_chunk);
 
-    // ── Synchronously generate and collide the spawn chunk ────────────────────
-    // The lobby (and any spawn point) must have a floor before physics starts.
-    // We generate the player's chunk right now, on the main thread, so the
-    // character is standing on solid ground from frame 1 — no falling.
-    // The surrounding chunks continue loading in the background as normal.
-    {
+    // ── Synchronously generate spawn chunk (OpenWorld only) ───────────────────
+    // In Construct mode the flat collision plane is sufficient — no terrain needed.
+    // On portal transition this same pattern runs inside the event loop instead.
+    if game_mode == GameMode::OpenWorld {
+        chunk_streamer.queue_priority(player_chunk);
+        println!("   Player chunk: {} — queued with priority", player_chunk);
+
         let generator = generator_arc.lock().unwrap();
         match generator.generate_chunk(&player_chunk) {
             Ok(octree) => {
@@ -869,10 +869,8 @@ fn main() {
                     for v in &mut mesh.vertices { v.position += offset; }
                     let collider = metaverse_core::physics::create_collision_from_mesh(
                         &mut physics, &mesh, &origin_voxel, None);
-                    // Store in the streamer so it won't be regenerated redundantly.
-                    // Mark as having a collider so the loading check passes immediately.
                     chunk_streamer.preload_chunk(player_chunk, octree, Some(collider));
-                    println!("✅ Spawn floor ready — lobby is live");
+                    println!("✅ Spawn floor ready — terrain is live");
                 } else {
                     println!("⚠️  Spawn chunk generated but has no mesh (ocean/void?)");
                 }
