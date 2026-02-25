@@ -948,8 +948,10 @@ fn main() {
                                         input_up = -1.0;
                                     }
                                 }
-                                KeyCode::KeyE => dig_pressed = true,
-                                KeyCode::KeyQ => place_pressed = true,
+                                KeyCode::KeyE => {
+                                    // Reserved for interact (terminals, portals)
+                                }
+                                // Q/E no longer dig/place — use mouse buttons
                                 _ => {}
                             }
                         }
@@ -965,13 +967,26 @@ fn main() {
                     }
                 }
                 
-                WindowEvent::MouseInput { button: MouseButton::Left, state: ElementState::Pressed, .. } => {
-                    // Don't grab cursor while signup screen is visible
+                WindowEvent::MouseInput { button, state: ElementState::Pressed, .. } => {
+                    // Don't act while signup screen is visible
                     if signup.is_some() { return; }
-                    if !cursor_grabbed {
-                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
-                        window.set_cursor_visible(false);
-                        cursor_grabbed = true;
+                    match button {
+                        MouseButton::Left => {
+                            // Grab cursor on first left-click (enter FPS mode), then dig
+                            if !cursor_grabbed {
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Confined);
+                                window.set_cursor_visible(false);
+                                cursor_grabbed = true;
+                            } else {
+                                dig_pressed = true;
+                            }
+                        }
+                        MouseButton::Right => {
+                            if cursor_grabbed {
+                                place_pressed = true;
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 
