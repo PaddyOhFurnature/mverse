@@ -448,6 +448,12 @@ struct AppState {
     config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>,
     /// Peers to disconnect on next world_tick (populated by load-shedding logic).
     pending_shed: Vec<PeerId>,
+    /// Incoming chunk state requests queued for processing in world_tick.
+    pending_chunk_requests: Vec<metaverse_core::messages::ChunkStateRequest>,
+    /// Incoming voxel ops from peers queued for persistence in world_tick.
+    pending_voxel_ops: Vec<metaverse_core::messages::SignedOperation>,
+    /// DHT provider keys to announce on next tick (populated at startup).
+    pending_dht_provide: Vec<Vec<u8>>,
 }
 
 impl AppState {
@@ -475,6 +481,9 @@ impl AppState {
             gossip_rx,
             config_reload_rx,
             pending_shed: Vec::new(),
+            pending_chunk_requests: Vec::new(),
+            pending_voxel_ops: Vec::new(),
+            pending_dht_provide: Vec::new(),
         }
     }
 
@@ -942,6 +951,7 @@ enum SwarmAction {
     DialPeer(PeerId, Multiaddr),
     SubscribeTopic(String),
     PublishGossip { topic: String, data: Vec<u8> },
+    StartProviding(Vec<u8>),
     /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
     DisconnectPeer(PeerId),
 }
@@ -1051,7 +1061,13 @@ fn handle_swarm_event(
             let topic = message.topic.as_str();
             if topic.contains("state-request") {
                 state.net.state_requests_in += 1;
-                state.log(format!("📩 State request ({} bytes)", message.data.len()));
+                if let Ok(req) = metaverse_core::messages::ChunkStateRequest::from_bytes(&message.data) {
+                    state.pending_chunk_requests.push(req);
+                }
+            } else if topic == "voxel-ops" || topic.starts_with("voxel-ops-") {
+                if let Ok(op) = bincode::deserialize::<metaverse_core::messages::SignedOperation>(&message.data) {
+                    state.pending_voxel_ops.push(op);
+                }
             } else if topic == "key-registry" {
                 // Deserialise and store incoming key records into SQLite.
                 // We check self_sig on every record before persisting.
@@ -1173,6 +1189,12 @@ fn apply_swarm_actions(
                 let t = gossipsub::IdentTopic::new(&topic);
                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(t, data) {
                     eprintln!("⚠️  [gossip] Failed to publish on '{}': {:?}", topic, e);
+                }
+            }
+            SwarmAction::StartProviding(key) => {
+                use libp2p::kad::RecordKey;
+                if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
+                    eprintln!("⚠️  [DHT] start_providing failed: {:?}", e);
                 }
             }
             SwarmAction::DisconnectPeer(peer_id) => {
@@ -2986,6 +3008,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if world_enabled && world.is_some() {
         app_state.log(format!("🌍 World state: {}", app_state.config.world_dir.as_deref().unwrap_or("~/.metaverse/world_data")));
     }
+    // Queue DHT provider announcements for all pre-loaded chunks
+    if let Some(ref w) = world {
+        let uc = w.user_content.lock().unwrap();
+        let chunk_ids: Vec<_> = uc.get_chunks_with_ops().into_keys().collect();
+        let count = chunk_ids.len();
+        for cid in chunk_ids {
+            app_state.pending_dht_provide.push(cid.dht_key());
+        }
+        if count > 0 {
+            app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
+        }
+    }
 
     if headless {
         run_headless(swarm, app_state, world).await
@@ -3024,6 +3058,59 @@ async fn run_headless(
                 // Drain load-shedding disconnects
                 for peer in state.drain_pending_shed() {
                     apply_swarm_actions(vec![SwarmAction::DisconnectPeer(peer)], &mut state, &mut swarm);
+                }
+                // Persist incoming voxel ops from peers
+                {
+                    let ops: Vec<_> = std::mem::take(&mut state.pending_voxel_ops);
+                    if !ops.is_empty() {
+                        if let Some(ref w) = world {
+                            let mut uc = w.user_content.lock().unwrap();
+                            let empty_local = std::collections::HashMap::new();
+                            let mut stored = 0usize;
+                            for op in ops {
+                                if uc.apply_operation(op, &empty_local).unwrap_or(false) {
+                                    stored += 1;
+                                }
+                            }
+                            if stored > 0 {
+                                state.log(format!("💾 Stored {} voxel op(s) from peers", stored));
+                            }
+                        }
+                    }
+                }
+                // Respond to chunk state requests from clients
+                {
+                    let reqs: Vec<_> = std::mem::take(&mut state.pending_chunk_requests);
+                    for req in reqs {
+                        if let Some(ref w) = world {
+                            let ops_map: std::collections::HashMap<_, Vec<_>> = {
+                                let uc = w.user_content.lock().unwrap();
+                                req.chunk_ids.iter().filter_map(|cid| {
+                                    let ops: Vec<_> = uc.operations_for_chunk(cid).into_iter().cloned().collect();
+                                    if ops.is_empty() { None } else { Some((*cid, ops)) }
+                                }).collect()
+                            };
+                            if !ops_map.is_empty() {
+                                let response = metaverse_core::messages::ChunkStateResponse::new(
+                                    ops_map, metaverse_core::vector_clock::VectorClock::new(),
+                                );
+                                if let Ok(bytes) = response.to_bytes() {
+                                    state.net.state_responses_out += 1;
+                                    apply_swarm_actions(
+                                        vec![SwarmAction::PublishGossip { topic: "state-response".to_string(), data: bytes }],
+                                        &mut state, &mut swarm,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // DHT provider announcements (startup + newly written chunks)
+                {
+                    let keys: Vec<_> = std::mem::take(&mut state.pending_dht_provide);
+                    for key in keys {
+                        apply_swarm_actions(vec![SwarmAction::StartProviding(key)], &mut state, &mut swarm);
+                    }
                 }
             }
             _ = stats_tick.tick() => {
@@ -3117,6 +3204,53 @@ async fn run_tui(
                 _ = world_tick.tick() => {
                     if let Some(ref mut w) = world {
                         w.tick(&world_config);
+                    }
+                    // Persist incoming voxel ops from peers
+                    {
+                        let ops: Vec<_> = std::mem::take(&mut state.pending_voxel_ops);
+                        if !ops.is_empty() {
+                            if let Some(ref w) = world {
+                                let mut uc = w.user_content.lock().unwrap();
+                                let empty_local = std::collections::HashMap::new();
+                                for op in ops {
+                                    let _ = uc.apply_operation(op, &empty_local);
+                                }
+                            }
+                        }
+                    }
+                    // Respond to chunk state requests from clients
+                    {
+                        let reqs: Vec<_> = std::mem::take(&mut state.pending_chunk_requests);
+                        for req in reqs {
+                            if let Some(ref w) = world {
+                                let ops_map: std::collections::HashMap<_, Vec<_>> = {
+                                    let uc = w.user_content.lock().unwrap();
+                                    req.chunk_ids.iter().filter_map(|cid| {
+                                        let ops: Vec<_> = uc.operations_for_chunk(cid).into_iter().cloned().collect();
+                                        if ops.is_empty() { None } else { Some((*cid, ops)) }
+                                    }).collect()
+                                };
+                                if !ops_map.is_empty() {
+                                    let response = metaverse_core::messages::ChunkStateResponse::new(
+                                        ops_map, metaverse_core::vector_clock::VectorClock::new(),
+                                    );
+                                    if let Ok(bytes) = response.to_bytes() {
+                                        state.net.state_responses_out += 1;
+                                        apply_swarm_actions(
+                                            vec![SwarmAction::PublishGossip { topic: "state-response".to_string(), data: bytes }],
+                                            &mut state, &mut swarm,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // DHT provider announcements
+                    {
+                        let keys: Vec<_> = std::mem::take(&mut state.pending_dht_provide);
+                        for key in keys {
+                            apply_swarm_actions(vec![SwarmAction::StartProviding(key)], &mut state, &mut swarm);
+                        }
                     }
                 }
                 _ = sync_tick.tick() => {
