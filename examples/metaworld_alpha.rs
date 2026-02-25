@@ -723,10 +723,9 @@ fn main() {
     player.camera_yaw = player_state.yaw;
     player.camera_pitch = player_state.pitch;
     
-    // Offset player slightly above their saved Y so they land on terrain
-    // (avoids spawning inside a voxel if save was taken at ground level)
-    let origin_local = physics.ecef_to_local(&player.position);
-    let spawn_local = Vec3::new(origin_local.x, origin_local.y + 2.0, origin_local.z);
+    // In Construct mode (always on startup), override position to Construct spawn.
+    // Ignore any saved open-world position — Construct has its own floor at local Y=0.
+    let spawn_local = metaverse_core::construct::SPAWN_POINT + glam::Vec3::new(0.0, 1.0, 0.0);
     let spawn_ecef = physics.local_to_ecef(spawn_local);
     player.position = spawn_ecef;
     if let Some(body) = physics.bodies.get_mut(player.body_handle) {

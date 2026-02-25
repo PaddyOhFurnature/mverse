@@ -102,9 +102,9 @@ fn build_floor() -> Mesh {
             let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y, z0), shade));
             let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1, y, z1), shade));
             let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0, y, z1), shade));
-            // Two triangles per tile
-            mesh.add_triangle(Triangle::new(v0, v1, v2));
-            mesh.add_triangle(Triangle::new(v0, v2, v3));
+            // CCW from above → normal faces +Y (upward, toward player)
+            mesh.add_triangle(Triangle::new(v0, v2, v1));
+            mesh.add_triangle(Triangle::new(v0, v3, v2));
             let _ = up; // normal used by renderer implicitly from vertex colour
         }
     }
@@ -121,6 +121,7 @@ fn build_floor() -> Mesh {
 }
 
 /// Add a vertical wall quad between two floor-level points, extruded up by `height`.
+/// Emits both front and back faces so the wall is visible from either side.
 fn add_wall_strip(mesh: &mut Mesh, a: Vec3, b: Vec3, height: f32, colour: Vec3) {
     let a_top = Vec3::new(a.x, height, a.z);
     let b_top = Vec3::new(b.x, height, b.z);
@@ -128,8 +129,12 @@ fn add_wall_strip(mesh: &mut Mesh, a: Vec3, b: Vec3, height: f32, colour: Vec3) 
     let v1 = mesh.add_vertex(Vertex::new(b,     colour));
     let v2 = mesh.add_vertex(Vertex::new(b_top, colour));
     let v3 = mesh.add_vertex(Vertex::new(a_top, colour));
+    // Front face
     mesh.add_triangle(Triangle::new(v0, v1, v2));
     mesh.add_triangle(Triangle::new(v0, v2, v3));
+    // Back face (reverse winding)
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
 }
 
 // ── Pillars ───────────────────────────────────────────────────────────────────
@@ -163,13 +168,13 @@ fn add_pillar(mesh: &mut Mesh, base: Vec3, hw: f32, height: f32, colour: Vec3) {
     add_wall_strip(mesh, Vec3::new(x1,y0,z0), Vec3::new(x1,y0,z1), y1-y0, colour);
     add_wall_strip(mesh, Vec3::new(x1,y0,z1), Vec3::new(x0,y0,z1), y1-y0, colour);
     add_wall_strip(mesh, Vec3::new(x0,y0,z1), Vec3::new(x0,y0,z0), y1-y0, colour);
-    // Top cap
+    // Top cap (CCW from above → faces +Y)
     let v0 = mesh.add_vertex(Vertex::new(Vec3::new(x0,y1,z0), colour));
     let v1 = mesh.add_vertex(Vertex::new(Vec3::new(x1,y1,z0), colour));
     let v2 = mesh.add_vertex(Vertex::new(Vec3::new(x1,y1,z1), colour));
     let v3 = mesh.add_vertex(Vertex::new(Vec3::new(x0,y1,z1), colour));
-    mesh.add_triangle(Triangle::new(v0, v1, v2));
-    mesh.add_triangle(Triangle::new(v0, v2, v3));
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
 }
 
 // ── Terminal kiosk ────────────────────────────────────────────────────────────
@@ -191,12 +196,16 @@ fn build_terminal(pos: Vec3, colour: Vec3) -> Mesh {
     let v5 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy+sh, sz-sd), screen_colour));
     let v6 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy+sh, sz+sd), screen_colour));
     let v7 = mesh.add_vertex(Vertex::new(Vec3::new(sx-sw, sy+sh, sz+sd), screen_colour));
-    // Top face
+    // Top face (both sides)
     mesh.add_triangle(Triangle::new(v4, v5, v6));
     mesh.add_triangle(Triangle::new(v4, v6, v7));
-    // Front face (facing -Z, toward player spawn)
+    mesh.add_triangle(Triangle::new(v4, v6, v5));
+    mesh.add_triangle(Triangle::new(v4, v7, v6));
+    // Front face (facing -Z, toward player spawn) — both sides
     mesh.add_triangle(Triangle::new(v0, v1, v5));
     mesh.add_triangle(Triangle::new(v0, v5, v4));
+    mesh.add_triangle(Triangle::new(v0, v5, v1));
+    mesh.add_triangle(Triangle::new(v0, v4, v5));
     mesh
 }
 
@@ -233,6 +242,9 @@ fn build_portal_arch(pos: Vec3) -> Mesh {
     let v3 = mesh.add_vertex(Vertex::new(Vec3::new(gx0, gy1, gz), GLOW_COLOUR));
     mesh.add_triangle(Triangle::new(v0, v1, v2));
     mesh.add_triangle(Triangle::new(v0, v2, v3));
+    // Back face (visible when entering from the world side)
+    mesh.add_triangle(Triangle::new(v0, v2, v1));
+    mesh.add_triangle(Triangle::new(v0, v3, v2));
 
     mesh
 }
