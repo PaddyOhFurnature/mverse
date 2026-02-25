@@ -2615,6 +2615,69 @@ async fn web_api_key_by_id(
 
 // ─── Meshsite API handlers ─────────────────────────────────────────────────────
 
+/// POST /api/v1/content/post  — quick post without pre-computing a signature.
+///
+/// Takes `{"section":"forums","title":"...","body":"..."}`.
+/// The server computes the id and injects into gossipsub.
+/// Use this for testing content distribution — see results at /meshsite/{section}.
+#[derive(serde::Deserialize)]
+struct QuickPost {
+    section: String,
+    title:   String,
+    body:    String,
+    #[serde(default)]
+    author:  String,
+}
+async fn api_v1_quick_post(
+    State(s): State<WebState>,
+    Json(payload): Json<QuickPost>,
+) -> impl IntoResponse {
+    use metaverse_core::meshsite::{ContentItem, Section, topic_for_section};
+
+    let section = match Section::from_str(&payload.section) {
+        Some(s) => s,
+        None => return (StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error":"unknown section (forums|wiki|marketplace|post)"}))).into_response(),
+    };
+    if payload.title.is_empty() || payload.body.is_empty() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"title and body required"}))).into_response();
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+    let author = if payload.author.is_empty() {
+        s.read().unwrap().local_peer_id.clone()
+    } else {
+        payload.author
+    };
+
+    let mut item = ContentItem {
+        id: String::new(),
+        section,
+        title: payload.title,
+        body: payload.body,
+        author,
+        signature: vec![0u8; 64], // placeholder — sig verification not yet enforced
+        created_at: now_ms,
+    };
+    item.id = item.compute_id();
+
+    let topic = topic_for_section(&item.section).to_string();
+    let data  = item.to_bytes();
+    let id    = item.id.clone();
+    let st = s.read().unwrap();
+
+    if let Some(ref tx) = st.gossip_tx {
+        let _ = tx.try_send(GossipCommand::Publish { topic, data: data.clone() });
+    }
+    if let Some(ref tx) = st.swarm_tx {
+        let _ = tx.send(SwarmAction::PutDhtRecord { key: item.dht_key(), value: data });
+    }
+
+    (StatusCode::CREATED,
+     Json(serde_json::json!({"id": id, "status": "published", "view": format!("/meshsite/{}", item.section.as_str())}))).into_response()
+}
+
 /// POST /api/v1/content  — inject a signed content item into the mesh.
 ///
 /// The item is published to the gossipsub topic for its section.
@@ -3428,6 +3491,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/sync/keys", get(api_v1_sync_keys))
                 // ── Meshsite content API ───────────────────────────────────
                 .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
+                .route("/api/v1/content/post", post(api_v1_quick_post))
                 .route("/api/v1/content/:id", get(api_v1_get_content))
                 // ── Meshsite HTML pages ────────────────────────────────────
                 .route("/meshsite", get(meshsite_root))
