@@ -46,6 +46,10 @@ pub const WORLD_PORTAL_POS: Vec3 = Vec3::new(0.0, 0.0, 14.0);
 /// Radius within which a player "activates" a terminal (metres).
 pub const INTERACT_RADIUS: f32 = 2.0;
 
+/// Radius within which a player triggers a module room door prompt (metres).
+/// Wider than the terminal since doors are physically larger.
+pub const MODULE_DOOR_RADIUS: f32 = 4.5;
+
 // ── Scene builder ─────────────────────────────────────────────────────────────
 
 /// All static meshes that make up the construct scene.
@@ -331,11 +335,40 @@ pub struct MeshsiteModule {
     pub colour:       Vec3,
     /// Screen wall accent colour
     pub screen_colour: Vec3,
-    /// Which perimeter wall this room attaches to
+    /// Which perimeter wall this room extends from
     pub side:         WallSide,
     /// Position along the wall (the axis perpendicular to the normal).
     /// E.g. on North/South walls this is the X offset; on East/West it's Z.
     pub offset:       f32,
+}
+
+impl MeshsiteModule {
+    /// World-space position of the door threshold (centre of the gap in the perimeter wall).
+    pub fn door_pos(&self) -> Vec3 {
+        let plaza = 20.0_f32;
+        match self.side {
+            WallSide::North => Vec3::new(self.offset, 0.0, -plaza),
+            WallSide::South => Vec3::new(self.offset, 0.0,  plaza),
+            WallSide::East  => Vec3::new( plaza, 0.0, self.offset),
+            WallSide::West  => Vec3::new(-plaza, 0.0, self.offset),
+        }
+    }
+
+    /// Centre of the enclosed room (past the corridor, in front of the screen wall).
+    pub fn room_center(&self) -> Vec3 {
+        let normal = self.outward_normal();
+        self.door_pos() + normal * (CORRIDOR_DEPTH + ROOM_DEPTH * 0.5)
+    }
+
+    /// Outward normal from plaza centre toward this room.
+    pub fn outward_normal(&self) -> Vec3 {
+        match self.side {
+            WallSide::North => Vec3::new(0.0, 0.0, -1.0),
+            WallSide::South => Vec3::new(0.0, 0.0,  1.0),
+            WallSide::East  => Vec3::new( 1.0, 0.0, 0.0),
+            WallSide::West  => Vec3::new(-1.0, 0.0, 0.0),
+        }
+    }
 }
 
 /// Which face of the plaza perimeter a module room extends from.
