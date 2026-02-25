@@ -35,4 +35,5 @@ pub mod chunk_loader;
 pub mod chunk_placeholder;
 pub mod spatial_sharding;
 pub mod bandwidth;  // Bandwidth profiles and message priority (graceful degradation)
-pub mod node_capabilities;  // NodeTier + NodeCapabilities — DHT-advertised node roles
+pub mod node_capabilities;
+pub mod meshsite;  // NodeTier + NodeCapabilities — DHT-advertised node roles

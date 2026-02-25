@@ -47,7 +47,7 @@ use std::{
 };
 use clap::Parser;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -396,6 +396,9 @@ pub struct SharedState {
     /// Channel to publish gossipsub messages from web handlers into the event loop.
     #[serde(skip)]
     pub gossip_tx: Option<tokio::sync::mpsc::Sender<GossipCommand>>,
+    /// Channel to send SwarmActions (e.g. DHT puts) from web handlers into the event loop.
+    #[serde(skip)]
+    pub swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     /// Channel to send a hot-reload `ServerConfig` from web handlers into the event loop.
     #[serde(skip)]
     pub config_reload_tx: Option<tokio::sync::mpsc::Sender<ServerConfig>>,
@@ -417,6 +420,7 @@ impl Default for SharedState {
             server_secret: [0u8; 32],
             pending_challenges: Arc::new(Mutex::new(HashMap::new())),
             gossip_tx: None,
+            swarm_tx: None,
             config_reload_tx: None,
         }
     }
@@ -447,6 +451,8 @@ struct AppState {
     shedding_relay: bool,
     /// Gossip commands from web handlers waiting to be published into the swarm.
     gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
+    /// SwarmActions from web handlers (e.g. DHT puts from content submissions).
+    swarm_web_rx: tokio::sync::mpsc::Receiver<SwarmAction>,
     /// Config reload commands from web handlers / SIGHUP.
     config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>,
     /// Peers to disconnect on next world_tick (populated by load-shedding logic).
@@ -463,6 +469,7 @@ impl AppState {
     fn new(config: ServerConfig, shared: Arc<RwLock<SharedState>>,
            local_peer_id: String, public_ip: String,
            gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
+           swarm_web_rx: tokio::sync::mpsc::Receiver<SwarmAction>,
            config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
@@ -482,6 +489,7 @@ impl AppState {
             net: NetStats::default(),
             shedding_relay: false,
             gossip_rx,
+            swarm_web_rx,
             config_reload_rx,
             pending_shed: Vec::new(),
             pending_chunk_requests: Vec::new(),
@@ -661,6 +669,19 @@ impl KeyDatabase {
                 last_synced_at     INTEGER NOT NULL DEFAULT 0,
                 records_received   INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Meshsite content (forums, wiki, marketplace, post office)
+            CREATE TABLE IF NOT EXISTS mesh_content (
+                id          TEXT    PRIMARY KEY,       -- SHA-256 hex
+                section     TEXT    NOT NULL,          -- forums|wiki|marketplace|post
+                title       TEXT    NOT NULL,
+                body        TEXT    NOT NULL,
+                author      TEXT    NOT NULL,          -- peer_id
+                signature   BLOB    NOT NULL,          -- ed25519 sig bytes
+                created_at  INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_mc_section  ON mesh_content (section, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_mc_author   ON mesh_content (author);
         ")?;
 
         // Schema migrations: add columns that may not exist in older databases.
@@ -912,6 +933,93 @@ impl KeyDatabase {
             params![id],
             |r| r.get(0),
         ).ok().flatten()
+    }
+
+    // ── Meshsite content ──────────────────────────────────────────────────────
+
+    /// Insert or ignore a content item (idempotent — content is immutable by id).
+    fn insert_content(&self, item: &metaverse_core::meshsite::ContentItem) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO mesh_content (id, section, title, body, author, signature, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &item.id,
+                item.section.as_str(),
+                &item.title,
+                &item.body,
+                &item.author,
+                &item.signature,
+                item.created_at as i64,
+            ],
+        );
+    }
+
+    /// List content items for a section, newest first (max 100).
+    fn list_content(&self, section: &str) -> Vec<metaverse_core::meshsite::ContentItem> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, section, title, body, author, signature, created_at
+             FROM mesh_content WHERE section = ?1 ORDER BY created_at DESC LIMIT 100"
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(params![section], |row| {
+            Ok(metaverse_core::meshsite::ContentItem {
+                id:         row.get(0)?,
+                section:    metaverse_core::meshsite::Section::from_str(
+                                &row.get::<_, String>(1)?
+                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
+                title:      row.get(2)?,
+                body:       row.get(3)?,
+                author:     row.get(4)?,
+                signature:  row.get(5)?,
+                created_at: row.get::<_, i64>(6)? as u64,
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Fetch a single content item by id.
+    fn get_content(&self, id: &str) -> Option<metaverse_core::meshsite::ContentItem> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT id, section, title, body, author, signature, created_at
+             FROM mesh_content WHERE id = ?1",
+            params![id],
+            |row| Ok(metaverse_core::meshsite::ContentItem {
+                id:         row.get(0)?,
+                section:    metaverse_core::meshsite::Section::from_str(
+                                &row.get::<_, String>(1)?
+                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
+                title:      row.get(2)?,
+                body:       row.get(3)?,
+                author:     row.get(4)?,
+                signature:  row.get(5)?,
+                created_at: row.get::<_, i64>(6)? as u64,
+            }),
+        ).ok()
+    }
+
+    /// Count content items per section.
+    fn content_counts(&self) -> std::collections::HashMap<String, usize> {
+        let conn = self.conn.lock().unwrap();
+        let mut map = std::collections::HashMap::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT section, COUNT(*) FROM mesh_content GROUP BY section"
+        ) {
+            let _ = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+            }).map(|rows| {
+                for (sec, count) in rows.flatten() {
+                    map.insert(sec, count);
+                }
+            });
+        }
+        map
     }
 }
 
@@ -2484,6 +2592,303 @@ async fn web_api_key_by_id(
     }
 }
 
+// ─── Meshsite API handlers ─────────────────────────────────────────────────────
+
+/// POST /api/v1/content  — submit a signed content item.
+///
+/// Body: JSON matching `SubmitContent`.
+/// The server verifies the SHA-256 id and stores the item.
+/// On success it also pushes the item into the DHT.
+async fn api_v1_post_content(
+    State(s): State<WebState>,
+    Json(payload): Json<metaverse_core::meshsite::SubmitContent>,
+) -> impl IntoResponse {
+    use metaverse_core::meshsite::ContentItem;
+
+    let item = match payload.into_item() {
+        Some(i) => i,
+        None => return (StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error":"invalid section or signature hex"}))).into_response(),
+    };
+
+    // Validate id integrity
+    if !item.id_valid() {
+        return (StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"id mismatch — recompute sha256 of canonical fields"}))).into_response();
+    }
+
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => {
+            db.insert_content(&item);
+            let id = item.id.clone();
+            // Queue DHT put so other servers mirror this content
+            if let Some(ref tx) = st.swarm_tx {
+                let dht_key = item.dht_key();
+                let dht_val = item.to_bytes();
+                let _ = tx.send(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
+            }
+            (StatusCode::CREATED,
+             Json(serde_json::json!({"id": id, "status": "stored"}))).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+    }
+}
+
+/// GET /api/v1/content?section=forums  — list items in a section.
+async fn api_v1_list_content(
+    State(s): State<WebState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let section = params.get("section").map(|s| s.as_str()).unwrap_or("forums");
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => {
+            let items = db.list_content(section);
+            let json: Vec<_> = items.iter().map(|i| serde_json::json!({
+                "id":         i.id,
+                "section":    i.section.as_str(),
+                "title":      i.title,
+                "body":       i.body,
+                "author":     i.author,
+                "created_at": i.created_at,
+            })).collect();
+            Json(json).into_response()
+        }
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+    }
+}
+
+/// GET /api/v1/content/:id  — fetch single content item by id.
+async fn api_v1_get_content(
+    State(s): State<WebState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => match db.get_content(&id) {
+            Some(item) => Json(serde_json::json!({
+                "id":         item.id,
+                "section":    item.section.as_str(),
+                "title":      item.title,
+                "body":       item.body,
+                "author":     item.author,
+                "created_at": item.created_at,
+            })).into_response(),
+            None => (StatusCode::NOT_FOUND,
+                     Json(serde_json::json!({"error":"not found"}))).into_response(),
+        },
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+    }
+}
+
+// ─── Meshsite HTML handlers ────────────────────────────────────────────────────
+
+async fn meshsite_root(State(s): State<WebState>) -> Html<String> {
+    let st = s.read().unwrap();
+    let counts = st.key_db.as_ref().map(|db| db.content_counts()).unwrap_or_default();
+    Html(render_meshsite_landing(&st, &counts))
+}
+
+async fn meshsite_section(
+    State(s): State<WebState>,
+    Path(section): Path<String>,
+) -> Html<String> {
+    let st = s.read().unwrap();
+    let items = st.key_db.as_ref()
+        .map(|db| db.list_content(&section))
+        .unwrap_or_default();
+    Html(render_meshsite_section(&st, &section, &items))
+}
+
+fn meshsite_nav(node_name: &str) -> String {
+    format!(r#"<nav class="ms-nav">
+  <a href="/meshsite" class="ms-logo">◈ {node_name}</a>
+  <div class="ms-links">
+    <a href="/meshsite/forums">Forums</a>
+    <a href="/meshsite/wiki">Wiki</a>
+    <a href="/meshsite/marketplace">Marketplace</a>
+    <a href="/meshsite/post">Post Office</a>
+    <a href="/">Server Dashboard</a>
+  </div>
+</nav>"#)
+}
+
+const MESHSITE_CSS: &str = r#"
+  body { margin:0; font-family: 'Segoe UI', system-ui, sans-serif;
+         background: #0a0d12; color: #cdd6f4; }
+  a { color: #89b4fa; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .ms-nav { display:flex; align-items:center; padding: 12px 24px;
+             background: #11141d; border-bottom: 1px solid #313244; }
+  .ms-logo { font-size: 1.2em; font-weight: bold; color: #cba6f7; margin-right: auto; }
+  .ms-links a { margin-left: 20px; color: #89dceb; }
+  .ms-main { max-width: 900px; margin: 40px auto; padding: 0 20px; }
+  h1 { color: #cba6f7; border-bottom: 1px solid #313244; padding-bottom: 8px; }
+  h2 { color: #89b4fa; }
+  .card { background: #13161f; border: 1px solid #313244; border-radius: 8px;
+          padding: 20px; margin-bottom: 20px; }
+  .card h3 { margin: 0 0 8px; color: #f5c2e7; }
+  .card .meta { font-size: 0.8em; color: #6c7086; margin-bottom: 8px; }
+  .card .body { white-space: pre-wrap; line-height: 1.6; }
+  .section-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .section-card { background: #13161f; border: 1px solid #313244; border-radius: 12px;
+                  padding: 24px; transition: border-color .2s; }
+  .section-card:hover { border-color: #89b4fa; }
+  .section-card h2 { margin: 0 0 8px; }
+  .section-card p { color: #a6adc8; margin: 0 0 16px; font-size: 0.9em; }
+  .section-count { font-size: 0.8em; color: #585b70; }
+  form { background: #13161f; border: 1px solid #313244; border-radius: 8px; padding: 20px; }
+  form label { display:block; margin-bottom: 4px; font-size: 0.85em; color: #a6adc8; }
+  form input, form textarea, form select {
+    width: 100%; box-sizing: border-box; background: #1e2030; border: 1px solid #45475a;
+    color: #cdd6f4; border-radius: 4px; padding: 8px 10px; margin-bottom: 12px;
+    font-family: inherit; font-size: 0.9em; }
+  form textarea { height: 140px; resize: vertical; }
+  button[type=submit] {
+    background: #89b4fa; color: #11111b; border: none; border-radius: 4px;
+    padding: 9px 20px; font-weight: bold; cursor: pointer; }
+  button[type=submit]:hover { background: #b4befe; }
+  .post-note { font-size: 0.8em; color: #585b70; margin-top: 6px; }
+  .empty { color: #585b70; font-style: italic; padding: 20px 0; }
+"#;
+
+fn render_meshsite_landing(
+    st: &SharedState,
+    counts: &std::collections::HashMap<String, usize>,
+) -> String {
+    let nav = meshsite_nav(&st.node_name);
+    let sections = [
+        ("forums",      "Forums",      "Threaded public discussion. Post questions, ideas, reports."),
+        ("wiki",        "Wiki",        "Community knowledge base. Articles stored in the DHT."),
+        ("marketplace", "Marketplace", "Trade items, land parcels and blueprints."),
+        ("post",        "Post Office", "Async player-to-player messages. Stored in the mesh."),
+    ];
+    let cards: String = sections.iter().map(|(slug, name, desc)| {
+        let count = counts.get(*slug).copied().unwrap_or(0);
+        format!(r#"<a href="/meshsite/{slug}" style="color:inherit;text-decoration:none">
+  <div class="section-card">
+    <h2>{name}</h2>
+    <p>{desc}</p>
+    <span class="section-count">{count} item{}</span>
+  </div></a>"#, if count == 1 { "" } else { "s" })
+    }).collect();
+    format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>Meshsite — {name}</title>
+<style>{css}</style></head><body>
+{nav}
+<div class="ms-main">
+  <h1>◈ Meshsite</h1>
+  <p style="color:#a6adc8">Distributed content hosted on <strong>{name}</strong>. Every item is signed and replicated across the mesh.</p>
+  <div class="section-grid">{cards}</div>
+</div></body></html>"#,
+        name = st.node_name, css = MESHSITE_CSS, nav = nav, cards = cards)
+}
+
+fn render_meshsite_section(
+    st: &SharedState,
+    section: &str,
+    items: &[metaverse_core::meshsite::ContentItem],
+) -> String {
+    use metaverse_core::meshsite::Section;
+    let display = Section::from_str(section)
+        .map(|s| s.display_name())
+        .unwrap_or(section);
+    let nav = meshsite_nav(&st.node_name);
+
+    let posts: String = if items.is_empty() {
+        format!(r#"<p class="empty">No posts yet — be the first to post in {display}.</p>"#)
+    } else {
+        items.iter().map(|item| {
+            let short_author = if item.author.len() > 16 {
+                format!("{}…", &item.author[..16])
+            } else {
+                item.author.clone()
+            };
+            format!(r#"<div class="card">
+  <h3>{title}</h3>
+  <div class="meta">by {author} · id: {id_short}…</div>
+  <div class="body">{body}</div>
+</div>"#,
+                title      = html_escape(&item.title),
+                body       = html_escape(&item.body),
+                author     = html_escape(&short_author),
+                id_short   = &item.id[..8],
+            )
+        }).collect()
+    };
+
+    format!(r#"<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>{display} — Meshsite</title>
+<style>{css}</style></head><body>
+{nav}
+<div class="ms-main">
+  <h1>{display}</h1>
+  {posts}
+  <h2>Post to {display}</h2>
+  <form method="POST" action="/meshsite/{section}/post">
+    <label>Title</label>
+    <input type="text" name="title" placeholder="Subject or title" maxlength="200" required>
+    <label>Body</label>
+    <textarea name="body" placeholder="Your message…" maxlength="65536" required></textarea>
+    <label>Your Peer ID</label>
+    <input type="text" name="author" placeholder="12D3KooW… (your peer ID)" required>
+    <label>Signature (hex)</label>
+    <input type="text" name="signature" placeholder="ed25519 signature over canonical_bytes in hex" required>
+    <button type="submit">Submit Post</button>
+    <p class="post-note">Sign with your identity key: <code>canonical = section\0title\0body\0author\0created_at</code></p>
+  </form>
+</div></body></html>"#,
+        display = display, css = MESHSITE_CSS, nav = nav,
+        posts = posts, section = section)
+}
+
+/// HTML-escape a string for safe embedding.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Handle the HTML form POST from /meshsite/{section}/post.
+async fn meshsite_form_post(
+    State(s): State<WebState>,
+    Path(section): Path<String>,
+    Form(form): Form<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    use metaverse_core::meshsite::SubmitContent;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let submit = SubmitContent {
+        section:    section.clone(),
+        title:      form.get("title").cloned().unwrap_or_default(),
+        body:       form.get("body").cloned().unwrap_or_default(),
+        author:     form.get("author").cloned().unwrap_or_default(),
+        signature:  form.get("signature").cloned().unwrap_or_default(),
+        created_at: now_ms,
+    };
+    let item = match submit.into_item() {
+        Some(i) => i,
+        None => return (StatusCode::BAD_REQUEST, Html("<p>Invalid section or signature.</p>".to_string())).into_response(),
+    };
+    let st = s.read().unwrap();
+    if let Some(ref db) = st.key_db {
+        db.insert_content(&item);
+        if let Some(ref tx) = st.swarm_tx {
+            let dht_key = item.dht_key();
+            let dht_val = item.to_bytes();
+            let _ = tx.send(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
+        }
+    }
+    // Redirect back to the section page
+    let mut headers = HeaderMap::new();
+    headers.insert("Location", format!("/meshsite/{}", section).parse().unwrap());
+    (StatusCode::SEE_OTHER, headers, Html(String::new())).into_response()
+}
+
 fn render_dashboard_html(st: &SharedState) -> String {
     let uptime_h = st.uptime_secs / 3600;
     let uptime_m = (st.uptime_secs % 3600) / 60;
@@ -2975,6 +3380,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Channel for web handlers to push gossipsub publishes into the event loop.
     let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel::<GossipCommand>(256);
+    // Channel for web handlers to push SwarmActions (e.g. DHT puts) into the event loop.
+    let (swarm_web_tx, mut swarm_web_rx) = tokio::sync::mpsc::channel::<SwarmAction>(256);
     // Channel for web handlers / SIGHUP to trigger config hot-reloads.
     let (config_reload_tx, config_reload_rx) = tokio::sync::mpsc::channel::<ServerConfig>(8);
 
@@ -2988,6 +3395,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         key_db,
         server_secret,
         gossip_tx: Some(gossip_tx),
+        swarm_tx: Some(swarm_web_tx),
         config_reload_tx: Some(config_reload_tx),
         ..Default::default()
     }));
@@ -3028,6 +3436,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/key-requests/:id/download", get(api_v1_download_key_request))
                 .route("/api/v1/keys/:peer_id/revoke", post(api_v1_revoke_key))
                 .route("/api/v1/sync/keys", get(api_v1_sync_keys))
+                // ── Meshsite content API ───────────────────────────────────
+                .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
+                .route("/api/v1/content/:id", get(api_v1_get_content))
+                // ── Meshsite HTML pages ────────────────────────────────────
+                .route("/meshsite", get(meshsite_root))
+                .route("/meshsite/:section", get(meshsite_section))
+                .route("/meshsite/:section/post", post(meshsite_form_post))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);
@@ -3042,7 +3457,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut app_state = AppState::new(
-        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx, config_reload_rx,
+        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx, swarm_web_rx, config_reload_rx,
     );
     app_state.log("✅ Metaverse server started");
     if world_enabled && world.is_some() {
@@ -3190,6 +3605,10 @@ async fn run_headless(
                     }
                 }
             }
+            // SwarmActions queued by web handlers (content DHT puts, etc.)
+            Some(action) = state.swarm_web_rx.recv() => {
+                apply_swarm_actions(vec![action], &mut state, &mut swarm);
+            }
             // Config hot-reload from web handler or SIGHUP task
             Some(new_cfg) = state.config_reload_rx.recv() => {
                 apply_config_hot_reload(&mut state, new_cfg, &mut world_config);
@@ -3332,6 +3751,10 @@ async fn run_tui(
                             }
                         }
                     }
+                }
+                // SwarmActions queued by web handlers (content DHT puts, etc.)
+                Some(action) = state.swarm_web_rx.recv() => {
+                    apply_swarm_actions(vec![action], &mut state, &mut swarm);
                 }
                 // Config hot-reload from web handler or SIGHUP task
                 Some(new_cfg) = state.config_reload_rx.recv() => {
