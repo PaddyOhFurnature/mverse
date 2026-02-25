@@ -47,7 +47,7 @@ use std::{
 };
 use clap::Parser;
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -1246,6 +1246,27 @@ fn handle_swarm_event(
                                         short_id(&revoker_pid.to_string())));
                                 }
                             }
+                        }
+                    }
+                }
+            } else if topic.starts_with("meshsite/") {
+                // Incoming meshsite content from the mesh — store locally and re-put to DHT.
+                if let Some(item) = metaverse_core::meshsite::ContentItem::from_bytes(&message.data) {
+                    if item.id_valid() {
+                        let (is_new, dht_key, dht_val) = {
+                            let s = state.shared.read().ok();
+                            let db = s.as_ref().and_then(|s| s.key_db.as_ref());
+                            if let Some(db) = db {
+                                let is_new = db.get_content(&item.id).is_none();
+                                if is_new { db.insert_content(&item); }
+                                (is_new, item.dht_key(), message.data.clone())
+                            } else {
+                                (false, vec![], vec![])
+                            }
+                        };
+                        if is_new {
+                            state.log(format!("◈ [meshsite/{}] stored: {}…", item.section.as_str(), &item.id[..8]));
+                            actions.push(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
                         }
                     }
                 }
@@ -2594,16 +2615,17 @@ async fn web_api_key_by_id(
 
 // ─── Meshsite API handlers ─────────────────────────────────────────────────────
 
-/// POST /api/v1/content  — submit a signed content item.
+/// POST /api/v1/content  — inject a signed content item into the mesh.
 ///
-/// Body: JSON matching `SubmitContent`.
-/// The server verifies the SHA-256 id and stores the item.
-/// On success it also pushes the item into the DHT.
+/// The item is published to the gossipsub topic for its section.
+/// Every subscribed node (including this server) will receive it,
+/// verify it, store it locally, and put it in the DHT.
+/// This endpoint is the local operator's injection point — not the distribution layer.
 async fn api_v1_post_content(
     State(s): State<WebState>,
     Json(payload): Json<metaverse_core::meshsite::SubmitContent>,
 ) -> impl IntoResponse {
-    use metaverse_core::meshsite::ContentItem;
+    use metaverse_core::meshsite::{ContentItem, topic_for_section};
 
     let item = match payload.into_item() {
         Some(i) => i,
@@ -2611,29 +2633,27 @@ async fn api_v1_post_content(
                         Json(serde_json::json!({"error":"invalid section or signature hex"}))).into_response(),
     };
 
-    // Validate id integrity
     if !item.id_valid() {
         return (StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error":"id mismatch — recompute sha256 of canonical fields"}))).into_response();
     }
 
     let st = s.read().unwrap();
-    match &st.key_db {
-        Some(db) => {
-            db.insert_content(&item);
-            let id = item.id.clone();
-            // Queue DHT put so other servers mirror this content
-            if let Some(ref tx) = st.swarm_tx {
-                let dht_key = item.dht_key();
-                let dht_val = item.to_bytes();
-                let _ = tx.send(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
-            }
-            (StatusCode::CREATED,
-             Json(serde_json::json!({"id": id, "status": "stored"}))).into_response()
-        }
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+    let topic = topic_for_section(&item.section).to_string();
+    let data  = item.to_bytes();
+    let id    = item.id.clone();
+
+    // Publish to gossipsub — the mesh distributes it; our own handler will store it
+    if let Some(ref tx) = st.gossip_tx {
+        let _ = tx.try_send(GossipCommand::Publish { topic, data: data.clone() });
     }
+    // Also put to DHT for offline/late-join persistence
+    if let Some(ref tx) = st.swarm_tx {
+        let _ = tx.send(SwarmAction::PutDhtRecord { key: item.dht_key(), value: data });
+    }
+
+    (StatusCode::ACCEPTED,
+     Json(serde_json::json!({"id": id, "status": "published to mesh"}))).into_response()
 }
 
 /// GET /api/v1/content?section=forums  — list items in a section.
@@ -2829,18 +2849,20 @@ fn render_meshsite_section(
   <h1>{display}</h1>
   {posts}
   <h2>Post to {display}</h2>
-  <form method="POST" action="/meshsite/{section}/post">
-    <label>Title</label>
-    <input type="text" name="title" placeholder="Subject or title" maxlength="200" required>
-    <label>Body</label>
-    <textarea name="body" placeholder="Your message…" maxlength="65536" required></textarea>
-    <label>Your Peer ID</label>
-    <input type="text" name="author" placeholder="12D3KooW… (your peer ID)" required>
-    <label>Signature (hex)</label>
-    <input type="text" name="signature" placeholder="ed25519 signature over canonical_bytes in hex" required>
-    <button type="submit">Submit Post</button>
-    <p class="post-note">Sign with your identity key: <code>canonical = section\0title\0body\0author\0created_at</code></p>
-  </form>
+  <div class="card" style="border-color:#45475a">
+    <p style="color:#a6adc8;margin:0">Content flows through the P2P mesh — use the API or game client to post:</p>
+    <pre style="background:#0a0d12;padding:12px;border-radius:4px;overflow-x:auto;font-size:0.85em">curl -X POST http://localhost:8080/api/v1/content \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "section": "{section}",
+    "title": "Your title",
+    "body": "Your content",
+    "author": "&lt;your-peer-id&gt;",
+    "signature": "&lt;hex-sig over canonical_bytes&gt;",
+    "created_at": &lt;unix-ms&gt;
+  }}'</pre>
+    <p style="color:#585b70;font-size:0.8em;margin:6px 0 0">The server publishes to gossipsub — all nodes receive and store it automatically.</p>
+  </div>
 </div></body></html>"#,
         display = display, css = MESHSITE_CSS, nav = nav,
         posts = posts, section = section)
@@ -2849,44 +2871,6 @@ fn render_meshsite_section(
 /// HTML-escape a string for safe embedding.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
-}
-
-/// Handle the HTML form POST from /meshsite/{section}/post.
-async fn meshsite_form_post(
-    State(s): State<WebState>,
-    Path(section): Path<String>,
-    Form(form): Form<std::collections::HashMap<String, String>>,
-) -> impl IntoResponse {
-    use metaverse_core::meshsite::SubmitContent;
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-    let submit = SubmitContent {
-        section:    section.clone(),
-        title:      form.get("title").cloned().unwrap_or_default(),
-        body:       form.get("body").cloned().unwrap_or_default(),
-        author:     form.get("author").cloned().unwrap_or_default(),
-        signature:  form.get("signature").cloned().unwrap_or_default(),
-        created_at: now_ms,
-    };
-    let item = match submit.into_item() {
-        Some(i) => i,
-        None => return (StatusCode::BAD_REQUEST, Html("<p>Invalid section or signature.</p>".to_string())).into_response(),
-    };
-    let st = s.read().unwrap();
-    if let Some(ref db) = st.key_db {
-        db.insert_content(&item);
-        if let Some(ref tx) = st.swarm_tx {
-            let dht_key = item.dht_key();
-            let dht_val = item.to_bytes();
-            let _ = tx.send(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
-        }
-    }
-    // Redirect back to the section page
-    let mut headers = HeaderMap::new();
-    headers.insert("Location", format!("/meshsite/{}", section).parse().unwrap());
-    (StatusCode::SEE_OTHER, headers, Html(String::new())).into_response()
 }
 
 fn render_dashboard_html(st: &SharedState) -> String {
@@ -3278,7 +3262,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "player-state", "voxel-ops", "chat",
                 "state-request", "state-response",
                 "chunk-terrain", "chunk-manifest",
+                "key-registry", "key-revocations",
             ] {
+                let t = gossipsub::IdentTopic::new(*topic);
+                let _ = gossipsub.subscribe(&t);
+            }
+            // Subscribe to all meshsite content topics
+            for topic in metaverse_core::meshsite::MESHSITE_TOPICS {
                 let t = gossipsub::IdentTopic::new(*topic);
                 let _ = gossipsub.subscribe(&t);
             }
@@ -3442,7 +3432,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // ── Meshsite HTML pages ────────────────────────────────────
                 .route("/meshsite", get(meshsite_root))
                 .route("/meshsite/:section", get(meshsite_section))
-                .route("/meshsite/:section/post", post(meshsite_form_post))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);

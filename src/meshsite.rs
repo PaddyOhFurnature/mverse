@@ -1,15 +1,43 @@
 //! Meshsite content layer — the distributed web hosted on the mesh.
 //!
 //! A `ContentItem` is a signed piece of content (forum post, wiki article, etc.)
-//! that any server can store and serve. Items are identified by the SHA-256 of
-//! their canonical fields and stored in both SQLite (for fast local queries) and
-//! the DHT (for cross-server distribution).
+//! that propagates through the gossipsub mesh exactly like a voxel operation.
+//! Items are identified by the SHA-256 of their canonical fields, stored in the
+//! DHT for persistence, and cached locally by every subscribed node.
 //!
-//! DHT key scheme: `meshsite/{section}/{id}`
-//! e.g.            `meshsite/forums/a3f9...`
+//! **No single server hosts the meshsite.** Every node (server, client, relay)
+//! that subscribes to the content topics IS the meshsite.
+//!
+//! Gossipsub topic per section: `meshsite/forums`, `meshsite/wiki`, etc.
+//! DHT key per item:            `meshsite/{section}/{id}`
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+// ── Gossipsub topics ──────────────────────────────────────────────────────────
+
+pub const TOPIC_MESHSITE_FORUMS:      &str = "meshsite/forums";
+pub const TOPIC_MESHSITE_WIKI:        &str = "meshsite/wiki";
+pub const TOPIC_MESHSITE_MARKETPLACE: &str = "meshsite/marketplace";
+pub const TOPIC_MESHSITE_POST:        &str = "meshsite/post";
+
+/// All meshsite gossipsub topics (subscribe to all at startup).
+pub const MESHSITE_TOPICS: &[&str] = &[
+    TOPIC_MESHSITE_FORUMS,
+    TOPIC_MESHSITE_WIKI,
+    TOPIC_MESHSITE_MARKETPLACE,
+    TOPIC_MESHSITE_POST,
+];
+
+/// The gossipsub topic for a given section.
+pub fn topic_for_section(section: &Section) -> &'static str {
+    match section {
+        Section::Forums      => TOPIC_MESHSITE_FORUMS,
+        Section::Wiki        => TOPIC_MESHSITE_WIKI,
+        Section::Marketplace => TOPIC_MESHSITE_MARKETPLACE,
+        Section::Post        => TOPIC_MESHSITE_POST,
+    }
+}
 
 // ── Section ───────────────────────────────────────────────────────────────────
 

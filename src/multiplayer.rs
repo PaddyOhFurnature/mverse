@@ -242,6 +242,10 @@ pub struct MultiplayerSystem {
     /// Pending key revocation events — drained by `take_key_revocations()`.
     pending_revocations: Vec<(PeerId, PeerId)>,
 
+    /// Local cache of meshsite content items received from the mesh.
+    /// Keyed by section name, newest-first. Max 200 items per section (simple LRU).
+    pub content_cache: std::collections::HashMap<String, Vec<crate::meshsite::ContentItem>>,
+
     /// Statistics
     stats: MultiplayerStats,
 }
@@ -335,6 +339,7 @@ impl MultiplayerSystem {
             local_session_token: peer_id_to_token(&local_peer_id),
             full_state_broadcasts: 0,
             pending_revocations: Vec::new(),
+            content_cache: std::collections::HashMap::new(),
             stats: MultiplayerStats::default(),
         })
     }
@@ -742,6 +747,7 @@ impl MultiplayerSystem {
                     // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
                     t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
                     t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
+                    t if t.starts_with("meshsite/") => self.handle_meshsite_content(&data),
                     _ => {}
                 }
             }
@@ -1514,6 +1520,56 @@ impl MultiplayerSystem {
         let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key, value: caps.to_bytes() });
     }
 
+    // ── Meshsite content ──────────────────────────────────────────────────────
+
+    /// Publish a signed `ContentItem` to the gossipsub mesh.
+    ///
+    /// The item propagates to every subscribed node (server, client, relay).
+    /// Each receiver stores it locally and re-puts it into the DHT.
+    pub fn publish_content(&self, item: &crate::meshsite::ContentItem) {
+        use crate::meshsite::topic_for_section;
+        let topic  = topic_for_section(&item.section).to_string();
+        let data   = item.to_bytes();
+        let dht_k  = item.dht_key();
+        let dht_v  = data.clone();
+        // Gossip so live peers receive it immediately
+        let _ = self.cmd_tx.send(NetworkCommand::Publish { topic, data });
+        // DHT put for offline persistence / late-joiners
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key: dht_k, value: dht_v });
+    }
+
+    /// Return cached content for a section, newest-first.
+    pub fn get_content(&self, section: &str) -> &[crate::meshsite::ContentItem] {
+        self.content_cache.get(section).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Handle an incoming meshsite content message from gossipsub.
+    fn handle_meshsite_content(&mut self, data: &[u8]) {
+        use crate::meshsite::ContentItem;
+        let item = match ContentItem::from_bytes(data) {
+            Some(i) => i,
+            None => return,
+        };
+        if !item.id_valid() {
+            return; // id doesn't match sha256 of fields — discard
+        }
+        let section = item.section.as_str().to_string();
+        let cache = self.content_cache.entry(section).or_default();
+        // Deduplicate by id
+        if cache.iter().any(|c| c.id == item.id) {
+            return;
+        }
+        cache.insert(0, item.clone()); // newest first
+        if cache.len() > 200 {
+            cache.truncate(200);
+        }
+        // Also persist to DHT so late-joining nodes can fetch it
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+            key: item.dht_key(),
+            value: data.to_vec(),
+        });
+    }
+
     /// Publish a `PlayerSessionRecord` to the DHT on clean logout.
     ///
     /// Signs the record with the player's identity key and stores it at the
@@ -1832,6 +1888,14 @@ fn run_network_thread(
             eprintln!("Failed to subscribe to player-state-compact: {}", e);
         } else {
             println!("📻 Subscribed to topic: player-state-compact");
+        }
+
+        for topic in crate::meshsite::MESHSITE_TOPICS {
+            if let Err(e) = network.subscribe(topic) {
+                eprintln!("Failed to subscribe to {}: {}", topic, e);
+            } else {
+                println!("📻 Subscribed to topic: {}", topic);
+            }
         }
         
         println!("🔍 Network thread started - polling for mDNS and connections...");
