@@ -73,6 +73,7 @@ use metaverse_core::{
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
     construct::{ConstructScene, SIGNUP_TERMINAL_POS, WORLD_PORTAL_POS, INTERACT_RADIUS,
                 MODULE_DOOR_RADIUS, MODULES},
+    billboard::{BillboardPipeline, ModuleBillboards},
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
     identity::{Identity, KeyType},
@@ -85,6 +86,7 @@ use metaverse_core::{
     player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
     renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
+    meshsite::Section,
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
     vector_clock::VectorClock,
@@ -847,6 +849,11 @@ fn main() {
     println!("🎨 Initializing renderer...");
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
+
+    // Billboard pipeline — renders textured quads on Construct module room walls
+    let billboard_pipeline = BillboardPipeline::new(&context);
+    let mut module_billboards: [Option<ModuleBillboards>; 6] = Default::default();
+    let mut billboard_frame_counter = 0u32;
 
     // Always-on debug HUD (top-left overlay)
     let mut hud = DebugHud::new(&context, &window);
@@ -2153,6 +2160,37 @@ fn main() {
                     
                     // Render
                     pipeline.update_camera(&context.queue, &camera);
+                    billboard_pipeline.update_camera(&context.queue, &camera.build_view_projection_matrix());
+
+                    // Refresh billboard content every 120 frames when in Construct
+                    billboard_frame_counter = billboard_frame_counter.wrapping_add(1);
+                    if matches!(game_mode, GameMode::Construct) && billboard_frame_counter % 120 == 1 {
+                        const MODULE_SECTIONS: [Option<Section>; 6] = [
+                            None,                      // 0: Login
+                            None,                      // 1: Signup
+                            Some(Section::Forums),     // 2: Forums
+                            Some(Section::Wiki),       // 3: Wiki
+                            Some(Section::Marketplace),// 4: Marketplace
+                            Some(Section::Post),       // 5: Post Office
+                        ];
+                        for (i, maybe_section) in MODULE_SECTIONS.iter().enumerate() {
+                            if let Some(section) = maybe_section {
+                                let items = multiplayer.get_content(section.as_str());
+                                let needs = module_billboards[i]
+                                    .as_ref()
+                                    .map(|mb| mb.needs_rebuild(items))
+                                    .unwrap_or(true);
+                                if needs {
+                                    module_billboards[i] = Some(ModuleBillboards::build(
+                                        &context.device, &context.queue, &billboard_pipeline,
+                                        section.clone(), items,
+                                        MODULES[i].room_center(),
+                                        MODULES[i].outward_normal(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     
                     match context.surface.get_current_texture() {
                         Ok(frame) => {
@@ -2173,6 +2211,14 @@ fn main() {
                                     construct_terminal_buffer.render(&mut render_pass);
                                     construct_portal_buffer.render(&mut render_pass);
                                     construct_doors_buffer.render(&mut render_pass);
+
+                                    // Render billboards on module room walls
+                                    billboard_pipeline.begin_render(&mut render_pass);
+                                    for mb in module_billboards.iter().flatten() {
+                                        mb.render(&mut render_pass);
+                                    }
+                                    // Restore main pipeline for subsequent draws
+                                    pipeline.set_pipeline(&mut render_pass);
                                 }
                                 
                                 // Render terrain chunks (only in Open World mode)

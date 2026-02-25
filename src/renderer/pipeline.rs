@@ -98,6 +98,7 @@ pub struct RenderPipeline {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    pub camera_bind_group_layout: wgpu::BindGroupLayout,
     model_buffer: wgpu::Buffer,
     model_bind_group: wgpu::BindGroup,
     model_bind_group_layout: wgpu::BindGroupLayout,
@@ -245,6 +246,7 @@ impl RenderPipeline {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            camera_bind_group_layout,
             model_buffer,
             model_bind_group,
             model_bind_group_layout,
@@ -369,5 +371,10 @@ impl RenderPipeline {
     /// Get camera bind group
     pub fn camera_bind_group(&self) -> &wgpu::BindGroup {
         &self.camera_bind_group
+    }
+
+    /// Get depth view — shared with billboard pass so depth testing works correctly.
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth_view
     }
 }

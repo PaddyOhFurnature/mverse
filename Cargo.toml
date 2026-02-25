@@ -36,6 +36,7 @@ rapier3d = { version = "0.22", features = ["debug-render", "serde-serialize"] }
 noise = { version = "0.9.0", features = ["images"] }
 png = "0.17"
 image = "0.25"
+font8x8 = "0.3"  # Embedded 8×8 bitmap font for billboard text rendering
 
 # Continuous query system (Phase 1)
 rstar = { version = "0.12", features = ["serde"] }  # R*-tree spatial index

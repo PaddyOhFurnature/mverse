@@ -13,6 +13,7 @@ pub mod mesh;
 pub mod marching_cubes;
 pub mod physics;
 pub mod construct;  // The Construct — bundled lobby scene, always available offline
+pub mod billboard;  // Billboard system — textured quads for Construct room wall screens
 
 // Phase 1.5: P2P Networking (Local-First Architecture)
 pub mod identity;
