@@ -102,6 +102,17 @@ use winit::{
 };
 use std::sync::Mutex;
 
+// ── Game mode — Construct (bundled lobby) vs Open World ───────────────────────
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum GameMode {
+    /// Player is in the bundled Construct lobby.
+    /// Terrain streaming is paused; only construct geometry renders.
+    Construct,
+    /// Player has entered the open world through the portal.
+    /// Construct geometry is hidden; terrain streams normally.
+    OpenWorld,
+}
+
 // ── Signup screen ─────────────────────────────────────────────────────────────
 
 enum SignupStep {
@@ -508,6 +519,9 @@ fn main() {
     } else {
         None
     };
+
+    // Always start in the Construct; player enters Open World through the portal.
+    let mut game_mode = GameMode::Construct;
     
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
@@ -624,10 +638,8 @@ fn main() {
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone(), user_content.clone(), world_dir.clone());
     
-    // Queue spawn area chunks for background loading — actual loading happens
-    // inside the event loop during the Loading phase so the window stays responsive.
-    let spawn_ecef = origin_gps.to_ecef();
-    chunk_streamer.update(spawn_ecef);
+    // Terrain chunks queued only when entering Open World — not needed in Construct.
+    // chunk_streamer.update(spawn_ecef);  // deferred until portal transition
     
     // Keep chunk manager for user edits and voxel operations tracking only
     let chunk_manager_user_content = user_content.lock().unwrap().clone();
@@ -1448,24 +1460,22 @@ fn main() {
                         signup = Some(SignupScreen::new(&context, &window));
                     }
 
-                    // World portal: log for now — full transition to open world next
-                    if near_portal {
+                    // World portal: walk through to enter the open world.
+                    if near_portal && game_mode == GameMode::Construct {
                         if frame_count % 120 == 0 {
-                            println!("🌐 [Construct] Player at world portal — enter world with E");
+                            println!("🌐 [Construct] Player at world portal — transitioning to open world...");
                         }
+                        game_mode = GameMode::OpenWorld;
+                        println!("🌍 Entered Open World — terrain streaming active");
                     }
 
                     jump_pressed = false;
                     
-                    // Update chunk streaming based on player position
-                    chunk_streamer.update(player.position);
-                    
-                    // CONTINUOUS LOADING: Process queues every frame with small budget
-                    // This enables smooth loading as player moves without frame drops
-                    const FRAME_BUDGET_MS: f64 = 16.0;  // 16ms budget = 1 chunk per frame max
-                    
-                    // Always process queues (poll completed chunks even if queue empty)
-                    chunk_streamer.process_queues(FRAME_BUDGET_MS);
+                    // Terrain streaming only runs in Open World mode.
+                    if game_mode == GameMode::OpenWorld {
+                        const FRAME_BUDGET_MS: f64 = 16.0;
+                        chunk_streamer.update(player.position);
+                        chunk_streamer.process_queues(FRAME_BUDGET_MS);
 
                     // Broadcast newly loaded chunk manifests to connected peers.
                     // This lets peers replace their independently-generated terrain with ours
@@ -1497,6 +1507,7 @@ fn main() {
                                 chunk_streamer.stats.chunks_loading);
                         }
                     }
+                    } // end game_mode == OpenWorld chunk streaming block
                     
                     // Update camera
                     camera.position = player.camera_position_local(&physics);
@@ -1599,18 +1610,21 @@ fn main() {
                                 let mut render_pass = pipeline.begin_frame(&mut encoder, &view);
                                 pipeline.set_pipeline(&mut render_pass);
 
-                                // ── Render Construct scene ────────────────────────────
-                                // Use identity matrix — construct is in local physics space.
-                                construct_floor_buffer.render(&mut render_pass);
-                                construct_pillars_buffer.render(&mut render_pass);
-                                construct_terminal_buffer.render(&mut render_pass);
-                                construct_portal_buffer.render(&mut render_pass);
-                                construct_doors_buffer.render(&mut render_pass);
+                                // ── Render Construct scene (only when in Construct mode) ──
+                                if game_mode == GameMode::Construct {
+                                    construct_floor_buffer.render(&mut render_pass);
+                                    construct_pillars_buffer.render(&mut render_pass);
+                                    construct_terminal_buffer.render(&mut render_pass);
+                                    construct_portal_buffer.render(&mut render_pass);
+                                    construct_doors_buffer.render(&mut render_pass);
+                                }
                                 
-                                // Render all loaded chunks from ChunkStreamer
-                                for chunk_data in chunk_streamer.loaded_chunks() {
-                                    if let Some(mesh_buffer) = &chunk_data.mesh_buffer {
-                                        mesh_buffer.render(&mut render_pass);
+                                // Render terrain chunks (only in Open World mode)
+                                if game_mode == GameMode::OpenWorld {
+                                    for chunk_data in chunk_streamer.loaded_chunks() {
+                                        if let Some(mesh_buffer) = &chunk_data.mesh_buffer {
+                                            mesh_buffer.render(&mut render_pass);
+                                        }
                                     }
                                 }
                                 
