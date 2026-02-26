@@ -904,7 +904,7 @@ impl DebugHud {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([680.0, 520.0])
                 .frame(egui::Frame::window(&ctx.style())
-                    .fill(egui::Color32::from_rgb(48, 52, 68))
+                    .fill(egui::Color32::from_rgb(22, 24, 30))
                     .stroke(egui::Stroke::new(1.5, accent)))
                 .show(ctx, |ui| {
                     // Module path breadcrumb
