@@ -1672,6 +1672,8 @@ fn main() {
 
     // Current WORLDNET address shown on the terminal screen
     let mut terminal_address = metaverse_core::worldnet::WorldnetAddress::Root;
+    let mut terminal_active  = false;       // true = keyboard routes to terminal
+    let mut terminal_input   = String::new(); // current command being typed
     
     let mut cursor_grabbed = false;
     
@@ -1795,6 +1797,100 @@ fn main() {
                         }
                         return;
                     }
+                    // ── WORLDNET terminal input mode ──────────────────────────
+                    // When terminal_active, route all keystrokes to the terminal.
+                    if terminal_active && event.state == ElementState::Pressed {
+                        use metaverse_core::worldnet::{
+                            WorldnetAddress, render_page, render_terminal_prompt,
+                            process_terminal_command, addr_section, TerminalCmd,
+                        };
+                        // Helper: re-render page + prompt and upload to screen
+                        macro_rules! refresh {
+                            () => {{
+                                let key_type = identity.load_key_record()
+                                    .map(|kr| kr.effective_key_type());
+                                let content = multiplayer.get_content(addr_section(&terminal_address));
+                                render_page(&terminal_address, key_type, content, &mut worldnet_buf);
+                                render_terminal_prompt(&terminal_input, &mut worldnet_buf);
+                                terminal_screen.update(&context.queue, &worldnet_buf);
+                            }};
+                        }
+                        match event.physical_key {
+                            // Escape / E — close terminal
+                            PhysicalKey::Code(KeyCode::Escape)
+                            | PhysicalKey::Code(KeyCode::KeyE) => {
+                                terminal_active = false;
+                                terminal_input.clear();
+                                let key_type = identity.load_key_record()
+                                    .map(|kr| kr.effective_key_type());
+                                let content = multiplayer.get_content(
+                                    addr_section(&terminal_address));
+                                render_page(&terminal_address, key_type, content, &mut worldnet_buf);
+                                terminal_screen.update(&context.queue, &worldnet_buf);
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                window.set_cursor_visible(false);
+                                cursor_grabbed = true;
+                            }
+                            // Enter — execute command
+                            PhysicalKey::Code(KeyCode::Enter) => {
+                                let cmd = terminal_input.trim().to_string();
+                                terminal_input.clear();
+                                match process_terminal_command(&cmd, &terminal_address) {
+                                    TerminalCmd::Navigate(addr) => {
+                                        terminal_address = addr;
+                                        refresh!();
+                                    }
+                                    TerminalCmd::OpenCompose => {
+                                        terminal_active = false;
+                                        terminal_input.clear();
+                                        let author = multiplayer.peer_id().to_string();
+                                        compose = Some(ComposeScreen::new(
+                                            &context, &window,
+                                            metaverse_core::meshsite::Section::Forums,
+                                            author,
+                                        ));
+                                        window.set_cursor_visible(true);
+                                        let _ = window.set_cursor_grab(
+                                            winit::window::CursorGrabMode::None);
+                                    }
+                                    TerminalCmd::Close => {
+                                        terminal_active = false;
+                                        let key_type = identity.load_key_record()
+                                            .map(|kr| kr.effective_key_type());
+                                        let content = multiplayer.get_content(
+                                            addr_section(&terminal_address));
+                                        render_page(&terminal_address, key_type, content,
+                                                    &mut worldnet_buf);
+                                        terminal_screen.update(&context.queue, &worldnet_buf);
+                                        let _ = window.set_cursor_grab(
+                                            winit::window::CursorGrabMode::Locked);
+                                        window.set_cursor_visible(false);
+                                        cursor_grabbed = true;
+                                    }
+                                    TerminalCmd::Refresh => {
+                                        refresh!();
+                                    }
+                                }
+                            }
+                            // Backspace — delete last char
+                            PhysicalKey::Code(KeyCode::Backspace) => {
+                                terminal_input.pop();
+                                refresh!();
+                            }
+                            // Any printable character
+                            _ => {
+                                if let Some(text) = &event.text {
+                                    for ch in text.chars() {
+                                        if !ch.is_control() && terminal_input.len() < 60 {
+                                            terminal_input.push(ch);
+                                        }
+                                    }
+                                    refresh!();
+                                }
+                            }
+                        }
+                        return;
+                    }
                     if event.state == ElementState::Pressed {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
@@ -1852,7 +1948,9 @@ fn main() {
                                     }
                                 }
                                 KeyCode::KeyE => {
-                                    use metaverse_core::worldnet::{WorldnetAddress, render_page};
+                                    use metaverse_core::worldnet::{
+                                        WorldnetAddress, render_page, render_terminal_prompt, addr_section,
+                                    };
                                     if let Some(idx) = hud_near_module {
                                         // Module room: open compose screen for content rooms (2-5)
                                         const MODULE_SECTIONS: [Option<metaverse_core::meshsite::Section>; 6] = [
@@ -1869,26 +1967,19 @@ fn main() {
                                             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         }
                                     } else if hud_near_terminal {
-                                        // Terminal: cycle through WORLDNET pages and update screen
-                                        terminal_address = match &terminal_address {
-                                            WorldnetAddress::Root       => WorldnetAddress::Forums,
-                                            WorldnetAddress::Forums     => WorldnetAddress::Wiki,
-                                            WorldnetAddress::Wiki       => WorldnetAddress::Marketplace,
-                                            WorldnetAddress::Marketplace => WorldnetAddress::Settings,
-                                            _                           => WorldnetAddress::Root,
-                                        };
+                                        // Activate terminal — release cursor, show prompt
+                                        terminal_active = true;
+                                        terminal_input.clear();
                                         let key_type = identity.load_key_record()
                                             .map(|kr| kr.effective_key_type());
-                                        let section_str = match &terminal_address {
-                                            WorldnetAddress::Forums      => "forums",
-                                            WorldnetAddress::Wiki        => "wiki",
-                                            WorldnetAddress::Marketplace => "marketplace",
-                                            _ => "",
-                                        };
-                                        let content = multiplayer.get_content(section_str);
+                                        let content = multiplayer.get_content(addr_section(&terminal_address));
                                         render_page(&terminal_address, key_type, content, &mut worldnet_buf);
+                                        render_terminal_prompt(&terminal_input, &mut worldnet_buf);
                                         terminal_screen.update(&context.queue, &worldnet_buf);
-                                        println!("🖥️  WORLDNET: {}", terminal_address.to_string());
+                                        window.set_cursor_visible(true);
+                                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                        cursor_grabbed = false;
+                                        println!("🖥️  WORLDNET terminal active — type commands, ESC to exit");
                                     }
                                 }
                                 // P — open in-game object placement overlay

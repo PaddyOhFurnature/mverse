@@ -278,6 +278,9 @@ pub fn render_page(
         | WorldnetAddress::AdminRegions | WorldnetAddress::AdminModeration => {
             render_admin(addr, buf);
         }
+        WorldnetAddress::Custom(s) if s == "help" => {
+            render_help(buf);
+        }
         _ => {
             render_not_found(addr, buf);
         }
@@ -428,4 +431,112 @@ fn render_not_found(addr: &WorldnetAddress, buf: &mut WorldnetPixelBuffer) {
     buf.draw_text("NOT FOUND", 4, 20, 255, 80, 80);
     let s = addr.to_string();
     buf.draw_text(&s, 4, 34, 140, 140, 140);
+}
+
+fn render_help(buf: &mut WorldnetPixelBuffer) {
+    buf.draw_text("COMMANDS", 4, 20, 80, 220, 160);
+    buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
+    let cmds: &[(&str, &str)] = &[
+        ("forums / f",   "Go to forums"),
+        ("wiki / w",     "Go to wiki"),
+        ("market / m",   "Go to marketplace"),
+        ("settings / s", "Identity & settings"),
+        ("admin / a",    "Admin intranet"),
+        ("home",         "Root page"),
+        ("post",         "Compose a new post"),
+        ("who",          "Your identity info"),
+        ("go <path>",    "Navigate to worldnet://path"),
+        ("exit / q",     "Close terminal"),
+    ];
+    let mut y = 40u32;
+    for (cmd, desc) in cmds {
+        buf.draw_text(cmd, 4, y, 100, 200, 255);
+        buf.draw_text(desc, 112, y, 180, 180, 180);
+        y += 12;
+        if y + 12 > buf.height { break; }
+    }
+}
+
+// ── Terminal Input ─────────────────────────────────────────────────────────────
+
+/// Result of processing a typed terminal command.
+#[derive(Debug, Clone)]
+pub enum TerminalCmd {
+    Navigate(WorldnetAddress),
+    OpenCompose,
+    Close,
+    Refresh,
+}
+
+/// Parse a typed command string and return the action to take.
+pub fn process_terminal_command(cmd: &str, _current: &WorldnetAddress) -> TerminalCmd {
+    let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
+    match parts.as_slice() {
+        // Navigation shorthands
+        [] | [""]              => TerminalCmd::Refresh,
+        ["home"] | ["root"]    => TerminalCmd::Navigate(WorldnetAddress::Root),
+        ["forums"] | ["f"]     => TerminalCmd::Navigate(WorldnetAddress::Forums),
+        ["wiki"] | ["w"]       => TerminalCmd::Navigate(WorldnetAddress::Wiki),
+        ["market"] | ["marketplace"] | ["m"]
+                               => TerminalCmd::Navigate(WorldnetAddress::Marketplace),
+        ["settings"] | ["s"]   => TerminalCmd::Navigate(WorldnetAddress::Settings),
+        ["admin"] | ["a"]      => TerminalCmd::Navigate(WorldnetAddress::AdminWorldConfig),
+        ["who"] | ["whoami"] | ["id"]
+                               => TerminalCmd::Navigate(WorldnetAddress::SettingsIdentity),
+        ["help"] | ["?"] | ["h"]
+                               => TerminalCmd::Navigate(WorldnetAddress::Custom("help".into())),
+        ["post"] | ["new"] | ["write"]
+                               => TerminalCmd::OpenCompose,
+        ["exit"] | ["quit"] | ["q"] | ["close"]
+                               => TerminalCmd::Close,
+        // Full address navigation: "go forums/thread/123" or "go worldnet://forums"
+        ["go", path] | ["cd", path] | ["open", path] => {
+            let addr_str = if path.starts_with("worldnet://") {
+                path.to_string()
+            } else {
+                format!("worldnet://{}", path)
+            };
+            TerminalCmd::Navigate(WorldnetAddress::parse(&addr_str))
+        }
+        // Bare path: "forums/thread/abc"
+        [path] => {
+            let addr_str = if path.starts_with("worldnet://") {
+                path.to_string()
+            } else {
+                format!("worldnet://{}", path)
+            };
+            TerminalCmd::Navigate(WorldnetAddress::parse(&addr_str))
+        }
+        _ => TerminalCmd::Refresh,
+    }
+}
+
+/// Draw the active command prompt at the bottom of the pixel buffer.
+/// Call this AFTER render_page() to overlay the prompt on top.
+pub fn render_terminal_prompt(input: &str, buf: &mut WorldnetPixelBuffer) {
+    let y = buf.height.saturating_sub(20);
+    // Divider line
+    buf.fill_rect(0, y, buf.width, 1, 40, 120, 80);
+    // Prompt background
+    buf.fill_rect(0, y + 1, buf.width, 19, 6, 8, 14);
+    // Prompt symbol
+    buf.draw_text(">", 4, y + 6, 60, 200, 120);
+    // Input text (cap display at buffer width)
+    let display: String = input.chars().rev().take(((buf.width - 20) / 9) as usize).collect::<String>().chars().rev().collect();
+    buf.draw_text(&display, 16, y + 6, 240, 240, 240);
+    // Block cursor at end of input
+    let cursor_x = 16 + (display.len() as u32) * 9;
+    if cursor_x + 8 < buf.width {
+        buf.fill_rect(cursor_x, y + 5, 7, 10, 60, 200, 120);
+    }
+}
+
+/// Helper: return the content-section key for a given address.
+pub fn addr_section(addr: &WorldnetAddress) -> &'static str {
+    match addr {
+        WorldnetAddress::Forums | WorldnetAddress::ForumThread(_) => "forums",
+        WorldnetAddress::Wiki   | WorldnetAddress::WikiPage(_)    => "wiki",
+        WorldnetAddress::Marketplace                               => "marketplace",
+        _                                                          => "",
+    }
 }
