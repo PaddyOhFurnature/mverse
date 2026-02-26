@@ -141,7 +141,6 @@ struct SignupScreen {
 impl SignupScreen {
     fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
         let egui_ctx = egui::Context::default();
-        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui_ctx.viewport_id(),
@@ -419,7 +418,6 @@ impl ComposeScreen {
         author: String,
     ) -> Self {
         let egui_ctx = egui::Context::default();
-        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
@@ -588,7 +586,6 @@ impl PlacementScreen {
         placed_by: String,
     ) -> Self {
         let egui_ctx = egui::Context::default();
-        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
@@ -755,7 +752,6 @@ struct DebugHud {
 impl DebugHud {
     fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
         let egui_ctx = egui::Context::default();
-        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
@@ -883,12 +879,15 @@ impl DebugHud {
 
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            // Full-screen solid backdrop — CentralPanel is always drawn first,
-            // covering the entire viewport before the Window floats on top.
-            egui::CentralPanel::default()
-                .frame(egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 215)))
-                .show(ctx, |_ui| {});
+            // Dim backdrop — same approach as SignupScreen which works
+            egui::Area::new(egui::Id::new("module_backdrop"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(
+                        ctx.screen_rect(), 0.0,
+                        egui::Color32::from_black_alpha(210),
+                    );
+                });
 
             let sc = module.screen_colour;
             let accent = egui::Color32::from_rgb(
@@ -900,16 +899,11 @@ impl DebugHud {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([680.0, 520.0])
-                .frame(egui::Frame::window(&ctx.style())
-                    .fill(egui::Color32::from_rgb(22, 24, 30))
-                    .stroke(egui::Stroke::new(1.5, accent)))
                 .show(ctx, |ui| {
-                    // All text inside this window: bright white on dark background
-                    ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
                     // Module path breadcrumb
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("/construct/{}", module.slug))
-                            .color(egui::Color32::GRAY).monospace().size(11.0));
+                            .color(accent).monospace().size(11.0));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("✕  ESC").clicked() {
                                 wants_exit = true;
