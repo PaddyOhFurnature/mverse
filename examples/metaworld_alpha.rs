@@ -558,6 +558,191 @@ enum ComposeResult {
     Cancel,
 }
 
+// ── In-game object placement overlay ─────────────────────────────────────────
+// Press P to open. Shows a small centered panel to pick type and content key,
+// then POSTs to the server API at the player's current look-ahead position.
+
+struct PlacementScreen {
+    egui_ctx:      egui::Context,
+    egui_state:    egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    obj_type:      String,
+    content_key:   String,
+    label:         String,
+    /// World position where the object will be placed (set on open).
+    position:      [f32; 3],
+    /// Player yaw at time of open — object faces toward player.
+    rotation_y:    f32,
+    placed_by:     String,
+    status:        Option<String>,
+}
+
+impl PlacementScreen {
+    fn new(
+        context: &RenderContext,
+        window: &winit::window::Window,
+        position: [f32; 3],
+        rotation_y: f32,
+        placed_by: String,
+    ) -> Self {
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(), egui_ctx.viewport_id(), window,
+            Some(window.scale_factor() as f32), None, None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &context.device, context.config.format, None, 1, false,
+        );
+        Self {
+            egui_ctx, egui_state, egui_renderer,
+            obj_type: "Billboard".to_string(),
+            content_key: "forums".to_string(),
+            label: String::new(),
+            position, rotation_y, placed_by,
+            status: None,
+        }
+    }
+
+    fn on_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
+        self.egui_state.on_window_event(window, event).consumed
+    }
+
+    /// Returns `true` when the overlay should close (submitted or cancelled).
+    fn render(
+        &mut self,
+        context: &RenderContext,
+        view: &wgpu::TextureView,
+        window: &winit::window::Window,
+        server_url: &str,
+    ) -> bool {
+        let raw_input = self.egui_state.take_egui_input(window);
+        let mut close = false;
+
+        let obj_type    = &mut self.obj_type;
+        let content_key = &mut self.content_key;
+        let label       = &mut self.label;
+        let status      = &mut self.status;
+        let position    = self.position;
+        let rotation_y  = self.rotation_y;
+        let placed_by   = self.placed_by.clone();
+        let server      = server_url.to_string();
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Area::new(egui::Id::new("place_backdrop"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(ctx.screen_rect(), 0.0,
+                        egui::Color32::from_black_alpha(160));
+                });
+
+            egui::Window::new("📌  Place Object")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .fixed_size([360.0, 240.0])
+                .show(ctx, |ui| {
+                    let accent = egui::Color32::from_rgb(0, 200, 160);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Type:");
+                        for t in ["Billboard", "Terminal", "Kiosk", "Portal", "SpawnPoint"] {
+                            let sel = obj_type.as_str() == t;
+                            if ui.selectable_label(sel, t).clicked() { *obj_type = t.to_string(); }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Content key:");
+                        ui.text_edit_singleline(content_key);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Label (opt):");
+                        ui.text_edit_singleline(label);
+                    });
+                    ui.add_space(4.0);
+                    ui.colored_label(egui::Color32::GRAY, format!(
+                        "Position: ({:.1}, {:.1}, {:.1})", position[0], position[1], position[2]));
+                    ui.add_space(8.0);
+
+                    if let Some(s) = status.as_deref() {
+                        ui.colored_label(if s.starts_with("✓") { accent } else { egui::Color32::RED }, s);
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Place").clicked() && !content_key.is_empty() {
+                            // Fire-and-forget POST
+                            let body = serde_json::json!({
+                                "id": "",
+                                "object_type": *obj_type,
+                                "position": position,
+                                "rotation_y": rotation_y,
+                                "scale": 1.0,
+                                "content_key": *content_key,
+                                "label": if label.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(label.clone()) },
+                                "placed_by": placed_by,
+                                "placed_at": 0u64,
+                            });
+                            let url = format!("{}/api/v1/world/objects", server);
+                            let body_str = body.to_string();
+                            std::thread::spawn(move || {
+                                // blocking reqwest in a thread — simple and sufficient
+                                let _ = reqwest::blocking::Client::new()
+                                    .post(&url)
+                                    .header("Content-Type","application/json")
+                                    .body(body_str)
+                                    .timeout(std::time::Duration::from_secs(5))
+                                    .send();
+                            });
+                            *status = Some("✓ Placed — syncing to DHT…".to_string());
+                            // close next frame
+                        }
+                        if ui.button("Cancel").clicked() || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            close = true;
+                        }
+                    });
+
+                    // Auto-close after confirmed placement
+                    if status.as_deref().map(|s| s.starts_with('✓')).unwrap_or(false) {
+                        close = true;
+                    }
+                });
+        });
+
+        // Render egui into the frame
+        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
+        }
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [context.config.width, context.config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let mut encoder = context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("placement_overlay") });
+        self.egui_renderer.update_buffers(&context.device, &context.queue, &mut encoder, &tris, &screen);
+        {
+            let rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("placement_overlay_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            let mut rp = rp.forget_lifetime();
+            self.egui_renderer.render(&mut rp, &tris, &screen);
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+        for id in &full_output.textures_delta.free { self.egui_renderer.free_texture(id); }
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+
+        close
+    }
+}
+
 struct DebugHud {
     egui_ctx:      egui::Context,
     egui_state:    egui_winit::State,
@@ -941,6 +1126,11 @@ fn main() {
     // Detect first run before creating/loading the identity.
     // --temp-identity flag skips signup (used for multi-instance testing).
     let is_temp = std::env::args().any(|arg| arg == "--temp-identity");
+    // --server http://192.168.1.x:8080  — server base URL for world object API
+    let server_url: String = std::env::args()
+        .skip_while(|a| a != "--server")
+        .nth(1)
+        .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
     let needs_signup = !is_temp && !Identity::key_file_exists();
 
     // Check for --temp-identity flag for testing multiple instances
@@ -1029,6 +1219,7 @@ fn main() {
 
     // In-game compose screen (None when not composing)
     let mut compose: Option<ComposeScreen> = None;
+    let mut placement: Option<PlacementScreen> = None;
 
     // Always start in the Construct; player enters Open World through the portal.
     let mut game_mode = GameMode::Construct;
@@ -1405,6 +1596,9 @@ fn main() {
                 if let Some(ref mut c) = compose {
                     c.on_event(&window, event);
                 }
+                if let Some(ref mut p) = placement {
+                    p.on_event(&window, event);
+                }
                 // HUD always needs events for egui input tracking
                 hud.on_event(&window, event);
             }
@@ -1465,6 +1659,16 @@ fn main() {
                 WindowEvent::KeyboardInput { event, .. } => {
                     // Block game input while the signup or compose screen is visible
                     if signup.is_some() { return; }
+                    if placement.is_some() {
+                        if event.state == ElementState::Pressed {
+                            if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
+                                placement = None;
+                                window.set_cursor_visible(false);
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                            }
+                        }
+                        return;
+                    }
                     if compose.is_some() {
                         // ESC closes compose without posting
                         if event.state == ElementState::Pressed {
@@ -1558,6 +1762,25 @@ fn main() {
                                     } else if matches!(game_mode, GameMode::Construct) {
                                         // signup terminal handled by auto-trigger above
                                     }
+                                }
+                                // P — open in-game object placement overlay
+                                KeyCode::KeyP => {
+                                    // Place object 3m ahead of player in look direction
+                                    let ploc = physics.ecef_to_local(&player.position);
+                                    let yaw = player.camera_yaw;
+                                    let pos = [
+                                        ploc.x as f32 + yaw.sin() * 3.0,
+                                        ploc.y as f32,
+                                        ploc.z as f32 + yaw.cos() * 3.0,
+                                    ];
+                                    // Object faces back toward player
+                                    let rot = yaw + std::f32::consts::PI;
+                                    let author = multiplayer.peer_id().to_string();
+                                    placement = Some(PlacementScreen::new(
+                                        &context, &window, pos, rot, author,
+                                    ));
+                                    window.set_cursor_visible(true);
+                                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                 }
                                 // Q/E no longer dig/place — use mouse buttons
                                 _ => {}
@@ -2595,6 +2818,19 @@ fn main() {
                                         cursor_grabbed = true;
                                     }
                                     ComposeResult::Continue => {}
+                                }
+                            }
+
+                            // Placement overlay — shown after compose, before HUD
+                            if let Some(ref mut p) = placement {
+                                let done = p.render(&context, &view, &window, &server_url);
+                                if done {
+                                    placement = None;
+                                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                    window.set_cursor_visible(false);
+                                    cursor_grabbed = true;
+                                    // Trigger world objects refresh next frame
+                                    last_world_obj_chunk = None;
                                 }
                             }
 

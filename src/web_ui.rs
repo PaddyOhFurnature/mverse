@@ -369,37 +369,19 @@ ${items.map(it=>`<tr>
 
 function pgObjects(data){
   const objs=Array.isArray(data)?data:(data.objects||[]);
-  async function del(id){if(!confirm('Delete object '+id+'?'))return;await fetch('/api/v1/world/objects/'+id,{method:'DELETE'});go('objects',null);}
-  async function place(e){
-    e.preventDefault();
-    const f=e.target;
-    const body={object_type:f.otype.value,pos_x:+f.px.value,pos_y:+f.py.value,pos_z:+f.pz.value,rotation_y:+f.ry.value,scale:+f.sc.value,content_key:f.ck.value,label:f.lbl.value,placed_by:'admin'};
-    const r=await fetch('/api/v1/world/objects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(r.ok){f.reset();go('objects',null);}else{alert('Failed: '+(await r.text()));}
-  }
-  const tbl=objs.length?`<table><thead><tr><th>ID</th><th>Type</th><th>Position</th><th>Content Key</th><th>Label</th><th></th></tr></thead><tbody>
+  async function del(id){if(!confirm('Remove object '+id+' from registry?'))return;await fetch('/api/v1/world/objects/'+id,{method:'DELETE'});go('objects',null);}
+  const tbl=objs.length?`<table><thead><tr><th>ID</th><th>Type</th><th>Position (x,y,z)</th><th>Content Key</th><th>Label</th><th>Placed By</th><th></th></tr></thead><tbody>
 ${objs.map(o=>`<tr>
   <td title="${o.id}">${o.id.slice(0,8)}…</td>
   <td>${o.object_type||'—'}</td>
   <td>${(o.pos_x||0).toFixed(1)}, ${(o.pos_y||0).toFixed(1)}, ${(o.pos_z||0).toFixed(1)}</td>
   <td>${o.content_key||'—'}</td>
   <td>${o.label||'—'}</td>
+  <td>${o.placed_by||'—'}</td>
   <td><button onclick="(${del})('${o.id}')">✕</button></td>
 </tr>`).join('')}
-</tbody></table>`:'<span class="empty">No objects placed yet.</span>';
-  return `<div class="sec">${tbl}</div>
-<div class="sec"><div class="card-title">Place New Object</div>
-<form onsubmit="(${place})(event)" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;max-width:600px">
-  <label>Type<select name="otype"><option>Billboard</option><option>Terminal</option><option>Kiosk</option><option>Portal</option><option>SpawnPoint</option></select></label>
-  <label>X<input name="px" type="number" step="0.1" value="0" required></label>
-  <label>Y<input name="py" type="number" step="0.1" value="0" required></label>
-  <label>Z<input name="pz" type="number" step="0.1" value="0" required></label>
-  <label>Rotation Y (rad)<input name="ry" type="number" step="0.01" value="0"></label>
-  <label>Scale<input name="sc" type="number" step="0.1" value="1.0" required></label>
-  <label>Content Key<input name="ck" type="text" placeholder="forums" required></label>
-  <label>Label<input name="lbl" type="text" placeholder="My Billboard"></label>
-  <div style="grid-column:1/-1"><button type="submit">Place Object</button></div>
-</form></div>`;
+</tbody></table>`:'<span class="empty">No objects placed in world yet. Objects are placed in-game.</span>';
+  return `<div class="sec">${tbl}</div>`;
 }
 
 function pgConfig(cfg){
