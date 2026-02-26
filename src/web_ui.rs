@@ -168,6 +168,7 @@ pre{color:var(--dim);font-size:.8em;overflow:auto;max-height:55vh;white-space:pr
     <a id="nav-world"   style="display:none" onclick="go('world',this)"><span class="ic">◈</span>World</a>
     <a id="nav-keys"    style="display:none" onclick="go('keys',this)"><span class="ic">⚿</span>Keys</a>
     <a id="nav-content" style="display:none" onclick="go('content',this)"><span class="ic">≡</span>Content</a>
+    <a id="nav-objects" onclick="go('objects',this)"><span class="ic">📌</span>Objects</a>
     <a onclick="go('config',this)"><span class="ic">⚙</span>Config</a>
   </nav>
   <div class="node-meta">
@@ -186,7 +187,7 @@ pre{color:var(--dim);font-size:.8em;overflow:auto;max-height:55vh;white-space:pr
 </main>
 <script>
 const S={page:'overview',data:null,timer:null};
-const TITLES={overview:'Overview',peers:'Peers',network:'Network',world:'World',keys:'Keys',content:'Content',config:'Config'};
+const TITLES={overview:'Overview',peers:'Peers',network:'Network',world:'World',keys:'Keys',content:'Content',objects:'Objects',config:'Config'};
 
 function fmt(v){return v==null||v===undefined?'—':v}
 function fmtB(b){b=b||0;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(2)+' GB'}
@@ -243,6 +244,7 @@ function render(p,d){
   else if(p==='config')  fetchPage('/api/config',el,raw=>pgConfig(raw));
   else if(p==='keys')    fetchPage('/api/keys',el,data=>pgKeys(data));
   else if(p==='content') fetchPage('/api/v1/content',el,data=>pgContent(data));
+  else if(p==='objects') fetchPage('/api/v1/world/objects',el,data=>pgObjects(data));
 }
 
 async function fetchPage(url,el,fn){
@@ -363,6 +365,41 @@ ${items.map(it=>`<tr>
   <td>${it.created_at?new Date(it.created_at).toLocaleString():'—'}</td>
 </tr>`).join('')}
 </tbody></table></div>`;
+}
+
+function pgObjects(data){
+  const objs=Array.isArray(data)?data:(data.objects||[]);
+  async function del(id){if(!confirm('Delete object '+id+'?'))return;await fetch('/api/v1/world/objects/'+id,{method:'DELETE'});go('objects',null);}
+  async function place(e){
+    e.preventDefault();
+    const f=e.target;
+    const body={object_type:f.otype.value,pos_x:+f.px.value,pos_y:+f.py.value,pos_z:+f.pz.value,rotation_y:+f.ry.value,scale:+f.sc.value,content_key:f.ck.value,label:f.lbl.value,placed_by:'admin'};
+    const r=await fetch('/api/v1/world/objects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(r.ok){f.reset();go('objects',null);}else{alert('Failed: '+(await r.text()));}
+  }
+  const tbl=objs.length?`<table><thead><tr><th>ID</th><th>Type</th><th>Position</th><th>Content Key</th><th>Label</th><th></th></tr></thead><tbody>
+${objs.map(o=>`<tr>
+  <td title="${o.id}">${o.id.slice(0,8)}…</td>
+  <td>${o.object_type||'—'}</td>
+  <td>${(o.pos_x||0).toFixed(1)}, ${(o.pos_y||0).toFixed(1)}, ${(o.pos_z||0).toFixed(1)}</td>
+  <td>${o.content_key||'—'}</td>
+  <td>${o.label||'—'}</td>
+  <td><button onclick="(${del})('${o.id}')">✕</button></td>
+</tr>`).join('')}
+</tbody></table>`:'<span class="empty">No objects placed yet.</span>';
+  return `<div class="sec">${tbl}</div>
+<div class="sec"><div class="card-title">Place New Object</div>
+<form onsubmit="(${place})(event)" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;max-width:600px">
+  <label>Type<select name="otype"><option>Billboard</option><option>Terminal</option><option>Kiosk</option><option>Portal</option><option>SpawnPoint</option></select></label>
+  <label>X<input name="px" type="number" step="0.1" value="0" required></label>
+  <label>Y<input name="py" type="number" step="0.1" value="0" required></label>
+  <label>Z<input name="pz" type="number" step="0.1" value="0" required></label>
+  <label>Rotation Y (rad)<input name="ry" type="number" step="0.01" value="0"></label>
+  <label>Scale<input name="sc" type="number" step="0.1" value="1.0" required></label>
+  <label>Content Key<input name="ck" type="text" placeholder="forums" required></label>
+  <label>Label<input name="lbl" type="text" placeholder="My Billboard"></label>
+  <div style="grid-column:1/-1"><button type="submit">Place Object</button></div>
+</form></div>`;
 }
 
 function pgConfig(cfg){

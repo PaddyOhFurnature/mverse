@@ -246,6 +246,10 @@ pub struct MultiplayerSystem {
     /// Keyed by section name, newest-first. Max 200 items per section (simple LRU).
     pub content_cache: std::collections::HashMap<String, Vec<crate::meshsite::ContentItem>>,
 
+    /// Local cache of placed world objects, keyed by chunk (cx, cz).
+    /// Populated from DHT `GetRecord("world/chunk/{cx}/{cz}")` responses.
+    pub world_objects_cache: std::collections::HashMap<(i32, i32), Vec<crate::world_objects::PlacedObject>>,
+
     /// Statistics
     stats: MultiplayerStats,
 }
@@ -340,6 +344,7 @@ impl MultiplayerSystem {
             full_state_broadcasts: 0,
             pending_revocations: Vec::new(),
             content_cache: std::collections::HashMap::new(),
+            world_objects_cache: std::collections::HashMap::new(),
             stats: MultiplayerStats::default(),
         })
     }
@@ -843,8 +848,19 @@ impl MultiplayerSystem {
                                 Err(e)    => eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e),
                             }
                         }
-                        Err(e) => {
-                            eprintln!("🔑 [DHT] Failed to deserialize DHT record ({} bytes): {}", value.len(), e);
+                        Err(_) => {
+                            // Not a KeyRecord — try as a world chunk object list
+                            if let Some(chunk_list) = crate::world_objects::ChunkObjectList::from_bytes(&value) {
+                                let count = chunk_list.objects.len();
+                                self.world_objects_cache.insert(
+                                    (chunk_list.cx, chunk_list.cz),
+                                    chunk_list.objects,
+                                );
+                                if count > 0 {
+                                    println!("🗺️  [DHT] Loaded {} world objects for chunk ({},{})",
+                                        count, chunk_list.cx, chunk_list.cz);
+                                }
+                            }
                         }
                     }
                 }
@@ -1548,6 +1564,37 @@ impl MultiplayerSystem {
     /// Return cached content for a section, newest-first.
     pub fn get_content(&self, section: &str) -> &[crate::meshsite::ContentItem] {
         self.content_cache.get(section).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    // ── World placed objects ──────────────────────────────────────────────────
+
+    /// Request world objects for a chunk from the DHT.
+    ///
+    /// Results arrive asynchronously as a `DhtRecordFound` event and are stored
+    /// in `world_objects_cache`.  Call [`get_world_objects`] after the next
+    /// [`update`] call to read them.
+    pub fn fetch_world_objects_for_chunk(&self, cx: i32, cz: i32) {
+        let key = crate::world_objects::chunk_dht_key(cx, cz);
+        let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
+    }
+
+    /// Request world objects for all chunks within `radius_chunks` of (cx, cz).
+    pub fn fetch_world_objects_for_area(&self, cx: i32, cz: i32, radius_chunks: i32) {
+        for dx in -radius_chunks..=radius_chunks {
+            for dz in -radius_chunks..=radius_chunks {
+                self.fetch_world_objects_for_chunk(cx + dx, cz + dz);
+            }
+        }
+    }
+
+    /// Return cached placed objects for a chunk (if available).
+    pub fn get_world_objects(&self, cx: i32, cz: i32) -> &[crate::world_objects::PlacedObject] {
+        self.world_objects_cache.get(&(cx, cz)).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// Return all cached placed objects across all loaded chunks.
+    pub fn all_world_objects(&self) -> impl Iterator<Item = &crate::world_objects::PlacedObject> {
+        self.world_objects_cache.values().flat_map(|v| v.iter())
     }
 
     /// Handle an incoming meshsite content message from gossipsub.

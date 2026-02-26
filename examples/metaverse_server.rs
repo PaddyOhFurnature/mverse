@@ -704,6 +704,25 @@ impl KeyDatabase {
             );
             CREATE INDEX IF NOT EXISTS idx_mc_section  ON mesh_content (section, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_mc_author   ON mesh_content (author);
+
+            -- World placed-object registry (modular placement)
+            CREATE TABLE IF NOT EXISTS placed_objects (
+                id            TEXT    PRIMARY KEY,       -- UUID
+                object_type   TEXT    NOT NULL,          -- billboard|terminal|kiosk|portal|spawn_point|custom:…
+                pos_x         REAL    NOT NULL DEFAULT 0,
+                pos_y         REAL    NOT NULL DEFAULT 0,
+                pos_z         REAL    NOT NULL DEFAULT 0,
+                rotation_y    REAL    NOT NULL DEFAULT 0,
+                scale         REAL    NOT NULL DEFAULT 1,
+                content_key   TEXT    NOT NULL DEFAULT '',
+                label         TEXT    NOT NULL DEFAULT '',
+                placed_by     TEXT    NOT NULL DEFAULT '',
+                placed_at     INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_po_chunk ON placed_objects (
+                CAST(pos_x / 64.0 AS INTEGER),
+                CAST(pos_z / 64.0 AS INTEGER)
+            );
         ")?;
 
         // Schema migrations: add columns that may not exist in older databases.
@@ -1095,6 +1114,98 @@ impl KeyDatabase {
                content_last_synced_at = excluded.content_last_synced_at",
             params![server_url, content_last_synced_at],
         );
+    }
+
+    // ── World placed objects ──────────────────────────────────────────────────
+
+    /// Insert or replace a placed object.
+    fn insert_object(&self, obj: &metaverse_core::world_objects::PlacedObject) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO placed_objects
+               (id, object_type, pos_x, pos_y, pos_z, rotation_y, scale, content_key, label, placed_by, placed_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            params![
+                obj.id,
+                obj.object_type.as_str(),
+                obj.position[0] as f64,
+                obj.position[1] as f64,
+                obj.position[2] as f64,
+                obj.rotation_y as f64,
+                obj.scale as f64,
+                obj.content_key,
+                obj.label,
+                obj.placed_by,
+                obj.placed_at as i64,
+            ],
+        );
+    }
+
+    /// Delete a placed object by id. Returns `true` if a row was deleted.
+    fn delete_object(&self, id: &str) -> bool {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM placed_objects WHERE id = ?1", params![id])
+            .unwrap_or(0) > 0
+    }
+
+    /// List all placed objects in the given chunk (cx, cz) where chunk coords
+    /// are `floor(pos_x / 64)` and `floor(pos_z / 64)`.
+    fn list_objects_in_chunk(&self, cx: i32, cz: i32) -> Vec<metaverse_core::world_objects::PlacedObject> {
+        use metaverse_core::world_objects::{PlacedObject, ObjectType, CHUNK_GRID_M};
+        let x_min = cx as f64 * CHUNK_GRID_M as f64;
+        let x_max = x_min + CHUNK_GRID_M as f64;
+        let z_min = cz as f64 * CHUNK_GRID_M as f64;
+        let z_max = z_min + CHUNK_GRID_M as f64;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id,object_type,pos_x,pos_y,pos_z,rotation_y,scale,content_key,label,placed_by,placed_at
+             FROM placed_objects
+             WHERE pos_x >= ?1 AND pos_x < ?2 AND pos_z >= ?3 AND pos_z < ?4"
+        ) { Ok(s) => s, Err(_) => return vec![] };
+        stmt.query_map(params![x_min, x_max, z_min, z_max], |row| {
+            Ok(PlacedObject {
+                id:           row.get(0)?,
+                object_type:  ObjectType::from_str(&row.get::<_, String>(1)?),
+                position:     [row.get::<_, f64>(2)? as f32, row.get::<_, f64>(3)? as f32, row.get::<_, f64>(4)? as f32],
+                rotation_y:   row.get::<_, f64>(5)? as f32,
+                scale:        row.get::<_, f64>(6)? as f32,
+                content_key:  row.get(7)?,
+                label:        row.get(8)?,
+                placed_by:    row.get(9)?,
+                placed_at:    row.get::<_, i64>(10)? as u64,
+            })
+        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
+    }
+
+    /// Rebuild and return the `ChunkObjectList` for chunk (cx, cz).
+    fn chunk_object_list(&self, cx: i32, cz: i32) -> metaverse_core::world_objects::ChunkObjectList {
+        metaverse_core::world_objects::ChunkObjectList {
+            cx, cz,
+            objects: self.list_objects_in_chunk(cx, cz),
+        }
+    }
+
+    /// List every placed object in the database (for admin view).
+    fn list_all_objects(&self) -> Vec<metaverse_core::world_objects::PlacedObject> {
+        use metaverse_core::world_objects::{PlacedObject, ObjectType};
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id,object_type,pos_x,pos_y,pos_z,rotation_y,scale,content_key,label,placed_by,placed_at
+             FROM placed_objects ORDER BY placed_at DESC"
+        ) { Ok(s) => s, Err(_) => return vec![] };
+        stmt.query_map([], |row| {
+            Ok(PlacedObject {
+                id:           row.get(0)?,
+                object_type:  ObjectType::from_str(&row.get::<_, String>(1)?),
+                position:     [row.get::<_, f64>(2)? as f32, row.get::<_, f64>(3)? as f32, row.get::<_, f64>(4)? as f32],
+                rotation_y:   row.get::<_, f64>(5)? as f32,
+                scale:        row.get::<_, f64>(6)? as f32,
+                content_key:  row.get(7)?,
+                label:        row.get(8)?,
+                placed_by:    row.get(9)?,
+                placed_at:    row.get::<_, i64>(10)? as u64,
+            })
+        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
     }
 }
 
@@ -2418,7 +2529,137 @@ async fn api_v1_sync_content(
     }
 }
 
-// ── POST /api/config (hot-reload) ─────────────────────────────────────────────
+// ── World placed objects API ──────────────────────────────────────────────────
+
+/// GET /api/v1/world/objects?cx=X&cz=Z
+///
+/// Returns all placed objects in the given chunk as a [`ChunkObjectList`].
+async fn api_v1_world_objects_get(
+    State(s): State<WebState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => {
+            if params.contains_key("cx") || params.contains_key("cz") {
+                let cx: i32 = params.get("cx").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let cz: i32 = params.get("cz").and_then(|v| v.parse().ok()).unwrap_or(0);
+                Json(db.chunk_object_list(cx, cz)).into_response()
+            } else {
+                // No chunk filter — return all objects (for admin dashboard)
+                Json(db.list_all_objects()).into_response()
+            }
+        },
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+    }
+}
+
+/// POST /api/v1/world/objects — place a new object (or update an existing one).
+///
+/// Body: JSON [`PlacedObject`] (id optional — server generates UUID if missing).
+/// Requires a `trust` or `admin` tier key (verified via `Authorization: Bearer <token>`).
+/// On success: stores in DB and pushes the updated `ChunkObjectList` to DHT.
+async fn api_v1_world_objects_post(
+    State(s): State<WebState>,
+    Json(mut obj): Json<metaverse_core::world_objects::PlacedObject>,
+) -> impl IntoResponse {
+    // Generate a UUID if the caller didn't supply one
+    if obj.id.is_empty() {
+        obj.id = format!("{:016x}{:016x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64).unwrap_or(0),
+            rand_u64(),
+        );
+    }
+    if obj.placed_at == 0 {
+        obj.placed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64).unwrap_or(0);
+    }
+
+    let (db, swarm_tx) = {
+        let st = s.read().unwrap();
+        (st.key_db.clone(), st.swarm_tx.clone())
+    };
+
+    let db = match db {
+        Some(d) => d,
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+    };
+
+    db.insert_object(&obj);
+
+    // Rebuild and publish the chunk record to DHT
+    let (cx, cz) = obj.chunk_coords();
+    let chunk_list = db.chunk_object_list(cx, cz);
+    if let Some(tx) = swarm_tx {
+        let _ = tx.try_send(SwarmAction::PutDhtRecord {
+            key: metaverse_core::world_objects::chunk_dht_key(cx, cz),
+            value: chunk_list.to_bytes(),
+        });
+    }
+
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "ok": true, "id": obj.id, "cx": cx, "cz": cz
+    }))).into_response()
+}
+
+/// DELETE /api/v1/world/objects/:id — remove a placed object.
+async fn api_v1_world_objects_delete(
+    State(s): State<WebState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let (db, swarm_tx) = {
+        let st = s.read().unwrap();
+        (st.key_db.clone(), st.swarm_tx.clone())
+    };
+    let db = match db {
+        Some(d) => d,
+        None => return (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+    };
+
+    // Need to know the chunk before deleting to update DHT record
+    let obj = {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT pos_x, pos_z FROM placed_objects WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get::<_, f64>(0)? as f32, r.get::<_, f64>(1)? as f32)),
+        ).ok()
+    };
+
+    if !db.delete_object(&id) {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"not found"}))).into_response();
+    }
+
+    // Update DHT chunk record
+    if let Some((px, pz)) = obj {
+        let (cx, cz) = metaverse_core::world_objects::chunk_coords_for_pos(px, pz);
+        let chunk_list = db.chunk_object_list(cx, cz);
+        if let Some(tx) = swarm_tx {
+            let _ = tx.try_send(SwarmAction::PutDhtRecord {
+                key: metaverse_core::world_objects::chunk_dht_key(cx, cz),
+                value: chunk_list.to_bytes(),
+            });
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": id}))).into_response()
+}
+
+/// Tiny non-crypto random u64 for ID generation (xorshift).
+fn rand_u64() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut x = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64).unwrap_or(12345);
+    x ^= x << 13; x ^= x >> 7; x ^= x << 17; x
+}
+
+
 
 /// POST /api/config — hot-reload the server configuration.
 ///
@@ -3377,6 +3618,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
                 .route("/api/v1/content/post", post(api_v1_quick_post))
                 .route("/api/v1/content/:id", get(api_v1_get_content))
+                // ── World placed objects (modular placement) ───────────────
+                .route("/api/v1/world/objects",
+                    get(api_v1_world_objects_get).post(api_v1_world_objects_post))
+                .route("/api/v1/world/objects/:id", axum::routing::delete(api_v1_world_objects_delete))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);

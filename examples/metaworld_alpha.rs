@@ -1013,6 +1013,8 @@ fn main() {
     let billboard_pipeline = BillboardPipeline::new(&context);
     let mut module_billboards: [Option<ModuleBillboards>; 6] = Default::default();
     let mut billboard_frame_counter = 0u32;
+    // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
+    let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
 
     // Always-on debug HUD (top-left overlay)
     let mut hud = DebugHud::new(&context, &window);
@@ -1236,6 +1238,15 @@ fn main() {
         multiplayer.fetch_session_record();
     }
 
+    // Prefetch world objects for the Construct area (chunk around origin) and
+    // the 3×3 neighbourhood so placed billboards/terminals appear immediately.
+    {
+        use metaverse_core::world_objects::chunk_coords_for_pos;
+        let (ox, oz) = chunk_coords_for_pos(0.0, 0.0);
+        multiplayer.fetch_world_objects_for_area(ox, oz, 2);
+        println!("🗺️  Requesting world objects for spawn area chunks…");
+    }
+
     // Load saved player state (position, rotation, mode) - encrypted with identity
     let player_state = PlayerPersistence::load(&world_dir, &identity);
     println!("🧍 Setting up player...");
@@ -1369,6 +1380,9 @@ fn main() {
     
     // Track local voxel operations for CRDT merge
     let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::SignedOperation> = HashMap::new();
+
+    // Track the world-object chunk we last fetched for, to avoid redundant DHT queries.
+    let mut last_world_obj_chunk: Option<(i32, i32)> = None;
 
     // Loading phase: true until enough spawn-area chunks have meshes and collision built.
     // The event loop renders the loading bar while this is true.
@@ -2147,6 +2161,17 @@ fn main() {
                     hud_near_portal   = near_portal;
                     hud_near_terminal = near_signup;
 
+                    // Fetch world objects when the player moves into a new chunk
+                    {
+                        use metaverse_core::world_objects::chunk_coords_for_pos;
+                        let current_chunk = chunk_coords_for_pos(ploc3.x, ploc3.z);
+                        if last_world_obj_chunk != Some(current_chunk) {
+                            last_world_obj_chunk = Some(current_chunk);
+                            let (cx, cz) = current_chunk;
+                            multiplayer.fetch_world_objects_for_area(cx, cz, 2);
+                        }
+                    }
+
                     // Auto-trigger signup overlay if player walks to terminal
                     // and no identity exists yet.
                     if near_signup && signup.is_none() && !Identity::key_file_exists() {
@@ -2400,6 +2425,33 @@ fn main() {
                             }
                         }
                     }
+
+                    // Rebuild placed world-object billboards every 120 frames
+                    if billboard_frame_counter % 120 == 1 {
+                        use metaverse_core::world_objects::ObjectType;
+                        let all_objs: Vec<_> = multiplayer.all_world_objects()
+                            .filter(|o| matches!(o.object_type, ObjectType::Billboard))
+                            .collect();
+                        let current_ids: Vec<String> = all_objs.iter().map(|o| o.id.clone()).collect();
+                        placed_billboards.retain(|(id, _)| current_ids.contains(id));
+                        for obj in &all_objs {
+                            if placed_billboards.iter().any(|(id, _)| id == &obj.id) {
+                                continue;
+                            }
+                            let items = multiplayer.get_content(&obj.content_key);
+                            let section = match obj.content_key.as_str() {
+                                "wiki"        => metaverse_core::meshsite::Section::Wiki,
+                                "marketplace" => metaverse_core::meshsite::Section::Marketplace,
+                                "post"        => metaverse_core::meshsite::Section::Post,
+                                _             => metaverse_core::meshsite::Section::Forums,
+                            };
+                            let mb = ModuleBillboards::build(
+                                &context.device, &context.queue, &billboard_pipeline,
+                                section, items, obj.pos_vec3(), obj.facing_normal(),
+                            );
+                            placed_billboards.push((obj.id.clone(), mb));
+                        }
+                    }
                     
                     match context.surface.get_current_texture() {
                         Ok(frame) => {
@@ -2453,9 +2505,13 @@ fn main() {
                                         }
                                     }
                                 }
-                                
-                                
-                                // Render local player hitbox
+
+                                // Render placed world-object billboards (any game mode)
+                                for (_, mb) in &placed_billboards {
+                                    billboard_pipeline.begin_render(&mut render_pass);
+                                    mb.render(&mut render_pass);
+                                    pipeline.set_pipeline(&mut render_pass);
+                                }
                                 pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);
                                 hitbox_buffer.render(&mut render_pass);
                                 
