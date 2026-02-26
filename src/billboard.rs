@@ -27,17 +27,17 @@ const TEX_H: u32 = 320;
 
 // ── Physical dimensions ───────────────────────────────────────────────────────
 
-/// Billboard width in metres.
-pub const BILLBOARD_W: f32 = 2.8;
-/// Billboard height in metres.
-pub const BILLBOARD_H: f32 = 1.8;
+/// Billboard width in metres — fills most of the 8 m wide room.
+pub const BILLBOARD_W: f32 = 6.5;
+/// Billboard height in metres — comfortable screen proportions.
+pub const BILLBOARD_H: f32 = 4.0;
 /// Gap between adjacent billboards (metres).
 const BB_GAP_H: f32 = 0.28;
 const BB_GAP_V: f32 = 0.22;
 /// Depth of each module room (metres) — used to position the screen wall.
 const ROOM_DEPTH: f32 = 6.0;
-/// Height offset so billboards sit at roughly eye level.
-const EYE_LEVEL_Y: f32 = 1.5;
+/// Height offset so the screen centre sits above eye level.
+const EYE_LEVEL_Y: f32 = 1.8;
 
 // ── Room template ─────────────────────────────────────────────────────────────
 
@@ -63,28 +63,28 @@ impl RoomTemplate {
     pub fn for_section(section: &Section) -> Self {
         match section {
             Section::Forums => Self {
-                cols: 2, rows: 3,
+                cols: 1, rows: 1,
                 bg:     [10, 14, 20, 255],
                 text:   [210, 220, 235, 255],
                 meta:   [90, 105, 130, 255],
                 accent: [88, 166, 255, 255],
             },
             Section::Wiki => Self {
-                cols: 2, rows: 2,
+                cols: 1, rows: 1,
                 bg:     [10, 18, 12, 255],
                 text:   [205, 235, 210, 255],
                 meta:   [80, 115, 85, 255],
                 accent: [72, 200, 100, 255],
             },
             Section::Marketplace => Self {
-                cols: 3, rows: 2,
+                cols: 1, rows: 1,
                 bg:     [20, 12, 26, 255],
                 text:   [230, 218, 242, 255],
                 meta:   [110, 88, 130, 255],
                 accent: [195, 120, 255, 255],
             },
             Section::Post => Self {
-                cols: 2, rows: 2,
+                cols: 1, rows: 1,
                 bg:     [20, 16, 8, 255],
                 text:   [238, 230, 210, 255],
                 meta:   [120, 108, 78, 255],
@@ -539,7 +539,8 @@ fn vs_main(in: VIn) -> VOut {
     var out: VOut;
     // Position is already in world space — model matrix is identity.
     out.clip_pos = camera.view_proj * model.model * vec4<f32>(in.position, 1.0);
-    out.uv = in.uv;
+    // Flip U so the texture reads left-to-right when standing inside the room.
+    out.uv = vec2<f32>(1.0 - in.uv.x, in.uv.y);
     return out;
 }
 

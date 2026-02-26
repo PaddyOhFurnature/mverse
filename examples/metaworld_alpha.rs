@@ -2132,9 +2132,10 @@ fn main() {
                     let near_signup = dist_terminal < INTERACT_RADIUS;
                     let near_portal = dist_portal   < INTERACT_RADIUS;
 
-                    // Detect nearest module door within trigger radius
+                    // Detect nearest module screen wall within interact radius
+                    // Player must be INSIDE the room (near the back wall) to interact.
                     hud_near_module = MODULES.iter().enumerate()
-                        .map(|(i, m)| (i, (m.door_pos() - ploc3).length()))
+                        .map(|(i, m)| (i, (m.screen_wall_pos() - ploc3).length()))
                         .filter(|(_, d)| *d < MODULE_DOOR_RADIUS)
                         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                         .map(|(i, _)| i);

@@ -360,6 +360,12 @@ impl MeshsiteModule {
         self.door_pos() + normal * (CORRIDOR_DEPTH + ROOM_DEPTH * 0.5)
     }
 
+    /// Position at the centre of the screen (back) wall, in front of the surface.
+    pub fn screen_wall_pos(&self) -> Vec3 {
+        let normal = self.outward_normal();
+        self.door_pos() + normal * (CORRIDOR_DEPTH + ROOM_DEPTH - 0.5)
+    }
+
     /// Outward normal from plaza centre toward this room.
     pub fn outward_normal(&self) -> Vec3 {
         match self.side {
