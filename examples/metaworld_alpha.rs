@@ -879,13 +879,13 @@ impl DebugHud {
 
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            // Dim backdrop
+            // Dim backdrop — solid enough to read text
             egui::Area::new(egui::Id::new("module_backdrop"))
                 .fixed_pos(egui::pos2(0.0, 0.0))
                 .show(ctx, |ui| {
                     ui.painter().rect_filled(
                         ctx.screen_rect(), 0.0,
-                        egui::Color32::from_black_alpha(200),
+                        egui::Color32::from_rgba_premultiplied(10, 10, 15, 235),
                     );
                 });
 
@@ -899,6 +899,9 @@ impl DebugHud {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([680.0, 520.0])
+                .frame(egui::Frame::window(&ctx.style())
+                    .fill(egui::Color32::from_rgb(22, 24, 30))
+                    .stroke(egui::Stroke::new(1.0, accent)))
                 .show(ctx, |ui| {
                     // Module path breadcrumb
                     ui.horizontal(|ui| {
@@ -1763,10 +1766,21 @@ fn main() {
                         return;
                     }
                     if compose.is_some() {
-                        // ESC closes compose without posting
                         if event.state == ElementState::Pressed {
                             if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
                                 compose = None;
+                            }
+                        }
+                        return;
+                    }
+                    // Block game input while a module overlay is open; ESC closes it
+                    if matches!(game_mode, GameMode::ConstructModule(_)) {
+                        if event.state == ElementState::Pressed {
+                            if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
+                                game_mode = GameMode::Construct;
+                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                window.set_cursor_visible(false);
+                                cursor_grabbed = true;
                             }
                         }
                         return;
@@ -1775,15 +1789,10 @@ fn main() {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
                                 KeyCode::Escape => {
-                                    // If in a module overlay, ESC exits back to Construct
-                                    if matches!(game_mode, GameMode::ConstructModule(_)) {
-                                        game_mode = GameMode::Construct;
-                                    } else {
-                                        window.set_cursor_visible(true);
-                                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                                        cursor_grabbed = false;
-                                        println!("🖱️  Mouse released");
-                                    }
+                                    window.set_cursor_visible(true);
+                                    let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                    cursor_grabbed = false;
+                                    println!("🖱️  Mouse released");
                                 }
                                 KeyCode::F12 => {
                                     // TODO: Update screenshot to work with multiple chunk meshes
@@ -1851,11 +1860,15 @@ fn main() {
                                             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         } else {
                                             game_mode = GameMode::ConstructModule(idx);
+                                            window.set_cursor_visible(true);
+                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         }
                                     } else if matches!(game_mode, GameMode::Construct) {
                                         // Terminal: open identity/login overlay (module 0)
                                         if hud_near_terminal {
                                             game_mode = GameMode::ConstructModule(0);
+                                            window.set_cursor_visible(true);
+                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         }
                                     }
                                 }
