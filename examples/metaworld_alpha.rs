@@ -879,15 +879,12 @@ impl DebugHud {
 
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            // Dim backdrop — solid enough to read text
-            egui::Area::new(egui::Id::new("module_backdrop"))
-                .fixed_pos(egui::pos2(0.0, 0.0))
-                .show(ctx, |ui| {
-                    ui.painter().rect_filled(
-                        ctx.screen_rect(), 0.0,
-                        egui::Color32::from_rgba_premultiplied(10, 10, 15, 235),
-                    );
-                });
+            // Full-screen solid backdrop — CentralPanel is always drawn first,
+            // covering the entire viewport before the Window floats on top.
+            egui::CentralPanel::default()
+                .frame(egui::Frame::none()
+                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 242)))
+                .show(ctx, |_ui| {});
 
             let sc = module.screen_colour;
             let accent = egui::Color32::from_rgb(
