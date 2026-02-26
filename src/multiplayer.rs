@@ -1566,6 +1566,23 @@ impl MultiplayerSystem {
         self.content_cache.get(section).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Inject content items directly into the cache (e.g. from a server HTTP fetch).
+    /// Deduplicates by id. Existing items are not replaced.
+    pub fn inject_content(&mut self, items: Vec<crate::meshsite::ContentItem>) {
+        for item in items {
+            let section = item.section.as_str().to_string();
+            let cache = self.content_cache.entry(section).or_default();
+            if !cache.iter().any(|c| c.id == item.id) {
+                cache.push(item);
+            }
+        }
+        // Sort each section newest-first
+        for cache in self.content_cache.values_mut() {
+            cache.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            if cache.len() > 200 { cache.truncate(200); }
+        }
+    }
+
     // ── World placed objects ──────────────────────────────────────────────────
 
     /// Request world objects for a chunk from the DHT.

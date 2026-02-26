@@ -867,6 +867,7 @@ impl DebugHud {
         identity: Option<&metaverse_core::identity::Identity>,
         peer_count: usize,
         server_addr: &str,
+        content: &[metaverse_core::meshsite::ContentItem],
     ) -> bool {
         use metaverse_core::construct::MODULES;
         let module = match MODULES.get(module_idx) {
@@ -913,13 +914,9 @@ impl DebugHud {
                     ui.add_space(6.0);
 
                     match module.slug {
-                        "login" => render_module_identity(ui, identity, accent),
+                        "login"  => render_module_identity(ui, identity, accent),
                         "signup" => render_module_signup_info(ui, accent),
-                        "forums" => render_module_coming_soon(ui, module.name, "Threaded public discussion, served from the mesh. Read, post and reply without accounts.", accent),
-                        "wiki"   => render_module_coming_soon(ui, module.name, "Community knowledge base. Every article is a signed document stored in the DHT.", accent),
-                        "market" => render_module_coming_soon(ui, module.name, "Buy, sell and trade items, land parcels and blueprints. Trustless escrow via signed operations.", accent),
-                        "post"   => render_module_coming_soon(ui, module.name, "Async player-to-player messages. Like postal mail, not instant chat. Stored in DHT.", accent),
-                        _ => render_module_coming_soon(ui, module.name, "Coming soon.", accent),
+                        _        => render_module_content(ui, module.name, content, accent),
                     }
 
                     ui.add_space(10.0);
@@ -1071,6 +1068,64 @@ fn render_module_coming_soon(ui: &mut egui::Ui, name: &str, description: &str, a
     ui.label(egui::RichText::new(
         "This room is here, waiting. The infrastructure is live.\nContent arrives when the server speaks.")
         .color(egui::Color32::DARK_GRAY).size(11.0).italics());
+}
+
+fn render_module_content(
+    ui: &mut egui::Ui,
+    name: &str,
+    items: &[metaverse_core::meshsite::ContentItem],
+    accent: egui::Color32,
+) {
+    ui.label(egui::RichText::new(name).color(accent).size(18.0).strong());
+    ui.add_space(6.0);
+
+    if items.is_empty() {
+        ui.separator();
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new("No posts yet.  Be the first — press E at the screen wall to compose.")
+            .color(egui::Color32::GRAY).size(13.0).italics());
+        return;
+    }
+
+    ui.label(egui::RichText::new(format!("{} posts", items.len()))
+        .color(egui::Color32::GRAY).size(11.0));
+    ui.separator();
+    ui.add_space(4.0);
+
+    egui::ScrollArea::vertical()
+        .max_height(360.0)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for item in items.iter().take(50) {
+                let ts = {
+                    let secs = item.created_at / 1000;
+                    let h = (secs / 3600) % 24;
+                    let m = (secs / 60) % 60;
+                    format!("{:02}:{:02}", h, m)
+                };
+                let short_author = if item.author.len() > 16 {
+                    format!("…{}", &item.author[item.author.len()-12..])
+                } else {
+                    item.author.clone()
+                };
+
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(format!("{}  {}  [{}]",
+                        ts, item.title, short_author))
+                    .size(13.0)
+                )
+                .id_salt(&item.id)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&item.body).size(12.0));
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(format!("by {}  •  id: {}",
+                        item.author, &item.id[..8.min(item.id.len())]))
+                        .color(egui::Color32::GRAY).size(10.0).monospace());
+                });
+                ui.add_space(2.0);
+            }
+        });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1438,6 +1493,44 @@ fn main() {
         println!("🗺️  Requesting world objects for spawn area chunks…");
     }
 
+    // Fetch content for all sections from the server so billboards are populated
+    // immediately on first render rather than waiting for gossipsub messages.
+    // The channel carries batches of ContentItems from the background thread.
+    let (content_inbox_tx, content_inbox_rx) =
+        std::sync::mpsc::channel::<Vec<metaverse_core::meshsite::ContentItem>>();
+    {
+        use metaverse_core::meshsite::{ContentItem, Section};
+        let url = server_url.clone();
+        let tx  = content_inbox_tx.clone();
+        println!("📰 Fetching content from server {}…", url);
+        std::thread::spawn(move || {
+            let client = match reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .build() { Ok(c) => c, Err(_) => return };
+            for section in ["forums", "wiki", "marketplace", "post"] {
+                let endpoint = format!("{}/api/v1/content?section={}&limit=50", url, section);
+                let Ok(resp) = client.get(&endpoint).send() else { continue };
+                let Ok(json) = resp.json::<Vec<serde_json::Value>>() else { continue };
+                let items: Vec<ContentItem> = json.into_iter().filter_map(|v| {
+                    Some(ContentItem {
+                        id:         v["id"].as_str()?.to_string(),
+                        section:    Section::from_str(v["section"].as_str().unwrap_or("forums"))
+                                        .unwrap_or(Section::Forums),
+                        title:      v["title"].as_str().unwrap_or("").to_string(),
+                        body:       v["body"].as_str().unwrap_or("").to_string(),
+                        author:     v["author"].as_str().unwrap_or("").to_string(),
+                        signature:  vec![],
+                        created_at: v["created_at"].as_u64().unwrap_or(0),
+                    })
+                }).collect();
+                if !items.is_empty() {
+                    println!("   📄 {} → {} items", section, items.len());
+                    let _ = tx.send(items);
+                }
+            }
+        });
+    }
+
     // Load saved player state (position, rotation, mode) - encrypted with identity
     let player_state = PlayerPersistence::load(&world_dir, &identity);
     println!("🧍 Setting up player...");
@@ -1760,7 +1853,10 @@ fn main() {
                                             game_mode = GameMode::ConstructModule(idx);
                                         }
                                     } else if matches!(game_mode, GameMode::Construct) {
-                                        // signup terminal handled by auto-trigger above
+                                        // Terminal: open identity/login overlay (module 0)
+                                        if hud_near_terminal {
+                                            game_mode = GameMode::ConstructModule(0);
+                                        }
                                     }
                                 }
                                 // P — open in-game object placement overlay
@@ -1929,6 +2025,12 @@ fn main() {
 
                     // Update multiplayer system (polls network, interpolates remote players)
                     multiplayer.update(dt);
+
+                    // Drain any content items that arrived from the server HTTP fetch thread
+                    while let Ok(items) = content_inbox_rx.try_recv() {
+                        multiplayer.inject_content(items);
+                        billboard_frame_counter = 0; // trigger billboard rebuild
+                    }
                     
                     // Handle chat
                     if chat_pressed {
@@ -2857,12 +2959,22 @@ fn main() {
                             // Module overlay — full-screen panel when inside a module room
                             if let GameMode::ConstructModule(idx) = game_mode {
                                 let peer_count = multiplayer.peer_count();
+                                // Get content for this module's section
+                                let section_str = match idx {
+                                    2 => "forums",
+                                    3 => "wiki",
+                                    4 => "marketplace",
+                                    5 => "post",
+                                    _ => "",
+                                };
+                                let content = multiplayer.get_content(section_str);
                                 let wants_exit = hud.render_module_overlay(
                                     &context, &view, &window,
                                     idx,
                                     Some(&identity),
                                     peer_count,
-                                    "", // server address (placeholder)
+                                    &server_url,
+                                    content,
                                 );
                                 if wants_exit {
                                     game_mode = GameMode::Construct;
