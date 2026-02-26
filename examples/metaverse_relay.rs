@@ -768,8 +768,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !config.no_web {
         let ws = std::sync::Arc::clone(&web_status);
         let web_port = config.web_port;
+        let config_val = serde_json::to_value(&config).unwrap_or_default();
         tokio::spawn(async move {
-            let app = build_base_router(ws);
+            let app = build_base_router(ws)
+                .route("/api/config", axum::routing::get(move || {
+                    let v = config_val.clone();
+                    async move { axum::Json(v) }
+                }));
             let bind = format!("0.0.0.0:{}", web_port);
             println!("🌐 Web dashboard: http://{}:{}/", "localhost", web_port);
             if let Ok(listener) = tokio::net::TcpListener::bind(&bind).await {
