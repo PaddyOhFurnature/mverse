@@ -27,17 +27,17 @@ const TEX_H: u32 = 320;
 
 // ── Physical dimensions ───────────────────────────────────────────────────────
 
-/// Billboard width in metres — fills most of the 8 m wide room.
-pub const BILLBOARD_W: f32 = 6.5;
-/// Billboard height in metres — comfortable screen proportions.
-pub const BILLBOARD_H: f32 = 4.0;
+/// Billboard width in metres — fits inside the 8 m wide room with margins.
+pub const BILLBOARD_W: f32 = 5.0;
+/// Billboard height in metres — fits inside the 3 m tall room.
+pub const BILLBOARD_H: f32 = 2.4;
 /// Gap between adjacent billboards (metres).
 const BB_GAP_H: f32 = 0.28;
 const BB_GAP_V: f32 = 0.22;
 /// Depth of each module room (metres) — used to position the screen wall.
 const ROOM_DEPTH: f32 = 6.0;
-/// Height offset so the screen centre sits above eye level.
-const EYE_LEVEL_Y: f32 = 1.8;
+/// Height of billboard centre above the floor.
+const EYE_LEVEL_Y: f32 = 1.2;
 
 // ── Room template ─────────────────────────────────────────────────────────────
 
@@ -540,7 +540,7 @@ fn vs_main(in: VIn) -> VOut {
     // Position is already in world space — model matrix is identity.
     out.clip_pos = camera.view_proj * model.model * vec4<f32>(in.position, 1.0);
     // Flip U so the texture reads left-to-right when standing inside the room.
-    out.uv = vec2<f32>(1.0 - in.uv.x, in.uv.y);
+    out.uv = in.uv;
     return out;
 }
 
@@ -680,7 +680,7 @@ fn draw_glyph(px: &mut [u8], w: usize, h: usize, ch: char, ox: usize, oy: usize,
     for row in 0..8usize {
         let byte = glyph[row];
         for col in 0..8usize {
-            if byte & (0x80 >> col) != 0 {
+            if byte & (0x01 << col) != 0 {
                 for sy in 0..scale {
                     for sx in 0..scale {
                         let px_ = ox + col * scale + sx;
