@@ -41,3 +41,4 @@ pub mod meshsite;       // Meshsite content types (ContentItem, Section)
 pub mod world_objects;  // Placed-object registry — modular placement schema + DHT keys
 pub mod web_ui;         // Shared Pi-Hole-style web dashboard — server, relay, client
 pub mod autoupdate;     // Binary auto-update: check manifest, verify, exec-restart
+pub mod worldnet;       // WORLDNET OS — distributed OS layer, address system, pixel renderer
