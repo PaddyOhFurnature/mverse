@@ -73,7 +73,7 @@ use metaverse_core::{
     chunk_streaming::{ChunkStreamer, ChunkStreamerConfig},
     construct::{ConstructScene, SIGNUP_TERMINAL_POS, WORLD_PORTAL_POS, INTERACT_RADIUS,
                 MODULE_DOOR_RADIUS, MODULES},
-    billboard::{BillboardPipeline, ModuleBillboards},
+    billboard::{BillboardPipeline, ModuleBillboards, TerminalScreen},
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
     identity::{Identity, KeyType},
@@ -1260,6 +1260,16 @@ fn main() {
     let mut billboard_frame_counter = 0u32;
     // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
     let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
+
+    // WORLDNET terminal screen — rendered onto the kiosk top face
+    let terminal_screen = TerminalScreen::new(&context, &billboard_pipeline, SIGNUP_TERMINAL_POS);
+    let mut worldnet_buf = metaverse_core::worldnet::WorldnetPixelBuffer::new();
+    // Render initial page (home, no key yet — will update each frame when near terminal)
+    {
+        use metaverse_core::worldnet::{WorldnetAddress, render_page};
+        render_page(&WorldnetAddress::Root, None, &[], &mut worldnet_buf);
+        terminal_screen.update(&context.queue, &worldnet_buf);
+    }
 
     // Always-on debug HUD (top-left overlay)
     let mut hud = DebugHud::new(&context, &window);
@@ -2496,6 +2506,21 @@ fn main() {
                     hud_near_portal   = near_portal;
                     hud_near_terminal = near_signup;
 
+                    // Update terminal WORLDNET screen when player is nearby
+                    // (every 30 frames to avoid re-rendering every frame)
+                    if matches!(game_mode, GameMode::Construct)
+                        && frame_count % 30 == 0
+                        && dist_terminal < 8.0
+                    {
+                        use metaverse_core::worldnet::{WorldnetAddress, render_page};
+                        let key_type = identity.load_key_record()
+                            .map(|kr| kr.effective_key_type());
+                        let addr = WorldnetAddress::Root;
+                        let content = multiplayer.get_content("forums");
+                        render_page(&addr, key_type, content, &mut worldnet_buf);
+                        terminal_screen.update(&context.queue, &worldnet_buf);
+                    }
+
                     // Fetch world objects when the player moves into a new chunk
                     {
                         use metaverse_core::world_objects::chunk_coords_for_pos;
@@ -2845,6 +2870,13 @@ fn main() {
                                 for (_, mb) in &placed_billboards {
                                     billboard_pipeline.begin_render(&mut render_pass);
                                     mb.render(&mut render_pass);
+                                    pipeline.set_pipeline(&mut render_pass);
+                                }
+
+                                // Render terminal WORLDNET screen (always visible in Construct)
+                                if matches!(game_mode, GameMode::Construct) {
+                                    billboard_pipeline.begin_render(&mut render_pass);
+                                    terminal_screen.render(&mut render_pass);
                                     pipeline.set_pipeline(&mut render_pass);
                                 }
                                 pipeline.set_model_bind_group(&mut render_pass, &player_model_bind_group);

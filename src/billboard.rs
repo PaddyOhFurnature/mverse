@@ -176,8 +176,9 @@ pub struct GpuBillboard {
     index_buf:            wgpu::Buffer,
     model_bind_group:     wgpu::BindGroup,
     texture_bind_group:   wgpu::BindGroup,
-    // keep texture alive (bind group holds TextureView not Texture)
-    _texture: wgpu::Texture,
+    texture:              wgpu::Texture,
+    tex_w:                u32,
+    tex_h:                u32,
 }
 
 impl GpuBillboard {
@@ -193,8 +194,29 @@ impl GpuBillboard {
         tex_bgl:     &wgpu::BindGroupLayout,
         sampler:     &wgpu::Sampler,
     ) -> Self {
-        let hw = BILLBOARD_W * 0.5;
-        let hh = BILLBOARD_H * 0.5;
+        Self::new_sized(device, queue, center, normal, right, up,
+            rgba_pixels, TEX_W, TEX_H, BILLBOARD_W, BILLBOARD_H,
+            model_bgl, tex_bgl, sampler)
+    }
+
+    fn new_sized(
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        center:      Vec3,
+        normal:      Vec3,
+        right:       Vec3,
+        up:          Vec3,
+        rgba_pixels: &[u8],
+        tex_w:       u32,
+        tex_h:       u32,
+        phys_w:      f32,
+        phys_h:      f32,
+        model_bgl:   &wgpu::BindGroupLayout,
+        tex_bgl:     &wgpu::BindGroupLayout,
+        sampler:     &wgpu::Sampler,
+    ) -> Self {
+        let hw = phys_w * 0.5;
+        let hh = phys_h * 0.5;
         let n  = normal.to_array();
 
         let verts = [
@@ -229,7 +251,7 @@ impl GpuBillboard {
         // Texture
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("BB Tex"),
-            size: wgpu::Extent3d { width: TEX_W, height: TEX_H, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -244,10 +266,10 @@ impl GpuBillboard {
             rgba_pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(TEX_W * 4),
-                rows_per_image: Some(TEX_H),
+                bytes_per_row: Some(tex_w * 4),
+                rows_per_image: Some(tex_h),
             },
-            wgpu::Extent3d { width: TEX_W, height: TEX_H, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -260,7 +282,24 @@ impl GpuBillboard {
             label: Some("BB Tex BG"),
         });
 
-        Self { vertex_buf, index_buf, model_bind_group, texture_bind_group, _texture: texture }
+        Self { vertex_buf, index_buf, model_bind_group, texture_bind_group, texture, tex_w, tex_h }
+    }
+
+    /// Upload new RGBA pixels to the existing texture (same dimensions).
+    pub fn update_texture(&self, queue: &wgpu::Queue, rgba_pixels: &[u8]) {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture, mip_level: 0,
+                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+            },
+            rgba_pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.tex_w * 4),
+                rows_per_image: Some(self.tex_h),
+            },
+            wgpu::Extent3d { width: self.tex_w, height: self.tex_h, depth_or_array_layers: 1 },
+        );
     }
 
     /// Draw this billboard. Call after `BillboardPipeline::begin_render()`.
@@ -549,6 +588,53 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     return textureSample(t_diffuse, s_diffuse, in.uv);
 }
 "#;
+
+// ── Terminal screen surface ───────────────────────────────────────────────────
+
+/// A WORLDNET terminal screen — a single updatable billboard quad sized to
+/// fit the top face of the kiosk terminal mesh (1.0m wide × 0.7m deep,
+/// normal pointing up, rendered into a WORLDNET_W × WORLDNET_H texture).
+pub struct TerminalScreen {
+    quad: GpuBillboard,
+}
+
+impl TerminalScreen {
+    /// Build the terminal screen at the given kiosk position.
+    pub fn new(
+        context:   &RenderContext,
+        pipeline:  &BillboardPipeline,
+        kiosk_pos: Vec3,
+    ) -> Self {
+        use crate::worldnet::{WORLDNET_W, WORLDNET_H};
+        // Top face sits at kiosk_pos.y + 1.1 (post) + 0.025 (half of 0.05 screen thickness)
+        let center = Vec3::new(kiosk_pos.x, kiosk_pos.y + 1.125, kiosk_pos.z);
+        let normal = Vec3::Y;        // facing up
+        let right  = Vec3::X;        // texture right = +X
+        let up     = Vec3::NEG_Z;    // texture "up" = toward -Z (away from player spawn)
+
+        let blank = vec![12u8, 14, 20, 255].repeat((WORLDNET_W * WORLDNET_H) as usize);
+
+        let quad = GpuBillboard::new_sized(
+            &context.device, &context.queue,
+            center, normal, right, up,
+            &blank,
+            WORLDNET_W, WORLDNET_H,
+            1.0, 0.7,
+            &pipeline.model_bgl, &pipeline.texture_bgl, &pipeline.sampler,
+        );
+        Self { quad }
+    }
+
+    /// Upload a rendered WORLDNET pixel buffer to the screen texture.
+    pub fn update(&self, queue: &wgpu::Queue, buf: &crate::worldnet::WorldnetPixelBuffer) {
+        self.quad.update_texture(queue, &buf.pixels);
+    }
+
+    /// Render the screen quad inside a billboard render pass.
+    pub fn render<'a>(&'a self, rpass: &mut wgpu::RenderPass<'a>) {
+        self.quad.render(rpass);
+    }
+}
 
 // ── Text rendering ────────────────────────────────────────────────────────────
 
