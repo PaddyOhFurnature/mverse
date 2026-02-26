@@ -3645,7 +3645,7 @@ dependencies = [
 
 [[package]]
 name = "metaverse_core"
-version = "0.1.0"
+version = "0.1.7"
 dependencies = [
  "axum",
  "base64",
