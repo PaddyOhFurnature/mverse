@@ -109,18 +109,20 @@ impl RoomTemplate {
         room_center: Vec3,
         outward_normal: Vec3,
     ) -> Vec<(Vec3, Vec3, Vec3, Vec3)> {
-        // Screen wall is the FAR wall — inward from the room.
-        // Door is at room_center + outward_normal * (ROOM_DEPTH/2).
-        // Screen wall is at room_center - outward_normal * (ROOM_DEPTH/2 - 0.1).
-        let inward  = -outward_normal;
-        let wall_c  = room_center + inward * (ROOM_DEPTH * 0.5 - 0.12);
+        // Screen wall is the FAR wall — deep in the room, away from the door.
+        // room_center is midway along the room. Move further in the outward direction
+        // to reach the back wall, then pull back 0.12 m to sit in front of it.
+        let inward = -outward_normal;
+        let wall_c = room_center + outward_normal * (ROOM_DEPTH * 0.5 - 0.12);
 
-        // Derive right/up axes (right = perp to outward_normal in XZ plane, up = Y)
+        // right: the axis that is "to the right" when standing inside facing the back wall.
+        // When facing `outward_normal`, right = forward × world_up.
         let world_up = Vec3::Y;
         let right = outward_normal.cross(world_up);
         let right = if right.length_squared() > 0.001 { right.normalize() } else { Vec3::X };
         let up = world_up;
-        let billboard_normal = inward; // faces into the room (toward player)
+        // Billboard normal points inward so the player walking in sees the front face.
+        let billboard_normal = inward;
 
         // Compute total grid dimensions
         let total_w = self.cols as f32 * BILLBOARD_W + (self.cols.saturating_sub(1)) as f32 * BB_GAP_H;
@@ -461,7 +463,7 @@ impl BillboardPipeline {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None, // visible from either side during dev
+                cull_mode: Some(wgpu::Face::Back), // only visible from inside the room
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

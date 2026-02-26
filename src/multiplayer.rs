@@ -1526,7 +1526,7 @@ impl MultiplayerSystem {
     ///
     /// The item propagates to every subscribed node (server, client, relay).
     /// Each receiver stores it locally and re-puts it into the DHT.
-    pub fn publish_content(&self, item: &crate::meshsite::ContentItem) {
+    pub fn publish_content(&mut self, item: &crate::meshsite::ContentItem) {
         use crate::meshsite::topic_for_section;
         let topic  = topic_for_section(&item.section).to_string();
         let data   = item.to_bytes();
@@ -1536,6 +1536,13 @@ impl MultiplayerSystem {
         let _ = self.cmd_tx.send(NetworkCommand::Publish { topic, data });
         // DHT put for offline persistence / late-joiners
         let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key: dht_k, value: dht_v });
+        // Add to local cache immediately so the poster sees it without network roundtrip
+        let section = item.section.as_str().to_string();
+        let cache = self.content_cache.entry(section).or_default();
+        if !cache.iter().any(|c| c.id == item.id) {
+            cache.insert(0, item.clone());
+            if cache.len() > 200 { cache.truncate(200); }
+        }
     }
 
     /// Return cached content for a section, newest-first.

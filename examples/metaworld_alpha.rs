@@ -2352,19 +2352,37 @@ fn main() {
                     pipeline.update_camera(&context.queue, &camera);
                     billboard_pipeline.update_camera(&context.queue, &camera.build_view_projection_matrix());
 
-                    // Refresh billboard content every 120 frames when in Construct
+                    // Refresh billboard content every 120 frames when in Construct,
+                    // but only build the billboard for the module the player is near.
                     billboard_frame_counter = billboard_frame_counter.wrapping_add(1);
+                    const MODULE_SECTIONS: [Option<Section>; 6] = [
+                        None,                       // 0: Login
+                        None,                       // 1: Signup
+                        Some(Section::Forums),      // 2: Forums
+                        Some(Section::Wiki),        // 3: Wiki
+                        Some(Section::Marketplace), // 4: Marketplace
+                        Some(Section::Post),        // 5: Post Office
+                    ];
                     if matches!(game_mode, GameMode::Construct) && billboard_frame_counter % 120 == 1 {
-                        const MODULE_SECTIONS: [Option<Section>; 6] = [
-                            None,                      // 0: Login
-                            None,                      // 1: Signup
-                            Some(Section::Forums),     // 2: Forums
-                            Some(Section::Wiki),       // 3: Wiki
-                            Some(Section::Marketplace),// 4: Marketplace
-                            Some(Section::Post),       // 5: Post Office
-                        ];
-                        for (i, maybe_section) in MODULE_SECTIONS.iter().enumerate() {
-                            if let Some(section) = maybe_section {
+                        // Determine which module to (re-)build: prefer nearest to player
+                        let build_idx = hud_near_module.or_else(|| {
+                            // find the closest content module
+                            let ploc = Vec3::new(
+                                player_local_pos.x as f32,
+                                player_local_pos.y as f32,
+                                player_local_pos.z as f32,
+                            );
+                            MODULE_SECTIONS.iter().enumerate()
+                                .filter(|(_, s)| s.is_some())
+                                .min_by(|(i, _), (j, _)| {
+                                    let di = (MODULES[*i].door_pos() - ploc).length();
+                                    let dj = (MODULES[*j].door_pos() - ploc).length();
+                                    di.partial_cmp(&dj).unwrap()
+                                })
+                                .map(|(i, _)| i)
+                        });
+                        if let Some(i) = build_idx {
+                            if let Some(section) = &MODULE_SECTIONS[i] {
                                 let items = multiplayer.get_content(section.as_str());
                                 let needs = module_billboards[i]
                                     .as_ref()
@@ -2402,13 +2420,28 @@ fn main() {
                                     construct_portal_buffer.render(&mut render_pass);
                                     construct_doors_buffer.render(&mut render_pass);
 
-                                    // Render billboards on module room walls
-                                    billboard_pipeline.begin_render(&mut render_pass);
-                                    for mb in module_billboards.iter().flatten() {
-                                        mb.render(&mut render_pass);
+                                    // Render only the nearest module room's billboard
+                                    if let Some(i) = hud_near_module.or_else(|| {
+                                        let ploc = Vec3::new(
+                                            player_local_pos.x as f32,
+                                            player_local_pos.y as f32,
+                                            player_local_pos.z as f32,
+                                        );
+                                        MODULE_SECTIONS.iter().enumerate()
+                                            .filter(|(_, s)| s.is_some())
+                                            .min_by(|(a, _), (b, _)| {
+                                                let da = (MODULES[*a].door_pos() - ploc).length();
+                                                let db = (MODULES[*b].door_pos() - ploc).length();
+                                                da.partial_cmp(&db).unwrap()
+                                            })
+                                            .map(|(idx, _)| idx)
+                                    }) {
+                                        if let Some(mb) = &module_billboards[i] {
+                                            billboard_pipeline.begin_render(&mut render_pass);
+                                            mb.render(&mut render_pass);
+                                            pipeline.set_pipeline(&mut render_pass);
+                                        }
                                     }
-                                    // Restore main pipeline for subsequent draws
-                                    pipeline.set_pipeline(&mut render_pass);
                                 }
                                 
                                 // Render terrain chunks (only in Open World mode)
@@ -2489,6 +2522,8 @@ fn main() {
                                         item.id = item.compute_id();
                                         multiplayer.publish_content(&item);
                                         println!("📤 Published [{:?}] \"{}\"", item.section, item.title);
+                                        // Trigger immediate billboard refresh so post appears on wall
+                                        billboard_frame_counter = 0;
                                         compose = None;
                                         // Restore mouse grab
                                         let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
