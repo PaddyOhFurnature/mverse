@@ -79,7 +79,7 @@ impl Default for RelayConfig {
             node_name: None,
             headless: false,
             always_on: true,
-            web_port: 8080,
+            web_port: 8081,
             no_web: false,
             ui: UiConfig::default(),
         }
