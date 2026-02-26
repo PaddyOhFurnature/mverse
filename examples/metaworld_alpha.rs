@@ -883,7 +883,7 @@ impl DebugHud {
             // covering the entire viewport before the Window floats on top.
             egui::CentralPanel::default()
                 .frame(egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 242)))
+                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 180)))
                 .show(ctx, |_ui| {});
 
             let sc = module.screen_colour;
