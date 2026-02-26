@@ -141,6 +141,7 @@ struct SignupScreen {
 impl SignupScreen {
     fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
         let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(),
             egui_ctx.viewport_id(),
@@ -418,6 +419,7 @@ impl ComposeScreen {
         author: String,
     ) -> Self {
         let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
@@ -586,6 +588,7 @@ impl PlacementScreen {
         placed_by: String,
     ) -> Self {
         let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
@@ -752,6 +755,7 @@ struct DebugHud {
 impl DebugHud {
     fn new(context: &RenderContext, window: &winit::window::Window) -> Self {
         let egui_ctx = egui::Context::default();
+        egui_ctx.set_visuals(egui::Visuals::dark());
         let egui_state = egui_winit::State::new(
             egui_ctx.clone(), egui_ctx.viewport_id(), window,
             Some(window.scale_factor() as f32), None, None,
