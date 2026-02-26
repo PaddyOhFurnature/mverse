@@ -148,6 +148,15 @@ pub struct ServerConfig {
     /// On startup and every 10 minutes the server will query
     /// `GET /api/v1/sync/keys?since=<last_sync_ms>&limit=1000` on each.
     pub known_servers: Vec<String>,
+
+    // ── Auto-update ──────────────────────────────────────────────────────────
+    /// URL of the JSON update manifest for this binary (leave empty to disable).
+    /// Example: "https://example.com/manifests/metaverse-server-latest.json"
+    #[serde(default)]
+    pub update_manifest_url: String,
+    /// How often to check for updates, in seconds. Default: 21600 (6 hours).
+    #[serde(default = "default_update_interval")]
+    pub update_check_interval_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -192,9 +201,13 @@ impl Default for ServerConfig {
             web_password: String::new(),
             log_level: "info".to_string(),
             known_servers: vec![],
+            update_manifest_url: String::new(),
+            update_check_interval_secs: default_update_interval(),
         }
     }
 }
+
+fn default_update_interval() -> u64 { 21600 } // 6 hours
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -404,6 +417,9 @@ pub struct SharedState {
     /// Channel to send a hot-reload `ServerConfig` from web handlers into the event loop.
     #[serde(skip)]
     pub config_reload_tx: Option<tokio::sync::mpsc::Sender<ServerConfig>>,
+    /// Set when an auto-update is available; cleared after applying the update.
+    #[serde(skip)]
+    pub update_available: Option<String>,
 }
 
 impl Default for SharedState {
@@ -425,6 +441,7 @@ impl Default for SharedState {
             gossip_tx: None,
             swarm_tx: None,
             config_reload_tx: None,
+            update_available: None,
         }
     }
 }
@@ -694,6 +711,7 @@ impl KeyDatabase {
             "ALTER TABLE key_records ADD COLUMN revoked_at INTEGER",
             "ALTER TABLE key_records ADD COLUMN revoked_by TEXT",
             "ALTER TABLE key_records ADD COLUMN revocation_reason TEXT",
+            "ALTER TABLE server_sync ADD COLUMN content_last_synced_at INTEGER NOT NULL DEFAULT 0",
         ] {
             let _ = conn.execute(migration, []);
         }
@@ -1023,6 +1041,58 @@ impl KeyDatabase {
             });
         }
         map
+    }
+
+    /// Return content items with `created_at > since_ms`, ordered ascending, up to `limit`.
+    ///
+    /// Used by `GET /api/v1/sync/content` so peer servers can pull incremental updates.
+    fn list_content_since(&self, since_ms: i64, limit: usize) -> Vec<metaverse_core::meshsite::ContentItem> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare(
+            "SELECT id, section, title, body, author, signature, created_at
+             FROM mesh_content WHERE created_at > ?1 ORDER BY created_at ASC LIMIT ?2"
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(params![since_ms, limit as i64], |row| {
+            Ok(metaverse_core::meshsite::ContentItem {
+                id:         row.get(0)?,
+                section:    metaverse_core::meshsite::Section::from_str(
+                                &row.get::<_, String>(1)?
+                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
+                title:      row.get(2)?,
+                body:       row.get(3)?,
+                author:     row.get(4)?,
+                signature:  row.get(5)?,
+                created_at: row.get::<_, i64>(6)? as u64,
+            })
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
+    }
+
+    /// Get the last-synced content timestamp for a peer server URL (0 if never).
+    fn get_content_last_synced_at(&self, server_url: &str) -> i64 {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT content_last_synced_at FROM server_sync WHERE server_url = ?1",
+            params![server_url],
+            |r| r.get(0),
+        ).unwrap_or(0)
+    }
+
+    /// Update the content-sync timestamp for a peer server.
+    fn update_content_sync(&self, server_url: &str, content_last_synced_at: i64) {
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO server_sync (server_url, content_last_synced_at)
+             VALUES (?1, ?2)
+             ON CONFLICT(server_url) DO UPDATE SET
+               content_last_synced_at = excluded.content_last_synced_at",
+            params![server_url, content_last_synced_at],
+        );
     }
 }
 
@@ -2325,6 +2395,27 @@ async fn api_v1_sync_keys(
     }
 }
 
+// ── GET /api/v1/sync/content ─────────────────────────────────────────────────
+
+/// GET /api/v1/sync/content?since=<unix_ms>&limit=<n>
+///
+/// Returns up to `limit` content items with `created_at > since`, ordered by
+/// `created_at` ascending.  Used by peer servers for incremental content sync.
+async fn api_v1_sync_content(
+    State(s): State<WebState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let since: i64 = params.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(1000);
+
+    let st = s.read().unwrap();
+    match &st.key_db {
+        Some(db) => Json(db.list_content_since(since, limit)).into_response(),
+        None => (StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+    }
+}
+
 // ── POST /api/config (hot-reload) ─────────────────────────────────────────────
 
 /// POST /api/config — hot-reload the server configuration.
@@ -2514,6 +2605,59 @@ async fn sync_keys_from_servers(state: &AppState) {
     }
 }
 
+/// Sync content items from all `known_servers`, mirroring `sync_keys_from_servers`.
+///
+/// Queries `GET /api/v1/sync/content?since=<last>&limit=100` on each peer server,
+/// imports new items via `insert_content` (idempotent), and updates
+/// `server_sync.content_last_synced_at`.
+async fn sync_content_from_servers(state: &AppState) {
+    let known_servers = state.config.known_servers.clone();
+    if known_servers.is_empty() { return; }
+
+    let db = match state.shared.read().ok().and_then(|s| s.key_db.clone()) {
+        Some(db) => db,
+        None => return,
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => { eprintln!("[ContentSync] Failed to create HTTP client: {}", e); return; }
+    };
+
+    for server_url in &known_servers {
+        let last_synced = db.get_content_last_synced_at(server_url);
+        let url = format!("{}/api/v1/sync/content?since={}&limit=100", server_url, last_synced);
+
+        let response = match client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => { eprintln!("[ContentSync] {} returned {}", server_url, r.status()); continue; }
+            Err(e) => { eprintln!("[ContentSync] {} unreachable: {}", server_url, e); continue; }
+        };
+
+        let items: Vec<metaverse_core::meshsite::ContentItem> = match response.json().await {
+            Ok(v) => v,
+            Err(e) => { eprintln!("[ContentSync] {} bad JSON: {}", server_url, e); continue; }
+        };
+
+        let count = items.len();
+        let mut newest_at: i64 = last_synced;
+
+        for item in &items {
+            if item.created_at as i64 > newest_at { newest_at = item.created_at as i64; }
+            db.insert_content(item);
+        }
+
+        if count > 0 {
+            db.update_content_sync(server_url, newest_at);
+            eprintln!("[ContentSync] {} — imported {} items (newest_at={})",
+                server_url, count, newest_at);
+        }
+    }
+}
+
 type WebState = Arc<RwLock<SharedState>>;
 
 async fn web_root() -> Html<&'static str> {
@@ -2549,6 +2693,7 @@ async fn web_api_status(State(s): State<WebState>) -> impl IntoResponse {
         ram_used_mb:      st.ram_used_mb,
         ram_total_mb:     st.ram_total_mb,
         shedding:         st.shedding_relay,
+        update_available: st.update_available.clone(),
         extra:            serde_json::json!({
                               "key_count": st.key_count,
                               "world":     serde_json::to_value(&st.world).unwrap_or_default(),
@@ -3225,6 +3370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/key-requests/:id/download", get(api_v1_download_key_request))
                 .route("/api/v1/keys/:peer_id/revoke", post(api_v1_revoke_key))
                 .route("/api/v1/sync/keys", get(api_v1_sync_keys))
+                .route("/api/v1/sync/content", get(api_v1_sync_content))
                 // ── Meshsite content API ───────────────────────────────────
                 .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
                 .route("/api/v1/content/post", post(api_v1_quick_post))
@@ -3284,6 +3430,8 @@ async fn run_headless(
     let mut stats_tick = tokio::time::interval(Duration::from_secs(30));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
+    let update_interval = state.config.update_check_interval_secs.max(60);
+    let mut update_tick = tokio::time::interval(Duration::from_secs(update_interval));
     let dummy_world = WorldStats::default();
 
     // Spawn a SIGHUP handler that sends the reloaded config to config_reload_rx (Unix only).
@@ -3369,8 +3517,25 @@ async fn run_headless(
                 ));
             }
             _ = sync_tick.tick() => {
-                // Periodic server-to-server key sync
+                // Periodic server-to-server key + content sync
                 sync_keys_from_servers(&state).await;
+                sync_content_from_servers(&state).await;
+            }
+            _ = update_tick.tick() => {
+                let url = state.config.update_manifest_url.clone();
+                if !url.is_empty() {
+                    let current = env!("CARGO_PKG_VERSION");
+                    if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
+                        eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                        if let Ok(mut st) = state.shared.write() {
+                            st.update_available = Some(manifest.version.clone());
+                        }
+                        if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                            eprintln!("[AutoUpdate] Update failed: {}", e);
+                        }
+                        // apply_update does not return on success (exec-restart)
+                    }
+                }
             }
             _ = caps_tick.tick() => {
                 // Re-announce NodeCapabilities to DHT (keeps record alive, updates storage availability)
@@ -3436,6 +3601,8 @@ async fn run_tui(
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
+    let update_interval_tui = state.config.update_check_interval_secs.max(60);
+    let mut update_tick_tui = tokio::time::interval(Duration::from_secs(update_interval_tui));
     let mut world_config = state.config.clone();
     let dummy_world = WorldStats::default();
 
@@ -3509,6 +3676,22 @@ async fn run_tui(
                 }
                 _ = sync_tick.tick() => {
                     sync_keys_from_servers(&state).await;
+                    sync_content_from_servers(&state).await;
+                }
+                _ = update_tick_tui.tick() => {
+                    let url = state.config.update_manifest_url.clone();
+                    if !url.is_empty() {
+                        let current = env!("CARGO_PKG_VERSION");
+                        if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
+                            eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                            if let Ok(mut st) = state.shared.write() {
+                                st.update_available = Some(manifest.version.clone());
+                            }
+                            if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                                eprintln!("[AutoUpdate] Update failed: {}", e);
+                            }
+                        }
+                    }
                 }
                 _ = caps_tick.tick() => {
                     publish_node_capabilities(&state.local_peer_id, &state.config, &mut swarm);

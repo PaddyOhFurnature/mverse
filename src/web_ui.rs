@@ -57,6 +57,10 @@ pub struct NodeStatus {
     pub ram_used_mb:      u64,
     pub ram_total_mb:     u64,
     pub shedding:         bool,
+    /// If an update is available, contains the new version string (e.g. "0.1.6").
+    /// `null` / absent when running the latest version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<String>,
     /// Node-type-specific extras (e.g. world stats, relay reservations).
     /// Serialised as a JSON object; the web UI reads known sub-keys.
     #[serde(default)]
@@ -282,7 +286,7 @@ function pgOverview(d){
   </div>`:''}
 </div>
 <div class="sec"><div class="card-title">Identity</div>
-  <div class="stat"><span class="lbl">Version</span><span class="val">${d.version||'—'}</span></div>
+  <div class="stat"><span class="lbl">Version</span><span class="val">${d.version||'—'}${d.update_available?` <span class="warn">↑ v${d.update_available} available</span>`:''}</span></div>
   <div class="stat"><span class="lbl">Web port</span><span class="val">${d.web_port||'—'}</span></div>
   <div class="pid">${d.peer_id||'—'}</div>
 </div>`;

@@ -62,6 +62,12 @@ pub struct RelayConfig {
     pub web_port: u16,
     pub no_web: bool,
     pub ui: UiConfig,
+    /// URL of the JSON update manifest for this binary (leave empty to disable).
+    #[serde(default)]
+    pub update_manifest_url: String,
+    /// How often to check for updates, in seconds. Default: 21600 (6 hours).
+    #[serde(default = "default_update_interval")]
+    pub update_check_interval_secs: u64,
 }
 
 impl Default for RelayConfig {
@@ -82,9 +88,13 @@ impl Default for RelayConfig {
             web_port: 8081,
             no_web: false,
             ui: UiConfig::default(),
+            update_manifest_url: String::new(),
+            update_check_interval_secs: 21600,
         }
     }
 }
+
+fn default_update_interval() -> u64 { 21600 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -793,6 +803,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, web_status: SharedStatus) -> Result<(), Box<dyn Error>> {
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
     let mut web_tick  = tokio::time::interval(Duration::from_secs(3));
+    let update_interval = state.config.update_check_interval_secs.max(60);
+    let mut update_tick = tokio::time::interval(Duration::from_secs(update_interval));
     loop {
         tokio::select! {
             _ = caps_tick.tick() => {
@@ -800,6 +812,18 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
             }
             _ = web_tick.tick() => {
                 update_web_status(&state, &web_status).await;
+            }
+            _ = update_tick.tick() => {
+                let url = state.config.update_manifest_url.clone();
+                if !url.is_empty() {
+                    let current = env!("CARGO_PKG_VERSION");
+                    if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
+                        eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                        if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                            eprintln!("[AutoUpdate] Update failed: {}", e);
+                        }
+                    }
+                }
             }
             event = swarm.select_next_some() => {
                 let actions = handle_swarm_event(event, &mut state);
@@ -818,6 +842,8 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(state.config.ui.refresh_ms));
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
+    let update_interval_tui = state.config.update_check_interval_secs.max(60);
+    let mut update_tick_tui = tokio::time::interval(Duration::from_secs(update_interval_tui));
 
     let result: Result<(), Box<dyn Error>> = async {
         loop {
@@ -829,6 +855,18 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
                 }
                 _ = caps_tick.tick() => {
                     publish_relay_capabilities(&state.local_peer_id, &state.config, &mut swarm);
+                }
+                _ = update_tick_tui.tick() => {
+                    let url = state.config.update_manifest_url.clone();
+                    if !url.is_empty() {
+                        let current = env!("CARGO_PKG_VERSION");
+                        if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
+                            eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                            if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                                eprintln!("[AutoUpdate] Update failed: {}", e);
+                            }
+                        }
+                    }
                 }
                 maybe_ev = events.next() => {
                     if let Some(Ok(Event::Key(k))) = maybe_ev {
