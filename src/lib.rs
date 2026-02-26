@@ -38,3 +38,4 @@ pub mod spatial_sharding;
 pub mod bandwidth;  // Bandwidth profiles and message priority (graceful degradation)
 pub mod node_capabilities;
 pub mod meshsite;  // NodeTier + NodeCapabilities — DHT-advertised node roles
+pub mod web_ui;   // Shared Pi-Hole-style web dashboard — server, relay, client

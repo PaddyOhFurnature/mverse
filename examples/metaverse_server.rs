@@ -53,6 +53,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use metaverse_core::web_ui::{NodeStatus, PeerSummary, DASHBOARD_HTML};
 use rusqlite::{params, Connection};
 use sha2::{Sha256, Digest};
 use rand::RngCore;
@@ -381,6 +382,7 @@ pub struct SharedState {
     pub ram_pct: f32,
     pub shedding_relay: bool,
     pub relay_port: u16,
+    pub web_port: u16,
     pub version: String,
     /// Key registry database handle (not serialised — accessed via REST).
     #[serde(skip)]
@@ -415,6 +417,7 @@ impl Default for SharedState {
             cpu_pct: 0.0, ram_used_mb: 0, ram_total_mb: 0, ram_pct: 0.0,
             shedding_relay: false,
             relay_port: 4001,
+            web_port: 8080,
             version: env!("CARGO_PKG_VERSION").to_string(),
             key_db: None,
             server_secret: [0u8; 32],
@@ -2513,14 +2516,46 @@ async fn sync_keys_from_servers(state: &AppState) {
 
 type WebState = Arc<RwLock<SharedState>>;
 
-async fn web_root(State(s): State<WebState>) -> Html<String> {
-    let st = s.read().unwrap().clone();
-    Html(render_dashboard_html(&st))
+async fn web_root() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
 }
 
 async fn web_api_status(State(s): State<WebState>) -> impl IntoResponse {
-    let st = s.read().unwrap().clone();
-    Json(st)
+    let st = s.read().unwrap();
+    let _ram_pct = if st.ram_total_mb > 0 { st.ram_used_mb as f32 / st.ram_total_mb as f32 * 100.0 } else { 0.0 };
+    let status = NodeStatus {
+        node_name:        st.node_name.clone(),
+        node_type:        st.node_type.clone(),
+        version:          st.version.clone(),
+        peer_id:          st.local_peer_id.clone(),
+        public_ip:        st.public_ip.clone(),
+        p2p_port:         st.relay_port,
+        web_port:         st.web_port,
+        uptime_secs:      st.uptime_secs,
+        peers:            st.peers.iter().map(|p| PeerSummary {
+                              peer_id:        p.peer_id.clone(),
+                              peer_type:      p.peer_type.clone(),
+                              addr:           p.addr.clone(),
+                              connected_secs: p.connected_secs,
+                          }).collect(),
+        circuit_count:    st.circuit_count,
+        total_connections: st.total_connections,
+        dht_peer_count:   st.dht_peer_count,
+        gossip_msgs_in:   st.net.gossip_msgs_in,
+        gossip_msgs_out:  st.net.gossip_msgs_out,
+        bytes_in:         st.net.bytes_in,
+        bytes_out:        st.net.bytes_out,
+        cpu_pct:          st.cpu_pct,
+        ram_used_mb:      st.ram_used_mb,
+        ram_total_mb:     st.ram_total_mb,
+        shedding:         st.shedding_relay,
+        extra:            serde_json::json!({
+                              "key_count": st.key_count,
+                              "world":     serde_json::to_value(&st.world).unwrap_or_default(),
+                          }),
+    };
+    drop(st);
+    Json(status)
 }
 
 async fn web_api_peers(State(s): State<WebState>) -> impl IntoResponse {
@@ -2770,141 +2805,6 @@ async fn api_v1_get_content(
 }
 
 
-
-fn render_dashboard_html(st: &SharedState) -> String {
-    let uptime_h = st.uptime_secs / 3600;
-    let uptime_m = (st.uptime_secs % 3600) / 60;
-    let uptime_s = st.uptime_secs % 60;
-    let peer_rows = st.peers.iter().map(|p| format!(
-        "<tr><td>{}</td><td><span class=\"badge badge-{}\">{}</span></td><td>{}</td><td>{}s</td></tr>",
-        p.peer_id, p.peer_type, p.peer_type, p.addr, p.connected_secs
-    )).collect::<Vec<_>>().join("\n");
-    let cpu_bar_width = (st.cpu_pct as u32).min(100);
-    let cpu_color = if st.cpu_pct > 80.0 { "#e74c3c" } else if st.cpu_pct > 50.0 { "#f39c12" } else { "#2ecc71" };
-    let ram_bar_width = st.ram_pct as u32;
-    let ram_color = if st.ram_pct > 85.0 { "#e74c3c" } else if st.ram_pct > 70.0 { "#f39c12" } else { "#2ecc71" };
-    let shed_class = if st.shedding_relay { "warn" } else { "ok" };
-    let shed_txt = if st.shedding_relay { "⚠️ Shedding" } else { "✅ Normal" };
-    format!(r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="10">
-<title>Metaverse Server — {name}</title>
-<style>
-  :root {{ --bg:#1a1a2e;--surface:#16213e;--accent:#0f3460;--cyan:#00d4ff;--green:#2ecc71;--red:#e74c3c;--yellow:#f39c12;--text:#eee;--dim:#888; }}
-  *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{background:var(--bg);color:var(--text);font:14px/1.5 'Courier New',monospace;padding:16px}}
-  h1{{color:var(--cyan);font-size:1.2em;margin-bottom:12px}}
-  h2{{color:var(--cyan);font-size:0.95em;margin:16px 0 8px;text-transform:uppercase;letter-spacing:.05em}}
-  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:16px}}
-  .card{{background:var(--surface);border:1px solid var(--accent);border-radius:6px;padding:12px}}
-  .stat{{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--accent)}}
-  .stat:last-child{{border:none}}
-  .val{{color:var(--cyan)}}
-  .ok{{color:var(--green)}}.warn{{color:var(--yellow)}}.err{{color:var(--red)}}
-  .bar-wrap{{background:var(--accent);border-radius:4px;height:8px;margin-top:4px}}
-  .bar{{height:8px;border-radius:4px;transition:width .5s}}
-  table{{width:100%;border-collapse:collapse}}
-  th{{text-align:left;color:var(--dim);padding:4px 8px;border-bottom:1px solid var(--accent)}}
-  td{{padding:4px 8px;border-bottom:1px solid #1e1e3a}}
-  .badge{{padding:2px 8px;border-radius:4px;font-size:.8em}}
-  .badge-server{{background:#0f3460;color:var(--cyan)}}
-  .badge-relay{{background:#1a3a5c;color:#74b9ff}}
-  .badge-client{{background:#1a3a1a;color:var(--green)}}
-  .badge-unknown{{background:#333;color:var(--dim)}}
-  footer{{margin-top:20px;color:var(--dim);font-size:.8em}}
-</style>
-</head>
-<body>
-<h1>🌍 Metaverse Server — {name} <span style="color:var(--dim);font-size:.7em">v{version}</span></h1>
-<div style="color:var(--dim);margin-bottom:16px">
-  PeerID: {peer_id} &nbsp;|&nbsp; {ip}:{port} &nbsp;|&nbsp; Uptime: {uh:02}h{um:02}m{us:02}s &nbsp;|&nbsp; Type: {ntype}
-</div>
-
-<div class="grid">
-  <div class="card">
-    <h2>Network</h2>
-    <div class="stat"><span>Connected peers</span><span class="val">{peers}</span></div>
-    <div class="stat"><span>Active circuits</span><span class="val">{circuits}</span></div>
-    <div class="stat"><span>Total connections</span><span class="val">{total_conns}</span></div>
-    <div class="stat"><span>DHT peers</span><span class="val">{dht}</span></div>
-    <div class="stat"><span>Registered keys</span><span class="val">{key_count}</span></div>
-    <div class="stat"><span>Gossip msgs in</span><span class="val">{gmsg}</span></div>
-    <div class="stat"><span>State requests</span><span class="val">{sreqs}</span></div>
-    <div class="stat"><span>Relay status</span><span class="{shed_class}">{shed_txt}</span></div>
-  </div>
-
-  <div class="card">
-    <h2>World</h2>
-    <div class="stat"><span>Chunks loaded</span><span class="val">{chunks_loaded}</span></div>
-    <div class="stat"><span>Chunks queued</span><span class="val">{chunks_queued}</span></div>
-    <div class="stat"><span>Voxel ops</span><span class="val">{vops}</span></div>
-    <div class="stat"><span>Ops merged</span><span class="val">{vops_merged}</span></div>
-    <div class="stat"><span>Data size</span><span class="val">{data_mb:.1} MB</span></div>
-    <div class="stat"><span>Last save</span><span class="val">{last_save}</span></div>
-  </div>
-
-  <div class="card">
-    <h2>System</h2>
-    <div class="stat"><span>CPU</span><span class="val">{cpu:.1}%</span></div>
-    <div class="bar-wrap"><div class="bar" style="width:{cpu_bar}%;background:{cpu_color}"></div></div>
-    <div class="stat" style="margin-top:8px"><span>RAM</span><span class="val">{ram_used}/{ram_total} MB</span></div>
-    <div class="bar-wrap"><div class="bar" style="width:{ram_bar}%;background:{ram_color}"></div></div>
-  </div>
-</div>
-
-<h2>Connected Peers ({peers})</h2>
-<div class="card">
-<table>
-<tr><th>Peer ID</th><th>Type</th><th>Address</th><th>Connected</th></tr>
-{peer_rows}
-</table>
-</div>
-
-<footer>
-  Auto-refreshes every 10s &nbsp;|&nbsp; API: <a href="/api/status" style="color:var(--cyan)">/api/status</a>
-  &nbsp;|&nbsp; <a href="/api/peers" style="color:var(--cyan)">/api/peers</a>
-  &nbsp;|&nbsp; <a href="/api/keys" style="color:var(--cyan)">/api/keys</a>
-  &nbsp;|&nbsp; <a href="/health" style="color:var(--cyan)">/health</a>
-</footer>
-</body>
-</html>"#,
-        name = st.node_name,
-        version = st.version,
-        peer_id = &st.local_peer_id[st.local_peer_id.len().saturating_sub(16)..],
-        ip = st.public_ip,
-        port = st.relay_port,
-        ntype = st.node_type,
-        peers = st.peers.len(),
-        circuits = st.circuit_count,
-        total_conns = st.total_connections,
-        dht = st.dht_peer_count,
-        key_count = st.key_count,
-        gmsg = st.net.gossip_msgs_in,
-        sreqs = st.net.state_requests_in,
-        shed_class = shed_class,
-        shed_txt = shed_txt,
-        chunks_loaded = st.world.chunks_loaded,
-        chunks_queued = st.world.chunks_queued,
-        vops = st.world.voxel_ops_total,
-        vops_merged = st.world.ops_merged_total,
-        data_mb = st.world.world_data_mb,
-        last_save = if st.world.last_save_secs_ago < 3600 { format!("{}s ago", st.world.last_save_secs_ago) } else { "never".to_string() },
-        cpu = st.cpu_pct,
-        cpu_bar = cpu_bar_width,
-        cpu_color = cpu_color,
-        ram_used = st.ram_used_mb,
-        ram_total = st.ram_total_mb,
-        ram_bar = ram_bar_width,
-        ram_color = ram_color,
-        uh = uptime_h,
-        um = uptime_m,
-        us = uptime_s,
-        peer_rows = peer_rows,
-    )
-}
 
 // ─── Public IP detection ─────────────────────────────────────────────────────
 
@@ -3280,6 +3180,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         node_name: config.node_name.clone().unwrap_or_else(|| "server".to_string()),
         node_type: config.node_type.clone(),
         relay_port: config.port,
+        web_port: config.web_port,
         key_db,
         server_secret,
         gossip_tx: Some(gossip_tx),

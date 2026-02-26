@@ -40,6 +40,8 @@ use std::{
 };
 use clap::Parser;
 
+use metaverse_core::web_ui::{NodeStatus, PeerSummary, SharedStatus, build_base_router};
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -57,6 +59,8 @@ pub struct RelayConfig {
     pub node_name: Option<String>,
     pub headless: bool,
     pub always_on: bool,
+    pub web_port: u16,
+    pub no_web: bool,
     pub ui: UiConfig,
 }
 
@@ -75,6 +79,8 @@ impl Default for RelayConfig {
             node_name: None,
             headless: false,
             always_on: true,
+            web_port: 8080,
+            no_web: false,
             ui: UiConfig::default(),
         }
     }
@@ -146,6 +152,12 @@ struct Args {
     /// Plain log output, no TUI (auto-detected when not a terminal)
     #[arg(long)]
     headless: bool,
+    /// Disable web dashboard
+    #[arg(long)]
+    no_web: bool,
+    /// Web dashboard port (default: 8080)
+    #[arg(long)]
+    web_port: Option<u16>,
     /// Node display name shown in the dashboard header
     #[arg(long)]
     name: Option<String>,
@@ -164,6 +176,8 @@ fn apply_cli_overrides(config: &mut RelayConfig, args: &Args) {
     if let Some(v) = args.max_circuit_bytes    { config.max_circuit_bytes = v; }
     if !args.peer.is_empty()                   { config.peers.extend(args.peer.iter().cloned()); }
     if args.headless                            { config.headless = true; }
+    if args.no_web                             { config.no_web = true; }
+    if let Some(v) = args.web_port             { config.web_port = v; }
     if let Some(ref v) = args.name             { config.node_name = Some(v.clone()); }
 }
 
@@ -733,23 +747,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
 
-    let mut state = AppState::new(config.clone(), local_peer_id.to_string(), public_ip);
+    let mut state = AppState::new(config.clone(), local_peer_id.to_string(), public_ip.clone());
     state.push_log(format!("✅ Relay started — {}", local_peer_id));
 
     publish_relay_capabilities(&local_peer_id.to_string(), &config, &mut swarm);
     state.push_log(format!("📡 NodeCapabilities published (tier=relay, always_on={})", config.always_on));
 
-    if headless { run_headless(swarm, state).await } else { run_tui(swarm, state).await }
+    // ── Web dashboard ─────────────────────────────────────────────────────────
+    let web_status: SharedStatus = std::sync::Arc::new(tokio::sync::RwLock::new(NodeStatus {
+        node_name:  config.node_name.clone().unwrap_or_else(|| "relay".to_string()),
+        node_type:  "relay".to_string(),
+        version:    env!("CARGO_PKG_VERSION").to_string(),
+        peer_id:    local_peer_id.to_string(),
+        public_ip:  public_ip.clone(),
+        p2p_port:   config.port,
+        web_port:   config.web_port,
+        ..NodeStatus::default()
+    }));
+
+    if !config.no_web {
+        let ws = std::sync::Arc::clone(&web_status);
+        let web_port = config.web_port;
+        tokio::spawn(async move {
+            let app = build_base_router(ws);
+            let bind = format!("0.0.0.0:{}", web_port);
+            println!("🌐 Web dashboard: http://{}:{}/", "localhost", web_port);
+            if let Ok(listener) = tokio::net::TcpListener::bind(&bind).await {
+                let _ = axum::serve(listener, app).await;
+            } else {
+                eprintln!("⚠️  Relay web server failed to bind on {}", bind);
+            }
+        });
+    }
+
+    if headless { run_headless(swarm, state, web_status).await } else { run_tui(swarm, state, web_status).await }
 }
 
 // ─── Headless loop ───────────────────────────────────────────────────────────
 
-async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) -> Result<(), Box<dyn Error>> {
+async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, web_status: SharedStatus) -> Result<(), Box<dyn Error>> {
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
+    let mut web_tick  = tokio::time::interval(Duration::from_secs(3));
     loop {
         tokio::select! {
             _ = caps_tick.tick() => {
                 publish_relay_capabilities(&state.local_peer_id, &state.config, &mut swarm);
+            }
+            _ = web_tick.tick() => {
+                update_web_status(&state, &web_status).await;
             }
             event = swarm.select_next_some() => {
                 let actions = handle_swarm_event(event, &mut state);
@@ -761,7 +806,7 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
 
 // ─── TUI loop ────────────────────────────────────────────────────────────────
 
-async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) -> Result<(), Box<dyn Error>> {
+async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, web_status: SharedStatus) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -774,6 +819,7 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) 
             tokio::select! {
                 _ = tick.tick() => {
                     state.refresh_sys();
+                    update_web_status(&state, &web_status).await;
                     terminal.draw(|f| draw(f, &state))?;
                 }
                 _ = caps_tick.tick() => {
@@ -805,4 +851,26 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState) 
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     result
+}
+
+// ─── Web status sync ─────────────────────────────────────────────────────────
+
+async fn update_web_status(state: &AppState, status: &SharedStatus) {
+    let uptime = state.start_time.elapsed().as_secs();
+    let peers: Vec<PeerSummary> = state.connected_peers.values().map(|p| PeerSummary {
+        peer_id:        p.peer_id.to_string(),
+        peer_type:      "unknown".to_string(),
+        addr:           p.addr.clone(),
+        connected_secs: p.connected_at.elapsed().as_secs(),
+    }).collect();
+    let mut st = status.write().await;
+    st.uptime_secs      = uptime;
+    st.peers            = peers;
+    st.circuit_count    = state.active_circuits.len();
+    st.total_connections = state.total_connections;
+    st.dht_peer_count   = state.dht_peer_count;
+    st.cpu_pct          = state.cpu_pct;
+    st.ram_used_mb      = state.ram_used_mb;
+    st.ram_total_mb     = state.ram_total_mb;
+    st.extra            = serde_json::json!({ "total_reservations": state.total_reservations });
 }
