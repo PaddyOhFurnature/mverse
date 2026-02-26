@@ -150,10 +150,11 @@ pub struct ServerConfig {
     pub known_servers: Vec<String>,
 
     // ── Auto-update ──────────────────────────────────────────────────────────
-    /// URL of the JSON update manifest for this binary (leave empty to disable).
-    /// Example: "https://example.com/manifests/metaverse-server-latest.json"
-    #[serde(default)]
-    pub update_manifest_url: String,
+    /// GitHub repo to check for binary updates, e.g. `"PaddyOhFurnature/mverse"`.
+    /// Uses the GitHub Releases API — asset names must match the binary filename.
+    /// Set to empty string to disable auto-update.
+    #[serde(default = "default_github_repo")]
+    pub github_repo: String,
     /// How often to check for updates, in seconds. Default: 21600 (6 hours).
     #[serde(default = "default_update_interval")]
     pub update_check_interval_secs: u64,
@@ -201,13 +202,14 @@ impl Default for ServerConfig {
             web_password: String::new(),
             log_level: "info".to_string(),
             known_servers: vec![],
-            update_manifest_url: String::new(),
+            github_repo: default_github_repo(),
             update_check_interval_secs: default_update_interval(),
         }
     }
 }
 
 fn default_update_interval() -> u64 { 21600 } // 6 hours
+fn default_github_repo() -> String { "PaddyOhFurnature/mverse".to_string() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -3522,15 +3524,15 @@ async fn run_headless(
                 sync_content_from_servers(&state).await;
             }
             _ = update_tick.tick() => {
-                let url = state.config.update_manifest_url.clone();
-                if !url.is_empty() {
+                let repo = state.config.github_repo.clone();
+                if !repo.is_empty() {
                     let current = env!("CARGO_PKG_VERSION");
-                    if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
-                        eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                    if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                        eprintln!("[AutoUpdate] New release: {}", tag);
                         if let Ok(mut st) = state.shared.write() {
-                            st.update_available = Some(manifest.version.clone());
+                            st.update_available = Some(tag.clone());
                         }
-                        if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                        if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
                             eprintln!("[AutoUpdate] Update failed: {}", e);
                         }
                         // apply_update does not return on success (exec-restart)
@@ -3679,15 +3681,15 @@ async fn run_tui(
                     sync_content_from_servers(&state).await;
                 }
                 _ = update_tick_tui.tick() => {
-                    let url = state.config.update_manifest_url.clone();
-                    if !url.is_empty() {
+                    let repo = state.config.github_repo.clone();
+                    if !repo.is_empty() {
                         let current = env!("CARGO_PKG_VERSION");
-                        if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
-                            eprintln!("[AutoUpdate] New version available: {}", manifest.version);
+                        if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                            eprintln!("[AutoUpdate] New release: {}", tag);
                             if let Ok(mut st) = state.shared.write() {
-                                st.update_available = Some(manifest.version.clone());
+                                st.update_available = Some(tag.clone());
                             }
-                            if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                            if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
                                 eprintln!("[AutoUpdate] Update failed: {}", e);
                             }
                         }

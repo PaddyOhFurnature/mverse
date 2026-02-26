@@ -1,42 +1,41 @@
-//! Binary auto-update for server and relay nodes.
+//! Binary auto-update using GitHub Releases.
 //!
 //! Workflow:
-//!   1. Node periodically fetches the operator-configured `manifest_url`.
-//!   2. If the manifest version is newer than the running binary, the new binary
-//!      is downloaded and its SHA-256 verified.
-//!   3. The current executable is atomically replaced.
-//!   4. The process exec()-restarts in-place (same PID, new binary image).
+//!   1. Query `https://api.github.com/repos/{github_repo}/releases/latest`.
+//!   2. If the release tag is newer than the running binary, find the matching
+//!      asset (by executable filename) and download it.
+//!   3. Atomically replace the current executable.
+//!   4. exec()-restart in-place (same PID on Linux; exit for supervisor restart otherwise).
 //!
-//! Manifest format (JSON at the operator-controlled URL):
+//! Configuration (server.json / relay.json):
 //! ```json
 //! {
-//!   "version": "0.1.5",
-//!   "download_url": "https://example.com/builds/metaverse-server",
-//!   "sha256": "a1b2c3...",
-//!   "release_notes": "Bug fixes and new features"
+//!   "github_repo": "PaddyOhFurnature/mverse",
+//!   "update_check_interval_secs": 21600
 //! }
 //! ```
+//! Set `github_repo` to an empty string to disable auto-update.
 //!
-//! The operator is responsible for hosting a manifest per binary per platform.
-//! Configure `update_manifest_url` in server.json / relay.json to enable.
+//! Asset names in GitHub releases must match the binary filename exactly
+//! (e.g. `metaverse-server`, `metaverse-relay`). That is already the case
+//! for `PaddyOhFurnature/mverse` releases.
 
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 
-// ── Manifest ──────────────────────────────────────────────────────────────────
+// ── GitHub Releases API types ─────────────────────────────────────────────────
 
-/// Operator-hosted JSON manifest describing an available release.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UpdateManifest {
-    /// Semantic version string, e.g. `"0.1.5"` or `"v0.1.5"`.
-    pub version: String,
-    /// Direct download URL for this node's binary.
-    pub download_url: String,
-    /// Lowercase hex SHA-256 of the downloaded binary.
-    pub sha256: String,
-    /// Human-readable release notes (shown in the web UI).
-    #[serde(default)]
-    pub release_notes: String,
+#[derive(Debug, Deserialize)]
+struct GhRelease {
+    tag_name: String,
+    name:     String,
+    body:     Option<String>,
+    assets:   Vec<GhAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GhAsset {
+    name:                 String,
+    browser_download_url: String,
 }
 
 // ── Version helpers ───────────────────────────────────────────────────────────
@@ -54,67 +53,75 @@ pub fn is_newer(candidate: &str, current: &str) -> bool {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Fetch the manifest at `url` and return it if its version is newer than
-/// `current_version`. Returns `None` if already up-to-date or on any error.
+/// Query the GitHub Releases API for `github_repo` (e.g. `"PaddyOhFurnature/mverse"`).
 ///
-/// Errors are logged to stderr but not propagated — a failed check is silent.
-pub async fn check_for_update(url: &str, current_version: &str) -> Option<UpdateManifest> {
+/// Returns `Some((tag, download_url, release_notes))` if there is a release newer
+/// than `current_version` **and** it contains an asset matching this binary's
+/// filename.  Returns `None` if up-to-date, the repo is empty, or on any error.
+pub async fn check_for_update(
+    github_repo: &str,
+    current_version: &str,
+) -> Option<(String, String, String)> {
+    if github_repo.is_empty() { return None; }
+
+    let binary_name = std::env::current_exe().ok()?
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+
+    let api_url = format!("https://api.github.com/repos/{}/releases/latest", github_repo);
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
+        .user_agent("metaverse-autoupdate/1.0")
         .build()
         .ok()?;
 
-    let resp = match client.get(url).send().await {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r)  => { eprintln!("[AutoUpdate] manifest fetch returned {}", r.status()); return None; }
-        Err(e) => { eprintln!("[AutoUpdate] manifest fetch failed: {}", e); return None; }
+    let release: GhRelease = match client.get(&api_url).send().await {
+        Ok(r) if r.status().is_success() => match r.json().await {
+            Ok(v) => v,
+            Err(e) => { eprintln!("[AutoUpdate] parse error: {}", e); return None; }
+        },
+        Ok(r)  => { eprintln!("[AutoUpdate] GitHub API returned {}", r.status()); return None; }
+        Err(e) => { eprintln!("[AutoUpdate] GitHub API unreachable: {}", e); return None; }
     };
 
-    let manifest: UpdateManifest = match resp.json().await {
-        Ok(m) => m,
-        Err(e) => { eprintln!("[AutoUpdate] manifest parse failed: {}", e); return None; }
-    };
-
-    if is_newer(&manifest.version, current_version) {
-        Some(manifest)
-    } else {
-        None
+    if !is_newer(&release.tag_name, current_version) {
+        return None; // already up-to-date
     }
+
+    // Find the asset whose name matches this binary
+    let asset = release.assets.iter().find(|a| a.name == binary_name)?;
+
+    let notes = release.body.clone().unwrap_or_default();
+    Some((release.tag_name, asset.browser_download_url.clone(), notes))
 }
 
-/// Download, verify, and atomically install the binary described by `manifest`,
-/// then exec()-restart in-place.
+/// Download and atomically install the binary at `download_url`, then
+/// exec()-restart the process in-place.
 ///
-/// Returns `Err` if any step fails — the running binary is left untouched.
-/// On success this function does **not** return (the process is replaced).
-pub async fn apply_update(manifest: &UpdateManifest) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Returns `Err` on failure — the running binary is left untouched.
+/// On success this function does **not** return (process is replaced).
+pub async fn apply_update(
+    version: &str,
+    download_url: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let exe_path = std::env::current_exe()?;
     let tmp_path = exe_path.with_extension("_update_tmp");
 
-    eprintln!("[AutoUpdate] Downloading v{}…", manifest.version);
+    eprintln!("[AutoUpdate] Downloading {}…", version);
 
-    // ── Download ──────────────────────────────────────────────────────────────
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
+        .user_agent("metaverse-autoupdate/1.0")
         .build()?;
 
-    let bytes = client.get(&manifest.download_url)
+    // GitHub releases redirect to the CDN; follow redirects automatically.
+    let bytes = client.get(download_url)
         .send().await?
         .bytes().await?;
 
-    eprintln!("[AutoUpdate] Downloaded {} bytes, verifying…", bytes.len());
-
-    // ── Verify SHA-256 ────────────────────────────────────────────────────────
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let actual   = hex::encode(hasher.finalize());
-    let expected = manifest.sha256.to_lowercase();
-
-    if actual != expected {
-        return Err(format!(
-            "SHA-256 mismatch: got {} expected {}", actual, expected
-        ).into());
-    }
+    eprintln!("[AutoUpdate] Downloaded {} bytes", bytes.len());
 
     // ── Write + chmod ─────────────────────────────────────────────────────────
     std::fs::write(&tmp_path, &bytes)?;
@@ -128,7 +135,7 @@ pub async fn apply_update(manifest: &UpdateManifest) -> Result<(), Box<dyn std::
     // ── Atomic replace ────────────────────────────────────────────────────────
     std::fs::rename(&tmp_path, &exe_path)?;
 
-    eprintln!("[AutoUpdate] v{} installed — restarting…", manifest.version);
+    eprintln!("[AutoUpdate] {} installed — restarting…", version);
 
     // ── Exec-restart: replace process image in-place (same PID) ──────────────
     #[cfg(unix)]
@@ -141,7 +148,7 @@ pub async fn apply_update(manifest: &UpdateManifest) -> Result<(), Box<dyn std::
         return Err(format!("exec restart failed: {}", err).into());
     }
 
-    // Non-Unix fallback: exit and let the supervisor (systemd/etc.) restart.
+    // Non-Unix fallback: exit and let the supervisor (systemd / etc.) restart.
     #[cfg(not(unix))]
     std::process::exit(0);
 }

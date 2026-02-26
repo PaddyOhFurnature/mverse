@@ -62,9 +62,10 @@ pub struct RelayConfig {
     pub web_port: u16,
     pub no_web: bool,
     pub ui: UiConfig,
-    /// URL of the JSON update manifest for this binary (leave empty to disable).
-    #[serde(default)]
-    pub update_manifest_url: String,
+    /// GitHub repo to check for binary updates, e.g. `"PaddyOhFurnature/mverse"`.
+    /// Set to empty string to disable auto-update.
+    #[serde(default = "default_github_repo")]
+    pub github_repo: String,
     /// How often to check for updates, in seconds. Default: 21600 (6 hours).
     #[serde(default = "default_update_interval")]
     pub update_check_interval_secs: u64,
@@ -88,13 +89,14 @@ impl Default for RelayConfig {
             web_port: 8081,
             no_web: false,
             ui: UiConfig::default(),
-            update_manifest_url: String::new(),
+            github_repo: default_github_repo(),
             update_check_interval_secs: 21600,
         }
     }
 }
 
 fn default_update_interval() -> u64 { 21600 }
+fn default_github_repo() -> String { "PaddyOhFurnature/mverse".to_string() }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -814,12 +816,12 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
                 update_web_status(&state, &web_status).await;
             }
             _ = update_tick.tick() => {
-                let url = state.config.update_manifest_url.clone();
-                if !url.is_empty() {
+                let repo = state.config.github_repo.clone();
+                if !repo.is_empty() {
                     let current = env!("CARGO_PKG_VERSION");
-                    if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
-                        eprintln!("[AutoUpdate] New version available: {}", manifest.version);
-                        if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                    if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                        eprintln!("[AutoUpdate] New release: {}", tag);
+                        if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
                             eprintln!("[AutoUpdate] Update failed: {}", e);
                         }
                     }
@@ -857,12 +859,12 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
                     publish_relay_capabilities(&state.local_peer_id, &state.config, &mut swarm);
                 }
                 _ = update_tick_tui.tick() => {
-                    let url = state.config.update_manifest_url.clone();
-                    if !url.is_empty() {
+                    let repo = state.config.github_repo.clone();
+                    if !repo.is_empty() {
                         let current = env!("CARGO_PKG_VERSION");
-                        if let Some(manifest) = metaverse_core::autoupdate::check_for_update(&url, current).await {
-                            eprintln!("[AutoUpdate] New version available: {}", manifest.version);
-                            if let Err(e) = metaverse_core::autoupdate::apply_update(&manifest).await {
+                        if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                            eprintln!("[AutoUpdate] New release: {}", tag);
+                            if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
                                 eprintln!("[AutoUpdate] Update failed: {}", e);
                             }
                         }
