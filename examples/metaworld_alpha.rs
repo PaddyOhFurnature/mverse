@@ -397,7 +397,166 @@ impl SignupScreen {
     }
 }
 
-// ── Debug HUD ─────────────────────────────────────────────────────────────────
+// ── Compose screen — in-game content posting ──────────────────────────────────
+
+struct ComposeScreen {
+    egui_ctx:      egui::Context,
+    egui_state:    egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
+    section:       metaverse_core::meshsite::Section,
+    title:         String,
+    body:          String,
+    author:        String,
+    error:         Option<String>,
+}
+
+impl ComposeScreen {
+    fn new(
+        context: &RenderContext,
+        window: &winit::window::Window,
+        section: metaverse_core::meshsite::Section,
+        author: String,
+    ) -> Self {
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(), egui_ctx.viewport_id(), window,
+            Some(window.scale_factor() as f32), None, None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &context.device, context.config.format, None, 1, false,
+        );
+        Self {
+            egui_ctx, egui_state, egui_renderer,
+            section, title: String::new(), body: String::new(),
+            author, error: None,
+        }
+    }
+
+    fn on_event(&mut self, window: &winit::window::Window, event: &WindowEvent) -> bool {
+        self.egui_state.on_window_event(window, event).consumed
+    }
+
+    /// Render the compose overlay.
+    /// Returns `Some(item)` when the user submits, `None` still composing, or drops self on cancel.
+    /// The caller should set `compose = None` when this returns `Some(false_sentinel)`.
+    fn render(
+        &mut self,
+        context: &RenderContext,
+        view: &wgpu::TextureView,
+        window: &winit::window::Window,
+    ) -> ComposeResult {
+        let raw_input = self.egui_state.take_egui_input(window);
+        let mut result = ComposeResult::Continue;
+
+        let section = &mut self.section;
+        let title   = &mut self.title;
+        let body    = &mut self.body;
+        let error   = &mut self.error;
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            // dim backdrop
+            egui::Area::new(egui::Id::new("compose_backdrop"))
+                .fixed_pos(egui::pos2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.painter().rect_filled(ctx.screen_rect(), 0.0,
+                        egui::Color32::from_black_alpha(190));
+                });
+
+            egui::Window::new("✍  New Post")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .fixed_size([520.0, 420.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Section:");
+                        use metaverse_core::meshsite::Section;
+                        for s in [Section::Forums, Section::Wiki, Section::Marketplace, Section::Post] {
+                            let active = std::mem::discriminant(section) == std::mem::discriminant(&s);
+                            let label = s.as_str();
+                            if ui.selectable_label(active, label).clicked() {
+                                *section = s;
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+
+                    ui.label("Title:");
+                    ui.add(egui::TextEdit::singleline(title)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Subject / title (required)"));
+                    ui.add_space(6.0);
+
+                    ui.label("Body:");
+                    ui.add(egui::TextEdit::multiline(body)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(10)
+                        .hint_text("Write your post here..."));
+                    ui.add_space(8.0);
+
+                    if let Some(e) = error.as_deref() {
+                        ui.colored_label(egui::Color32::from_rgb(255, 100, 100), e);
+                        ui.add_space(4.0);
+                    }
+
+                    ui.horizontal(|ui| {
+                        let can_submit = !title.trim().is_empty() && !body.trim().is_empty();
+                        if ui.add_enabled(can_submit, egui::Button::new("📤  Post")).clicked() {
+                            result = ComposeResult::Submit;
+                        }
+                        if ui.button("✖  Cancel").clicked() {
+                            result = ComposeResult::Cancel;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!("[ ESC to cancel ]"))
+                                .color(egui::Color32::DARK_GRAY).size(11.0));
+                        });
+                    });
+                });
+        });
+
+        self.egui_state.handle_platform_output(window, full_output.platform_output);
+        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        for (id, delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
+        }
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [context.config.width, context.config.height],
+            pixels_per_point: full_output.pixels_per_point,
+        };
+        let mut encoder = context.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("compose") }
+        );
+        self.egui_renderer.update_buffers(&context.device, &context.queue, &mut encoder, &tris, &screen_desc);
+        {
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("compose_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            }).forget_lifetime();
+            self.egui_renderer.render(&mut rpass, &tris, &screen_desc);
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
+        }
+
+        result
+    }
+}
+
+#[derive(PartialEq)]
+enum ComposeResult {
+    Continue,
+    Submit,
+    Cancel,
+}
 
 struct DebugHud {
     egui_ctx:      egui::Context,
@@ -866,6 +1025,9 @@ fn main() {
         None
     };
 
+    // In-game compose screen (None when not composing)
+    let mut compose: Option<ComposeScreen> = None;
+
     // Always start in the Construct; player enters Open World through the portal.
     let mut game_mode = GameMode::Construct;
     
@@ -1222,9 +1384,12 @@ fn main() {
     event_loop.run(move |event, elwt| {
         match event {
             Event::WindowEvent { ref event, .. } => {
-                // Route all window events through egui when the signup screen is active
+                // Route all window events through egui when the signup or compose screen is active
                 if let Some(ref mut s) = signup {
                     s.on_event(&window, event);
+                }
+                if let Some(ref mut c) = compose {
+                    c.on_event(&window, event);
                 }
                 // HUD always needs events for egui input tracking
                 hud.on_event(&window, event);
@@ -1284,8 +1449,17 @@ fn main() {
                 }
                 
                 WindowEvent::KeyboardInput { event, .. } => {
-                    // Block game input while the signup screen is visible
+                    // Block game input while the signup or compose screen is visible
                     if signup.is_some() { return; }
+                    if compose.is_some() {
+                        // ESC closes compose without posting
+                        if event.state == ElementState::Pressed {
+                            if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
+                                compose = None;
+                            }
+                        }
+                        return;
+                    }
                     if event.state == ElementState::Pressed {
                         if let PhysicalKey::Code(keycode) = event.physical_key {
                             match keycode {
@@ -1348,9 +1522,25 @@ fn main() {
                                     }
                                 }
                                 KeyCode::KeyE => {
-                                    // Interact: module rooms take priority over signup terminal
+                                    // Interact: module rooms
                                     if let Some(idx) = hud_near_module {
-                                        game_mode = GameMode::ConstructModule(idx);
+                                        // Modules 2-5 are content rooms — open compose screen
+                                        const MODULE_SECTIONS: [Option<metaverse_core::meshsite::Section>; 6] = [
+                                            None,
+                                            None,
+                                            Some(metaverse_core::meshsite::Section::Forums),
+                                            Some(metaverse_core::meshsite::Section::Wiki),
+                                            Some(metaverse_core::meshsite::Section::Marketplace),
+                                            Some(metaverse_core::meshsite::Section::Post),
+                                        ];
+                                        if let Some(section) = MODULE_SECTIONS[idx].clone() {
+                                            let author = multiplayer.peer_id().to_string();
+                                            compose = Some(ComposeScreen::new(&context, &window, section, author));
+                                            window.set_cursor_visible(true);
+                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                        } else {
+                                            game_mode = GameMode::ConstructModule(idx);
+                                        }
                                     } else if matches!(game_mode, GameMode::Construct) {
                                         // signup terminal handled by auto-trigger above
                                     }
@@ -2274,6 +2464,45 @@ fn main() {
                                         }
                                         signup = None;
                                     }
+                                }
+                            }
+
+                            // Compose overlay — in-game content posting
+                            if let Some(ref mut c) = compose {
+                                match c.render(&context, &view, &window) {
+                                    ComposeResult::Submit => {
+                                        use metaverse_core::meshsite::ContentItem;
+                                        use std::time::{SystemTime, UNIX_EPOCH};
+                                        let now_ms = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .map(|d| d.as_millis() as u64)
+                                            .unwrap_or(0);
+                                        let mut item = ContentItem {
+                                            id: String::new(),
+                                            section: c.section.clone(),
+                                            title: c.title.trim().to_string(),
+                                            body: c.body.trim().to_string(),
+                                            author: c.author.clone(),
+                                            signature: vec![],
+                                            created_at: now_ms,
+                                        };
+                                        item.id = item.compute_id();
+                                        multiplayer.publish_content(&item);
+                                        println!("📤 Published [{:?}] \"{}\"", item.section, item.title);
+                                        compose = None;
+                                        // Restore mouse grab
+                                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                        window.set_cursor_visible(false);
+                                        cursor_grabbed = true;
+                                    }
+                                    ComposeResult::Cancel => {
+                                        compose = None;
+                                        // Restore mouse grab
+                                        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
+                                        window.set_cursor_visible(false);
+                                        cursor_grabbed = true;
+                                    }
+                                    ComposeResult::Continue => {}
                                 }
                             }
 
