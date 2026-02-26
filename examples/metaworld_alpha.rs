@@ -1669,6 +1669,9 @@ fn main() {
     let mut hud_near_portal:   bool = false;
     let mut hud_near_terminal: bool = false;
     let mut hud_near_module:   Option<usize> = None;
+
+    // Current WORLDNET address shown on the terminal screen
+    let mut terminal_address = metaverse_core::worldnet::WorldnetAddress::Root;
     
     let mut cursor_grabbed = false;
     
@@ -1849,12 +1852,11 @@ fn main() {
                                     }
                                 }
                                 KeyCode::KeyE => {
-                                    // Interact: module rooms
+                                    use metaverse_core::worldnet::{WorldnetAddress, render_page};
                                     if let Some(idx) = hud_near_module {
-                                        // Modules 2-5 are content rooms — open compose screen
+                                        // Module room: open compose screen for content rooms (2-5)
                                         const MODULE_SECTIONS: [Option<metaverse_core::meshsite::Section>; 6] = [
-                                            None,
-                                            None,
+                                            None, None,
                                             Some(metaverse_core::meshsite::Section::Forums),
                                             Some(metaverse_core::meshsite::Section::Wiki),
                                             Some(metaverse_core::meshsite::Section::Marketplace),
@@ -1865,18 +1867,28 @@ fn main() {
                                             compose = Some(ComposeScreen::new(&context, &window, section, author));
                                             window.set_cursor_visible(true);
                                             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                                        } else {
-                                            game_mode = GameMode::ConstructModule(idx);
-                                            window.set_cursor_visible(true);
-                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         }
-                                    } else if matches!(game_mode, GameMode::Construct) {
-                                        // Terminal: open identity/login overlay (module 0)
-                                        if hud_near_terminal {
-                                            game_mode = GameMode::ConstructModule(0);
-                                            window.set_cursor_visible(true);
-                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-                                        }
+                                    } else if hud_near_terminal {
+                                        // Terminal: cycle through WORLDNET pages and update screen
+                                        terminal_address = match &terminal_address {
+                                            WorldnetAddress::Root       => WorldnetAddress::Forums,
+                                            WorldnetAddress::Forums     => WorldnetAddress::Wiki,
+                                            WorldnetAddress::Wiki       => WorldnetAddress::Marketplace,
+                                            WorldnetAddress::Marketplace => WorldnetAddress::Settings,
+                                            _                           => WorldnetAddress::Root,
+                                        };
+                                        let key_type = identity.load_key_record()
+                                            .map(|kr| kr.effective_key_type());
+                                        let section_str = match &terminal_address {
+                                            WorldnetAddress::Forums      => "forums",
+                                            WorldnetAddress::Wiki        => "wiki",
+                                            WorldnetAddress::Marketplace => "marketplace",
+                                            _ => "",
+                                        };
+                                        let content = multiplayer.get_content(section_str);
+                                        render_page(&terminal_address, key_type, content, &mut worldnet_buf);
+                                        terminal_screen.update(&context.queue, &worldnet_buf);
+                                        println!("🖥️  WORLDNET: {}", terminal_address.to_string());
                                     }
                                 }
                                 // P — open in-game object placement overlay

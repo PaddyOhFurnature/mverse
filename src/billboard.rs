@@ -591,26 +591,31 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
 // ── Terminal screen surface ───────────────────────────────────────────────────
 
-/// A WORLDNET terminal screen — a single updatable billboard quad sized to
-/// fit the top face of the kiosk terminal mesh (1.0m wide × 0.7m deep,
-/// normal pointing up, rendered into a WORLDNET_W × WORLDNET_H texture).
+/// A WORLDNET terminal screen — vertical quad on the front face of the kiosk,
+/// facing the approaching player (+Z), at eye level.
 pub struct TerminalScreen {
     quad: GpuBillboard,
 }
 
 impl TerminalScreen {
     /// Build the terminal screen at the given kiosk position.
+    /// Renders as a vertical screen on the player-facing side of the kiosk,
+    /// centred at eye level (1.4m), 0.85m wide × 0.65m tall.
     pub fn new(
         context:   &RenderContext,
         pipeline:  &BillboardPipeline,
         kiosk_pos: Vec3,
     ) -> Self {
         use crate::worldnet::{WORLDNET_W, WORLDNET_H};
-        // Top face sits at kiosk_pos.y + 1.1 (post) + 0.025 (half of 0.05 screen thickness)
-        let center = Vec3::new(kiosk_pos.x, kiosk_pos.y + 1.125, kiosk_pos.z);
-        let normal = Vec3::Y;        // facing up
+        // Front face of screen housing: z = kiosk_pos.z - 0.35 (sd=0.35), offset 0.01 to clear mesh
+        let center = Vec3::new(
+            kiosk_pos.x,
+            kiosk_pos.y + 1.4,       // eye level
+            kiosk_pos.z - 0.34,      // just in front of kiosk front face
+        );
+        let normal = Vec3::Z;        // facing +Z = toward approaching player
         let right  = Vec3::X;        // texture right = +X
-        let up     = Vec3::NEG_Z;    // texture "up" = toward -Z (away from player spawn)
+        let up     = Vec3::Y;        // texture up = up
 
         let blank = vec![12u8, 14, 20, 255].repeat((WORLDNET_W * WORLDNET_H) as usize);
 
@@ -619,7 +624,7 @@ impl TerminalScreen {
             center, normal, right, up,
             &blank,
             WORLDNET_W, WORLDNET_H,
-            1.0, 0.7,
+            0.85, 0.65,   // physical: 0.85m wide × 0.65m tall
             &pipeline.model_bgl, &pipeline.texture_bgl, &pipeline.sampler,
         );
         Self { quad }
