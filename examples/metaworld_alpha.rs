@@ -1856,16 +1856,15 @@ fn main() {
                                             window.set_cursor_visible(true);
                                             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                         } else {
-                                            game_mode = GameMode::ConstructModule(idx);
-                                            window.set_cursor_visible(true);
-                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                            // Identity/login info — open web dashboard in browser
+                                            let url = format!("{}", server_url);
+                                            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                                         }
                                     } else if matches!(game_mode, GameMode::Construct) {
-                                        // Terminal: open identity/login overlay (module 0)
+                                        // Terminal: open web dashboard in browser
                                         if hud_near_terminal {
-                                            game_mode = GameMode::ConstructModule(0);
-                                            window.set_cursor_visible(true);
-                                            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                                            let url = format!("{}", server_url);
+                                            let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                                         }
                                     }
                                 }
@@ -2965,31 +2964,6 @@ fn main() {
                                 hud_near_portal, hud_near_terminal,
                                 near_module_hud,
                             );
-
-                            // Module overlay — full-screen panel when inside a module room
-                            if let GameMode::ConstructModule(idx) = game_mode {
-                                let peer_count = multiplayer.peer_count();
-                                // Get content for this module's section
-                                let section_str = match idx {
-                                    2 => "forums",
-                                    3 => "wiki",
-                                    4 => "marketplace",
-                                    5 => "post",
-                                    _ => "",
-                                };
-                                let content = multiplayer.get_content(section_str);
-                                let wants_exit = hud.render_module_overlay(
-                                    &context, &view, &window,
-                                    idx,
-                                    Some(&identity),
-                                    peer_count,
-                                    &server_url,
-                                    content,
-                                );
-                                if wants_exit {
-                                    game_mode = GameMode::Construct;
-                                }
-                            }
 
                             frame.present();
                         }
