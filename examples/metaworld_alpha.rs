@@ -891,13 +891,6 @@ impl DebugHud {
                 (sc.x * 255.0) as u8, (sc.y * 255.0) as u8, (sc.z * 255.0) as u8,
             );
 
-            // Force dark visuals with bright text inside this context
-            ctx.set_visuals({
-                let mut v = egui::Visuals::dark();
-                v.override_text_color = Some(egui::Color32::from_gray(220));
-                v
-            });
-
             egui::Window::new(format!("◈  {}", module.name))
                 .collapsible(false)
                 .resizable(false)
@@ -907,6 +900,8 @@ impl DebugHud {
                     .fill(egui::Color32::from_rgb(22, 24, 30))
                     .stroke(egui::Stroke::new(1.5, accent)))
                 .show(ctx, |ui| {
+                    // All text inside this window: bright white on dark background
+                    ui.visuals_mut().override_text_color = Some(egui::Color32::WHITE);
                     // Module path breadcrumb
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(format!("/construct/{}", module.slug))
