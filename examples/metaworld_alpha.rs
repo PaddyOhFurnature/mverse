@@ -883,7 +883,7 @@ impl DebugHud {
             // covering the entire viewport before the Window floats on top.
             egui::CentralPanel::default()
                 .frame(egui::Frame::none()
-                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 180)))
+                    .fill(egui::Color32::from_rgba_unmultiplied(8, 10, 18, 215)))
                 .show(ctx, |_ui| {});
 
             let sc = module.screen_colour;
@@ -891,14 +891,21 @@ impl DebugHud {
                 (sc.x * 255.0) as u8, (sc.y * 255.0) as u8, (sc.z * 255.0) as u8,
             );
 
+            // Force dark visuals with bright text inside this context
+            ctx.set_visuals({
+                let mut v = egui::Visuals::dark();
+                v.override_text_color = Some(egui::Color32::from_gray(220));
+                v
+            });
+
             egui::Window::new(format!("◈  {}", module.name))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .fixed_size([680.0, 520.0])
                 .frame(egui::Frame::window(&ctx.style())
-                    .fill(egui::Color32::from_rgb(22, 24, 30))
-                    .stroke(egui::Stroke::new(1.0, accent)))
+                    .fill(egui::Color32::from_rgb(48, 52, 68))
+                    .stroke(egui::Stroke::new(1.5, accent)))
                 .show(ctx, |ui| {
                     // Module path breadcrumb
                     ui.horizontal(|ui| {
