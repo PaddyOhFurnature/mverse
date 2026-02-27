@@ -2094,42 +2094,38 @@ fn main() {
                                 } else {
                                     ChunkContext::from_chunk(chunk_id).with_osm(osm)
                                 };
-                                // Buildings
+                                // Buildings: Y = SRTM elevation (matches terrain formula),
+                                //            X/Z = ECEF local (matches terrain column positions).
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let gps = metaverse_core::coordinates::GPS::new(
-                                            obj.lat, obj.lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                                .map(|e| e.meters)
-                                                .unwrap_or(origin_gps.alt));
-                                        let ecef = gps.to_ecef();
+                                        let srtm_y = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let ecef = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef();
                                         let local = physics.ecef_to_local(&ecef);
-                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                        let world_pos = [local.x, srtm_y + obj.y_offset, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Roads
+                                // Roads: each endpoint gets SRTM Y separately to keep segments flat.
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
                                     for seg in &segs {
-                                        let ga = metaverse_core::coordinates::GPS::new(
-                                            seg.a_lat, seg.a_lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
-                                        let gb = metaverse_core::coordinates::GPS::new(
-                                            seg.b_lat, seg.b_lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
-                                        let la = physics.ecef_to_local(&ga.to_ecef());
-                                        let lb = physics.ecef_to_local(&gb.to_ecef());
+                                        let ya = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let yb = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let la = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                        let lb = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, la.y, la.z),
-                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            Vec3::new(la.x, ya, la.z),
+                                            Vec3::new(lb.x, yb, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
@@ -2796,15 +2792,12 @@ fn main() {
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let gps = metaverse_core::coordinates::GPS::new(
-                                            obj.lat, obj.lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                                .map(|e| e.meters)
-                                                .unwrap_or(origin_gps.alt));
-                                        let ecef = gps.to_ecef();
+                                        let srtm_y = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let ecef = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef();
                                         let local = physics.ecef_to_local(&ecef);
-                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                        let world_pos = [local.x, srtm_y + obj.y_offset, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
@@ -2812,21 +2805,19 @@ fn main() {
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
                                     for seg in &segs {
-                                        let ga = metaverse_core::coordinates::GPS::new(
-                                            seg.a_lat, seg.a_lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
-                                        let gb = metaverse_core::coordinates::GPS::new(
-                                            seg.b_lat, seg.b_lon,
-                                            osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
-                                        let la = physics.ecef_to_local(&ga.to_ecef());
-                                        let lb = physics.ecef_to_local(&gb.to_ecef());
+                                        let ya = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let yb = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
+                                            .map(|e| e.meters as f32).unwrap_or(0.0);
+                                        let la = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                        let lb = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, la.y, la.z),
-                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            Vec3::new(la.x, ya, la.z),
+                                            Vec3::new(lb.x, yb, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
@@ -3517,8 +3508,9 @@ fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::Road
         let i1 = mesh.add_vertex(Vertex::new(v1, color));
         let i2 = mesh.add_vertex(Vertex::new(v2, color));
         let i3 = mesh.add_vertex(Vertex::new(v3, color));
-        mesh.add_triangle(Triangle::new(i0, i2, i1));
-        mesh.add_triangle(Triangle::new(i0, i3, i2));
+        // CCW from above: normal = +Y (visible looking down at road surface)
+        mesh.add_triangle(Triangle::new(i0, i1, i2));
+        mesh.add_triangle(Triangle::new(i0, i2, i3));
     }
 
     mesh
