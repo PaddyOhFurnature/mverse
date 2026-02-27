@@ -1614,6 +1614,17 @@ impl MultiplayerSystem {
         self.world_objects_cache.values().flat_map(|v| v.iter())
     }
 
+    /// Insert an inferred object into the cache without overwriting existing DHT objects.
+    /// Key is the chunk grid cell for the object's (x, z) position.
+    pub fn register_inferred_object(&mut self, obj: crate::world_objects::PlacedObject) {
+        use crate::world_objects::chunk_coords_for_pos;
+        let (cx, cz) = chunk_coords_for_pos(obj.position[0], obj.position[2]);
+        let bucket = self.world_objects_cache.entry((cx, cz)).or_default();
+        if !bucket.iter().any(|o| o.id == obj.id) {
+            bucket.push(obj);
+        }
+    }
+
     /// Handle an incoming meshsite content message from gossipsub.
     fn handle_meshsite_content(&mut self, data: &[u8]) {
         use crate::meshsite::ContentItem;

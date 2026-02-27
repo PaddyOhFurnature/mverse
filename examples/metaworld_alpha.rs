@@ -79,7 +79,7 @@ use metaverse_core::{
     identity::{Identity, KeyType},
     marching_cubes::extract_chunk_mesh,
     materials::MaterialId,
-    mesh::{Mesh, Vertex},
+    mesh::{Mesh, Triangle, Vertex},
     messages::{Material, MovementMode},
     multiplayer::MultiplayerSystem,
     physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
@@ -1261,6 +1261,14 @@ fn main() {
     // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
     let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
 
+    // OSM-inferred geometry buffers (buildings + roads)
+    let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
+    let mut roads_mesh_buffer: Option<MeshBuffer> = None;
+    // Accumulated road segments for the visible area: (a, b, width, road_type)
+    let mut road_segments: Vec<(Vec3, Vec3, f32, metaverse_core::osm::RoadType)> = Vec::new();
+    // Set to true whenever new objects are registered, triggering a mesh rebuild
+    let mut osm_geom_dirty = false;
+
     // WORLDNET terminal screen — rendered onto the kiosk top face
     let terminal_screen = TerminalScreen::new(&context, &billboard_pipeline, SIGNUP_TERMINAL_POS);
     let mut worldnet_buf = metaverse_core::worldnet::WorldnetPixelBuffer::new();
@@ -1328,6 +1336,14 @@ fn main() {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
     }
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
+
+    // Third elevation pipeline for OSM inference (objects need ground-truth elevation)
+    let mut osm_elev_pipeline = ElevationPipeline::new();
+    let cache_dir_3 = data_dir.join("elevation_cache");
+    if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
+        osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir_3)));
+    }
+    let osm_cache_dir = data_dir.join("osm");
     
     // User content layer - separates edits from base terrain
     let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
@@ -2044,8 +2060,8 @@ fn main() {
 
                         // Build mesh + collider for any chunks that finished loading
                         let new_chunks: Vec<_> = chunk_streamer.newly_loaded_chunks.drain(..).collect();
-                        for chunk_id in new_chunks {
-                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                        for chunk_id in &new_chunks {
+                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
@@ -2062,6 +2078,64 @@ fn main() {
                                     chunk_data.collider = Some(collider);
                                 }
                                 chunk_data.dirty = false;
+                            }
+                        }
+
+                        // OSM inference for newly loaded chunks
+                        {
+                            use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
+                                                                  infer_road_segments, to_placed_object};
+                            for &chunk_id in &new_chunks {
+                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
+                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                let ctx = if osm.is_empty() {
+                                    ChunkContext::from_chunk(chunk_id)
+                                } else {
+                                    ChunkContext::from_chunk(chunk_id).with_osm(osm)
+                                };
+                                // Buildings
+                                let inferred = infer_chunk_objects(&ctx);
+                                if !inferred.is_empty() {
+                                    for obj in &inferred {
+                                        let gps = metaverse_core::coordinates::GPS::new(
+                                            obj.lat, obj.lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
+                                                .map(|e| e.meters)
+                                                .unwrap_or(origin_gps.alt));
+                                        let ecef = gps.to_ecef();
+                                        let local = physics.ecef_to_local(&ecef);
+                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                        multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
+                                    }
+                                    osm_geom_dirty = true;
+                                }
+                                // Roads
+                                let segs = infer_road_segments(&ctx);
+                                if !segs.is_empty() {
+                                    for seg in &segs {
+                                        let ga = metaverse_core::coordinates::GPS::new(
+                                            seg.a_lat, seg.a_lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
+                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
+                                        let gb = metaverse_core::coordinates::GPS::new(
+                                            seg.b_lat, seg.b_lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
+                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
+                                        let la = physics.ecef_to_local(&ga.to_ecef());
+                                        let lb = physics.ecef_to_local(&gb.to_ecef());
+                                        road_segments.push((
+                                            Vec3::new(la.x, la.y, la.z),
+                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            seg.width_m,
+                                            seg.road_type.clone(),
+                                        ));
+                                    }
+                                    osm_geom_dirty = true;
+                                }
                             }
                         }
 
@@ -2705,6 +2779,63 @@ fn main() {
                     // This lets peers replace their independently-generated terrain with ours
                     // if they haven't loaded this chunk yet (or ours is newer due to user edits).
                     if !chunk_streamer.newly_loaded_chunks.is_empty() {
+                        // OSM inference for newly loaded chunks (game phase)
+                        {
+                            use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
+                                                                  infer_road_segments, to_placed_object};
+                            let new_ids: Vec<_> = chunk_streamer.newly_loaded_chunks.iter().copied().collect();
+                            for chunk_id in new_ids {
+                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
+                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                let ctx = if osm.is_empty() {
+                                    ChunkContext::from_chunk(chunk_id)
+                                } else {
+                                    ChunkContext::from_chunk(chunk_id).with_osm(osm)
+                                };
+                                let inferred = infer_chunk_objects(&ctx);
+                                if !inferred.is_empty() {
+                                    for obj in &inferred {
+                                        let gps = metaverse_core::coordinates::GPS::new(
+                                            obj.lat, obj.lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
+                                                .map(|e| e.meters)
+                                                .unwrap_or(origin_gps.alt));
+                                        let ecef = gps.to_ecef();
+                                        let local = physics.ecef_to_local(&ecef);
+                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                        multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
+                                    }
+                                    osm_geom_dirty = true;
+                                }
+                                let segs = infer_road_segments(&ctx);
+                                if !segs.is_empty() {
+                                    for seg in &segs {
+                                        let ga = metaverse_core::coordinates::GPS::new(
+                                            seg.a_lat, seg.a_lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
+                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
+                                        let gb = metaverse_core::coordinates::GPS::new(
+                                            seg.b_lat, seg.b_lon,
+                                            osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
+                                                .map(|e| e.meters).unwrap_or(origin_gps.alt));
+                                        let la = physics.ecef_to_local(&ga.to_ecef());
+                                        let lb = physics.ecef_to_local(&gb.to_ecef());
+                                        road_segments.push((
+                                            Vec3::new(la.x, la.y, la.z),
+                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            seg.width_m,
+                                            seg.road_type.clone(),
+                                        ));
+                                    }
+                                    osm_geom_dirty = true;
+                                }
+                            }
+                        }
+
                         // Always update AOI subscriptions when loaded chunks change —
                         // do NOT gate on peer_count because we need to be subscribed
                         // before the first peer connects, not after.
@@ -2824,6 +2955,18 @@ fn main() {
                         }
                     }
                     
+                    // Rebuild OSM geometry buffers when new objects arrived
+                    if osm_geom_dirty {
+                        let all_objs: Vec<_> = multiplayer.all_world_objects().cloned().collect();
+                        let bld_mesh = build_buildings_mesh(&all_objs);
+                        buildings_mesh_buffer = if bld_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &bld_mesh)) };
+                        let rd_mesh = build_roads_mesh(&road_segments);
+                        roads_mesh_buffer = if rd_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &rd_mesh)) };
+                        osm_geom_dirty = false;
+                    }
+
                     // Render
                     pipeline.update_camera(&context.queue, &camera);
                     billboard_pipeline.update_camera(&context.queue, &camera.build_view_projection_matrix());
@@ -2953,6 +3096,14 @@ fn main() {
                                         if let Some(mesh_buffer) = &chunk_data.mesh_buffer {
                                             mesh_buffer.render(&mut render_pass);
                                         }
+                                    }
+                                    // Render OSM road surfaces below buildings
+                                    if let Some(buf) = &roads_mesh_buffer {
+                                        buf.render(&mut render_pass);
+                                    }
+                                    // Render OSM building boxes
+                                    if let Some(buf) = &buildings_mesh_buffer {
+                                        buf.render(&mut render_pass);
                                     }
                                 }
 
@@ -3234,4 +3385,141 @@ fn create_crosshair() -> Mesh {
 // ─── Loading screen ──────────────────────────────────────────────────────────
 
 
+/// Build a triangle mesh of coloured boxes for all registered building objects.
+///
+/// Each building's config JSON contains `height`, `width`, `depth`.
+/// Winding: CCW from outside, matching the pipeline `front_face: Ccw` setting.
+fn build_buildings_mesh(
+    objects: &[metaverse_core::world_objects::PlacedObject],
+) -> Mesh {
+    use metaverse_core::world_objects::ObjectType;
+    let mut mesh = Mesh::new();
 
+    for obj in objects {
+        let type_str = obj.object_type.as_str();
+        if !type_str.starts_with("building") { continue; }
+
+        // Parse footprint dimensions from config JSON
+        let cfg: serde_json::Value = serde_json::from_str(&obj.content_key).unwrap_or_default();
+        let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.5) as f32;
+        let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+        let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+
+        let color = building_color(type_str);
+        let [cx, cy, cz] = obj.position;
+        let hw = w * 0.5;
+        let hd = d * 0.5;
+
+        // 8 corners of the box
+        let bot = cy;
+        let top = cy + h;
+
+        // bottom face vertices (y = bot)
+        let b0 = Vec3::new(cx - hw, bot, cz - hd);
+        let b1 = Vec3::new(cx + hw, bot, cz - hd);
+        let b2 = Vec3::new(cx + hw, bot, cz + hd);
+        let b3 = Vec3::new(cx - hw, bot, cz + hd);
+        // top face vertices (y = top)
+        let t0 = Vec3::new(cx - hw, top, cz - hd);
+        let t1 = Vec3::new(cx + hw, top, cz - hd);
+        let t2 = Vec3::new(cx + hw, top, cz + hd);
+        let t3 = Vec3::new(cx - hw, top, cz + hd);
+
+        // Top face — CCW from above (normal +Y)
+        let vt0 = mesh.add_vertex(Vertex::new(t0, color));
+        let vt1 = mesh.add_vertex(Vertex::new(t1, color));
+        let vt2 = mesh.add_vertex(Vertex::new(t2, color));
+        let vt3 = mesh.add_vertex(Vertex::new(t3, color));
+        mesh.add_triangle(Triangle::new(vt0, vt2, vt1));
+        mesh.add_triangle(Triangle::new(vt0, vt3, vt2));
+
+        // Four side faces — each CCW from outside
+        // North face (z = cz - hd, normal -Z)
+        let vn0 = mesh.add_vertex(Vertex::new(b1, color));
+        let vn1 = mesh.add_vertex(Vertex::new(b0, color));
+        let vn2 = mesh.add_vertex(Vertex::new(t0, color));
+        let vn3 = mesh.add_vertex(Vertex::new(t1, color));
+        mesh.add_triangle(Triangle::new(vn0, vn1, vn2));
+        mesh.add_triangle(Triangle::new(vn0, vn2, vn3));
+
+        // South face (z = cz + hd, normal +Z)
+        let vs0 = mesh.add_vertex(Vertex::new(b3, color));
+        let vs1 = mesh.add_vertex(Vertex::new(b2, color));
+        let vs2 = mesh.add_vertex(Vertex::new(t2, color));
+        let vs3 = mesh.add_vertex(Vertex::new(t3, color));
+        mesh.add_triangle(Triangle::new(vs0, vs1, vs2));
+        mesh.add_triangle(Triangle::new(vs0, vs2, vs3));
+
+        // East face (x = cx + hw, normal +X)
+        let ve0 = mesh.add_vertex(Vertex::new(b2, color));
+        let ve1 = mesh.add_vertex(Vertex::new(b1, color));
+        let ve2 = mesh.add_vertex(Vertex::new(t1, color));
+        let ve3 = mesh.add_vertex(Vertex::new(t2, color));
+        mesh.add_triangle(Triangle::new(ve0, ve1, ve2));
+        mesh.add_triangle(Triangle::new(ve0, ve2, ve3));
+
+        // West face (x = cx - hw, normal -X)
+        let vw0 = mesh.add_vertex(Vertex::new(b0, color));
+        let vw1 = mesh.add_vertex(Vertex::new(b3, color));
+        let vw2 = mesh.add_vertex(Vertex::new(t3, color));
+        let vw3 = mesh.add_vertex(Vertex::new(t0, color));
+        mesh.add_triangle(Triangle::new(vw0, vw1, vw2));
+        mesh.add_triangle(Triangle::new(vw0, vw2, vw3));
+    }
+
+    mesh
+}
+
+/// Road surface colour by type.
+fn road_color(road_type: &metaverse_core::osm::RoadType) -> Vec3 {
+    use metaverse_core::osm::RoadType;
+    match road_type {
+        RoadType::Motorway | RoadType::Trunk => Vec3::new(0.9, 0.5, 0.1),
+        RoadType::Primary | RoadType::Secondary => Vec3::new(0.85, 0.75, 0.2),
+        RoadType::Tertiary | RoadType::Residential => Vec3::new(0.55, 0.55, 0.55),
+        _ => Vec3::new(0.45, 0.45, 0.45),
+    }
+}
+
+/// Build colour for building type.
+fn building_color(type_str: &str) -> Vec3 {
+    match type_str {
+        s if s.contains("commercial") || s.contains("retail") => Vec3::new(0.4, 0.5, 0.85),
+        s if s.contains("industrial") || s.contains("warehouse") => Vec3::new(0.55, 0.45, 0.35),
+        s if s.contains("residential") || s.contains("house") => Vec3::new(0.85, 0.75, 0.55),
+        _ => Vec3::new(0.7, 0.68, 0.62),
+    }
+}
+
+/// Build a road surface mesh from road segment data stored in placed objects.
+///
+/// Roads are stored as `Custom("road_*")` objects whose config JSON has
+/// `a` and `b` endpoint positions and `width`.  Each segment becomes a
+/// flat quad lying on the ground.
+fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::RoadType)]) -> Mesh {
+    let mut mesh = Mesh::new();
+
+    for (a, b, width, road_type) in road_segments {
+        let color = road_color(road_type);
+        let hw = width * 0.5;
+
+        // Perpendicular to road in XZ plane
+        let dir = (*b - *a).normalize();
+        let perp = Vec3::new(-dir.z, 0.0, dir.x) * hw;
+
+        let v0 = *a - perp;
+        let v1 = *a + perp;
+        let v2 = *b + perp;
+        let v3 = *b - perp;
+
+        // Quad lying flat — CCW from above (+Y normal)
+        let i0 = mesh.add_vertex(Vertex::new(v0, color));
+        let i1 = mesh.add_vertex(Vertex::new(v1, color));
+        let i2 = mesh.add_vertex(Vertex::new(v2, color));
+        let i3 = mesh.add_vertex(Vertex::new(v3, color));
+        mesh.add_triangle(Triangle::new(i0, i2, i1));
+        mesh.add_triangle(Triangle::new(i0, i3, i2));
+    }
+
+    mesh
+}

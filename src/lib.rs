@@ -42,3 +42,5 @@ pub mod world_objects;  // Placed-object registry — modular placement schema +
 pub mod web_ui;         // Shared Pi-Hole-style web dashboard — server, relay, client
 pub mod autoupdate;     // Binary auto-update: check manifest, verify, exec-restart
 pub mod worldnet;       // WORLDNET OS — distributed OS layer, address system, pixel renderer
+pub mod osm;            // OpenStreetMap data loading from local PBF
+pub mod world_inference; // Infer placed objects from OSM data + elevation
