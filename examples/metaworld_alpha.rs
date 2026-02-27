@@ -1292,7 +1292,7 @@ fn main() {
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
     
-    let origin_gps = GPS::new(-27.3996, 153.1871, 2.0); // Flat island, Moreton Bay QLD
+    let origin_gps = GPS::new(-27.463675, 153.035645, 10.0); // Story Bridge, Brisbane
     
     let mut elevation_pipeline = ElevationPipeline::new();
     
@@ -1300,9 +1300,7 @@ fn main() {
     // identical terrain from the same source data. NAS file is excluded because
     // different SRTM datasets (NAS vs API) produce slightly different heights,
     // causing 1-2 block offsets between clients even at the same GPS coordinates.
-    let data_dir = std::env::var("METAVERSE_DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap());
+    let data_dir = std::path::PathBuf::from("world_data");
     let cache_dir = data_dir.join("elevation_cache");
     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").ok();
     if let Some(key) = api_key {
@@ -1341,19 +1339,8 @@ fn main() {
     // Advertise this client's capabilities to the DHT (0 = no storage contribution by default)
     multiplayer.publish_node_capabilities(0);
     
-    // World data directory - unique per identity for local testing
-    // In production on separate machines, all would use "world_data"
-    let world_dir = if let Ok(identity_file) = std::env::var("METAVERSE_IDENTITY_FILE") {
-        // Extract identity name from file (e.g., alice.key -> alice)
-        let identity_name = std::path::Path::new(&identity_file)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("default");
-        
-        std::path::PathBuf::from(format!("world_data_{}", identity_name))
-    } else {
-        std::path::PathBuf::from("world_data")
-    };
+    // World data directory - single shared location
+    let world_dir = std::path::PathBuf::from("world_data");
     
     // Create world directory if it doesn't exist
     if !world_dir.exists() {
