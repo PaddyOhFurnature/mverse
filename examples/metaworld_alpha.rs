@@ -1828,48 +1828,56 @@ fn main() {
                                 } else {
                                     ChunkContext::from_chunk(chunk_id).with_osm(osm)
                                 };
-                                // Buildings: include SRTM elevation in GPS before ECEF conversion so
-                                // physics.ecef_to_local() handles all three axes correctly.
+                                // Buildings: Y = srtm - origin_alt (same formula as terrain generator).
+                                // X/Z from GPS(lat,lon,0).to_ecef() → ecef_to_local (horizontal only).
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
+                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
-                                        let elev = osm_elev_pipeline.query(
+                                        let srtm = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
-                                        let gps = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, elev);
-                                        let local = physics.ecef_to_local(&gps.to_ecef());
-                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let render_y = (srtm - origin_alt) + obj.y_offset;
+                                        let local = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
+                                        let world_pos = [local.x, render_y, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Roads: same pattern — elevation baked into GPS so local coords are correct.
+                                // Roads: same Y formula, +0.05m to sit just above terrain surface.
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
+                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
-                                        let ea = osm_elev_pipeline.query(
+                                        let sa = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
-                                        let eb = osm_elev_pipeline.query(
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let sb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let ya = (sa - origin_alt) + 0.05;
+                                        let yb = (sb - origin_alt) + 0.05;
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, ea + 0.05).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, eb + 0.05).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, la.y, la.z),
-                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            Vec3::new(la.x, ya, la.z),
+                                            Vec3::new(lb.x, yb, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Water polygons — flat surface at centroid elevation.
+                                // Water polygons — flat at centroid SRTM elevation.
                                 if let Some(ref osm_data) = ctx.osm {
                                     if !osm_data.water.is_empty() {
+                                        let origin_alt = origin_gps.alt as f32;
                                         for w in &osm_data.water {
                                             if w.polygon.len() < 3 { continue; }
                                             let n = w.polygon.len() as f64;
@@ -1877,11 +1885,13 @@ fn main() {
                                             let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
                                             let elev = osm_elev_pipeline.query(
                                                 &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                                .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                                .map(|e| e.meters as f32)
+                                                .unwrap_or(origin_gps.alt as f32);
+                                            let water_y = (elev - origin_alt) - 0.1;
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let local = physics.ecef_to_local(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev - 0.1).to_ecef());
-                                                Vec3::new(local.x, local.y, local.z)
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                                Vec3::new(local.x, water_y, local.z)
                                             }).collect();
                                             water_polygons.push(verts);
                                         }
@@ -2542,34 +2552,41 @@ fn main() {
                                 };
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
+                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
-                                        let elev = osm_elev_pipeline.query(
+                                        let srtm = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
-                                        let gps = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, elev);
-                                        let local = physics.ecef_to_local(&gps.to_ecef());
-                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let render_y = (srtm - origin_alt) + obj.y_offset;
+                                        let local = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
+                                        let world_pos = [local.x, render_y, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
+                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
-                                        let ea = osm_elev_pipeline.query(
+                                        let sa = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
-                                        let eb = osm_elev_pipeline.query(
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let sb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let ya = (sa - origin_alt) + 0.05;
+                                        let yb = (sb - origin_alt) + 0.05;
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, ea + 0.05).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, eb + 0.05).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, la.y, la.z),
-                                            Vec3::new(lb.x, lb.y, lb.z),
+                                            Vec3::new(la.x, ya, la.z),
+                                            Vec3::new(lb.x, yb, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
@@ -2584,6 +2601,7 @@ fn main() {
                                 let osm = metaverse_core::osm::fetch_osm_for_chunk(
                                     lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
                                 if !osm.water.is_empty() {
+                                    let origin_alt = origin_gps.alt as f32;
                                     for w in &osm.water {
                                         if w.polygon.len() < 3 { continue; }
                                         let n = w.polygon.len() as f64;
@@ -2591,11 +2609,13 @@ fn main() {
                                         let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
                                         let elev = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                            .map(|e| e.meters as f32)
+                                            .unwrap_or(origin_gps.alt as f32);
+                                        let water_y = (elev - origin_alt) - 0.1;
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                             let local = physics.ecef_to_local(
-                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev - 0.1).to_ecef());
-                                            Vec3::new(local.x, local.y, local.z)
+                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                            Vec3::new(local.x, water_y, local.z)
                                         }).collect();
                                         water_polygons.push(verts);
                                     }
