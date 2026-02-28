@@ -791,13 +791,29 @@ impl DebugHud {
         window: &winit::window::Window,
         // Data to display
         game_mode: &str,
-        pos: (f32, f32, f32),
+        gps: (f64, f64, f64),   // (lat, lon, alt_m)
+        heading_rad: f32,        // camera yaw → compass bearing
         dist_portal: f32,
         dist_terminal: f32,
         near_portal: bool,
         near_terminal: bool,
         near_module: Option<usize>,
     ) {
+        // Convert yaw to compass bearing: yaw=0 → North, yaw=π/2 → West (wgpu -Z = north)
+        // camera_yaw is rotation around Y; 0 = looking -Z (north), positive = clockwise
+        let bearing_deg = ((-heading_rad.to_degrees()) % 360.0 + 360.0) % 360.0;
+        let compass = match bearing_deg as u32 {
+            0..=22   | 338..=360 => "N",
+            23..=67              => "NE",
+            68..=112             => "E",
+            113..=157            => "SE",
+            158..=202            => "S",
+            203..=247            => "SW",
+            248..=292            => "W",
+            293..=337            => "NW",
+            _                   => "N",
+        };
+
         let raw_input = self.egui_state.take_egui_input(window);
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             egui::Area::new(egui::Id::new("debug_hud"))
@@ -811,7 +827,10 @@ impl DebugHud {
                             ui.label(egui::RichText::new(format!("Mode: {}", game_mode))
                                 .color(egui::Color32::WHITE).size(13.0));
                             ui.label(egui::RichText::new(
-                                format!("Pos: ({:.1}, {:.1}, {:.1})", pos.0, pos.1, pos.2))
+                                format!("{:.6}°, {:.6}°", gps.0, gps.1))
+                                .color(egui::Color32::LIGHT_GRAY).size(12.0));
+                            ui.label(egui::RichText::new(
+                                format!("Alt: {:.1}m  {}  {:.0}°", gps.2, compass, bearing_deg))
                                 .color(egui::Color32::LIGHT_GRAY).size(12.0));
                             ui.separator();
 
@@ -3027,7 +3046,11 @@ fn main() {
                             };
                             hud.render(
                                 &context, &view, &window,
-                                mode_str, (ploc.x, ploc.y, ploc.z),
+                                mode_str, {
+                                    let g = player.position.to_gps();
+                                    (g.lat, g.lon, g.alt)
+                                },
+                                player.camera_yaw,
                                 dist_portal, dist_terminal,
                                 near_portal, hud_near_terminal,
                                 near_module_hud,
