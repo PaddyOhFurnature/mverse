@@ -546,10 +546,6 @@ fn clip_osm_to_bounds(
             in_box(c.lat, c.lon)
         }).collect(),
 
-        // Roads: keep roads where any node is near the chunk, but only emit segments
-        // where at least one endpoint is within an expanded search radius.
-        // (Retaining by individual nodes would strip most of a 30m chunk's roads
-        //  since OSM nodes are typically 50-500m apart.)
         roads: data.roads.into_iter().filter(|r| {
             r.nodes.iter().any(|n| in_box(n.lat, n.lon))
         }).collect(),

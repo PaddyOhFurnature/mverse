@@ -798,6 +798,9 @@ impl DebugHud {
         near_portal: bool,
         near_terminal: bool,
         near_module: Option<usize>,
+        // Road labels: (world_pos, name) — projected to screen space
+        road_labels: &[(glam::Vec3, String)],
+        view_proj: glam::Mat4,
     ) {
         // Convert yaw to compass bearing: yaw=0 → North, yaw=π/2 → West (wgpu -Z = north)
         // camera_yaw is rotation around Y; 0 = looking -Z (north), positive = clockwise
@@ -858,6 +861,31 @@ impl DebugHud {
                             }
                         });
                 });
+
+            // Road name labels — projected from 3D world space to screen
+            let sw = context.config.width as f32;
+            let sh = context.config.height as f32;
+            let ppp = ctx.pixels_per_point();
+            for (world_pos, name) in road_labels {
+                // Project world → clip space
+                let clip = view_proj.project_point3(*world_pos);
+                // clip.z <= 0 means behind camera
+                if clip.z <= 0.0 || clip.z > 1.0 { continue; }
+                // NDC to screen pixels
+                let sx = (clip.x * 0.5 + 0.5) * sw;
+                let sy = (1.0 - (clip.y * 0.5 + 0.5)) * sh;
+                // Skip if outside viewport
+                if sx < 0.0 || sx > sw || sy < 0.0 || sy > sh { continue; }
+                let screen_pos = egui::pos2(sx / ppp, sy / ppp);
+                egui::Area::new(egui::Id::new(format!("road_lbl_{}", name)))
+                    .fixed_pos(screen_pos)
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(name.as_str())
+                            .color(egui::Color32::from_rgb(255, 255, 100))
+                            .size(11.0)
+                            .background_color(egui::Color32::from_black_alpha(120)));
+                    });
+            }
         });
 
         self.egui_state.handle_platform_output(window, full_output.platform_output);
@@ -1032,6 +1060,8 @@ fn main() {
     let mut water_mesh_buffer: Option<MeshBuffer> = None;
     // Accumulated road segments for the visible area: (a, b, width, road_type)
     let mut road_segments: Vec<(Vec3, Vec3, f32, metaverse_core::osm::RoadType)> = Vec::new();
+    // Named road midpoints for on-screen labels: (world_pos, name)
+    let mut road_labels: Vec<(Vec3, String)> = Vec::new();
     // Accumulated water polygons: each entry is a list of local-space vertices
     let mut water_polygons: Vec<Vec<Vec3>> = Vec::new();
     // Set to true whenever new objects are registered, triggering a mesh rebuild
@@ -1884,12 +1914,15 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        road_segments.push((
-                                            Vec3::new(la.x, ya, la.z),
-                                            Vec3::new(lb.x, yb, lb.z),
-                                            seg.width_m,
-                                            seg.road_type.clone(),
-                                        ));
+                                        let pa = Vec3::new(la.x, ya, la.z);
+                                        let pb = Vec3::new(lb.x, yb, lb.z);
+                                        road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
+                                        if let Some(ref name) = seg.name {
+                                            let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
+                                            if !road_labels.iter().any(|(_, n)| n == name) {
+                                                road_labels.push((mid, name.clone()));
+                                            }
+                                        }
                                     }
                                     osm_geom_dirty = true;
                                 }
@@ -2603,12 +2636,15 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        road_segments.push((
-                                            Vec3::new(la.x, ya, la.z),
-                                            Vec3::new(lb.x, yb, lb.z),
-                                            seg.width_m,
-                                            seg.road_type.clone(),
-                                        ));
+                                        let pa = Vec3::new(la.x, ya, la.z);
+                                        let pb = Vec3::new(lb.x, yb, lb.z);
+                                        road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
+                                        if let Some(ref name) = seg.name {
+                                            let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
+                                            if !road_labels.iter().any(|(_, n)| n == name) {
+                                                road_labels.push((mid, name.clone()));
+                                            }
+                                        }
                                     }
                                     osm_geom_dirty = true;
                                 }
@@ -3054,6 +3090,8 @@ fn main() {
                                 dist_portal, dist_terminal,
                                 near_portal, hud_near_terminal,
                                 near_module_hud,
+                                &road_labels,
+                                camera.build_view_projection_matrix(),
                             );
 
                             frame.present();
