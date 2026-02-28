@@ -530,12 +530,22 @@ pub struct RoadSegmentGps {
 }
 
 /// Extract all road segments from the OSM data for a chunk.
+/// Segments longer than MAX_SEGMENT_M are skipped — they are artefacts of
+/// sparse OSM nodes on long motorways/bridges that span multiple tiles.
 pub fn infer_road_segments(ctx: &ChunkContext) -> Vec<RoadSegmentGps> {
+    const MAX_SEGMENT_M: f64 = 300.0; // skip any single OSM segment > 300m
+    let meters_per_deg_lat = 111_320.0_f64;
+
     let osm = match &ctx.osm { Some(o) => o, None => return vec![] };
     let mut out = Vec::new();
     for road in &osm.roads {
         let w = road.road_type.width_m() as f32;
         for pair in road.nodes.windows(2) {
+            let dlat = (pair[1].lat - pair[0].lat) * meters_per_deg_lat;
+            let cos_lat = pair[0].lat.to_radians().cos();
+            let dlon = (pair[1].lon - pair[0].lon) * meters_per_deg_lat * cos_lat;
+            let dist = (dlat * dlat + dlon * dlon).sqrt();
+            if dist > MAX_SEGMENT_M { continue; }
             out.push(RoadSegmentGps {
                 a_lat: pair[0].lat, a_lon: pair[0].lon,
                 b_lat: pair[1].lat, b_lon: pair[1].lon,
