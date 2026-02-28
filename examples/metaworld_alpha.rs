@@ -99,11 +99,32 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use winit::{
+    application::ApplicationHandler,
     event::*,
-    event_loop::EventLoop,
+    event_loop::{EventLoop, ActiveEventLoop},
     keyboard::{KeyCode, PhysicalKey},
 };
 use std::sync::Mutex;
+
+// Minimal ApplicationHandler wrapper — defers window creation to resumed(), then
+// dispatches all events to the existing game-loop closure unchanged.
+type GameHandlerFn = Box<dyn FnMut(Event<()>, &ActiveEventLoop)>;
+type InitFn = Box<dyn FnOnce(&ActiveEventLoop) -> GameHandlerFn>;
+struct GameApp { init: Option<InitFn>, handler: Option<GameHandlerFn> }
+impl ApplicationHandler for GameApp {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if let Some(f) = self.init.take() { self.handler = Some(f(el)); }
+    }
+    fn window_event(&mut self, el: &ActiveEventLoop, window_id: winit::window::WindowId, event: WindowEvent) {
+        if let Some(h) = &mut self.handler { h(Event::WindowEvent { window_id, event }, el); }
+    }
+    fn device_event(&mut self, el: &ActiveEventLoop, device_id: DeviceId, event: DeviceEvent) {
+        if let Some(h) = &mut self.handler { h(Event::DeviceEvent { device_id, event }, el); }
+    }
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if let Some(h) = &mut self.handler { h(Event::AboutToWait, el); }
+    }
+}
 
 // ── Game mode — Construct (bundled lobby) vs Open World ───────────────────────
 #[derive(Debug, Clone, PartialEq)]
@@ -111,9 +132,6 @@ enum GameMode {
     /// Player is in the bundled Construct lobby.
     /// Terrain streaming is paused; only construct geometry renders.
     Construct,
-    /// Player is inside one of the Construct module rooms.
-    /// Index into MODULES. Screen wall overlay shown.
-    ConstructModule(usize),
     /// Player has entered the open world through the portal.
     /// Construct geometry is hidden; terrain streams normally.
     OpenWorld,
@@ -855,277 +873,6 @@ impl DebugHud {
             self.egui_renderer.free_texture(id);
         }
     }
-
-    /// Render a full-screen module overlay (the "wall as screen" experience).
-    /// Returns `true` if the player requested to exit (ESC).
-    fn render_module_overlay(
-        &mut self,
-        context: &RenderContext,
-        view: &wgpu::TextureView,
-        window: &winit::window::Window,
-        module_idx: usize,
-        identity: Option<&metaverse_core::identity::Identity>,
-        peer_count: usize,
-        server_addr: &str,
-        content: &[metaverse_core::meshsite::ContentItem],
-    ) -> bool {
-        use metaverse_core::construct::MODULES;
-        let module = match MODULES.get(module_idx) {
-            Some(m) => m,
-            None => return true,
-        };
-
-        let mut wants_exit = false;
-
-        let raw_input = self.egui_state.take_egui_input(window);
-        let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            // Dim backdrop — same approach as SignupScreen which works
-            egui::Area::new(egui::Id::new("module_backdrop"))
-                .fixed_pos(egui::pos2(0.0, 0.0))
-                .show(ctx, |ui| {
-                    ui.painter().rect_filled(
-                        ctx.screen_rect(), 0.0,
-                        egui::Color32::from_black_alpha(210),
-                    );
-                });
-
-            let sc = module.screen_colour;
-            let accent = egui::Color32::from_rgb(
-                (sc.x * 255.0) as u8, (sc.y * 255.0) as u8, (sc.z * 255.0) as u8,
-            );
-
-            egui::Window::new(format!("◈  {}", module.name))
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .fixed_size([680.0, 520.0])
-                .show(ctx, |ui| {
-                    // Module path breadcrumb
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("/construct/{}", module.slug))
-                            .color(accent).monospace().size(11.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("✕  ESC").clicked() {
-                                wants_exit = true;
-                            }
-                        });
-                    });
-                    ui.separator();
-                    ui.add_space(6.0);
-
-                    match module.slug {
-                        "login"  => render_module_identity(ui, identity, accent),
-                        "signup" => render_module_signup_info(ui, accent),
-                        _        => render_module_content(ui, module.name, content, accent),
-                    }
-
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(
-                            format!("Peers: {}  •  Server: {}  •  ESC to exit",
-                                peer_count,
-                                if server_addr.is_empty() { "standalone" } else { server_addr }))
-                            .color(egui::Color32::DARK_GRAY).size(10.0));
-                    });
-                });
-        });
-
-        self.egui_state.handle_platform_output(window, full_output.platform_output);
-        let tris = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
-        for (id, delta) in &full_output.textures_delta.set {
-            self.egui_renderer.update_texture(&context.device, &context.queue, *id, delta);
-        }
-        let screen_desc = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [context.config.width, context.config.height],
-            pixels_per_point: full_output.pixels_per_point,
-        };
-        let mut encoder = context.device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("module_overlay") }
-        );
-        self.egui_renderer.update_buffers(&context.device, &context.queue, &mut encoder, &tris, &screen_desc);
-        {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("module_overlay_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            }).forget_lifetime();
-            self.egui_renderer.render(&mut rpass, &tris, &screen_desc);
-        }
-        context.queue.submit(std::iter::once(encoder.finish()));
-        for id in &full_output.textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-
-        wants_exit
-    }
-}
-
-// ── Construct module content renderers ────────────────────────────────────────
-
-fn render_module_identity(
-    ui: &mut egui::Ui,
-    identity: Option<&metaverse_core::identity::Identity>,
-    accent: egui::Color32,
-) {
-    ui.label(egui::RichText::new("Identity & Keys").color(accent).size(18.0).strong());
-    ui.add_space(8.0);
-
-    if let Some(id) = identity {
-        let pid = id.peer_id().to_string();
-        let short_pid = if pid.len() > 20 {
-            format!("{}…{}", &pid[..8], &pid[pid.len()-8..])
-        } else {
-            pid.clone()
-        };
-
-        egui::Grid::new("identity_grid")
-            .num_columns(2)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Peer ID:").strong());
-                ui.label(egui::RichText::new(&short_pid).monospace());
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Key type:").strong());
-                ui.label("Ed25519");
-                ui.end_row();
-
-                ui.label(egui::RichText::new("Key file:").strong());
-                let key_path = dirs::home_dir()
-                    .map(|h| h.join(".metaverse").join("identity.key"))
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "~/.metaverse/identity.key".to_string());
-                ui.label(egui::RichText::new(key_path).monospace().size(11.0));
-                ui.end_row();
-            });
-
-        ui.add_space(12.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        let mut pid_display = pid.clone();
-        ui.label(egui::RichText::new("Your full Peer ID (for sharing):").color(egui::Color32::GRAY).size(11.0));
-        ui.add(egui::TextEdit::singleline(&mut pid_display).font(egui::TextStyle::Monospace));
-
-        ui.add_space(12.0);
-        if ui.button("📋  Copy Peer ID").clicked() {
-            ui.output_mut(|o| o.copied_text = pid);
-        }
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Key backup: keep your .key file safe — it cannot be recovered.").color(egui::Color32::GRAY).size(11.0));
-    } else {
-        ui.colored_label(egui::Color32::YELLOW, "⚠  No identity loaded.");
-        ui.add_space(8.0);
-        ui.label("Walk to the signup terminal in the lobby to create or load an identity.");
-    }
-}
-
-fn render_module_signup_info(ui: &mut egui::Ui, accent: egui::Color32) {
-    ui.label(egui::RichText::new("Account & Identity").color(accent).size(18.0).strong());
-    ui.add_space(8.0);
-    ui.label("To create a new identity or load an existing one:");
-    ui.add_space(6.0);
-    ui.label("• Walk to the glowing terminal near the centre of the lobby");
-    ui.label("• The signup screen opens automatically");
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new("Identity tiers:").strong());
-    ui.add_space(4.0);
-
-    egui::Grid::new("tiers_grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-        ui.label(egui::RichText::new("Trial").color(egui::Color32::LIGHT_YELLOW));
-        ui.label("No registration. Resets every hour. Walk around and look.");
-        ui.end_row();
-        ui.label(egui::RichText::new("Guest").color(egui::Color32::from_rgb(100, 200, 255)));
-        ui.label("Free account with email. Persistent identity. Can build.");
-        ui.end_row();
-        ui.label(egui::RichText::new("User").color(accent));
-        ui.label("Full account. All features. Identity signed by the network.");
-        ui.end_row();
-    });
-
-    ui.add_space(10.0);
-    ui.label(egui::RichText::new("Your key file is your identity — back it up.").color(egui::Color32::GRAY).size(11.0));
-}
-
-fn render_module_coming_soon(ui: &mut egui::Ui, name: &str, description: &str, accent: egui::Color32) {
-    ui.label(egui::RichText::new(name).color(accent).size(18.0).strong());
-    ui.add_space(8.0);
-    ui.label(description);
-    ui.add_space(20.0);
-    ui.separator();
-    ui.add_space(12.0);
-    ui.label(egui::RichText::new("◈  Coming in the next update").color(egui::Color32::GRAY).size(13.0));
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(
-        "This room is here, waiting. The infrastructure is live.\nContent arrives when the server speaks.")
-        .color(egui::Color32::DARK_GRAY).size(11.0).italics());
-}
-
-fn render_module_content(
-    ui: &mut egui::Ui,
-    name: &str,
-    items: &[metaverse_core::meshsite::ContentItem],
-    accent: egui::Color32,
-) {
-    ui.label(egui::RichText::new(name).color(accent).size(18.0).strong());
-    ui.add_space(6.0);
-
-    if items.is_empty() {
-        ui.separator();
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new("No posts yet.  Be the first — press E at the screen wall to compose.")
-            .color(egui::Color32::GRAY).size(13.0).italics());
-        return;
-    }
-
-    ui.label(egui::RichText::new(format!("{} posts", items.len()))
-        .color(egui::Color32::GRAY).size(11.0));
-    ui.separator();
-    ui.add_space(4.0);
-
-    egui::ScrollArea::vertical()
-        .max_height(360.0)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for item in items.iter().take(50) {
-                let ts = {
-                    let secs = item.created_at / 1000;
-                    let h = (secs / 3600) % 24;
-                    let m = (secs / 60) % 60;
-                    format!("{:02}:{:02}", h, m)
-                };
-                let short_author = if item.author.len() > 16 {
-                    format!("…{}", &item.author[item.author.len()-12..])
-                } else {
-                    item.author.clone()
-                };
-
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(format!("{}  {}  [{}]",
-                        ts, item.title, short_author))
-                    .size(13.0)
-                )
-                .id_salt(&item.id)
-                .show(ui, |ui| {
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(&item.body).size(12.0));
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new(format!("by {}  •  id: {}",
-                        item.author, &item.id[..8.min(item.id.len())]))
-                        .color(egui::Color32::GRAY).size(10.0).monospace());
-                });
-                ui.add_space(2.0);
-            }
-        });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1239,15 +986,14 @@ fn main() {
     
     // Create window - sized for 4 instances on 1080p screen (960x540 each)
     let event_loop = EventLoop::new().unwrap();
-    let window = event_loop
-        .create_window(
-            winit::window::WindowAttributes::default()
-                .with_title("Phase 1 Multiplayer - Metaverse Core")
-                .with_inner_size(winit::dpi::LogicalSize::new(960, 540))
-        )
-        .unwrap();
-    
-    let window = Arc::new(window);
+    let mut app = GameApp {
+        handler: None,
+        init: Some(Box::new(move |el: &ActiveEventLoop| -> GameHandlerFn {
+    let window = Arc::new(el.create_window(
+        winit::window::WindowAttributes::default()
+            .with_title("Phase 1 Multiplayer - Metaverse Core")
+            .with_inner_size(winit::dpi::LogicalSize::new(960, 540))
+    ).unwrap());
     
     // Initialize renderer
     println!("🎨 Initializing renderer...");
@@ -1261,11 +1007,14 @@ fn main() {
     // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
     let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
 
-    // OSM-inferred geometry buffers (buildings + roads)
+    // OSM-inferred geometry buffers (buildings, roads, water)
     let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
     let mut roads_mesh_buffer: Option<MeshBuffer> = None;
+    let mut water_mesh_buffer: Option<MeshBuffer> = None;
     // Accumulated road segments for the visible area: (a, b, width, road_type)
     let mut road_segments: Vec<(Vec3, Vec3, f32, metaverse_core::osm::RoadType)> = Vec::new();
+    // Accumulated water polygons: each entry is a list of local-space vertices
+    let mut water_polygons: Vec<Vec<Vec3>> = Vec::new();
     // Set to true whenever new objects are registered, triggering a mesh rebuild
     let mut osm_geom_dirty = false;
 
@@ -1432,11 +1181,12 @@ fn main() {
     }
     println!("🔄 Initializing chunk streaming system...");
     let stream_config = ChunkStreamerConfig {
-        load_radius_m: 150.0,           // ~78 chunks (5 chunk radius)
-        unload_radius_m: 200.0,         // Unload beyond 200m (tighter window for sliding)
-        max_loaded_chunks: 150,         // Increased headroom for smooth streaming
+        load_radius_m: 150.0,           // 150m view distance
+        unload_radius_m: 250.0,         // 100m hysteresis — no churn when walking
+        max_loaded_chunks: 600,         // Headroom above ~300 max at 150m
         safe_zone_radius: 2,            // Keep 5×5 chunks around player (always loaded)
-        frame_budget_ms: 5.0,           // 5ms per frame during gameplay
+        frame_budget_ms: 5.0,
+        max_in_flight: 16,              // Only 16 chunks dispatched to workers at once
     };
     let mut chunk_streamer = ChunkStreamer::new(stream_config, generator_arc.clone(), user_content.clone(), world_dir.clone());
     
@@ -1666,10 +1416,6 @@ fn main() {
     let mut dht_fallback_done = false;
 
     // HUD data — updated every physics frame, read by render
-    let mut hud_pos: (f32, f32, f32) = (0.0, 0.0, 0.0);
-    let mut hud_dist_portal:   f32 = 9999.0;
-    let mut hud_dist_terminal: f32 = 9999.0;
-    let mut hud_near_portal:   bool = false;
     let mut hud_near_terminal: bool = false;
     let mut hud_near_module:   Option<usize> = None;
 
@@ -1697,7 +1443,7 @@ fn main() {
     println!("   Target: {} chunks, spawn chunk must have collider", LOADING_TARGET);
     println!("   Progress will print every second. Window title shows loading status.");
 
-    event_loop.run(move |event, elwt| {
+    Box::new(move |event: Event<()>, elwt: &ActiveEventLoop| {
         match event {
             Event::WindowEvent { ref event, .. } => {
                 // Route all window events through egui when the signup or compose screen is active
@@ -1788,23 +1534,11 @@ fn main() {
                         }
                         return;
                     }
-                    // Block game input while a module overlay is open; ESC closes it
-                    if matches!(game_mode, GameMode::ConstructModule(_)) {
-                        if event.state == ElementState::Pressed {
-                            if let PhysicalKey::Code(KeyCode::Escape) = event.physical_key {
-                                game_mode = GameMode::Construct;
-                                let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
-                                window.set_cursor_visible(false);
-                                cursor_grabbed = true;
-                            }
-                        }
-                        return;
-                    }
                     // ── WORLDNET terminal input mode ──────────────────────────
                     // When terminal_active, route all keystrokes to the terminal.
                     if terminal_active && event.state == ElementState::Pressed {
                         use metaverse_core::worldnet::{
-                            WorldnetAddress, render_page, render_terminal_prompt,
+                            render_page, render_terminal_prompt,
                             process_terminal_command, addr_section, TerminalCmd,
                         };
                         // Helper: re-render page + prompt and upload to screen
@@ -1952,7 +1686,7 @@ fn main() {
                                 }
                                 KeyCode::KeyE => {
                                     use metaverse_core::worldnet::{
-                                        WorldnetAddress, render_page, render_terminal_prompt, addr_section,
+                                        render_page, render_terminal_prompt, addr_section,
                                     };
                                     if let Some(idx) = hud_near_module {
                                         // Module room: open compose screen for content rooms (2-5)
@@ -2094,49 +1828,65 @@ fn main() {
                                 } else {
                                     ChunkContext::from_chunk(chunk_id).with_osm(osm)
                                 };
-                                // Buildings: Y must match terrain.rs surface formula exactly.
-                                // Terrain surface world_Y = floor(srtm) + floor(srtm - origin.alt)
-                                // Using raw srtm places objects at wrong height (off by ~10-20m).
+                                // Buildings: include SRTM elevation in GPS before ECEF conversion so
+                                // physics.ecef_to_local() handles all three axes correctly.
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query(
+                                        let elev = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let terrain_y = srtm.floor() + (srtm - origin_alt).floor();
-                                        let ecef = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef();
-                                        let local = physics.ecef_to_local(&ecef);
-                                        let world_pos = [local.x, terrain_y + obj.y_offset, local.z];
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
+                                        let gps = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, elev);
+                                        let local = physics.ecef_to_local(&gps.to_ecef());
+                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Roads: same Y formula, +0.05 to sit on top of terrain surface.
+                                // Roads: same pattern — elevation baked into GPS so local coords are correct.
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
-                                        let sa = osm_elev_pipeline.query(
+                                        let ea = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let sb = osm_elev_pipeline.query(
+                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                        let eb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let ya = sa.floor() + (sa - origin_alt).floor() + 0.05;
-                                        let yb = sb.floor() + (sb - origin_alt).floor() + 0.05;
+                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, ea + 0.05).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, eb + 0.05).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, ya, la.z),
-                                            Vec3::new(lb.x, yb, lb.z),
+                                            Vec3::new(la.x, la.y, la.z),
+                                            Vec3::new(lb.x, lb.y, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
                                     }
                                     osm_geom_dirty = true;
+                                }
+                                // Water polygons — flat surface at centroid elevation.
+                                if let Some(ref osm_data) = ctx.osm {
+                                    if !osm_data.water.is_empty() {
+                                        for w in &osm_data.water {
+                                            if w.polygon.len() < 3 { continue; }
+                                            let n = w.polygon.len() as f64;
+                                            let c_lat = w.polygon.iter().map(|g| g.lat).sum::<f64>() / n;
+                                            let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
+                                            let elev = osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
+                                                .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                            let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
+                                                let local = physics.ecef_to_local(
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev - 0.1).to_ecef());
+                                                Vec3::new(local.x, local.y, local.z)
+                                            }).collect();
+                                            water_polygons.push(verts);
+                                        }
+                                        osm_geom_dirty = true;
+                                    }
                                 }
                             }
                         }
@@ -2665,11 +2415,6 @@ fn main() {
                         .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                         .map(|(i, _)| i);
 
-                    // Update HUD data every frame
-                    hud_pos = (ploc.x, ploc.y, ploc.z);
-                    hud_dist_portal   = dist_portal;
-                    hud_dist_terminal = dist_terminal;
-                    hud_near_portal   = near_portal;
                     hud_near_terminal = near_signup;
 
                     // Update terminal WORLDNET screen when player is nearby
@@ -2797,41 +2542,62 @@ fn main() {
                                 };
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query(
+                                        let elev = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let terrain_y = srtm.floor() + (srtm - origin_alt).floor();
-                                        let ecef = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef();
-                                        let local = physics.ecef_to_local(&ecef);
-                                        let world_pos = [local.x, terrain_y + obj.y_offset, local.z];
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
+                                        let gps = metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, elev);
+                                        let local = physics.ecef_to_local(&gps.to_ecef());
+                                        let world_pos = [local.x, local.y + obj.y_offset, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
-                                        let sa = osm_elev_pipeline.query(
+                                        let ea = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let sb = osm_elev_pipeline.query(
+                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                        let eb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters as f32).unwrap_or(0.0);
-                                        let ya = sa.floor() + (sa - origin_alt).floor() + 0.05;
-                                        let yb = sb.floor() + (sb - origin_alt).floor() + 0.05;
+                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, ea + 0.05).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, eb + 0.05).to_ecef());
                                         road_segments.push((
-                                            Vec3::new(la.x, ya, la.z),
-                                            Vec3::new(lb.x, yb, lb.z),
+                                            Vec3::new(la.x, la.y, la.z),
+                                            Vec3::new(lb.x, lb.y, lb.z),
                                             seg.width_m,
                                             seg.road_type.clone(),
                                         ));
+                                    }
+                                    osm_geom_dirty = true;
+                                }
+                            }
+                            // Water polygons from newly loaded game-phase chunks
+                            let new_ids_water: Vec<_> = chunk_streamer.newly_loaded_chunks.iter().copied().collect();
+                            for chunk_id in new_ids_water {
+                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
+                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                if !osm.water.is_empty() {
+                                    for w in &osm.water {
+                                        if w.polygon.len() < 3 { continue; }
+                                        let n = w.polygon.len() as f64;
+                                        let c_lat = w.polygon.iter().map(|g| g.lat).sum::<f64>() / n;
+                                        let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
+                                        let elev = osm_elev_pipeline.query(
+                                            &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
+                                            .map(|e| e.meters).unwrap_or(origin_gps.alt);
+                                        let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
+                                            let local = physics.ecef_to_local(
+                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev - 0.1).to_ecef());
+                                            Vec3::new(local.x, local.y, local.z)
+                                        }).collect();
+                                        water_polygons.push(verts);
                                     }
                                     osm_geom_dirty = true;
                                 }
@@ -2966,6 +2732,9 @@ fn main() {
                         let rd_mesh = build_roads_mesh(&road_segments);
                         roads_mesh_buffer = if rd_mesh.vertices.is_empty() { None }
                             else { Some(MeshBuffer::from_mesh(&context.device, &rd_mesh)) };
+                        let wtr_mesh = build_water_mesh(&water_polygons);
+                        water_mesh_buffer = if wtr_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &wtr_mesh)) };
                         osm_geom_dirty = false;
                     }
 
@@ -3099,6 +2868,10 @@ fn main() {
                                             mesh_buffer.render(&mut render_pass);
                                         }
                                     }
+                                    // Render water surfaces just above terrain
+                                    if let Some(buf) = &water_mesh_buffer {
+                                        buf.render(&mut render_pass);
+                                    }
                                     // Render OSM road surfaces below buildings
                                     if let Some(buf) = &roads_mesh_buffer {
                                         buf.render(&mut render_pass);
@@ -3223,9 +2996,8 @@ fn main() {
 
                             // Debug HUD — always visible, top-left corner
                             let mode_str = match &game_mode {
-                                GameMode::Construct        => "Construct",
-                                GameMode::OpenWorld        => "Open World",
-                                GameMode::ConstructModule(_) => "Construct (module)",
+                                GameMode::Construct => "Construct",
+                                GameMode::OpenWorld => "Open World",
                             };
                             // Only show module proximity prompt when in Construct walking mode
                             let near_module_hud = if matches!(game_mode, GameMode::Construct) {
@@ -3235,36 +3007,11 @@ fn main() {
                             };
                             hud.render(
                                 &context, &view, &window,
-                                mode_str, hud_pos,
-                                hud_dist_portal, hud_dist_terminal,
-                                hud_near_portal, hud_near_terminal,
+                                mode_str, (ploc.x, ploc.y, ploc.z),
+                                dist_portal, dist_terminal,
+                                near_portal, hud_near_terminal,
                                 near_module_hud,
                             );
-
-                            // Module overlay — full-screen panel when inside a module room
-                            if let GameMode::ConstructModule(idx) = game_mode {
-                                let peer_count = multiplayer.peer_count();
-                                // Get content for this module's section
-                                let section_str = match idx {
-                                    2 => "forums",
-                                    3 => "wiki",
-                                    4 => "marketplace",
-                                    5 => "post",
-                                    _ => "",
-                                };
-                                let content = multiplayer.get_content(section_str);
-                                let wants_exit = hud.render_module_overlay(
-                                    &context, &view, &window,
-                                    idx,
-                                    Some(&identity),
-                                    peer_count,
-                                    &server_url,
-                                    content,
-                                );
-                                if wants_exit {
-                                    game_mode = GameMode::Construct;
-                                }
-                            }
 
                             frame.present();
                         }
@@ -3328,7 +3075,10 @@ fn main() {
             
             _ => {}
         }
-    }).unwrap();
+    }) as GameHandlerFn
+    })),
+};
+    event_loop.run_app(&mut app).unwrap();
 }
 
 /// Create local player cube (green)
@@ -3394,7 +3144,6 @@ fn create_crosshair() -> Mesh {
 fn build_buildings_mesh(
     objects: &[metaverse_core::world_objects::PlacedObject],
 ) -> Mesh {
-    use metaverse_core::world_objects::ObjectType;
     let mut mesh = Mesh::new();
 
     for obj in objects {
@@ -3522,6 +3271,34 @@ fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::Road
         // CCW from above: normal = +Y (visible looking down at road surface)
         mesh.add_triangle(Triangle::new(i0, i1, i2));
         mesh.add_triangle(Triangle::new(i0, i2, i3));
+    }
+
+    mesh
+}
+
+/// Build a flat water surface mesh from OSM water polygons.
+///
+/// Each polygon is triangulated as a fan from its centroid.
+/// Both sides are rendered (CCW + CW) so water is visible from bank level.
+fn build_water_mesh(water_polygons: &[Vec<Vec3>]) -> Mesh {
+    let mut mesh = Mesh::new();
+    let color = Vec3::new(0.18, 0.42, 0.72); // river blue
+
+    for poly in water_polygons {
+        if poly.len() < 3 { continue; }
+        let sum = poly.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
+        let centroid = sum / poly.len() as f32;
+        let n = poly.len();
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let ci = mesh.add_vertex(Vertex::new(centroid, color));
+            let ai = mesh.add_vertex(Vertex::new(poly[i], color));
+            let bi = mesh.add_vertex(Vertex::new(poly[next], color));
+            // CCW from above (visible looking down)
+            mesh.add_triangle(Triangle::new(ci, ai, bi));
+            // CW — visible from bank level / below
+            mesh.add_triangle(Triangle::new(ci, bi, ai));
+        }
     }
 
     mesh
