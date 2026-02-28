@@ -1,8 +1,8 @@
 /// OpenStreetMap data fetching and per-chunk caching.
 ///
 /// Queries the Overpass API for buildings, roads, waterways, and parks
-/// within a chunk's GPS bounds. Results are cached to disk as JSON so
-/// subsequent loads are instant.
+/// within a chunk's GPS bounds. Results are cached to disk in binary
+/// (bincode) format so subsequent loads are instant.
 ///
 /// ## Why NOT the old approach
 /// Old code used `GpsPos { lat_deg, lon_deg }` — wrong field names for the
@@ -192,12 +192,14 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64)
 {
     wait_global_cooldown();
 
-    // Only query buildings and navigable roads — 2 feature types, small response.
     let query = format!(
         "[out:json][timeout:25];\n(\
           way[\"building\"]({s},{w},{n},{e});\
           way[\"highway\"~\"^(motorway|trunk|primary|secondary|tertiary|residential|service|living_street|unclassified)$\"]({s},{w},{n},{e});\
           node[\"amenity\"~\"^(bench|waste_basket|street_lamp|traffic_signals|post_box)$\"]({s},{w},{n},{e});\
+          way[\"natural\"=\"water\"]({s},{w},{n},{e});\
+          way[\"waterway\"~\"^(river|canal|reservoir|dock|riverbank)$\"]({s},{w},{n},{e});\
+          relation[\"type\"=\"multipolygon\"][\"natural\"=\"water\"]({s},{w},{n},{e});\
         );\nout body;\n>;\nout skel qt;",
         s = south, w = west, n = north, e = east,
     );
@@ -230,26 +232,31 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
     let elements = v["elements"].as_array()
         .ok_or("Missing 'elements' array")?;
 
-    // First pass: build node id → GPS lookup
+    // Pass 1: build node id → GPS and way id → node list
     let mut node_map: std::collections::HashMap<u64, GPS> = std::collections::HashMap::new();
+    let mut way_nodes_map: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
     for elem in elements {
-        if elem["type"].as_str() == Some("node") {
-            let id  = elem["id"].as_u64().unwrap_or(0);
-            let lat = elem["lat"].as_f64().unwrap_or(0.0);
-            let lon = elem["lon"].as_f64().unwrap_or(0.0);
-            node_map.insert(id, GPS::new(lat, lon, 0.0));
-
-            // Amenity nodes
-            if let Some(amenity) = elem["tags"]["amenity"].as_str() {
-                // collected in second pass via same element
-                let _ = (id, amenity);
+        match elem["type"].as_str() {
+            Some("node") => {
+                let id  = elem["id"].as_u64().unwrap_or(0);
+                let lat = elem["lat"].as_f64().unwrap_or(0.0);
+                let lon = elem["lon"].as_f64().unwrap_or(0.0);
+                node_map.insert(id, GPS::new(lat, lon, 0.0));
             }
+            Some("way") => {
+                let id = elem["id"].as_u64().unwrap_or(0);
+                let node_ids: Vec<u64> = elem["nodes"].as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                    .unwrap_or_default();
+                way_nodes_map.insert(id, node_ids);
+            }
+            _ => {}
         }
     }
 
     let mut data = OsmData::default();
 
-    // Second pass: ways and amenity nodes
+    // Pass 2: ways and amenity nodes
     for elem in elements {
         let elem_type = elem["type"].as_str().unwrap_or("");
         let id = elem["id"].as_u64().unwrap_or(0);
@@ -269,16 +276,12 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                 }
             }
             "way" => {
-                let node_ids: Vec<u64> = elem["nodes"].as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
-                    .unwrap_or_default();
-
+                let node_ids = way_nodes_map.get(&id).cloned().unwrap_or_default();
                 let nodes: Vec<GPS> = node_ids.iter()
                     .filter_map(|nid| node_map.get(nid).copied())
                     .collect();
 
                 if tags["building"].as_str().is_some() {
-                    // Building
                     let height_m = tags["height"].as_str()
                         .and_then(|h| h.trim_end_matches('m').trim().parse::<f64>().ok())
                         .unwrap_or_else(|| {
@@ -298,7 +301,6 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                         levels,
                     });
                 } else if let Some(highway) = tags["highway"].as_str() {
-                    // Road
                     data.roads.push(OsmRoad {
                         osm_id: id,
                         nodes,
@@ -330,6 +332,47 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                     });
                 }
             }
+            "relation" => {
+                // Handle multipolygon water relations (e.g. Brisbane River)
+                if tags["type"].as_str() == Some("multipolygon")
+                    && (tags["natural"].as_str() == Some("water")
+                        || tags["waterway"].as_str().is_some())
+                {
+                    let members = match elem["members"].as_array() {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    // Collect outer ring ways in order, stitch into one polygon
+                    let mut outer_ways: Vec<Vec<GPS>> = Vec::new();
+                    for member in members {
+                        if member["role"].as_str() == Some("outer") {
+                            if let Some(way_id) = member["ref"].as_u64() {
+                                if let Some(nids) = way_nodes_map.get(&way_id) {
+                                    let pts: Vec<GPS> = nids.iter()
+                                        .filter_map(|nid| node_map.get(nid).copied())
+                                        .collect();
+                                    if !pts.is_empty() {
+                                        outer_ways.push(pts);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Stitch ways into a single polygon ring
+                    let polygon = stitch_ways(outer_ways);
+                    if polygon.len() >= 3 {
+                        data.water.push(OsmWater {
+                            osm_id: id,
+                            polygon,
+                            name: tags["name"].as_str().map(|s| s.to_string()),
+                            water_type: tags["water"].as_str()
+                                .or(tags["waterway"].as_str())
+                                .unwrap_or("water")
+                                .to_string(),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -337,10 +380,33 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
     Ok(data)
 }
 
+/// Stitch multiple ordered way chains into a single closed polygon ring.
+/// Ways are chained end-to-start; if needed a way is reversed to connect.
+fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
+    if ways.is_empty() { return vec![]; }
+    let mut ring = ways[0].clone();
+    for next_way in ways.into_iter().skip(1) {
+        if next_way.is_empty() { continue; }
+        let tail = ring.last().unwrap();
+        let head = &next_way[0];
+        let head_rev = next_way.last().unwrap();
+        let dist_head = (tail.lat - head.lat).abs() + (tail.lon - head.lon).abs();
+        let dist_rev  = (tail.lat - head_rev.lat).abs() + (tail.lon - head_rev.lon).abs();
+        if dist_rev < dist_head {
+            ring.extend(next_way.into_iter().rev().skip(1));
+        } else {
+            ring.extend(next_way.into_iter().skip(1));
+        }
+    }
+    ring
+}
+
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-/// Cache OSM query results to disk as JSON files.
-/// Key is derived from the bounding box rounded to 3 decimal places.
+const OSM_CACHE_VERSION: u32 = 1;
+
+/// Cache OSM tile data on disk in binary (bincode) format.
+/// Key is derived from the bounding box rounded to 4 decimal places.
 pub struct OsmDiskCache {
     dir: PathBuf,
 }
@@ -352,20 +418,23 @@ impl OsmDiskCache {
     }
 
     fn path(&self, s: f64, w: f64, n: f64, e: f64) -> PathBuf {
-        let name = format!("osm_{:.4}_{:.4}_{:.4}_{:.4}.json", s, w, n, e);
+        let name = format!("osm_{:.4}_{:.4}_{:.4}_{:.4}.bin", s, w, n, e);
         self.dir.join(name)
     }
 
     pub fn load(&self, s: f64, w: f64, n: f64, e: f64) -> Option<OsmData> {
-        let p = self.path(s, w, n, e);
-        let bytes = fs::read(&p).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let bytes = fs::read(self.path(s, w, n, e)).ok()?;
+        if bytes.len() < 4 { return None; }
+        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        if version != OSM_CACHE_VERSION { return None; }
+        bincode::deserialize(&bytes[4..]).ok()
     }
 
     pub fn save(&self, s: f64, w: f64, n: f64, e: f64, data: &OsmData) {
-        let p = self.path(s, w, n, e);
-        if let Ok(json) = serde_json::to_vec_pretty(data) {
-            let _ = fs::write(p, json);
+        if let Ok(payload) = bincode::serialize(data) {
+            let mut bytes = OSM_CACHE_VERSION.to_le_bytes().to_vec();
+            bytes.extend_from_slice(&payload);
+            let _ = fs::write(self.path(s, w, n, e), bytes);
         }
     }
 }
@@ -457,22 +526,39 @@ fn clip_osm_to_bounds(
         lat >= lat_min && lat <= lat_max && lon >= lon_min && lon <= lon_max
     };
 
+    // A polygon/bbox intersects our box if any vertex is inside, OR the polygon
+    // bbox overlaps ours (handles large river polygons that fully cover the chunk).
+    let poly_intersects = |pts: &[GPS]| -> bool {
+        if pts.iter().any(|n| in_box(n.lat, n.lon)) {
+            return true;
+        }
+        // Check if polygon bbox overlaps chunk bbox
+        let p_lat_min = pts.iter().map(|n| n.lat).fold(f64::INFINITY, f64::min);
+        let p_lat_max = pts.iter().map(|n| n.lat).fold(f64::NEG_INFINITY, f64::max);
+        let p_lon_min = pts.iter().map(|n| n.lon).fold(f64::INFINITY, f64::min);
+        let p_lon_max = pts.iter().map(|n| n.lon).fold(f64::NEG_INFINITY, f64::max);
+        p_lat_min <= lat_max && p_lat_max >= lat_min && p_lon_min <= lon_max && p_lon_max >= lon_min
+    };
+
     OsmData {
         buildings: data.buildings.into_iter().filter(|b| {
             let c = b.centroid();
             in_box(c.lat, c.lon)
         }).collect(),
 
-        roads: data.roads.into_iter().filter(|r| {
-            r.nodes.iter().any(|n| in_box(n.lat, n.lon))
-        }).collect(),
+        // Roads: only keep segments where BOTH endpoints are near the chunk.
+        // This prevents long motorway/bridge ways from spanning km across tiles.
+        roads: data.roads.into_iter().map(|mut r| {
+            r.nodes.retain(|n| in_box(n.lat, n.lon));
+            r
+        }).filter(|r| r.nodes.len() >= 2).collect(),
 
         water: data.water.into_iter().filter(|w| {
-            w.polygon.iter().any(|n| in_box(n.lat, n.lon))
+            poly_intersects(&w.polygon)
         }).collect(),
 
         parks: data.parks.into_iter().filter(|p| {
-            p.polygon.iter().any(|n| in_box(n.lat, n.lon))
+            poly_intersects(&p.polygon)
         }).collect(),
 
         amenities: data.amenities.into_iter().filter(|a| {
