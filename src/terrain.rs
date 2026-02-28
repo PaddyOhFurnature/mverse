@@ -145,15 +145,34 @@ impl TerrainGenerator {
                 let frac_i = grid_i - i0 as f64;
                 let frac_j = grid_j - j0 as f64;
                 
-                // Bilinear interpolation
+                // Bilinear or nearest-neighbour depending on slope steepness.
+                // Bilinear interpolation smooths gradual hills correctly, but turns
+                // steep cliff faces into ramps.  When any adjacent SRTM sample pair
+                // differs by more than CLIFF_THRESHOLD metres, snap to nearest-neighbour
+                // so the cliff renders as a vertical wall rather than a ramp.
+                const CLIFF_THRESHOLD: f64 = 4.0;
                 let e00 = elevation_grid[i0 * samples_per_axis + j0];
                 let e01 = elevation_grid[i0 * samples_per_axis + j1];
                 let e10 = elevation_grid[i1 * samples_per_axis + j0];
                 let e11 = elevation_grid[i1 * samples_per_axis + j1];
-                
-                let e0 = e00 * (1.0 - frac_j) + e01 * frac_j;
-                let e1 = e10 * (1.0 - frac_j) + e11 * frac_j;
-                let surface_elevation = e0 * (1.0 - frac_i) + e1 * frac_i;
+
+                let max_diff = (e00 - e01).abs()
+                    .max((e00 - e10).abs())
+                    .max((e01 - e11).abs())
+                    .max((e10 - e11).abs());
+
+                let surface_elevation = if max_diff > CLIFF_THRESHOLD {
+                    // Nearest-neighbour: snap to closest SRTM sample point.
+                    // Produces a vertical wall at the sample boundary.
+                    let ni = if frac_i < 0.5 { i0 } else { i1 };
+                    let nj = if frac_j < 0.5 { j0 } else { j1 };
+                    elevation_grid[ni * samples_per_axis + nj]
+                } else {
+                    // Bilinear interpolation for smooth terrain.
+                    let e0 = e00 * (1.0 - frac_j) + e01 * frac_j;
+                    let e1 = e10 * (1.0 - frac_j) + e11 * frac_j;
+                    e0 * (1.0 - frac_i) + e1 * frac_i
+                };
                 
                 const BEDROCK_DEPTH: i64 = 200;
                 const SKY_HEIGHT: i64 = 100;
