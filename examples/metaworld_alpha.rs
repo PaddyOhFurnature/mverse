@@ -2904,10 +2904,22 @@ fn main() {
                                 let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
                                 let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
                                 let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-                                // Kenney models are naturally ~10m in each axis
-                                let sx = w / 10.0;
-                                let sy = h / 10.0;
-                                let sz = d / 10.0;
+                                // Kenney model actual dimensions (measured from GLB bounds):
+                                // 0=commercial: 0.884×1.293×0.940 m
+                                // 1=industrial: 2.084×1.470×1.242 m
+                                // 2=residential: 1.300×0.834×1.028 m
+                                // 3=skyscraper: 1.360×2.880×1.360 m
+                                let model_idx_for_scale = building_model_idx(type_str);
+                                let (mw, mh, md) = match model_idx_for_scale {
+                                    0 => (0.884_f32, 1.293_f32, 0.940_f32),
+                                    1 => (2.084_f32, 1.470_f32, 1.242_f32),
+                                    2 => (1.300_f32, 0.834_f32, 1.028_f32),
+                                    3 => (1.360_f32, 2.880_f32, 1.360_f32),
+                                    _ => (1.0_f32, 1.0_f32, 1.0_f32),
+                                };
+                                let sx = w / mw;
+                                let sy = h / mh;
+                                let sz = d / md;
 
                                 let transform = glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz))
                                     * glam::Mat4::from_rotation_y(rotation_y)
@@ -2921,8 +2933,8 @@ fn main() {
                             }
                         }
 
-                        // Flat-colour fallback mesh (used when no GLB models are loaded)
-                        let bld_mesh = if !glb_models_loaded {
+                        // Flat-colour fallback mesh (used when GLB models didn't load OR no instances)
+                        let bld_mesh = if !glb_models_loaded || building_instances.is_empty() {
                             build_buildings_mesh(&all_objs)
                         } else {
                             metaverse_core::mesh::Mesh::new()
