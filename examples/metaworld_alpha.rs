@@ -2953,9 +2953,10 @@ fn main() {
                         let rd_mesh = build_roads_mesh(&road_segments);
                         roads_mesh_buffer = if rd_mesh.vertices.is_empty() { None }
                             else { Some(MeshBuffer::from_mesh(&context.device, &rd_mesh)) };
-                        let wtr_mesh = build_water_mesh(&water_polygons);
-                        water_mesh_buffer = if wtr_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &wtr_mesh)) };
+                        // Water is now voxel-based (WATER/GRAVEL/SAND in terrain.rs).
+                        // The OSM polygon overlay is disabled — terrain voxels handle the
+                        // river surface following the actual slope per column.
+                        water_mesh_buffer = None;
                         osm_geom_dirty = false;
                     }
 

@@ -269,10 +269,13 @@ impl TerrainGenerator {
         };
 
         // Two-pass chunk generation:
-        //   Pass 1 — sample every column, find the minimum elevation of any in-water column.
-        //            That lowest point becomes the flat water surface for the whole chunk.
-        //   Pass 2 — generate voxels.  Columns more than BANK_THRESHOLD above the water
-        //            surface are dry land even if the OSM polygon covers them.
+        //   Pass 1 — sample every column, compute SRTM elevation, check OSM water polygon.
+        //   Post-pass — mark boundary (bank) columns adjacent to water as is_bank.
+        //   Pass 2 — generate voxels per-column.
+        //
+        //   Water columns use their OWN SRTM elevation as the water surface — not a
+        //   single chunk-minimum. SRTM measures the actual water surface for rivers
+        //   so this correctly follows the terrain slope (15m upstream → 5m at bay).
         //
         // GPS per column computed via ellipsoid equation (not fixed origin Y).
         // At Brisbane lon≈153°, fixing ECEF Y at origin causes 726m geographic error at 1km.
@@ -283,6 +286,7 @@ impl TerrainGenerator {
             surface_elevation: f64,
             surface_voxel_y:   i64,
             in_water:          bool,
+            is_bank:           bool, // dry land adjacent to water → SAND surface
             is_road:           bool,
         }
 
@@ -292,7 +296,6 @@ impl TerrainGenerator {
 
         let mut columns: Vec<ColSample> =
             Vec::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
-        let mut min_water_elev: f64 = f64::MAX;
 
         // --- Pass 1 ---
         for i in 0..CHUNK_SIZE_X {
@@ -331,26 +334,33 @@ impl TerrainGenerator {
                         })
                     });
 
-                if in_water {
-                    min_water_elev = min_water_elev.min(surface_elevation);
-                }
-
                 columns.push(ColSample {
                     voxel_x, voxel_z,
                     surface_elevation, surface_voxel_y, in_water,
+                    is_bank: false,
                     is_road: false,
                 });
             }
         }
 
-        // Flat water surface Y from the lowest in-water SRTM sample.
-        // Columns more than BANK_THRESHOLD above this are hills/banks — treated as dry land.
-        const BANK_THRESHOLD: f64 = 3.0; // metres above min water elevation
-        let water_surface_y: i64 = if min_water_elev < f64::MAX {
-            self.origin_voxel.y + (min_water_elev - self.origin_gps.alt) as i64
-        } else {
-            i64::MIN
-        };
+        // --- Bank detection pass ---
+        // Mark dry columns immediately adjacent to water as is_bank → SAND surface.
+        // Uses grid indexing: column (i,k) is at index i*CHUNK_SIZE_Z + k.
+        for i in 0..CHUNK_SIZE_X as usize {
+            for k in 0..CHUNK_SIZE_Z as usize {
+                let idx = i * CHUNK_SIZE_Z as usize + k;
+                if columns[idx].in_water { continue; }
+                let neighbours = [
+                    if i > 0 { Some(idx - CHUNK_SIZE_Z as usize) } else { None },
+                    if i + 1 < CHUNK_SIZE_X as usize { Some(idx + CHUNK_SIZE_Z as usize) } else { None },
+                    if k > 0 { Some(idx - 1) } else { None },
+                    if k + 1 < CHUNK_SIZE_Z as usize { Some(idx + 1) } else { None },
+                ];
+                if neighbours.iter().any(|n| n.map(|ni| columns[ni].in_water).unwrap_or(false)) {
+                    columns[idx].is_bank = true;
+                }
+            }
+        }
 
         // --- Road carving pass ---
         // For each non-bridge road segment, flatten terrain to road elevation.
@@ -435,15 +445,10 @@ impl TerrainGenerator {
         const WATER_DEPTH:   i64 = 5;
 
         for col in &columns {
-            let effective_water = col.in_water
-                && min_water_elev < f64::MAX
-                && col.surface_elevation <= min_water_elev + BANK_THRESHOLD;
-
-            let col_top = if effective_water {
-                water_surface_y
-            } else {
-                col.surface_voxel_y + SKY_HEIGHT
-            };
+            // Per-column water: each column uses its own SRTM surface elevation.
+            // SRTM measures the water surface for rivers — no flat chunk-minimum needed.
+            // This lets the river follow the actual terrain slope voxel-by-voxel.
+            let col_top = col.surface_voxel_y + SKY_HEIGHT;
             let col_bot = col.surface_voxel_y - BEDROCK_DEPTH;
 
             for voxel_y in col_bot..=col_top {
@@ -453,17 +458,26 @@ impl TerrainGenerator {
                 let voxel_pos = VoxelCoord::new(col.voxel_x, voxel_y, col.voxel_z);
                 let depth_below_surface = col.surface_voxel_y - voxel_y;
 
-                let material = if effective_water {
-                    // SRTM measures the water surface, not the riverbed, so surface_voxel_y
-                    // sits at water_surface_y. Place WATER from (water_surface_y - WATER_DEPTH)
-                    // up to water_surface_y so the river has visible depth.
-                    let depth_below_water = water_surface_y - voxel_y;
-                    if depth_below_water < 0 {
+                let material = if col.in_water {
+                    // Water column: surface_voxel_y IS the water surface (SRTM = water level).
+                    // WATER fills from surface down WATER_DEPTH voxels, then GRAVEL riverbed.
+                    if depth_below_surface < 0 {
                         MaterialId::AIR
-                    } else if depth_below_water < WATER_DEPTH {
+                    } else if depth_below_surface < WATER_DEPTH {
                         MaterialId::WATER
-                    } else if depth_below_water < WATER_DEPTH + 5 {
+                    } else if depth_below_surface < WATER_DEPTH + 5 {
                         MaterialId::GRAVEL
+                    } else {
+                        MaterialId::STONE
+                    }
+                } else if col.is_bank {
+                    // Bank column: dry land adjacent to water → SAND surface.
+                    if depth_below_surface < 0 {
+                        MaterialId::AIR
+                    } else if depth_below_surface == 0 {
+                        if col.is_road { MaterialId::ASPHALT } else { MaterialId::SAND }
+                    } else if depth_below_surface <= 5 {
+                        MaterialId::DIRT
                     } else {
                         MaterialId::STONE
                     }
