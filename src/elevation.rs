@@ -476,8 +476,13 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
             .collect();
 
         if !valid_far.is_empty() {
-            let mean = valid_far.iter().sum::<f64>() / valid_far.len() as f64;
-            return Ok(Elevation { meters: mean });
+            // Use MINIMUM of valid neighbours, not mean.
+            // When querying a water-surface pixel, the nearest valid pixels are
+            // the bank edges — the lowest of those is closest to the true water
+            // surface level. Using the mean pulls the result toward hillside
+            // elevation and causes water polygons to float above terrain.
+            let min_far = valid_far.iter().cloned().fold(f64::MAX, f64::min);
+            return Ok(Elevation { meters: min_far });
         }
     }
 

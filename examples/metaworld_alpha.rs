@@ -2023,18 +2023,29 @@ fn main() {
                                             let key = ((w.polygon[0].lat * 1e6) as i64,
                                                        (w.polygon[0].lon * 1e6) as i64);
                                             if !water_poly_seen.insert(key) { continue; }
-                                            // Sample up to 8 evenly-spaced vertices, use minimum elevation.
-                                            // This gives the actual water surface level rather than the
-                                            // centroid elevation (which may be on land for meanders).
-                                            let step = (w.polygon.len() / 8).max(1);
-                                            let min_elev = w.polygon.iter().step_by(step)
+                                            // Sample up to 16 evenly-spaced vertices for elevation.
+                                            // More samples → higher chance of hitting actual bank pixels.
+                                            // After sampling, discard outliers more than 8m above the raw
+                                            // minimum (those are land-contaminated void fallback values)
+                                            // and take the minimum of what remains.
+                                            let step = (w.polygon.len() / 16).max(1);
+                                            let samples: Vec<f64> = w.polygon.iter().step_by(step).take(16)
                                                 .filter_map(|gps| {
                                                     osm_elev_pipeline.query(
                                                         &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
                                                         .map(|e| e.meters).ok()
                                                 })
-                                                .fold(f64::MAX, f64::min);
-                                            let min_elev = if min_elev < f64::MAX { min_elev } else { 2.0 };
+                                                .collect();
+                                            let min_elev = if samples.is_empty() {
+                                                2.0 // sea-level fallback
+                                            } else {
+                                                let raw_min = samples.iter().cloned().fold(f64::MAX, f64::min);
+                                                // Filter out outliers (void-fallback land pixels > 8m above minimum)
+                                                let filtered: Vec<f64> = samples.iter().cloned()
+                                                    .filter(|&e| e <= raw_min + 8.0)
+                                                    .collect();
+                                                filtered.iter().cloned().fold(f64::MAX, f64::min)
+                                            };
                                             let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let h = physics.ecef_to_local(
@@ -2755,15 +2766,23 @@ fn main() {
                                         let key = ((w.polygon[0].lat * 1e6) as i64,
                                                    (w.polygon[0].lon * 1e6) as i64);
                                         if !water_poly_seen.insert(key) { continue; }
-                                        let step = (w.polygon.len() / 8).max(1);
-                                        let min_elev = w.polygon.iter().step_by(step)
+                                        let step = (w.polygon.len() / 16).max(1);
+                                        let samples: Vec<f64> = w.polygon.iter().step_by(step).take(16)
                                             .filter_map(|gps| {
                                                 osm_elev_pipeline.query(
                                                     &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
                                                     .map(|e| e.meters).ok()
                                             })
-                                            .fold(f64::MAX, f64::min);
-                                        let min_elev = if min_elev < f64::MAX { min_elev } else { 2.0 };
+                                            .collect();
+                                        let min_elev = if samples.is_empty() {
+                                            2.0
+                                        } else {
+                                            let raw_min = samples.iter().cloned().fold(f64::MAX, f64::min);
+                                            let filtered: Vec<f64> = samples.iter().cloned()
+                                                .filter(|&e| e <= raw_min + 8.0)
+                                                .collect();
+                                            filtered.iter().cloned().fold(f64::MAX, f64::min)
+                                        };
                                         let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                             let h = physics.ecef_to_local(
