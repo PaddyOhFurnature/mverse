@@ -198,32 +198,23 @@ impl TexturedPipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Build texture from material base colour or a 1×1 white fallback.
+        // Always use base_color_factor as a 1×1 solid-colour texture.
+        // Kenney city kit GLBs reference an external colormap.png via UV mapping.
+        // The UV layout varies between asset versions, making the colormap render
+        // inconsistently across machines (correct colours on one, white on another).
+        // Using base_color_factor gives consistent solid colours everywhere.
+        // For these GLBs base_color_factor defaults to [1,1,1,1] (white),
+        // so has_real_texture becomes false and the flat-colour box fallback is used.
         let pbr = primitive.material().pbr_metallic_roughness();
-        let (tex_data, tex_w, tex_h, has_real_texture) =
-            if let Some(tex_info) = pbr.base_color_texture() {
-                let img_idx = tex_info.texture().source().index();
-                let img = &images[img_idx];
-                let rgba = image_to_rgba8(img);
-                if rgba.len() == (img.width * img.height * 4) as usize {
-                    (rgba, img.width, img.height, true)
-                } else {
-                    eprintln!("⚠️  GLB texture size mismatch (fmt={:?} {}×{} pixels={} expected={})",
-                        img.format, img.width, img.height, rgba.len(), img.width * img.height * 4);
-                    (vec![255u8; 4], 1u32, 1u32, false)
-                }
-            } else {
-                let f = pbr.base_color_factor();
-                let pixel = [
-                    (f[0] * 255.0) as u8,
-                    (f[1] * 255.0) as u8,
-                    (f[2] * 255.0) as u8,
-                    (f[3] * 255.0) as u8,
-                ];
-                // Non-white factor counts as a real (solid-colour) texture
-                let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
-                (pixel.to_vec(), 1u32, 1u32, !is_white)
-            };
+        let f = pbr.base_color_factor();
+        let pixel = [
+            (f[0] * 255.0) as u8,
+            (f[1] * 255.0) as u8,
+            (f[2] * 255.0) as u8,
+            (f[3] * 255.0) as u8,
+        ];
+        let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
+        let (tex_data, tex_w, tex_h, has_real_texture) = (pixel.to_vec(), 1u32, 1u32, !is_white);
 
         let texture = device.create_texture_with_data(
             queue,
