@@ -410,6 +410,11 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     let pixel_col = ((gps.lon - x_origin) / pixel_width).floor() as isize;
     let pixel_row = ((gps.lat - y_origin) / pixel_height).floor() as isize;
 
+    // Clamp so a 2×2 read never goes out of bounds at tile edges.
+    let raster_size = rasterband.size();
+    let pixel_col = pixel_col.max(0).min(raster_size.0 as isize - 2);
+    let pixel_row = pixel_row.max(0).min(raster_size.1 as isize - 2);
+
     // --- 2×2 bilinear interpolation (primary path) ---
     let buf2 = rasterband.read_as::<i16>(
         (pixel_col, pixel_row), (2, 2), (2, 2),
