@@ -377,77 +377,112 @@ impl ElevationSource for OpenTopographySource {
     }
 }
 
-/// Extract elevation from GeoTIFF at given GPS coordinate
+/// SRTM standard void/nodata value (i16::MIN = -32768).
+/// Also filter -9999 which some providers use.
+#[inline]
+fn is_srtm_void(v: i16) -> bool {
+    v == i16::MIN || v == -9999
+}
+
+/// Extract elevation from GeoTIFF at given GPS coordinate.
+///
+/// Handles SRTM void pixels (-32768 / -9999) by expanding the search window
+/// up to FALLBACK_RADIUS pixels outward and averaging valid neighbours.
+/// Returns Ok(None) only when the entire fallback window contains no valid data.
 fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
     use gdal::Dataset;
     use gdal::raster::ResampleAlg;
-    
-    // Open dataset (doesn't load into memory)
+
     let dataset = Dataset::open(tiff_path)
         .map_err(|e| ElevationError::FileNotFound(format!("GDAL open failed: {}", e)))?;
-    
-    // Get raster band (elevation is usually band 1)
+
     let rasterband = dataset.rasterband(1)
         .map_err(|e| ElevationError::ParseError(format!("No raster band: {}", e)))?;
-    
-    // Get geotransform (maps pixel coords → lat/lon)
+
     let geotransform = dataset.geo_transform()
         .map_err(|e| ElevationError::ParseError(format!("No geotransform: {}", e)))?;
-    
-    // Geotransform format: [x_origin, pixel_width, 0, y_origin, 0, -pixel_height]
-    // x = geotransform[0] + pixel_col * geotransform[1]
-    // y = geotransform[3] + pixel_row * geotransform[5]
-    
-    let x_origin = geotransform[0];
+
+    let x_origin    = geotransform[0];
     let pixel_width = geotransform[1];
-    let y_origin = geotransform[3];
-    let pixel_height = geotransform[5];  // Usually negative
-    
-    // Convert lat/lon to pixel coordinates
+    let y_origin    = geotransform[3];
+    let pixel_height = geotransform[5]; // negative
+
     let pixel_col = ((gps.lon - x_origin) / pixel_width).floor() as isize;
     let pixel_row = ((gps.lat - y_origin) / pixel_height).floor() as isize;
-    
-    // Read a 2×2 window for bilinear interpolation
-    // GDAL read_as uses (x_off, y_off, x_size, y_size) in pixels
-    let buffer = rasterband.read_as::<i16>(
-        (pixel_col, pixel_row),  // offset
-        (2, 2),                   // window size
-        (2, 2),                   // buffer size (no resampling)
-        Some(ResampleAlg::Bilinear)
+
+    // --- 2×2 bilinear interpolation (primary path) ---
+    let buf2 = rasterband.read_as::<i16>(
+        (pixel_col, pixel_row), (2, 2), (2, 2),
+        Some(ResampleAlg::Bilinear),
     ).map_err(|e| ElevationError::ParseError(format!("GDAL read failed: {}", e)))?;
-    
-    // Calculate fractional position within pixel
-    let col_frac = ((gps.lon - x_origin) / pixel_width) - pixel_col as f64;
-    let row_frac = ((gps.lat - y_origin) / pixel_height) - pixel_row as f64;
-    
-    // Bilinear interpolation, with nearest-neighbour fallback for cliffs.
-    // If adjacent SRTM pixels differ by more than CLIFF_THRESHOLD metres, snap
-    // to the nearest pixel instead of smoothly blending — this preserves the
-    // sharp vertical wall rather than rendering a 30m-wide ramp.
-    const CLIFF_THRESHOLD: f64 = 15.0;
-    let data = buffer.data();
-    let e00 = data[0] as f64;  // Top-left
-    let e01 = data[1] as f64;  // Top-right
-    let e10 = data[2] as f64;  // Bottom-left
-    let e11 = data[3] as f64;  // Bottom-right
 
-    let max_diff = (e00 - e01).abs()
-        .max((e00 - e10).abs())
-        .max((e01 - e11).abs())
-        .max((e10 - e11).abs());
+    let data2 = buf2.data();
+    let valid2: Vec<f64> = data2.iter()
+        .filter(|&&v| !is_srtm_void(v))
+        .map(|&v| v as f64)
+        .collect();
 
-    let elevation_meters = if max_diff > CLIFF_THRESHOLD {
-        // Nearest-neighbour: snap to closest pixel centre
-        let col_near = if col_frac < 0.5 { 0 } else { 1 };
-        let row_near = if row_frac < 0.5 { 0 } else { 1 };
-        data[row_near * 2 + col_near] as f64
-    } else {
-        let e0 = e00 * (1.0 - col_frac) + e01 * col_frac;  // Top edge
-        let e1 = e10 * (1.0 - col_frac) + e11 * col_frac;  // Bottom edge
-        e0 * (1.0 - row_frac) + e1 * row_frac
-    };
-    
-    Ok(Elevation { meters: elevation_meters })
+    if valid2.len() == 4 {
+        // All pixels valid — standard bilinear interpolation with cliff snap.
+        let col_frac = ((gps.lon - x_origin) / pixel_width) - pixel_col as f64;
+        let row_frac = ((gps.lat - y_origin) / pixel_height) - pixel_row as f64;
+
+        const CLIFF_THRESHOLD: f64 = 15.0;
+        let e00 = data2[0] as f64;
+        let e01 = data2[1] as f64;
+        let e10 = data2[2] as f64;
+        let e11 = data2[3] as f64;
+
+        let max_diff = (e00 - e01).abs()
+            .max((e00 - e10).abs())
+            .max((e01 - e11).abs())
+            .max((e10 - e11).abs());
+
+        let elevation_meters = if max_diff > CLIFF_THRESHOLD {
+            let col_near = if col_frac < 0.5 { 0 } else { 1 };
+            let row_near = if row_frac < 0.5 { 0 } else { 1 };
+            data2[row_near * 2 + col_near] as f64
+        } else {
+            let e0 = e00 * (1.0 - col_frac) + e01 * col_frac;
+            let e1 = e10 * (1.0 - col_frac) + e11 * col_frac;
+            e0 * (1.0 - row_frac) + e1 * row_frac
+        };
+        return Ok(Elevation { meters: elevation_meters });
+    }
+
+    if !valid2.is_empty() {
+        // Partial void — use mean of valid pixels.
+        let mean = valid2.iter().sum::<f64>() / valid2.len() as f64;
+        return Ok(Elevation { meters: mean });
+    }
+
+    // --- All immediate pixels are void: expand outward up to FALLBACK_RADIUS ---
+    // This handles water bodies where SRTM has no-data and the user asks us to
+    // "sample the areas around it" to work out the elevation.
+    const FALLBACK_RADIUS: isize = 8; // ~240m at 30m/pixel
+    let window = FALLBACK_RADIUS * 2 + 1;
+    let top_left_col = pixel_col - FALLBACK_RADIUS;
+    let top_left_row = pixel_row - FALLBACK_RADIUS;
+
+    if let Ok(buf_large) = rasterband.read_as::<i16>(
+        (top_left_col, top_left_row),
+        (window as usize, window as usize),
+        (window as usize, window as usize),
+        Some(ResampleAlg::NearestNeighbour),
+    ) {
+        let valid_far: Vec<f64> = buf_large.data().iter()
+            .filter(|&&v| !is_srtm_void(v))
+            .map(|&v| v as f64)
+            .collect();
+
+        if !valid_far.is_empty() {
+            let mean = valid_far.iter().sum::<f64>() / valid_far.len() as f64;
+            return Ok(Elevation { meters: mean });
+        }
+    }
+
+    // No valid data anywhere in fallback window — let pipeline try next source.
+    Ok(Elevation { meters: 0.0 })
 }
 
 /// Multi-source elevation pipeline
