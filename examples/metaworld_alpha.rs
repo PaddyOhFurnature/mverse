@@ -2019,38 +2019,24 @@ fn main() {
                                     if !osm_data.water.is_empty() {
                                         for w in &osm_data.water {
                                             if w.polygon.len() < 3 { continue; }
-                                            // Deduplicate by first vertex GPS (scaled to mm)
                                             let key = ((w.polygon[0].lat * 1e6) as i64,
                                                        (w.polygon[0].lon * 1e6) as i64);
                                             if !water_poly_seen.insert(key) { continue; }
-                                            // Sample up to 16 evenly-spaced vertices for elevation.
-                                            // More samples → higher chance of hitting actual bank pixels.
-                                            // After sampling, discard outliers more than 8m above the raw
-                                            // minimum (those are land-contaminated void fallback values)
-                                            // and take the minimum of what remains.
-                                            let step = (w.polygon.len() / 16).max(1);
-                                            let samples: Vec<f64> = w.polygon.iter().step_by(step).take(16)
-                                                .filter_map(|gps| {
-                                                    osm_elev_pipeline.query(
-                                                        &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
-                                                        .map(|e| e.meters).ok()
-                                                })
-                                                .collect();
-                                            let min_elev = if samples.is_empty() {
-                                                2.0 // sea-level fallback
-                                            } else {
-                                                let raw_min = samples.iter().cloned().fold(f64::MAX, f64::min);
-                                                // Filter out outliers (void-fallback land pixels > 8m above minimum)
-                                                let filtered: Vec<f64> = samples.iter().cloned()
-                                                    .filter(|&e| e <= raw_min + 8.0)
-                                                    .collect();
-                                                filtered.iter().cloned().fold(f64::MAX, f64::min)
-                                            };
-                                            let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
+                                            // Per-vertex elevation: each vertex gets its own Y from SRTM.
+                                            // The river flows downhill — 15m at upstream end, 5m at CBD,
+                                            // 0m at Moreton Bay over 345km. Forcing all vertices to the
+                                            // same Y creates a second floating plane where the polygon
+                                            // is above or below the terrain at the wrong elevation.
+                                            // With per-vertex Y the water surface drapes along the slope.
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let h = physics.ecef_to_local(
                                                     &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                                Vec3::new(h.x, water_y, h.z)
+                                                let elev = osm_elev_pipeline.query(
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
+                                                    .map(|e| e.meters)
+                                                    .unwrap_or(2.0);
+                                                let vy = (elev - origin_gps.alt) as f32 + 0.05;
+                                                Vec3::new(h.x, vy, h.z)
                                             }).collect();
                                             water_polygons.push(verts);
                                         }
@@ -2766,28 +2752,16 @@ fn main() {
                                         let key = ((w.polygon[0].lat * 1e6) as i64,
                                                    (w.polygon[0].lon * 1e6) as i64);
                                         if !water_poly_seen.insert(key) { continue; }
-                                        let step = (w.polygon.len() / 16).max(1);
-                                        let samples: Vec<f64> = w.polygon.iter().step_by(step).take(16)
-                                            .filter_map(|gps| {
-                                                osm_elev_pipeline.query(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
-                                                    .map(|e| e.meters).ok()
-                                            })
-                                            .collect();
-                                        let min_elev = if samples.is_empty() {
-                                            2.0
-                                        } else {
-                                            let raw_min = samples.iter().cloned().fold(f64::MAX, f64::min);
-                                            let filtered: Vec<f64> = samples.iter().cloned()
-                                                .filter(|&e| e <= raw_min + 8.0)
-                                                .collect();
-                                            filtered.iter().cloned().fold(f64::MAX, f64::min)
-                                        };
-                                        let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
+                                        // Per-vertex elevation — see first water block above.
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                             let h = physics.ecef_to_local(
                                                 &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                            Vec3::new(h.x, water_y, h.z)
+                                            let elev = osm_elev_pipeline.query(
+                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
+                                                .map(|e| e.meters)
+                                                .unwrap_or(2.0);
+                                            let vy = (elev - origin_gps.alt) as f32 + 0.05;
+                                            Vec3::new(h.x, vy, h.z)
                                         }).collect();
                                         water_polygons.push(verts);
                                     }
@@ -3555,10 +3529,13 @@ fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::Road
     mesh
 }
 
-/// Build a flat water surface mesh from OSM water polygons.
+/// Build a water surface mesh from OSM water polygons.
 ///
 /// Each polygon is triangulated as a fan from its centroid.
-/// Both sides are rendered (CCW + CW) so water is visible from bank level.
+/// Vertex Y values are per-vertex SRTM elevations so the surface
+/// correctly follows the river gradient (e.g., 15m→5m over 15km
+/// for the Brisbane CBD reach). Both faces rendered so water is
+/// visible from bank level looking across.
 fn build_water_mesh(water_polygons: &[Vec<Vec3>]) -> Mesh {
     let mut mesh = Mesh::new();
     let color = Vec3::new(0.18, 0.42, 0.72); // river blue
