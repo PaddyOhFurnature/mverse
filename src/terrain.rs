@@ -25,6 +25,7 @@ pub struct TerrainGenerator {
     elevation: Arc<Mutex<ElevationPipeline>>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
+    osm_cache_dir: Option<std::path::PathBuf>,
 }
 
 impl TerrainGenerator {
@@ -39,6 +40,7 @@ impl TerrainGenerator {
             elevation: Arc::new(Mutex::new(elevation)),
             origin_gps,
             origin_voxel,
+            osm_cache_dir: None,
         }
     }
     
@@ -52,7 +54,14 @@ impl TerrainGenerator {
             elevation,
             origin_gps,
             origin_voxel,
+            osm_cache_dir: None,
         }
+    }
+
+    /// Set OSM cache directory for water-aware terrain generation.
+    pub fn with_osm_cache(mut self, dir: std::path::PathBuf) -> Self {
+        self.osm_cache_dir = Some(dir);
+        self
     }
     
     /// Get shared elevation pipeline (for cloning generator)
@@ -249,55 +258,148 @@ impl TerrainGenerator {
         
         // Clone Arc for direct access (ElevationPipeline methods are now &self, thread-safe)
         let elevation = Arc::clone(&self.elevation);
-        
-        // 30m×200m×30m chunks aligned to SRTM
-        // Sample elevation at 30m intervals (1 per horizontal voxel position)
+
+        // Load water polygons for this chunk from OSM cache (if available)
+        let chunk_water_polys: Vec<crate::osm::OsmWater> = if let Some(ref dir) = self.osm_cache_dir {
+            let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+            crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir).water
+        } else {
+            vec![]
+        };
+
+        // Two-pass chunk generation:
+        //   Pass 1 — sample every column, find the minimum elevation of any in-water column.
+        //            That lowest point becomes the flat water surface for the whole chunk.
+        //   Pass 2 — generate voxels.  Columns more than BANK_THRESHOLD above the water
+        //            surface are dry land even if the OSM polygon covers them.
+        //
+        // GPS per column computed via ellipsoid equation (not fixed origin Y).
+        // At Brisbane lon≈153°, fixing ECEF Y at origin causes 726m geographic error at 1km.
+        // WGS-84: Y = sqrt(A²(1 - Z²/B²) - X²), sign matched to origin.
+        struct ColSample {
+            voxel_x: i64,
+            voxel_z: i64,
+            surface_elevation: f64,
+            surface_voxel_y:   i64,
+            in_water:          bool,
+        }
+
+        const WGS84_A: f64 = 6_378_137.0;
+        const WGS84_B: f64 = 6_356_752.3142;
+        let origin_ecef_y = (self.origin_voxel.y as f64 + 0.5) + crate::voxel::WORLD_MIN_METERS;
+
+        let mut columns: Vec<ColSample> =
+            Vec::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
+        let mut min_water_elev: f64 = f64::MAX;
+
+        // --- Pass 1 ---
         for i in 0..CHUNK_SIZE_X {
             for k in 0..CHUNK_SIZE_Z {
                 let voxel_x = min_voxel.x + i;
                 let voxel_z = min_voxel.z + k;
-                
-                // Convert voxel position to GPS
-                let sample_voxel = VoxelCoord::new(voxel_x, self.origin_voxel.y, voxel_z);
-                let sample_ecef = sample_voxel.to_ecef();
-                let sample_gps = sample_ecef.to_gps();
-                
-                // Query SRTM elevation (thread-safe with brief internal locks)
+
+                // Ellipsoid-corrected ECEF Y for this column's GPS
+                let ecef_x = (voxel_x as f64 + 0.5) + crate::voxel::WORLD_MIN_METERS;
+                let ecef_z = (voxel_z as f64 + 0.5) + crate::voxel::WORLD_MIN_METERS;
+                let y_sq = WGS84_A * WGS84_A * (1.0 - (ecef_z / WGS84_B).powi(2))
+                    - ecef_x * ecef_x;
+                let ecef_y = if y_sq > 0.0 {
+                    y_sq.sqrt() * origin_ecef_y.signum()
+                } else {
+                    origin_ecef_y
+                };
+                let sample_gps =
+                    crate::coordinates::ECEF::new(ecef_x, ecef_y, ecef_z).to_gps();
+
                 let surface_elevation = elevation.lock().unwrap().query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
-                
-                // Convert to voxel Y coordinate
-                let surface_offset = surface_elevation - self.origin_gps.alt;
-                let surface_voxel_y = self.origin_voxel.y + surface_offset as i64;
-                
-                // Generate vertical column
-                const BEDROCK_DEPTH: i64 = 200;
-                const SKY_HEIGHT: i64 = 100;
-                
-                for height_offset in (-BEDROCK_DEPTH)..=SKY_HEIGHT {
-                    let voxel_y = surface_voxel_y + height_offset;
-                    
-                    // Only generate voxels within chunk Y bounds
-                    if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
-                        continue;
-                    }
-                    
-                    let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
-                    let depth_below_surface = -height_offset;
-                    
-                    let material = if depth_below_surface > 5 {
-                        MaterialId::STONE
-                    } else if depth_below_surface > 1 {
-                        MaterialId::DIRT
-                    } else if depth_below_surface > 0 {
-                        MaterialId::GRASS
-                    } else {
-                        MaterialId::AIR
-                    };
-                    
-                    octree.set_voxel(voxel_pos, material);
+                let surface_voxel_y = self.origin_voxel.y
+                    + (surface_elevation - self.origin_gps.alt) as i64;
+
+                // Water if inside outer polygon AND outside all inner holes
+                let in_water = !chunk_water_polys.is_empty()
+                    && chunk_water_polys.iter().any(|w| {
+                        crate::osm::point_in_polygon(
+                            sample_gps.lat, sample_gps.lon, &w.polygon,
+                        ) && !w.holes.iter().any(|hole| {
+                            crate::osm::point_in_polygon(
+                                sample_gps.lat, sample_gps.lon, hole,
+                            )
+                        })
+                    });
+
+                if in_water {
+                    min_water_elev = min_water_elev.min(surface_elevation);
                 }
+
+                columns.push(ColSample {
+                    voxel_x, voxel_z,
+                    surface_elevation, surface_voxel_y, in_water,
+                });
+            }
+        }
+
+        // Flat water surface Y from the lowest in-water SRTM sample.
+        // Columns more than BANK_THRESHOLD above this are hills/banks — treated as dry land.
+        const BANK_THRESHOLD: f64 = 3.0; // metres above min water elevation
+        let water_surface_y: i64 = if min_water_elev < f64::MAX {
+            self.origin_voxel.y + (min_water_elev - self.origin_gps.alt) as i64
+        } else {
+            i64::MIN
+        };
+
+        // --- Pass 2 ---
+        const BEDROCK_DEPTH: i64 = 200;
+        const SKY_HEIGHT:    i64 = 100;
+        const WATER_DEPTH:   i64 = 5;
+
+        for col in &columns {
+            let effective_water = col.in_water
+                && min_water_elev < f64::MAX
+                && col.surface_elevation <= min_water_elev + BANK_THRESHOLD;
+
+            let col_top = if effective_water {
+                water_surface_y
+            } else {
+                col.surface_voxel_y + SKY_HEIGHT
+            };
+            let col_bot = col.surface_voxel_y - BEDROCK_DEPTH;
+
+            for voxel_y in col_bot..=col_top {
+                if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
+                    continue;
+                }
+                let voxel_pos = VoxelCoord::new(col.voxel_x, voxel_y, col.voxel_z);
+                let depth_below_surface = col.surface_voxel_y - voxel_y;
+
+                let material = if effective_water {
+                    // SRTM measures the water surface, not the riverbed, so surface_voxel_y
+                    // sits at water_surface_y. Place WATER from (water_surface_y - WATER_DEPTH)
+                    // up to water_surface_y so the river has visible depth.
+                    let depth_below_water = water_surface_y - voxel_y;
+                    if depth_below_water < 0 {
+                        MaterialId::AIR
+                    } else if depth_below_water < WATER_DEPTH {
+                        MaterialId::WATER
+                    } else if depth_below_water < WATER_DEPTH + 5 {
+                        MaterialId::GRAVEL
+                    } else {
+                        MaterialId::STONE
+                    }
+                } else {
+                    if depth_below_surface < 0 {
+                        MaterialId::AIR
+                    } else if depth_below_surface == 0 {
+                        MaterialId::GRASS
+                    } else if depth_below_surface <= 5 {
+                        MaterialId::DIRT
+                    } else {
+                        MaterialId::STONE
+                    }
+                };
+
+                octree.set_voxel(voxel_pos, material);
             }
         }
         

@@ -85,7 +85,7 @@ use metaverse_core::{
     physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
     player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
-    renderer::{Camera, MeshBuffer, RenderContext, RenderPipeline},
+    renderer::{Camera, MeshBuffer, OsmPipeline, RenderContext, RenderPipeline},
     meshsite::Section,
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
@@ -830,10 +830,10 @@ impl DebugHud {
                             ui.label(egui::RichText::new(format!("Mode: {}", game_mode))
                                 .color(egui::Color32::WHITE).size(13.0));
                             ui.label(egui::RichText::new(
-                                format!("{:.6}°, {:.6}°", gps.0, gps.1))
-                                .color(egui::Color32::LIGHT_GRAY).size(12.0));
+                                format!("GPS  {:.5}°N  {:.5}°E", gps.0, gps.1))
+                                .color(egui::Color32::from_rgb(120, 220, 255)).size(13.0).strong());
                             ui.label(egui::RichText::new(
-                                format!("Alt: {:.1}m  {}  {:.0}°", gps.2, compass, bearing_deg))
+                                format!("Alt: {:.1}m", gps.2))
                                 .color(egui::Color32::LIGHT_GRAY).size(12.0));
                             ui.separator();
 
@@ -861,6 +861,52 @@ impl DebugHud {
                             }
                         });
                 });
+
+            // Compass rose — top-right corner
+            {
+                let compass_r = 30.0_f32;
+                let sw_pts = ctx.screen_rect().width();
+                let cx = sw_pts - compass_r - 14.0;
+                let cy = compass_r + 14.0;
+                let center = egui::pos2(cx, cy);
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground, egui::Id::new("compass_layer"),
+                ));
+                painter.circle_filled(center, compass_r + 3.0, egui::Color32::from_black_alpha(170));
+                painter.circle_stroke(center, compass_r, egui::Stroke::new(1.5, egui::Color32::from_gray(120)));
+                for i in 0..8 {
+                    let a = ((i as f32) * 45.0 - bearing_deg).to_radians();
+                    let inner = if i % 2 == 0 { compass_r - 6.0 } else { compass_r - 3.0 };
+                    let p0 = center + egui::vec2(a.sin() * inner, -a.cos() * inner);
+                    let p1 = center + egui::vec2(a.sin() * compass_r, -a.cos() * compass_r);
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.0, egui::Color32::from_gray(160)));
+                }
+                for (label, angle_offset) in [("N", 0.0_f32), ("E", 90.0_f32), ("S", 180.0_f32), ("W", 270.0_f32)] {
+                    let a = (angle_offset - bearing_deg).to_radians();
+                    let pos = center + egui::vec2(a.sin() * (compass_r - 10.0), -a.cos() * (compass_r - 10.0));
+                    let color = if label == "N" { egui::Color32::from_rgb(230, 60, 60) }
+                                else { egui::Color32::from_gray(220) };
+                    painter.text(pos, egui::Align2::CENTER_CENTER, label,
+                        egui::FontId::proportional(10.0), color);
+                }
+                // Forward arrow always pointing up (your facing direction)
+                let tip = center + egui::vec2(0.0, -(compass_r - 6.0));
+                let bl  = center + egui::vec2(-4.5, 4.0);
+                let br  = center + egui::vec2( 4.5, 4.0);
+                painter.add(egui::Shape::convex_polygon(
+                    vec![tip, bl, br],
+                    egui::Color32::from_rgb(255, 210, 50),
+                    egui::Stroke::NONE,
+                ));
+                painter.circle_filled(center, 3.0, egui::Color32::WHITE);
+                painter.text(
+                    egui::pos2(cx, cy + compass_r + 9.0),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{}  {:.0}°", compass, bearing_deg),
+                    egui::FontId::proportional(10.0),
+                    egui::Color32::from_gray(200),
+                );
+            }
 
             // Road name labels — projected from 3D world space to screen
             let sw = context.config.width as f32;
@@ -1046,6 +1092,13 @@ fn main() {
     println!("🎨 Initializing renderer...");
     let mut context = pollster::block_on(RenderContext::new(window.clone()));
     let mut pipeline = RenderPipeline::new(&context);
+    // OSM pipeline — flat vertex-colour shader for roads, buildings, water surface.
+    // Treats the "normal" vertex slot as RGB so colours pass through without lighting.
+    let osm_pipeline = OsmPipeline::new(
+        &context,
+        &pipeline.camera_bind_group_layout,
+        &pipeline.model_bind_group_layout,
+    );
 
     // Billboard pipeline — renders textured quads on Construct module room walls
     let billboard_pipeline = BillboardPipeline::new(&context);
@@ -1124,7 +1177,8 @@ fn main() {
     
     // Create terrain generator with origin for coordinate conversion
     let elevation_pipeline_1 = elevation_pipeline;
-    let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel);
+    let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel)
+        .with_osm_cache(data_dir.join("osm"));
     let generator_arc = Arc::new(Mutex::new(generator));
     
     // Create second elevation pipeline for chunk_manager (same source as above)
@@ -1133,7 +1187,8 @@ fn main() {
     if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
     }
-    let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
+    let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
+        .with_osm_cache(data_dir.join("osm"));
 
     // Third elevation pipeline for OSM inference (objects need ground-truth elevation)
     let mut osm_elev_pipeline = ElevationPipeline::new();
@@ -1881,41 +1936,37 @@ fn main() {
                                 // X/Z from GPS(lat,lon,0).to_ecef() → ecef_to_local (horizontal only).
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
                                         let srtm = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
-                                        let render_y = (srtm - origin_alt) + obj.y_offset;
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
+                                        // Use full GPS→ECEF with elevation so all 3 render axes are correct
                                         let local = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [local.x, render_y, local.z];
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, srtm).to_ecef());
+                                        let world_pos = [local.x, local.y, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Roads: same Y formula, +0.05m to sit just above terrain surface.
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
                                         let sa = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
                                         let sb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
-                                        let ya = (sa - origin_alt) + 0.05;
-                                        let yb = (sb - origin_alt) + 0.05;
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
+                                        // Full GPS→ECEF with elevation — correct X/Y/Z in ECEF-local space
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, sa).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let pa = Vec3::new(la.x, ya, la.z);
-                                        let pb = Vec3::new(lb.x, yb, lb.z);
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, sb).to_ecef());
+                                        let pa = Vec3::new(la.x, la.y + 0.05, la.z);
+                                        let pb = Vec3::new(lb.x, lb.y + 0.05, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -1929,7 +1980,6 @@ fn main() {
                                 // Water polygons — flat at centroid SRTM elevation.
                                 if let Some(ref osm_data) = ctx.osm {
                                     if !osm_data.water.is_empty() {
-                                        let origin_alt = origin_gps.alt as f32;
                                         for w in &osm_data.water {
                                             if w.polygon.len() < 3 { continue; }
                                             let n = w.polygon.len() as f64;
@@ -1937,13 +1987,13 @@ fn main() {
                                             let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
                                             let elev = osm_elev_pipeline.query(
                                                 &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                                .map(|e| e.meters as f32)
-                                                .unwrap_or(origin_gps.alt as f32);
-                                            let water_y = (elev - origin_alt) - 0.1;
+                                                .map(|e| e.meters)
+                                                .unwrap_or(origin_gps.alt);
+                                            // All polygon verts at same centroid elevation (water is flat)
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let local = physics.ecef_to_local(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                                Vec3::new(local.x, water_y, local.z)
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev).to_ecef());
+                                                Vec3::new(local.x, local.y - 0.1, local.z)
                                             }).collect();
                                             water_polygons.push(verts);
                                         }
@@ -2604,40 +2654,35 @@ fn main() {
                                 };
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for obj in &inferred {
                                         let srtm = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
-                                        let render_y = (srtm - origin_alt) + obj.y_offset;
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
                                         let local = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [local.x, render_y, local.z];
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, srtm).to_ecef());
+                                        let world_pos = [local.x, local.y, local.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for seg in &segs {
                                         let sa = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
                                         let sb = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
-                                        let ya = (sa - origin_alt) + 0.05;
-                                        let yb = (sb - origin_alt) + 0.05;
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, sa).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let pa = Vec3::new(la.x, ya, la.z);
-                                        let pb = Vec3::new(lb.x, yb, lb.z);
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, sb).to_ecef());
+                                        let pa = Vec3::new(la.x, la.y + 0.05, la.z);
+                                        let pb = Vec3::new(lb.x, lb.y + 0.05, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -2656,7 +2701,6 @@ fn main() {
                                 let osm = metaverse_core::osm::fetch_osm_for_chunk(
                                     lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
                                 if !osm.water.is_empty() {
-                                    let origin_alt = origin_gps.alt as f32;
                                     for w in &osm.water {
                                         if w.polygon.len() < 3 { continue; }
                                         let n = w.polygon.len() as f64;
@@ -2664,13 +2708,12 @@ fn main() {
                                         let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
                                         let elev = osm_elev_pipeline.query(
                                             &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                            .map(|e| e.meters as f32)
-                                            .unwrap_or(origin_gps.alt as f32);
-                                        let water_y = (elev - origin_alt) - 0.1;
+                                            .map(|e| e.meters)
+                                            .unwrap_or(origin_gps.alt);
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                             let local = physics.ecef_to_local(
-                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                            Vec3::new(local.x, water_y, local.z)
+                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev).to_ecef());
+                                            Vec3::new(local.x, local.y - 0.1, local.z)
                                         }).collect();
                                         water_polygons.push(verts);
                                     }
@@ -2943,6 +2986,10 @@ fn main() {
                                             mesh_buffer.render(&mut render_pass);
                                         }
                                     }
+                                    // Switch to OSM flat-colour pipeline for water/roads/buildings
+                                    osm_pipeline.set_pipeline(&mut render_pass);
+                                    render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                    render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
                                     // Render water surfaces just above terrain
                                     if let Some(buf) = &water_mesh_buffer {
                                         buf.render(&mut render_pass);
@@ -2955,6 +3002,8 @@ fn main() {
                                     if let Some(buf) = &buildings_mesh_buffer {
                                         buf.render(&mut render_pass);
                                     }
+                                    // Restore main pipeline for anything that follows
+                                    pipeline.set_pipeline(&mut render_pass);
                                 }
 
                                 // Render placed world-object billboards (any game mode)

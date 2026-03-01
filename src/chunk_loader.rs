@@ -1,3 +1,6 @@
+/// Bump this when terrain generation logic changes — invalidates all cached chunks.
+const TERRAIN_CACHE_VERSION: u32 = 3;
+
 /// Asynchronous chunk loading subsystem
 ///
 /// Loads chunks in background thread to avoid blocking main game loop.
@@ -6,6 +9,7 @@
 use crate::chunk::ChunkId;
 use crate::voxel::Octree;
 use crate::terrain::TerrainGenerator;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -55,9 +59,14 @@ impl ChunkLoader {
     /// # Arguments
     /// * `terrain_generator` - Thread-safe terrain generator (Send+Sync)
     /// * `num_workers` - Number of parallel worker threads (default: 4)
-    pub fn new(terrain_generator: Arc<Mutex<TerrainGenerator>>, num_workers: usize) -> Self {
+    pub fn new(terrain_generator: Arc<Mutex<TerrainGenerator>>, num_workers: usize, cache_dir: Option<PathBuf>) -> Self {
         let (cmd_tx, cmd_rx) = channel();
         let (result_tx, result_rx) = channel();
+        
+        // Create cache directory if provided
+        if let Some(ref dir) = cache_dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
         
         // Spawn multiple worker threads for parallel generation
         let cmd_rx = Arc::new(Mutex::new(cmd_rx));
@@ -66,9 +75,10 @@ impl ChunkLoader {
             let cmd_rx_clone = Arc::clone(&cmd_rx);
             let result_tx_clone = result_tx.clone();
             let terrain_gen_clone = Arc::clone(&terrain_generator);
+            let cache_dir_clone = cache_dir.clone();
             
             thread::spawn(move || {
-                Self::worker_thread(worker_id, cmd_rx_clone, result_tx_clone, terrain_gen_clone);
+                Self::worker_thread(worker_id, cmd_rx_clone, result_tx_clone, terrain_gen_clone, cache_dir_clone);
             });
         }
         
@@ -126,6 +136,7 @@ impl ChunkLoader {
         cmd_rx: Arc<Mutex<Receiver<LoaderCommand>>>,
         result_tx: Sender<LoadResult>,
         terrain_generator: Arc<Mutex<TerrainGenerator>>,
+        cache_dir: Option<PathBuf>,
     ) {
         loop {
             // Lock only to receive command, then release
@@ -137,15 +148,32 @@ impl ChunkLoader {
             match command {
                 Ok(LoaderCommand::Load(request)) => {
                     let start = Instant::now();
-                    
-                    // Generate REAL terrain from SRTM elevation data
-                    // TerrainGenerator.generate_chunk() takes &self (thread-safe)
-                    let octree = match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
-                        Ok(octree) => Some(octree),
-                        Err(e) => {
-                            eprintln!("[Worker {}] Failed to generate chunk {}: {}", 
-                                worker_id, request.chunk_id, e);
-                            None
+
+                    // Try disk cache first — avoids ~2s regeneration on every launch
+                    let octree = if let Some(ref dir) = cache_dir {
+                        match Self::load_from_cache(dir, &request.chunk_id) {
+                            Some(cached) => Some(cached),
+                            None => {
+                                // Cache miss: generate, then save
+                                match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
+                                    Ok(octree) => {
+                                        Self::save_to_cache(dir, &request.chunk_id, &octree);
+                                        Some(octree)
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, request.chunk_id, e);
+                                        None
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
+                            Ok(octree) => Some(octree),
+                            Err(e) => {
+                                eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, request.chunk_id, e);
+                                None
+                            }
                         }
                     };
                     
@@ -180,6 +208,26 @@ impl ChunkLoader {
         }
     }
     
+    /// Load a chunk octree from disk cache. Returns None on miss or version mismatch.
+    fn load_from_cache(cache_dir: &Path, chunk_id: &ChunkId) -> Option<Octree> {
+        let path = cache_dir.join(format!("{}.bin", chunk_id));
+        let data = std::fs::read(&path).ok()?;
+        if data.len() < 4 { return None; }
+        let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if version != TERRAIN_CACHE_VERSION { return None; }
+        Octree::from_bytes(&data[4..]).ok()
+    }
+
+    /// Persist a generated chunk octree to the disk cache.
+    fn save_to_cache(cache_dir: &Path, chunk_id: &ChunkId, octree: &Octree) {
+        let path = cache_dir.join(format!("{}.bin", chunk_id));
+        if let Ok(octree_bytes) = octree.to_bytes() {
+            let mut data = TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
+            data.extend_from_slice(&octree_bytes);
+            let _ = std::fs::write(&path, &data);
+        }
+    }
+
     /// Shutdown background thread gracefully
     pub fn shutdown(&mut self) {
         let _ = self.cmd_tx.send(LoaderCommand::Shutdown);

@@ -123,6 +123,10 @@ pub struct OsmRoad {
 pub struct OsmWater {
     pub osm_id: u64,
     pub polygon: Vec<GPS>,
+    /// Inner rings (holes) — land masses inside river bends / islands.
+    /// A point is water only if inside `polygon` AND outside all `holes`.
+    #[serde(default)]
+    pub holes: Vec<Vec<GPS>>,
     pub name: Option<String>,
     pub water_type: String, // "lake", "river", "ocean", "reservoir", etc.
 }
@@ -176,7 +180,7 @@ fn wait_global_cooldown() {
     let mut last = cell.lock().unwrap();
     if let Some(t) = *last {
         let elapsed = t.elapsed();
-        let cooldown = Duration::from_secs(2);
+        let cooldown = Duration::from_secs(5);
         if elapsed < cooldown {
             std::thread::sleep(cooldown - elapsed);
         }
@@ -318,6 +322,7 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                     data.water.push(OsmWater {
                         osm_id: id,
                         polygon: nodes,
+                        holes: vec![],
                         name: tags["name"].as_str().map(|s| s.to_string()),
                         water_type: tags["water"].as_str()
                             .or(tags["waterway"].as_str())
@@ -342,28 +347,35 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                         Some(m) => m,
                         None => continue,
                     };
-                    // Collect outer ring ways in order, stitch into one polygon
+                    // Collect outer ways (stitched into one polygon) and inner ways
+                    // (each inner way = one hole; they're typically already closed rings).
                     let mut outer_ways: Vec<Vec<GPS>> = Vec::new();
+                    let mut holes: Vec<Vec<GPS>> = Vec::new();
                     for member in members {
-                        if member["role"].as_str() == Some("outer") {
-                            if let Some(way_id) = member["ref"].as_u64() {
-                                if let Some(nids) = way_nodes_map.get(&way_id) {
-                                    let pts: Vec<GPS> = nids.iter()
-                                        .filter_map(|nid| node_map.get(nid).copied())
-                                        .collect();
-                                    if !pts.is_empty() {
+                        let role = member["role"].as_str().unwrap_or("");
+                        if role != "outer" && role != "inner" { continue; }
+                        if let Some(way_id) = member["ref"].as_u64() {
+                            if let Some(nids) = way_nodes_map.get(&way_id) {
+                                let pts: Vec<GPS> = nids.iter()
+                                    .filter_map(|nid| node_map.get(nid).copied())
+                                    .collect();
+                                if pts.len() >= 3 {
+                                    if role == "outer" {
                                         outer_ways.push(pts);
+                                    } else {
+                                        holes.push(pts);
                                     }
                                 }
                             }
                         }
                     }
-                    // Stitch ways into a single polygon ring
+                    // Stitch outer ways into a single polygon ring
                     let polygon = stitch_ways(outer_ways);
                     if polygon.len() >= 3 {
                         data.water.push(OsmWater {
                             osm_id: id,
                             polygon,
+                            holes,
                             name: tags["name"].as_str().map(|s| s.to_string()),
                             water_type: tags["water"].as_str()
                                 .or(tags["waterway"].as_str())
@@ -403,7 +415,7 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-const OSM_CACHE_VERSION: u32 = 1;
+const OSM_CACHE_VERSION: u32 = 2;
 
 /// Cache OSM tile data on disk in binary (bincode) format.
 /// Key is derived from the bounding box rounded to 4 decimal places.
@@ -516,6 +528,25 @@ pub fn fetch_osm_for_chunk(
     clip_osm_to_bounds(tile, lat_min, lat_max, lon_min, lon_max)
 }
 
+/// Ray-casting point-in-polygon test for GPS coordinates.
+pub fn point_in_polygon(lat: f64, lon: f64, polygon: &[crate::coordinates::GPS]) -> bool {
+    let n = polygon.len();
+    if n < 3 { return false; }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (lat_i, lon_i) = (polygon[i].lat, polygon[i].lon);
+        let (lat_j, lon_j) = (polygon[j].lat, polygon[j].lon);
+        if ((lon_i > lon) != (lon_j > lon))
+            && (lat < (lat_j - lat_i) * (lon - lon_i) / (lon_j - lon_i) + lat_i)
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 /// Filter an OsmData to only features that intersect a bounding box.
 fn clip_osm_to_bounds(
     data: OsmData,
@@ -550,6 +581,9 @@ fn clip_osm_to_bounds(
             r.nodes.iter().any(|n| in_box(n.lat, n.lon))
         }).collect(),
 
+        // Water: include full polygon (unclipped) for any polygon whose bbox overlaps.
+        // Clipping vertices breaks point_in_polygon tests (open polygon = wrong results).
+        // Water is now rendered as voxels, so polygon vertex count per-chunk doesn't matter.
         water: data.water.into_iter().filter(|w| {
             poly_intersects(&w.polygon)
         }).collect(),

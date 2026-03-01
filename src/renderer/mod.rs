@@ -7,7 +7,7 @@ mod camera;
 mod pipeline;
 
 pub use camera::Camera;
-pub use pipeline::{RenderContext, RenderPipeline};
+pub use pipeline::{OsmPipeline, RenderContext, RenderPipeline};
 
 use crate::mesh::Mesh;
 use glam::Mat4;

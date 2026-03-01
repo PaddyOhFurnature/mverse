@@ -556,7 +556,8 @@ pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> M
                         voxel_pos.y + dy,
                         voxel_pos.z + dz,
                     );
-                    corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
+                    let mat = octree.get_voxel(corner_pos);
+                    corners[i] = mat != MaterialId::AIR && mat != MaterialId::WATER;
                 }
                 
                 // Use simple integer offsets for marching cubes
@@ -617,7 +618,8 @@ pub fn extract_chunk_mesh(
                         voxel_pos.y + dy,
                         voxel_pos.z + dz,
                     );
-                    corners[i] = octree.get_voxel(corner_pos) != MaterialId::AIR;
+                    let mat = octree.get_voxel(corner_pos);
+                    corners[i] = mat != MaterialId::AIR && mat != MaterialId::WATER;
                 }
                 
                 // Position relative to chunk center (mesh centered at origin)
@@ -636,4 +638,54 @@ pub fn extract_chunk_mesh(
     }
     
     (mesh, center)
+}
+
+/// Extract a flat water surface mesh from the top face of WATER voxels.
+/// Vertices use the water color in the normal slot for OSM shader rendering.
+/// Positions are relative to chunk center (same as extract_chunk_mesh).
+pub fn extract_water_surface_mesh(
+    octree: &Octree,
+    min_voxel: &VoxelCoord,
+    max_voxel: &VoxelCoord,
+) -> Mesh {
+    use crate::mesh::Triangle;
+
+    let mut mesh = Mesh::new();
+
+    // Royal blue water color (stored in normal slot for OSM flat-colour shader)
+    let water_color = Vec3::new(65.0 / 255.0, 105.0 / 255.0, 225.0 / 255.0);
+
+    let center = VoxelCoord::new(
+        min_voxel.x + (max_voxel.x - min_voxel.x - 1) / 2,
+        min_voxel.y + (max_voxel.y - min_voxel.y - 1) / 2,
+        min_voxel.z + (max_voxel.z - min_voxel.z - 1) / 2,
+    );
+
+    for voxel_x in min_voxel.x..max_voxel.x {
+        for voxel_y in min_voxel.y..max_voxel.y {
+            for voxel_z in min_voxel.z..max_voxel.z {
+                let pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
+                let above = VoxelCoord::new(voxel_x, voxel_y + 1, voxel_z);
+
+                // Top face of a WATER voxel exposed to AIR
+                if octree.get_voxel(pos) == MaterialId::WATER
+                    && octree.get_voxel(above) == MaterialId::AIR
+                {
+                    let lx = (voxel_x - center.x) as f32;
+                    let ly = (voxel_y - center.y) as f32 + 1.0; // top of voxel
+                    let lz = (voxel_z - center.z) as f32;
+
+                    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(lx,       ly, lz),       water_color));
+                    let v1 = mesh.add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz),       water_color));
+                    let v2 = mesh.add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz + 1.0), water_color));
+                    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(lx,       ly, lz + 1.0), water_color));
+
+                    mesh.add_triangle(Triangle::new(v0, v1, v2));
+                    mesh.add_triangle(Triangle::new(v0, v2, v3));
+                }
+            }
+        }
+    }
+
+    mesh
 }

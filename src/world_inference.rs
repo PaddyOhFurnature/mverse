@@ -528,6 +528,8 @@ pub struct RoadSegmentGps {
     pub width_m: f32,
     pub road_type: crate::osm::RoadType,
     pub name: Option<String>,
+    pub is_bridge: bool,
+    pub is_tunnel: bool,
 }
 
 /// Extract all road segments from the OSM data for a chunk.
@@ -543,6 +545,8 @@ pub fn infer_road_segments(ctx: &ChunkContext) -> Vec<RoadSegmentGps> {
                 width_m: w,
                 road_type: road.road_type.clone(),
                 name: road.name.clone(),
+                is_bridge: road.is_bridge,
+                is_tunnel: road.is_tunnel,
             });
         }
     }

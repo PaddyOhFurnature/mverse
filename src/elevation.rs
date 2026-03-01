@@ -420,16 +420,32 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     let col_frac = ((gps.lon - x_origin) / pixel_width) - pixel_col as f64;
     let row_frac = ((gps.lat - y_origin) / pixel_height) - pixel_row as f64;
     
-    // Bilinear interpolation
+    // Bilinear interpolation, with nearest-neighbour fallback for cliffs.
+    // If adjacent SRTM pixels differ by more than CLIFF_THRESHOLD metres, snap
+    // to the nearest pixel instead of smoothly blending — this preserves the
+    // sharp vertical wall rather than rendering a 30m-wide ramp.
+    const CLIFF_THRESHOLD: f64 = 15.0;
     let data = buffer.data();
     let e00 = data[0] as f64;  // Top-left
     let e01 = data[1] as f64;  // Top-right
     let e10 = data[2] as f64;  // Bottom-left
     let e11 = data[3] as f64;  // Bottom-right
-    
-    let e0 = e00 * (1.0 - col_frac) + e01 * col_frac;  // Top edge
-    let e1 = e10 * (1.0 - col_frac) + e11 * col_frac;  // Bottom edge
-    let elevation_meters = e0 * (1.0 - row_frac) + e1 * row_frac;
+
+    let max_diff = (e00 - e01).abs()
+        .max((e00 - e10).abs())
+        .max((e01 - e11).abs())
+        .max((e10 - e11).abs());
+
+    let elevation_meters = if max_diff > CLIFF_THRESHOLD {
+        // Nearest-neighbour: snap to closest pixel centre
+        let col_near = if col_frac < 0.5 { 0 } else { 1 };
+        let row_near = if row_frac < 0.5 { 0 } else { 1 };
+        data[row_near * 2 + col_near] as f64
+    } else {
+        let e0 = e00 * (1.0 - col_frac) + e01 * col_frac;  // Top edge
+        let e1 = e10 * (1.0 - col_frac) + e11 * col_frac;  // Bottom edge
+        e0 * (1.0 - row_frac) + e1 * row_frac
+    };
     
     Ok(Elevation { meters: elevation_meters })
 }

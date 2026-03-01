@@ -372,9 +372,6 @@ pub struct NetStats {
     pub state_responses_out: u64,
 }
 
-#[derive(PartialEq, Clone)]
-enum Tab { Main }  // single-screen TUI — kept for headless/log path compatibility
-
 /// Shared state readable by web server and TUI
 #[derive(Clone, Serialize)]
 pub struct SharedState {
@@ -461,7 +458,6 @@ struct AppState {
     total_reservations: u64,
     dht_peer_count: usize,
     log: VecDeque<String>,
-    tab: Tab,
     should_quit: bool,
     sys: System,
     cpu_pct: f32,
@@ -504,7 +500,7 @@ impl AppState {
             connected_peers: HashMap::new(),
             active_circuits: vec![],
             total_connections: 0, total_reservations: 0, dht_peer_count: 0,
-            log: VecDeque::new(), tab: Tab::Main, should_quit: false,
+            log: VecDeque::new(), should_quit: false,
             sys, cpu_pct, ram_used_mb, ram_total_mb,
             last_sys_refresh: Instant::now(),
             last_shared_sync: Instant::now(),
@@ -646,7 +642,7 @@ fn world_data_size_mb(world_dir: &std::path::Path) -> f64 {
 ///
 /// `Clone` is cheap — the internal connection is behind `Arc<Mutex<>>`.
 #[derive(Clone)]
-struct KeyDatabase {
+pub struct KeyDatabase {
     conn: Arc<std::sync::Mutex<Connection>>,
 }
 
@@ -1046,24 +1042,6 @@ impl KeyDatabase {
         ).ok()
     }
 
-    /// Count content items per section.
-    fn content_counts(&self) -> std::collections::HashMap<String, usize> {
-        let conn = self.conn.lock().unwrap();
-        let mut map = std::collections::HashMap::new();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT section, COUNT(*) FROM mesh_content GROUP BY section"
-        ) {
-            let _ = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
-            }).map(|rows| {
-                for (sec, count) in rows.flatten() {
-                    map.insert(sec, count);
-                }
-            });
-        }
-        map
-    }
-
     /// Return content items with `created_at > since_ms`, ordered ascending, up to `limit`.
     ///
     /// Used by `GET /api/v1/sync/content` so peer servers can pull incremental updates.
@@ -1238,11 +1216,11 @@ fn key_record_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusq
 
 
 /// Commands sent from web handlers → event loop to publish via gossipsub.
-enum GossipCommand {
+pub enum GossipCommand {
     Publish { topic: String, data: Vec<u8> },
 }
 
-enum SwarmAction {
+pub enum SwarmAction {
     AddKadAddress(PeerId, Multiaddr),
     RefreshDhtCount,
     DialPeer(PeerId, Multiaddr),
@@ -1370,7 +1348,6 @@ fn handle_swarm_event(
                 // Deserialise and store incoming key records into SQLite.
                 // We check self_sig on every record before persisting.
                 use metaverse_core::key_registry::KeyRegistryMessage;
-                use metaverse_core::identity::KeyRecord;
                 if let Ok(msg) = bincode::deserialize::<KeyRegistryMessage>(&message.data) {
                     match msg {
                         KeyRegistryMessage::Publish(r)  => {
@@ -1727,12 +1704,6 @@ fn stat_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static
         Span::styled(label.into(), Style::default().fg(Color::DarkGray)),
         Span::styled(value.into(), Style::default().fg(Color::White)),
     ])
-}
-
-fn cpu_color(pct: f32) -> Style {
-    if pct > 80.0 { Style::default().fg(Color::Red) }
-    else if pct > 50.0 { Style::default().fg(Color::Yellow) }
-    else { Style::default().fg(Color::Green) }
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -2188,7 +2159,6 @@ async fn api_v1_approve_key_request(
     Json(body): Json<ReviewBody>,
 ) -> impl IntoResponse {
     use metaverse_core::identity::{KeyRecord, KeyType};
-    use libp2p::identity;
 
     // Auth check
     {
@@ -3112,7 +3082,7 @@ async fn api_v1_post_content(
     State(s): State<WebState>,
     Json(payload): Json<metaverse_core::meshsite::SubmitContent>,
 ) -> impl IntoResponse {
-    use metaverse_core::meshsite::{ContentItem, topic_for_section};
+    use metaverse_core::meshsite::topic_for_section;
 
     let item = match payload.into_item() {
         Some(i) => i,
@@ -3557,7 +3527,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Channel for web handlers to push gossipsub publishes into the event loop.
     let (gossip_tx, gossip_rx) = tokio::sync::mpsc::channel::<GossipCommand>(256);
     // Channel for web handlers to push SwarmActions (e.g. DHT puts) into the event loop.
-    let (swarm_web_tx, mut swarm_web_rx) = tokio::sync::mpsc::channel::<SwarmAction>(256);
+    let (swarm_web_tx, swarm_web_rx) = tokio::sync::mpsc::channel::<SwarmAction>(256);
     // Channel for web handlers / SIGHUP to trigger config hot-reloads.
     let (config_reload_tx, config_reload_rx) = tokio::sync::mpsc::channel::<ServerConfig>(8);
 
@@ -3579,7 +3549,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // World systems
     let world_enabled = config.world_enabled;
-    let mut world = if world_enabled {
+    let world = if world_enabled {
         println!("🌍 Initialising world state...");
         WorldSystems::new(&config)
     } else {

@@ -27,7 +27,6 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct GhRelease {
     tag_name: String,
-    name:     String,
     body:     Option<String>,
     assets:   Vec<GhAsset>,
 }

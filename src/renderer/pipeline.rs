@@ -100,8 +100,8 @@ pub struct RenderPipeline {
     camera_bind_group: wgpu::BindGroup,
     pub camera_bind_group_layout: wgpu::BindGroupLayout,
     model_buffer: wgpu::Buffer,
-    model_bind_group: wgpu::BindGroup,
-    model_bind_group_layout: wgpu::BindGroupLayout,
+    pub model_bind_group: wgpu::BindGroup,
+    pub model_bind_group_layout: wgpu::BindGroupLayout,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
 }
@@ -376,5 +376,91 @@ impl RenderPipeline {
     /// Get depth view — shared with billboard pass so depth testing works correctly.
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth_view
+    }
+}
+
+/// Render pipeline for OSM objects (buildings, roads, water).
+///
+/// Uses `osm_shader.wgsl` which treats the vertex "normal" slot as an RGB
+/// colour, giving buildings/roads their intended colours instead of the
+/// terrain grass/rock shading from the main pipeline.
+///
+/// Shares bind-group layouts with `RenderPipeline` so that the main pipeline's
+/// camera and model bind-groups can be reused without re-uploading uniforms.
+pub struct OsmPipeline {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl OsmPipeline {
+    pub fn new(
+        context: &RenderContext,
+        camera_layout: &wgpu::BindGroupLayout,
+        model_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let device = &context.device;
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("OSM Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("osm_shader.wgsl").into()),
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("OSM Pipeline Layout"),
+            bind_group_layouts: &[camera_layout, model_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("OSM Render Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: context.config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // No backface culling — water/roads must be visible from both sides.
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        Self { pipeline }
+    }
+
+    /// Switch the render pass to this pipeline.  Caller must then re-bind
+    /// the camera and model bind-groups (groups 0 and 1).
+    pub fn set_pipeline<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        render_pass.set_pipeline(&self.pipeline);
     }
 }

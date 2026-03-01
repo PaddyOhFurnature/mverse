@@ -1112,19 +1112,24 @@ impl NetworkNode {
                             value: record.value,
                         })
                     }
-                    // DHT put/provide results — log only on failure
+                    // DHT put/provide results — only log if we actually have peers
+                    // (QuorumFailed with no peers is expected when running solo)
                     kad::Event::OutboundQueryProgressed {
                         result: kad::QueryResult::PutRecord(Err(e)),
                         ..
                     } => {
-                        eprintln!("⚠️  [DHT] PutRecord failed: {:?}", e);
+                        if self.connected_peers.len() > 0 {
+                            eprintln!("⚠️  [DHT] PutRecord failed: {:?}", e);
+                        }
                         None
                     }
                     kad::Event::OutboundQueryProgressed {
                         result: kad::QueryResult::StartProviding(Err(e)),
                         ..
                     } => {
-                        eprintln!("⚠️  [DHT] StartProviding failed: {:?}", e);
+                        if self.connected_peers.len() > 0 {
+                            eprintln!("⚠️  [DHT] StartProviding failed: {:?}", e);
+                        }
                         None
                     }
                     // Providers found for a content key

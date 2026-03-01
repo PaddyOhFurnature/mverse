@@ -4,7 +4,7 @@
 /// Same renderer, same address system, key-gated access tiers.
 
 use crate::identity::KeyType;
-use crate::meshsite::{ContentItem, Section};
+use crate::meshsite::ContentItem;
 
 // ── Address System ─────────────────────────────────────────────────────────────
 

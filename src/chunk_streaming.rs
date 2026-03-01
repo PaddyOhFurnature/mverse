@@ -33,7 +33,7 @@
 //! ```
 
 use crate::{
-    chunk::{ChunkId, CHUNK_SIZE_X},
+    chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y},
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
     renderer::MeshBuffer,
@@ -68,16 +68,21 @@ pub struct ChunkStreamerConfig {
     
     /// Maximum time per frame for chunk operations (milliseconds)
     pub frame_budget_ms: f64,
+
+    /// Maximum chunks dispatched to worker threads at once.
+    /// Prevents flooding the workers with thousands of requests on first load.
+    pub max_in_flight: usize,
 }
 
 impl Default for ChunkStreamerConfig {
     fn default() -> Self {
         Self {
-            load_radius_m: 500.0,        // Load chunks within 500m
-            unload_radius_m: 1000.0,     // Unload chunks beyond 1km
-            max_loaded_chunks: 100,      // Hard limit: 100 chunks
-            safe_zone_radius: 1,         // Keep 3x3 grid around player
-            frame_budget_ms: 5.0,        // Max 5ms per frame
+            load_radius_m: 500.0,
+            unload_radius_m: 800.0,
+            max_loaded_chunks: 3000,
+            safe_zone_radius: 1,
+            frame_budget_ms: 5.0,
+            max_in_flight: 16,
         }
     }
 }
@@ -190,7 +195,8 @@ impl ChunkStreamer {
     ) -> Self {
         // Create chunk loader with parallel workers (4 threads for 4-core minimum)
         let num_workers = 4;  // Can make this configurable later
-        let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers);
+        let cache_dir = Some(world_dir.join("terrain_cache"));
+        let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers, cache_dir);
         
         Self {
             config,
@@ -315,8 +321,13 @@ impl ChunkStreamer {
             }
         }
         
-        // Request loading from worker threads (non-blocking)
-        while let Some(chunk_id) = self.loading_queue.pop_front() {
+        // Request loading from worker threads (non-blocking).
+        // Cap in-flight dispatches so we don't flood workers with 2000+ requests at once.
+        while self.loading_in_progress.len() < self.config.max_in_flight {
+            let chunk_id = match self.loading_queue.pop_front() {
+                Some(id) => id,
+                None => break,
+            };
             // Skip if already loaded or loading
             if self.loaded_chunks.contains_key(&chunk_id) {
                 continue;
@@ -404,7 +415,8 @@ impl ChunkStreamer {
         
         // Add chunks in grid around player
         for dx in -chunk_radius..=chunk_radius {
-            for dy in -1..=1 {  // Y is vertical, keep small
+            let dy_radius = (radius_m / CHUNK_SIZE_Y as f64).ceil() as i32;
+            for dy in -dy_radius..=dy_radius {
                 for dz in -chunk_radius..=chunk_radius {
                     let chunk_id = ChunkId {
                         x: player_chunk.x + dx as i64,

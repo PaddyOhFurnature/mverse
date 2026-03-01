@@ -280,7 +280,7 @@ impl AppState {
 
 // ─── Swarm event handler ─────────────────────────────────────────────────────
 
-enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr), PutDhtRecord { key: Vec<u8>, value: Vec<u8> } }
+enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr) }
 
 fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppState) -> Vec<SwarmAction> {
     let mut actions = vec![];
@@ -347,13 +347,6 @@ fn apply_swarm_actions(actions: Vec<SwarmAction>, state: &mut AppState, swarm: &
             SwarmAction::DialPeer(peer_id, addr) => {
                 if !swarm.is_connected(&peer_id) {
                     let _ = swarm.dial(addr);
-                }
-            }
-            SwarmAction::PutDhtRecord { key, value } => {
-                use libp2p::kad::{Record, RecordKey, Quorum};
-                let record = Record { key: RecordKey::new(&key), value, publisher: None, expires: None };
-                if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
-                    eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
                 }
             }
         }
@@ -566,7 +559,7 @@ fn stat_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
     ])
 }
 
-fn log_style(line: &str) -> Line {
+fn log_style<'a>(line: &'a str) -> Line<'a> {
     let color = if line.contains("✅") || line.contains("Reservation") { Color::Green }
         else if line.contains("❌") || line.contains("Disconnected") { Color::Red }
         else if line.contains("🔄") || line.contains("Circuit") { Color::Blue }

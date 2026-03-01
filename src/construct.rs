@@ -259,8 +259,8 @@ fn build_terminal(pos: Vec3, colour: Vec3) -> Mesh {
     let screen_colour = GLOW_COLOUR;
     let v0 = mesh.add_vertex(Vertex::new(Vec3::new(sx-sw, sy,    sz-sd), screen_colour));
     let v1 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy,    sz-sd), screen_colour));
-    let v2 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy,    sz+sd), screen_colour));
-    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(sx-sw, sy,    sz+sd), screen_colour));
+    let _v2 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy,    sz+sd), screen_colour));
+    let _v3 = mesh.add_vertex(Vertex::new(Vec3::new(sx-sw, sy,    sz+sd), screen_colour));
     let v4 = mesh.add_vertex(Vertex::new(Vec3::new(sx-sw, sy+sh, sz-sd), screen_colour));
     let v5 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy+sh, sz-sd), screen_colour));
     let v6 = mesh.add_vertex(Vertex::new(Vec3::new(sx+sw, sy+sh, sz+sd), screen_colour));
