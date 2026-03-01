@@ -149,7 +149,7 @@ impl TexturedPipeline {
         queue: &wgpu::Queue,
         path: &str,
     ) -> Option<GlbModel> {
-        let (document, buffers, images) = gltf::import(path).ok()?;
+        let (document, buffers, _images) = gltf::import(path).ok()?;
 
         let mesh = document.meshes().next()?;
         let primitive = mesh.primitives().next()?;
@@ -198,23 +198,44 @@ impl TexturedPipeline {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        // Always use base_color_factor as a 1×1 solid-colour texture.
-        // Kenney city kit GLBs reference an external colormap.png via UV mapping.
-        // The UV layout varies between asset versions, making the colormap render
-        // inconsistently across machines (correct colours on one, white on another).
-        // Using base_color_factor gives consistent solid colours everywhere.
-        // For these GLBs base_color_factor defaults to [1,1,1,1] (white),
-        // so has_real_texture becomes false and the flat-colour box fallback is used.
+        // Load the colormap texture by resolving the external URI ourselves.
+        // gltf::import may silently return a 1x1 white image when it can't find
+        // the external file, which renders everything white.  We explicitly read
+        // the file from disk relative to the GLB's directory so we always get
+        // the real pixels — or fall back to solid base_color_factor if missing.
         let pbr = primitive.material().pbr_metallic_roughness();
-        let f = pbr.base_color_factor();
-        let pixel = [
-            (f[0] * 255.0) as u8,
-            (f[1] * 255.0) as u8,
-            (f[2] * 255.0) as u8,
-            (f[3] * 255.0) as u8,
-        ];
-        let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
-        let (tex_data, tex_w, tex_h, has_real_texture) = (pixel.to_vec(), 1u32, 1u32, !is_white);
+        let glb_dir = std::path::Path::new(path).parent()
+            .unwrap_or(std::path::Path::new("."));
+
+        let (tex_data, tex_w, tex_h, has_real_texture) =
+            if let Some(tex_info) = pbr.base_color_texture() {
+                let src = tex_info.texture().source().source();
+                let explicit_path = match &src {
+                    gltf::image::Source::Uri { uri, .. } => Some(glb_dir.join(uri)),
+                    _ => None,
+                };
+                let loaded = explicit_path
+                    .and_then(|p| std::fs::read(p).ok())
+                    .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                    .map(|img| img.to_rgba8());
+                if let Some(rgba_img) = loaded {
+                    let w = rgba_img.width();
+                    let h = rgba_img.height();
+                    (rgba_img.into_raw(), w, h, true)
+                } else {
+                    let f = pbr.base_color_factor();
+                    let pixel = [(f[0]*255.0) as u8, (f[1]*255.0) as u8,
+                                 (f[2]*255.0) as u8, (f[3]*255.0) as u8];
+                    let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
+                    (pixel.to_vec(), 1u32, 1u32, !is_white)
+                }
+            } else {
+                let f = pbr.base_color_factor();
+                let pixel = [(f[0]*255.0) as u8, (f[1]*255.0) as u8,
+                             (f[2]*255.0) as u8, (f[3]*255.0) as u8];
+                let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
+                (pixel.to_vec(), 1u32, 1u32, !is_white)
+            };
 
         let texture = device.create_texture_with_data(
             queue,
