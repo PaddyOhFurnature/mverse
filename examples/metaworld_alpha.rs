@@ -1973,10 +1973,11 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
                                             .map(|e| e.meters)
                                             .unwrap_or(origin_gps.alt);
-                                        // Use full GPS→ECEF with elevation so all 3 render axes are correct
-                                        let local = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, srtm).to_ecef());
-                                        let world_pos = [local.x, local.y, local.z];
+                                        // X/Z: sea-level ECEF horizontal (matches terrain column coords).
+                                        // Y:   geographic altitude diff from origin (matches terrain voxel Y).
+                                        let horiz = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
+                                        let world_pos = [horiz.x, (srtm - origin_gps.alt) as f32, horiz.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
@@ -1992,13 +1993,13 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
                                             .map(|e| e.meters)
                                             .unwrap_or(origin_gps.alt);
-                                        // Full GPS→ECEF with elevation — correct X/Y/Z in ECEF-local space
+                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, sa).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, sb).to_ecef());
-                                        let pa = Vec3::new(la.x, la.y + 0.05, la.z);
-                                        let pb = Vec3::new(lb.x, lb.y + 0.05, lb.z);
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + 0.05, la.z);
+                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + 0.05, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -2021,11 +2022,12 @@ fn main() {
                                                 &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
                                                 .map(|e| e.meters)
                                                 .unwrap_or(origin_gps.alt);
-                                            // All polygon verts at same centroid elevation (water is flat)
+                                            let water_y = (elev - origin_gps.alt) as f32 - 0.1;
+                                            // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
-                                                let local = physics.ecef_to_local(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev).to_ecef());
-                                                Vec3::new(local.x, local.y - 0.1, local.z)
+                                                let h = physics.ecef_to_local(
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                                Vec3::new(h.x, water_y, h.z)
                                             }).collect();
                                             water_polygons.push(verts);
                                         }
@@ -2691,9 +2693,11 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
                                             .map(|e| e.meters)
                                             .unwrap_or(origin_gps.alt);
-                                        let local = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, srtm).to_ecef());
-                                        let world_pos = [local.x, local.y, local.z];
+                                        // X/Z: sea-level ECEF horizontal (matches terrain column coords).
+                                        // Y:   geographic altitude diff from origin (matches terrain voxel Y).
+                                        let horiz = physics.ecef_to_local(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
+                                        let world_pos = [horiz.x, (srtm - origin_gps.alt) as f32, horiz.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
@@ -2709,12 +2713,13 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
                                             .map(|e| e.meters)
                                             .unwrap_or(origin_gps.alt);
+                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, sa).to_ecef());
+                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, sb).to_ecef());
-                                        let pa = Vec3::new(la.x, la.y + 0.05, la.z);
-                                        let pb = Vec3::new(lb.x, lb.y + 0.05, lb.z);
+                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + 0.05, la.z);
+                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + 0.05, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -2742,10 +2747,12 @@ fn main() {
                                             &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
                                             .map(|e| e.meters)
                                             .unwrap_or(origin_gps.alt);
+                                        let water_y = (elev - origin_gps.alt) as f32 - 0.1;
+                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
-                                            let local = physics.ecef_to_local(
-                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, elev).to_ecef());
-                                            Vec3::new(local.x, local.y - 0.1, local.z)
+                                            let h = physics.ecef_to_local(
+                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                            Vec3::new(h.x, water_y, h.z)
                                         }).collect();
                                         water_polygons.push(verts);
                                     }
