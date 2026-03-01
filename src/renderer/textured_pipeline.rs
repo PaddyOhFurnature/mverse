@@ -32,6 +32,11 @@ pub struct GlbModel {
     index_buffer:        wgpu::Buffer,
     pub index_count:     u32,
     pub texture_bind_group: wgpu::BindGroup,
+    /// True if the model has a real texture or non-white base colour.
+    /// False means the texture fell back to a 1×1 white pixel — model
+    /// will render as solid white, which is a sign the GLB has no
+    /// usable texture data.
+    pub has_real_texture: bool,
 }
 
 impl GlbModel {
@@ -195,15 +200,17 @@ impl TexturedPipeline {
 
         // Build texture from material base colour or a 1×1 white fallback.
         let pbr = primitive.material().pbr_metallic_roughness();
-        let (tex_data, tex_w, tex_h) =
+        let (tex_data, tex_w, tex_h, has_real_texture) =
             if let Some(tex_info) = pbr.base_color_texture() {
                 let img_idx = tex_info.texture().source().index();
                 let img = &images[img_idx];
                 let rgba = image_to_rgba8(img);
                 if rgba.len() == (img.width * img.height * 4) as usize {
-                    (rgba, img.width, img.height)
+                    (rgba, img.width, img.height, true)
                 } else {
-                    (vec![255u8; 4], 1u32, 1u32)
+                    eprintln!("⚠️  GLB texture size mismatch (fmt={:?} {}×{} pixels={} expected={})",
+                        img.format, img.width, img.height, rgba.len(), img.width * img.height * 4);
+                    (vec![255u8; 4], 1u32, 1u32, false)
                 }
             } else {
                 let f = pbr.base_color_factor();
@@ -213,7 +220,9 @@ impl TexturedPipeline {
                     (f[2] * 255.0) as u8,
                     (f[3] * 255.0) as u8,
                 ];
-                (pixel.to_vec(), 1u32, 1u32)
+                // Non-white factor counts as a real (solid-colour) texture
+                let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
+                (pixel.to_vec(), 1u32, 1u32, !is_white)
             };
 
         let texture = device.create_texture_with_data(
@@ -268,6 +277,7 @@ impl TexturedPipeline {
             index_buffer,
             index_count: indices.len() as u32,
             texture_bind_group,
+            has_real_texture,
         })
     }
 

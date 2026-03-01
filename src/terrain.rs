@@ -343,24 +343,6 @@ impl TerrainGenerator {
             }
         }
 
-        // --- Bank detection pass ---
-        // Uses grid indexing: column (i,k) is at index i*CHUNK_SIZE_Z + k.
-        for i in 0..CHUNK_SIZE_X as usize {
-            for k in 0..CHUNK_SIZE_Z as usize {
-                let idx = i * CHUNK_SIZE_Z as usize + k;
-                if columns[idx].in_water { continue; }
-                let neighbours = [
-                    if i > 0 { Some(idx - CHUNK_SIZE_Z as usize) } else { None },
-                    if i + 1 < CHUNK_SIZE_X as usize { Some(idx + CHUNK_SIZE_Z as usize) } else { None },
-                    if k > 0 { Some(idx - 1) } else { None },
-                    if k + 1 < CHUNK_SIZE_Z as usize { Some(idx + 1) } else { None },
-                ];
-                if neighbours.iter().any(|n| n.map(|ni| columns[ni].in_water).unwrap_or(false)) {
-                    columns[idx].is_bank = true;
-                }
-            }
-        }
-
         // --- Road carving pass ---
         // For each non-bridge road segment, flatten terrain to road elevation.
         // Uses the same Y formula as the OSM render pipeline:

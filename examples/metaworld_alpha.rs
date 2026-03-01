@@ -2950,15 +2950,17 @@ fn main() {
                                     * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, sz));
 
                                 let model_idx = building_model_idx(type_str);
-                                if building_glb_models[model_idx].is_some() {
+                                if building_glb_models[model_idx].as_ref().map(|m| m.has_real_texture).unwrap_or(false) {
                                     let (_, bind_group) = pipeline.create_model_bind_group(&context.device, &transform);
                                     building_instances.push((model_idx, bind_group));
                                 }
                             }
                         }
 
-                        // Flat-colour fallback mesh (used when GLB models didn't load OR no instances)
-                        let bld_mesh = if !glb_models_loaded || building_instances.is_empty() {
+                        // Flat-colour fallback mesh: used when GLB models have no real texture
+                        // (render white on user machines) or when GLB didn't load at all.
+                        let use_flat_colour = building_instances.is_empty();
+                        let bld_mesh = if use_flat_colour {
                             build_buildings_mesh(&all_objs)
                         } else {
                             metaverse_core::mesh::Mesh::new()
