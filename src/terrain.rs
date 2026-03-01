@@ -259,12 +259,13 @@ impl TerrainGenerator {
         // Clone Arc for direct access (ElevationPipeline methods are now &self, thread-safe)
         let elevation = Arc::clone(&self.elevation);
 
-        // Load water polygons for this chunk from OSM cache (if available)
-        let chunk_water_polys: Vec<crate::osm::OsmWater> = if let Some(ref dir) = self.osm_cache_dir {
+        // Load OSM data for this chunk (water + roads for terrain carving)
+        let (chunk_water_polys, chunk_roads) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-            crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir).water
+            let osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+            (osm.water, osm.roads)
         } else {
-            vec![]
+            (vec![], vec![])
         };
 
         // Two-pass chunk generation:
@@ -282,6 +283,7 @@ impl TerrainGenerator {
             surface_elevation: f64,
             surface_voxel_y:   i64,
             in_water:          bool,
+            is_road:           bool,
         }
 
         const WGS84_A: f64 = 6_378_137.0;
@@ -336,6 +338,7 @@ impl TerrainGenerator {
                 columns.push(ColSample {
                     voxel_x, voxel_z,
                     surface_elevation, surface_voxel_y, in_water,
+                    is_road: false,
                 });
             }
         }
@@ -348,6 +351,83 @@ impl TerrainGenerator {
         } else {
             i64::MIN
         };
+
+        // --- Road carving pass ---
+        // For each non-bridge road segment, flatten terrain to road elevation.
+        // Uses the same Y formula as the OSM render pipeline:
+        //   render_y = (geographic_elevation - origin_gps.alt)
+        // X/Z from sea-level ECEF, matching terrain column coords.
+        if !chunk_roads.is_empty() {
+            use std::collections::HashMap;
+            let mut col_lookup: HashMap<(i64, i64), usize> = HashMap::with_capacity(columns.len());
+            for (i, c) in columns.iter().enumerate() {
+                col_lookup.insert((c.voxel_x, c.voxel_z), i);
+            }
+
+            let elev_arc = Arc::clone(&elevation);
+            for road in &chunk_roads {
+                if road.is_bridge || road.is_tunnel { continue; }
+                let half_w = (road.road_type.width_m() / 2.0).ceil() as i64 + 1;
+
+                for pair in road.nodes.windows(2) {
+                    let ga = &pair[0];
+                    let gb = &pair[1];
+
+                    // GPS → voxel XZ (sea-level ECEF matches terrain column formula)
+                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
+                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
+                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+
+                    // Endpoint surface Y (from column data if in chunk, else elevation query)
+                    let ya = col_lookup.get(&(vax, vaz))
+                        .map(|&i| columns[i].surface_voxel_y)
+                        .unwrap_or_else(|| {
+                            elev_arc.lock().unwrap()
+                                .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
+                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .unwrap_or(self.origin_voxel.y)
+                        });
+                    let yb = col_lookup.get(&(vbx, vbz))
+                        .map(|&i| columns[i].surface_voxel_y)
+                        .unwrap_or_else(|| {
+                            elev_arc.lock().unwrap()
+                                .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
+                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .unwrap_or(self.origin_voxel.y)
+                        });
+
+                    // Step along segment, one voxel at a time
+                    let dx = vbx - vax;
+                    let dz = vbz - vaz;
+                    let steps = dx.abs().max(dz.abs());
+                    if steps == 0 { continue; }
+
+                    for step in 0..=steps {
+                        let t = step as f32 / steps as f32;
+                        let cx = vax + (dx as f32 * t).round() as i64;
+                        let cz = vaz + (dz as f32 * t).round() as i64;
+                        let road_y = ya + ((yb - ya) as f32 * t).round() as i64;
+
+                        // Paint road width as a circle around centerline
+                        for ox in -half_w..=half_w {
+                            for oz in -half_w..=half_w {
+                                if ox * ox + oz * oz > half_w * half_w { continue; }
+                                if let Some(&idx) = col_lookup.get(&(cx + ox, cz + oz)) {
+                                    // Only flatten if not already water
+                                    if !columns[idx].in_water {
+                                        columns[idx].surface_voxel_y = road_y;
+                                        columns[idx].is_road = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // --- Pass 2 ---
         const BEDROCK_DEPTH: i64 = 200;
@@ -391,7 +471,7 @@ impl TerrainGenerator {
                     if depth_below_surface < 0 {
                         MaterialId::AIR
                     } else if depth_below_surface == 0 {
-                        MaterialId::GRASS
+                        if col.is_road { MaterialId::ASPHALT } else { MaterialId::GRASS }
                     } else if depth_below_surface <= 5 {
                         MaterialId::DIRT
                     } else {
