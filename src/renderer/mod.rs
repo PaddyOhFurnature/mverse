@@ -5,9 +5,11 @@
 
 mod camera;
 mod pipeline;
+mod textured_pipeline;
 
 pub use camera::Camera;
 pub use pipeline::{OsmPipeline, RenderContext, RenderPipeline};
+pub use textured_pipeline::{GlbModel, TexturedPipeline, TexturedVertex};
 
 use crate::mesh::Mesh;
 use glam::Mat4;

@@ -22,6 +22,7 @@ futures = "0.3"
 tiff = "0.11"  # TIFF/GeoTIFF parsing for SRTM elevation data
 serde_json = "1"
 wgpu = { version = "24", features = ["wgsl"], optional = true }
+gltf = { version = "1", features = ["image", "guess_mime_type"], optional = true }
 winit = { version = "0.30", optional = true }
 egui = { version = "0.31", optional = true }
 egui-wgpu = { version = "0.31", optional = true }
@@ -113,7 +114,7 @@ default = ["terrain", "client"]
 terrain = ["gdal", "gdal-sys", "geoconv"]
 
 # Client features (rendering, etc)
-client = ["wgpu", "winit", "egui", "egui-wgpu", "egui-winit"]
+client = ["wgpu", "winit", "egui", "egui-wgpu", "egui-winit", "dep:gltf"]
 
 # Vendor OpenSSL for cross-compilation (builds from source instead of linking system OpenSSL)
 vendored-openssl = ["openssl/vendored"]

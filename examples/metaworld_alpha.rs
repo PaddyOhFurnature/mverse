@@ -85,7 +85,7 @@ use metaverse_core::{
     physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
     player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
-    renderer::{Camera, MeshBuffer, OsmPipeline, RenderContext, RenderPipeline},
+    renderer::{Camera, GlbModel, MeshBuffer, OsmPipeline, RenderContext, RenderPipeline, TexturedPipeline},
     meshsite::Section,
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
@@ -1100,6 +1100,35 @@ fn main() {
         &pipeline.model_bind_group_layout,
     );
 
+    // Textured pipeline for GLB model rendering (buildings, world objects)
+    let textured_pipeline = TexturedPipeline::new(
+        &context,
+        &pipeline.camera_bind_group_layout,
+        &pipeline.model_bind_group_layout,
+    );
+
+    // Pre-load Kenney building GLB models — one per category
+    // Indices: 0=commercial, 1=industrial, 2=residential, 3=skyscraper, 4=default
+    let assets_base = "assets/models";
+    let building_glb_paths = [
+        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-a.glb", assets_base),
+        format!("{}/kenney_city-kit-industrial_1.0/Models/GLB format/building-a.glb", assets_base),
+        format!("{}/kenney_city-kit-suburban_20/Models/GLB format/building-type-a.glb", assets_base),
+        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-skyscraper-a.glb", assets_base),
+        format!("{}/kenney_building-kit/Models/GLB format/building-a.glb", assets_base),
+    ];
+    let building_glb_models: Vec<Option<GlbModel>> = building_glb_paths.iter().map(|p| {
+        let model = textured_pipeline.load_glb(&context.device, &context.queue, p);
+        if model.is_none() {
+            println!("⚠️  Failed to load GLB model: {}", p);
+        } else {
+            println!("✅ Loaded GLB model: {}", p);
+        }
+        model
+    }).collect();
+    let glb_models_loaded = building_glb_models.iter().any(|m| m.is_some());
+    println!("🏢 GLB building models loaded: {}/5", building_glb_models.iter().filter(|m| m.is_some()).count());
+
     // Billboard pipeline — renders textured quads on Construct module room walls
     let billboard_pipeline = BillboardPipeline::new(&context);
     let mut module_billboards: [Option<ModuleBillboards>; 6] = Default::default();
@@ -1111,6 +1140,9 @@ fn main() {
     let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
     let mut roads_mesh_buffer: Option<MeshBuffer> = None;
     let mut water_mesh_buffer: Option<MeshBuffer> = None;
+    // GLB building instances for textured rendering: (model_category_idx, model_bind_group)
+    // model_category_idx: 0=commercial, 1=industrial, 2=residential, 3=skyscraper, 4=default
+    let mut building_instances: Vec<(usize, wgpu::BindGroup)> = Vec::new();
     // Accumulated road segments for the visible area: (a, b, width, road_type)
     let mut road_segments: Vec<(Vec3, Vec3, f32, metaverse_core::osm::RoadType)> = Vec::new();
     // Named road midpoints for on-screen labels: (world_pos, name)
@@ -2844,7 +2876,50 @@ fn main() {
                     // Rebuild OSM geometry buffers when new objects arrived
                     if osm_geom_dirty {
                         let all_objs: Vec<_> = multiplayer.all_world_objects().cloned().collect();
-                        let bld_mesh = build_buildings_mesh(&all_objs);
+
+                        // Rebuild GLB building instances (used when GLB models are loaded)
+                        building_instances.clear();
+                        if glb_models_loaded {
+                            for obj in &all_objs {
+                                let type_str = obj.object_type.as_str();
+                                if !type_str.starts_with("building") { continue; }
+                                let [cx, cy, cz] = obj.position;
+
+                                // Deterministic rotation from position hash
+                                let hash = ((cx * 100.0) as i32)
+                                    .wrapping_mul(1664525)
+                                    .wrapping_add(((cz * 100.0) as i32).wrapping_mul(1013904223));
+                                let rotation_y = (hash.abs() % 360) as f32 * std::f32::consts::PI / 180.0;
+
+                                // Scale from footprint dimensions if available
+                                let cfg: serde_json::Value =
+                                    serde_json::from_str(&obj.content_key).unwrap_or_default();
+                                let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+                                let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+                                let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
+                                // Kenney models are naturally ~10m in each axis
+                                let sx = w / 10.0;
+                                let sy = h / 10.0;
+                                let sz = d / 10.0;
+
+                                let transform = glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz))
+                                    * glam::Mat4::from_rotation_y(rotation_y)
+                                    * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, sz));
+
+                                let model_idx = building_model_idx(type_str);
+                                if building_glb_models[model_idx].is_some() {
+                                    let (_, bind_group) = pipeline.create_model_bind_group(&context.device, &transform);
+                                    building_instances.push((model_idx, bind_group));
+                                }
+                            }
+                        }
+
+                        // Flat-colour fallback mesh (used when no GLB models are loaded)
+                        let bld_mesh = if !glb_models_loaded {
+                            build_buildings_mesh(&all_objs)
+                        } else {
+                            metaverse_core::mesh::Mesh::new()
+                        };
                         buildings_mesh_buffer = if bld_mesh.vertices.is_empty() { None }
                             else { Some(MeshBuffer::from_mesh(&context.device, &bld_mesh)) };
                         let rd_mesh = build_roads_mesh(&road_segments);
@@ -2998,8 +3073,20 @@ fn main() {
                                     if let Some(buf) = &roads_mesh_buffer {
                                         buf.render(&mut render_pass);
                                     }
-                                    // Render OSM building boxes
-                                    if let Some(buf) = &buildings_mesh_buffer {
+                                    // Render OSM building boxes (flat-colour fallback)
+                                    if !building_instances.is_empty() {
+                                        // Switch to textured pipeline for GLB buildings
+                                        textured_pipeline.set_pipeline(&mut render_pass, pipeline.camera_bind_group());
+                                        for (model_idx, model_bind_group) in &building_instances {
+                                            if let Some(model) = &building_glb_models[*model_idx] {
+                                                TexturedPipeline::draw_model(&mut render_pass, model, model_bind_group);
+                                            }
+                                        }
+                                        // Restore OSM pipeline for anything that follows in this block
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                    } else if let Some(buf) = &buildings_mesh_buffer {
                                         buf.render(&mut render_pass);
                                     }
                                     // Restore main pipeline for anything that follows
@@ -3370,6 +3457,14 @@ fn building_color(type_str: &str) -> Vec3 {
         s if s.contains("residential") || s.contains("house") => Vec3::new(0.85, 0.75, 0.55),
         _ => Vec3::new(0.7, 0.68, 0.62),
     }
+}
+
+fn building_model_idx(type_str: &str) -> usize {
+    if type_str.contains("commercial") || type_str.contains("retail") { 0 }
+    else if type_str.contains("industrial") || type_str.contains("warehouse") { 1 }
+    else if type_str.contains("residential") || type_str.contains("house") || type_str.contains("suburb") { 2 }
+    else if type_str.contains("skyscraper") || type_str.contains("highrise") || type_str.contains("tower") { 3 }
+    else { 4 }
 }
 
 /// Build a road surface mesh from road segment data stored in placed objects.
