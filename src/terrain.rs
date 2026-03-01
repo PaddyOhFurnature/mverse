@@ -286,7 +286,6 @@ impl TerrainGenerator {
             surface_elevation: f64,
             surface_voxel_y:   i64,
             in_water:          bool,
-            is_bank:           bool, // dry land adjacent to water → SAND surface
             is_road:           bool,
         }
 
@@ -337,7 +336,6 @@ impl TerrainGenerator {
                 columns.push(ColSample {
                     voxel_x, voxel_z,
                     surface_elevation, surface_voxel_y, in_water,
-                    is_bank: false,
                     is_road: false,
                 });
             }
@@ -448,17 +446,6 @@ impl TerrainGenerator {
                         MaterialId::WATER
                     } else if depth_below_surface < WATER_DEPTH + 5 {
                         MaterialId::GRAVEL
-                    } else {
-                        MaterialId::STONE
-                    }
-                } else if col.is_bank {
-                    // Bank column: dry land adjacent to water → SAND surface.
-                    if depth_below_surface < 0 {
-                        MaterialId::AIR
-                    } else if depth_below_surface == 0 {
-                        if col.is_road { MaterialId::ASPHALT } else { MaterialId::SAND }
-                    } else if depth_below_surface <= 5 {
-                        MaterialId::DIRT
                     } else {
                         MaterialId::STONE
                     }
