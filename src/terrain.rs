@@ -344,7 +344,6 @@ impl TerrainGenerator {
         }
 
         // --- Bank detection pass ---
-        // Mark dry columns immediately adjacent to water as is_bank → SAND surface.
         // Uses grid indexing: column (i,k) is at index i*CHUNK_SIZE_Z + k.
         for i in 0..CHUNK_SIZE_X as usize {
             for k in 0..CHUNK_SIZE_Z as usize {

@@ -98,6 +98,9 @@ pub struct LoadedChunk {
     /// GPU mesh buffer (None until generated)
     pub mesh_buffer: Option<MeshBuffer>,
     
+    /// GPU water surface mesh buffer (None if chunk has no water voxels)
+    pub water_mesh_buffer: Option<MeshBuffer>,
+    
     /// Physics collider (None until generated)
     pub collider: Option<ColliderHandle>,
     
@@ -376,6 +379,7 @@ impl ChunkStreamer {
                     id: result.chunk_id,
                     octree,
                     mesh_buffer: None,
+                    water_mesh_buffer: None,
                     collider: None,
                     dirty: true,
                     distance_m: 0.0,
@@ -532,6 +536,7 @@ impl ChunkStreamer {
             id: chunk_id,
             octree,
             mesh_buffer: None, // GPU mesh built on first render pass
+            water_mesh_buffer: None,
             collider,
             dirty: true,       // mark dirty so render pass builds the GPU mesh
             distance_m: 0.0,
@@ -683,6 +688,7 @@ mod tests {
                 in_safe_zone: false,
                 state: ChunkLoadState::Loaded,
                 mesh_buffer: None,
+                water_mesh_buffer: None,
                 collider: None,
                 dirty: false,
                 last_modified: 0,

@@ -77,7 +77,7 @@ use metaverse_core::{
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource},
     identity::{Identity, KeyType},
-    marching_cubes::extract_chunk_mesh,
+    marching_cubes::{extract_chunk_mesh, extract_water_surface_mesh},
     materials::MaterialId,
     mesh::{Mesh, Triangle, Vertex},
     messages::{Material, MovementMode},
@@ -1937,17 +1937,23 @@ fn main() {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
+                                let offset = Vec3::new(
+                                    (chunk_center.x - origin_voxel.x) as f32,
+                                    (chunk_center.y - origin_voxel.y) as f32,
+                                    (chunk_center.z - origin_voxel.z) as f32,
+                                );
                                 if !mesh.vertices.is_empty() {
-                                    let offset = Vec3::new(
-                                        (chunk_center.x - origin_voxel.x) as f32,
-                                        (chunk_center.y - origin_voxel.y) as f32,
-                                        (chunk_center.z - origin_voxel.z) as f32,
-                                    );
                                     for v in &mut mesh.vertices { v.position += offset; }
                                     chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
                                     let collider = metaverse_core::physics::create_collision_from_mesh(
                                         &mut physics, &mesh, &origin_voxel, None);
                                     chunk_data.collider = Some(collider);
+                                }
+                                // Water surface mesh (flat quads on top of WATER voxels)
+                                let mut water_mesh = extract_water_surface_mesh(&chunk_data.octree, &min_v, &max_v);
+                                if !water_mesh.vertices.is_empty() {
+                                    for v in &mut water_mesh.vertices { v.position += offset; }
+                                    chunk_data.water_mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &water_mesh));
                                 }
                                 chunk_data.dirty = false;
                             }
@@ -2856,15 +2862,13 @@ fn main() {
                             let max_voxel = chunk_data.id.max_voxel();
                             let (mut new_mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
                             
-                            // Only create mesh/collision if chunk has geometry
+                            let offset = Vec3::new(
+                                (chunk_center.x - origin_voxel.x) as f32,
+                                (chunk_center.y - origin_voxel.y) as f32,
+                                (chunk_center.z - origin_voxel.z) as f32,
+                            );
+
                             if !new_mesh.vertices.is_empty() {
-                                // Simple offset in voxel coordinates
-                                let offset = Vec3::new(
-                                    (chunk_center.x - origin_voxel.x) as f32,
-                                    (chunk_center.y - origin_voxel.y) as f32,
-                                    (chunk_center.z - origin_voxel.z) as f32,
-                                );
-                                
                                 for vertex in &mut new_mesh.vertices {
                                     vertex.position[0] += offset.x;
                                     vertex.position[1] += offset.y;
@@ -2881,9 +2885,20 @@ fn main() {
                                 );
                                 chunk_data.collider = Some(new_collider);
                             } else {
-                                // Chunk became empty - remove mesh and collision
                                 chunk_data.mesh_buffer = None;
                                 chunk_data.collider = None;
+                            }
+                            // Rebuild water surface mesh
+                            let mut new_water = extract_water_surface_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
+                            if !new_water.vertices.is_empty() {
+                                for v in &mut new_water.vertices {
+                                    v.position[0] += offset.x;
+                                    v.position[1] += offset.y;
+                                    v.position[2] += offset.z;
+                                }
+                                chunk_data.water_mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_water));
+                            } else {
+                                chunk_data.water_mesh_buffer = None;
                             }
                             chunk_data.dirty = false;
                         }
@@ -3094,9 +3109,11 @@ fn main() {
                                     osm_pipeline.set_pipeline(&mut render_pass);
                                     render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
                                     render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                    // Render water surfaces just above terrain
-                                    if let Some(buf) = &water_mesh_buffer {
-                                        buf.render(&mut render_pass);
+                                    // Render per-chunk voxel water surfaces
+                                    for chunk_data in chunk_streamer.loaded_chunks() {
+                                        if let Some(buf) = &chunk_data.water_mesh_buffer {
+                                            buf.render(&mut render_pass);
+                                        }
                                     }
                                     // Render OSM road surfaces below buildings
                                     if let Some(buf) = &roads_mesh_buffer {
