@@ -3107,7 +3107,12 @@ fn main() {
                                             mesh_buffer.render(&mut render_pass);
                                         }
                                     }
-                                    // Switch to OSM flat-colour pipeline for water/roads/buildings
+                                    // Buildings use the main terrain shader (proper geometric normals
+                                    // → green rooftops from slope-based colouring, grey lit walls).
+                                    if let Some(buf) = &buildings_mesh_buffer {
+                                        buf.render(&mut render_pass);
+                                    }
+                                    // Switch to OSM flat-colour pipeline for water and roads
                                     osm_pipeline.set_pipeline(&mut render_pass);
                                     render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
                                     render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
@@ -3117,24 +3122,8 @@ fn main() {
                                             buf.render(&mut render_pass);
                                         }
                                     }
-                                    // Render OSM road surfaces below buildings
+                                    // Render OSM road surfaces
                                     if let Some(buf) = &roads_mesh_buffer {
-                                        buf.render(&mut render_pass);
-                                    }
-                                    // Render OSM building boxes (flat-colour fallback)
-                                    if !building_instances.is_empty() {
-                                        // Switch to textured pipeline for GLB buildings
-                                        textured_pipeline.set_pipeline(&mut render_pass, pipeline.camera_bind_group());
-                                        for (model_idx, model_bind_group) in &building_instances {
-                                            if let Some(model) = &building_glb_models[*model_idx] {
-                                                TexturedPipeline::draw_model(&mut render_pass, model, model_bind_group);
-                                            }
-                                        }
-                                        // Restore OSM pipeline for anything that follows in this block
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                    } else if let Some(buf) = &buildings_mesh_buffer {
                                         buf.render(&mut render_pass);
                                     }
                                     // Restore main pipeline for anything that follows
@@ -3421,7 +3410,6 @@ fn build_buildings_mesh(
         let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
         let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
 
-        let color = building_color(type_str);
         let [cx, cy, cz] = obj.position;
         let hw = w * 0.5;
         let hd = d * 0.5;
@@ -3441,44 +3429,51 @@ fn build_buildings_mesh(
         let t2 = Vec3::new(cx + hw, top, cz + hd);
         let t3 = Vec3::new(cx - hw, top, cz + hd);
 
-        // Top face — CCW from above (normal +Y)
-        let vt0 = mesh.add_vertex(Vertex::new(t0, color));
-        let vt1 = mesh.add_vertex(Vertex::new(t1, color));
-        let vt2 = mesh.add_vertex(Vertex::new(t2, color));
-        let vt3 = mesh.add_vertex(Vertex::new(t3, color));
+        // Geometric normals per face — used by main terrain shader for
+        // slope-based colouring: up → grass (green), vertical → rock (grey).
+        let up    = Vec3::new( 0.0,  1.0,  0.0);
+        let north = Vec3::new( 0.0,  0.0, -1.0);
+        let south = Vec3::new( 0.0,  0.0,  1.0);
+        let east  = Vec3::new( 1.0,  0.0,  0.0);
+        let west  = Vec3::new(-1.0,  0.0,  0.0);
+
+        // Top face
+        let vt0 = mesh.add_vertex(Vertex::new(t0, up));
+        let vt1 = mesh.add_vertex(Vertex::new(t1, up));
+        let vt2 = mesh.add_vertex(Vertex::new(t2, up));
+        let vt3 = mesh.add_vertex(Vertex::new(t3, up));
         mesh.add_triangle(Triangle::new(vt0, vt2, vt1));
         mesh.add_triangle(Triangle::new(vt0, vt3, vt2));
 
-        // Four side faces — each CCW from outside
-        // North face (z = cz - hd, normal -Z)
-        let vn0 = mesh.add_vertex(Vertex::new(b1, color));
-        let vn1 = mesh.add_vertex(Vertex::new(b0, color));
-        let vn2 = mesh.add_vertex(Vertex::new(t0, color));
-        let vn3 = mesh.add_vertex(Vertex::new(t1, color));
+        // North face (normal -Z)
+        let vn0 = mesh.add_vertex(Vertex::new(b1, north));
+        let vn1 = mesh.add_vertex(Vertex::new(b0, north));
+        let vn2 = mesh.add_vertex(Vertex::new(t0, north));
+        let vn3 = mesh.add_vertex(Vertex::new(t1, north));
         mesh.add_triangle(Triangle::new(vn0, vn1, vn2));
         mesh.add_triangle(Triangle::new(vn0, vn2, vn3));
 
-        // South face (z = cz + hd, normal +Z)
-        let vs0 = mesh.add_vertex(Vertex::new(b3, color));
-        let vs1 = mesh.add_vertex(Vertex::new(b2, color));
-        let vs2 = mesh.add_vertex(Vertex::new(t2, color));
-        let vs3 = mesh.add_vertex(Vertex::new(t3, color));
+        // South face (normal +Z)
+        let vs0 = mesh.add_vertex(Vertex::new(b3, south));
+        let vs1 = mesh.add_vertex(Vertex::new(b2, south));
+        let vs2 = mesh.add_vertex(Vertex::new(t2, south));
+        let vs3 = mesh.add_vertex(Vertex::new(t3, south));
         mesh.add_triangle(Triangle::new(vs0, vs1, vs2));
         mesh.add_triangle(Triangle::new(vs0, vs2, vs3));
 
-        // East face (x = cx + hw, normal +X)
-        let ve0 = mesh.add_vertex(Vertex::new(b2, color));
-        let ve1 = mesh.add_vertex(Vertex::new(b1, color));
-        let ve2 = mesh.add_vertex(Vertex::new(t1, color));
-        let ve3 = mesh.add_vertex(Vertex::new(t2, color));
+        // East face (normal +X)
+        let ve0 = mesh.add_vertex(Vertex::new(b2, east));
+        let ve1 = mesh.add_vertex(Vertex::new(b1, east));
+        let ve2 = mesh.add_vertex(Vertex::new(t1, east));
+        let ve3 = mesh.add_vertex(Vertex::new(t2, east));
         mesh.add_triangle(Triangle::new(ve0, ve1, ve2));
         mesh.add_triangle(Triangle::new(ve0, ve2, ve3));
 
-        // West face (x = cx - hw, normal -X)
-        let vw0 = mesh.add_vertex(Vertex::new(b0, color));
-        let vw1 = mesh.add_vertex(Vertex::new(b3, color));
-        let vw2 = mesh.add_vertex(Vertex::new(t3, color));
-        let vw3 = mesh.add_vertex(Vertex::new(t0, color));
+        // West face (normal -X)
+        let vw0 = mesh.add_vertex(Vertex::new(b0, west));
+        let vw1 = mesh.add_vertex(Vertex::new(b3, west));
+        let vw2 = mesh.add_vertex(Vertex::new(t3, west));
+        let vw3 = mesh.add_vertex(Vertex::new(t0, west));
         mesh.add_triangle(Triangle::new(vw0, vw1, vw2));
         mesh.add_triangle(Triangle::new(vw0, vw2, vw3));
     }
