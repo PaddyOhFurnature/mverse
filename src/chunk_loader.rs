@@ -1,5 +1,5 @@
 /// Bump this when terrain generation logic changes — invalidates all cached chunks.
-const TERRAIN_CACHE_VERSION: u32 = 5;
+const TERRAIN_CACHE_VERSION: u32 = 6;
 
 /// Asynchronous chunk loading subsystem
 ///

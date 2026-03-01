@@ -341,6 +341,26 @@ impl TerrainGenerator {
             }
         }
 
+        // --- Water level normalisation pass ---
+        // SRTM elevation over open water has 1–3 m of pixel noise, which
+        // produces visible "steps" or layered surfaces across the river.
+        // Within any chunk cross-section the water surface must be flat,
+        // so we level all in_water columns to the minimum surface_voxel_y
+        // found in this chunk.  The natural downstream slope is preserved
+        // because each chunk independently finds its own minimum.
+        if columns.iter().any(|c| c.in_water) {
+            let water_level_y = columns.iter()
+                .filter(|c| c.in_water)
+                .map(|c| c.surface_voxel_y)
+                .min()
+                .unwrap_or(0);
+            for col in columns.iter_mut() {
+                if col.in_water {
+                    col.surface_voxel_y = water_level_y;
+                }
+            }
+        }
+
         // --- Road carving pass ---
         // For each non-bridge road segment, flatten terrain to road elevation.
         // Uses the same Y formula as the OSM render pipeline:
