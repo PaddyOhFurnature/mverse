@@ -1149,6 +1149,8 @@ fn main() {
     let mut road_labels: Vec<(Vec3, String)> = Vec::new();
     // Accumulated water polygons: each entry is a list of local-space vertices
     let mut water_polygons: Vec<Vec<Vec3>> = Vec::new();
+    // Deduplication: track first-vertex GPS (as ordered pair) to avoid adding same polygon twice
+    let mut water_poly_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
     // Set to true whenever new objects are registered, triggering a mesh rebuild
     let mut osm_geom_dirty = false;
 
@@ -2010,20 +2012,30 @@ fn main() {
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Water polygons — flat at centroid SRTM elevation.
+                                // Water polygons — flat at minimum sampled vertex elevation.
+                                // Use min elevation (not centroid) since river polygon centroids
+                                // often fall on land far from the chunk, giving wrong Y.
                                 if let Some(ref osm_data) = ctx.osm {
                                     if !osm_data.water.is_empty() {
                                         for w in &osm_data.water {
                                             if w.polygon.len() < 3 { continue; }
-                                            let n = w.polygon.len() as f64;
-                                            let c_lat = w.polygon.iter().map(|g| g.lat).sum::<f64>() / n;
-                                            let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
-                                            let elev = osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                                .map(|e| e.meters)
-                                                .unwrap_or(origin_gps.alt);
-                                            let water_y = (elev - origin_gps.alt) as f32 - 0.1;
-                                            // X/Z from sea-level ECEF; Y = altitude diff from origin.
+                                            // Deduplicate by first vertex GPS (scaled to mm)
+                                            let key = ((w.polygon[0].lat * 1e6) as i64,
+                                                       (w.polygon[0].lon * 1e6) as i64);
+                                            if !water_poly_seen.insert(key) { continue; }
+                                            // Sample up to 8 evenly-spaced vertices, use minimum elevation.
+                                            // This gives the actual water surface level rather than the
+                                            // centroid elevation (which may be on land for meanders).
+                                            let step = (w.polygon.len() / 8).max(1);
+                                            let min_elev = w.polygon.iter().step_by(step)
+                                                .filter_map(|gps| {
+                                                    osm_elev_pipeline.query(
+                                                        &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
+                                                        .map(|e| e.meters).ok()
+                                                })
+                                                .fold(f64::MAX, f64::min);
+                                            let min_elev = if min_elev < f64::MAX { min_elev } else { 2.0 };
+                                            let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let h = physics.ecef_to_local(
                                                     &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
@@ -2740,15 +2752,19 @@ fn main() {
                                 if !osm.water.is_empty() {
                                     for w in &osm.water {
                                         if w.polygon.len() < 3 { continue; }
-                                        let n = w.polygon.len() as f64;
-                                        let c_lat = w.polygon.iter().map(|g| g.lat).sum::<f64>() / n;
-                                        let c_lon = w.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
-                                        let elev = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(c_lat, c_lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
-                                        let water_y = (elev - origin_gps.alt) as f32 - 0.1;
-                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
+                                        let key = ((w.polygon[0].lat * 1e6) as i64,
+                                                   (w.polygon[0].lon * 1e6) as i64);
+                                        if !water_poly_seen.insert(key) { continue; }
+                                        let step = (w.polygon.len() / 8).max(1);
+                                        let min_elev = w.polygon.iter().step_by(step)
+                                            .filter_map(|gps| {
+                                                osm_elev_pipeline.query(
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
+                                                    .map(|e| e.meters).ok()
+                                            })
+                                            .fold(f64::MAX, f64::min);
+                                        let min_elev = if min_elev < f64::MAX { min_elev } else { 2.0 };
+                                        let water_y = (min_elev - origin_gps.alt) as f32 + 0.05;
                                         let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                             let h = physics.ecef_to_local(
                                                 &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
