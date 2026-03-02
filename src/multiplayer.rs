@@ -77,25 +77,33 @@ use sha2::{Sha256, Digest as _};
 #[derive(Clone)]
 pub struct TileFetcher {
     cmd_tx: crossbeam::channel::Sender<NetworkCommand>,
-    /// Known peers that serve tiles (Server tier or storage > 0).
-    known_tile_servers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+    /// All connected peers — any of them may have tiles cached.
+    tile_peers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+    /// Tiles to fetch in the background when no peer has them.
+    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
 }
 
 impl TileFetcher {
-    /// Try to fetch an OSM tile from a known peer. Tries ALL known servers in order (3s per peer).
+    /// Try to fetch an OSM tile from a known peer. Tries ALL known peers in order (3s per peer).
     /// Returns raw bincode bytes on success, None on failure.
     pub fn fetch_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
-        let servers: Vec<PeerId> = self.known_tile_servers.lock().ok()?.clone();
-        for peer in servers {
+        let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
+        for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
             if self.cmd_tx.send(NetworkCommand::RequestTile {
-                peer_id: peer,
+                peer_id: *peer,
                 request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
                 response_tx: tx,
             }).is_err() { continue; }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
                 Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
                 _ => continue,
+            }
+        }
+        // No peer had it — queue for background download
+        if let Ok(mut q) = self.idle_queue.lock() {
+            if q.len() < 256 {
+                q.push_back(crate::tile_protocol::TileRequest::OsmTile { s, w, n, e });
             }
         }
         None
@@ -111,17 +119,23 @@ impl TileFetcher {
     /// Try to fetch an elevation tile (1°×1° SRTM) from a known peer. Blocks up to 9s.
     /// Returns raw GeoTIFF bytes on success, None on failure.
     pub fn fetch_elevation(&self, lat: i32, lon: i32) -> Option<Vec<u8>> {
-        let servers: Vec<PeerId> = self.known_tile_servers.lock().ok()?.clone();
-        for peer in servers {
+        let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
+        for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
             if self.cmd_tx.send(NetworkCommand::RequestTile {
-                peer_id: peer,
+                peer_id: *peer,
                 request: crate::tile_protocol::TileRequest::ElevationTile { lat, lon },
                 response_tx: tx,
             }).is_err() { continue; }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
                 Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
                 _ => continue,
+            }
+        }
+        // No peer had it — queue for background download
+        if let Ok(mut q) = self.idle_queue.lock() {
+            if q.len() < 256 {
+                q.push_back(crate::tile_protocol::TileRequest::ElevationTile { lat, lon });
             }
         }
         None
@@ -316,8 +330,11 @@ pub struct MultiplayerSystem {
     /// Statistics
     stats: MultiplayerStats,
 
-    /// Known peers that can serve tiles (servers with storage > 0).
-    known_tile_servers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+    /// Every connected peer is a potential tile source.
+    tile_peers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+
+    /// Tiles queued for background download.
+    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
 
     /// Root directory for world data (osm/, elevation_cache/, chunks/).
     world_data_dir: std::path::PathBuf,
@@ -366,14 +383,21 @@ impl MultiplayerSystem {
         let identity_clone = identity.clone();
         let local_peer_id = *identity.peer_id();
         
-        // Spawn background thread with tokio runtime
+        // Create bounded channels for command/event passing
+        // Capacity of 1000 provides back-pressure if game loop falls behind
         let world_data_dir = std::path::PathBuf::from("./world_data");
         let world_data_dir_clone = world_data_dir.clone();
+        let idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>> =
+            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let idle_queue_for_net = Arc::clone(&idle_queue);
+        let idle_queue_for_downloader = Arc::clone(&idle_queue);
+
+        // Spawn background thread with tokio runtime
         std::thread::spawn(move || {
-            run_network_thread(identity_clone, cmd_rx, event_tx, world_data_dir_clone);
+            run_network_thread(identity_clone, cmd_rx, event_tx, world_data_dir_clone, idle_queue_for_net);
         });
-        
-        Ok(Self {
+
+        let s = Self {
             cmd_tx,
             event_rx,
             identity,
@@ -417,9 +441,17 @@ impl MultiplayerSystem {
             content_cache: std::collections::HashMap::new(),
             world_objects_cache: std::collections::HashMap::new(),
             stats: MultiplayerStats::default(),
-            known_tile_servers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            tile_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            idle_queue,
             world_data_dir,
-        })
+        };
+        // Spawn idle tile downloader — drains the idle_queue, fetches from internet, announces
+        let data_dir = s.world_data_dir.clone();
+        let cmd_tx2 = s.cmd_tx.clone();
+        std::thread::spawn(move || {
+            idle_downloader_thread(idle_queue_for_downloader, data_dir, cmd_tx2);
+        });
+        Ok(s)
     }
     
     /// Create a new multiplayer system (deprecated - use new_with_runtime)
@@ -833,6 +865,12 @@ impl MultiplayerSystem {
             NetworkEvent::PeerConnected { peer_id, address } => {
                 println!("🔗 Peer connected: {} @ {}", peer_id, address);
                 self.connected_peers.insert(peer_id);
+                // Every connected peer is a potential tile source
+                if let Ok(mut peers) = self.tile_peers.lock() {
+                    if !peers.contains(&peer_id) {
+                        peers.push(peer_id);
+                    }
+                }
                 if !self.state_requested_from.contains(&peer_id) {
                     self.peers_needing_sync.push(peer_id);
                 }
@@ -851,7 +889,7 @@ impl MultiplayerSystem {
                 }
 
                 // Remove from tile server list
-                if let Ok(mut servers) = self.known_tile_servers.lock() {
+                if let Ok(mut servers) = self.tile_peers.lock() {
                     servers.retain(|p| p != &peer_id);
                 }
             }
@@ -916,17 +954,13 @@ impl MultiplayerSystem {
                         Err(e) => eprintln!("📍 [Session] Failed to deserialize session record: {}", e),
                     }
                 } else if key.starts_with(b"caps/") {
-                    // NodeCapabilities record — track as tile server if eligible
-                    if let Some(caps) = crate::node_capabilities::NodeCapabilities::from_bytes(&value) {
+                    if let Some(_caps) = crate::node_capabilities::NodeCapabilities::from_bytes(&value) {
                         if let Ok(key_str) = std::str::from_utf8(&key) {
                             if let Some(peer_id_str) = key_str.strip_prefix("caps/") {
                                 if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
-                                    use crate::node_capabilities::NodeTier;
-                                    if matches!(caps.tier, NodeTier::Server) || caps.available_storage_bytes > 0 {
-                                        if let Ok(mut servers) = self.known_tile_servers.lock() {
-                                            if !servers.contains(&peer_id) {
-                                                servers.push(peer_id);
-                                            }
+                                    if let Ok(mut peers) = self.tile_peers.lock() {
+                                        if !peers.contains(&peer_id) {
+                                            peers.push(peer_id);
                                         }
                                     }
                                 }
@@ -1636,7 +1670,8 @@ impl MultiplayerSystem {
     pub fn tile_fetcher(&self) -> TileFetcher {
         TileFetcher {
             cmd_tx: self.cmd_tx.clone(),
-            known_tile_servers: Arc::clone(&self.known_tile_servers),
+            tile_peers: Arc::clone(&self.tile_peers),
+            idle_queue: Arc::clone(&self.idle_queue),
         }
     }
 
@@ -2085,6 +2120,7 @@ fn run_network_thread(
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     world_data_dir: std::path::PathBuf,
+    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
 ) {
     // Create tokio runtime in this thread
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2099,6 +2135,7 @@ fn run_network_thread(
         let mut network = match NetworkNode::new_async(identity).await {
             Ok(mut n) => {
                 n.set_tile_cache_root(world_data_dir);
+                n.set_idle_queue(Arc::clone(&idle_queue));
                 println!("✅ [Network Thread] NetworkNode created successfully");
                 n
             }
@@ -2279,6 +2316,9 @@ fn run_network_thread(
                     NetworkCommand::RequestTile { peer_id, request, response_tx } => {
                         network.request_tile(peer_id, request, response_tx);
                     }
+                    NetworkCommand::QueueIdleFetch { request } => {
+                        network.queue_idle_fetch(request);
+                    }
                 }
             }
             
@@ -2358,6 +2398,67 @@ pub fn chunk_player_topic(id: &ChunkId) -> String {
 /// Only peers subscribed to this chunk's topic receive block-edit events published here.
 pub fn chunk_voxel_topic(id: &ChunkId) -> String {
     format!("voxel-ops-{}-{}-{}", id.x, id.y, id.z)
+}
+
+/// Background thread that fetches tiles queued in the idle queue.
+/// Runs until the process exits. Fetches one tile at a time, saves to disk, announces via DHT.
+fn idle_downloader_thread(
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
+    data_dir: std::path::PathBuf,
+    cmd_tx: crossbeam::channel::Sender<NetworkCommand>,
+) {
+    use crate::tile_protocol::TileRequest;
+    loop {
+        let task = {
+            let mut q = match queue.lock() {
+                Ok(q) => q,
+                Err(_) => { std::thread::sleep(std::time::Duration::from_secs(1)); continue; }
+            };
+            q.pop_front()
+        };
+        let Some(task) = task else {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            continue;
+        };
+        match task {
+            TileRequest::OsmTile { s, w, n, e } => {
+                let osm_dir = data_dir.join("osm");
+                std::fs::create_dir_all(&osm_dir).ok();
+                let cache = crate::osm::OsmDiskCache::new(&osm_dir);
+                if cache.load(s, w, n, e).is_none() {
+                    if crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir).is_ok() {
+                        let key = crate::osm::osm_dht_key(s, w, n, e);
+                        let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+                        println!("📥 [Idle] OSM tile cached and announced: {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                    }
+                }
+            }
+            TileRequest::ElevationTile { lat, lon } => {
+                let elev_dir = data_dir.join("elevation_cache");
+                let tile_path = elev_dir
+                    .join(format!("N{:02}", lat.unsigned_abs()))
+                    .join(format!("E{:03}", lon.unsigned_abs()))
+                    .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+                if !tile_path.exists() {
+                    let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").unwrap_or_default();
+                    if !api_key.is_empty() {
+                        use crate::elevation::ElevationSource as _;
+                        let src = crate::elevation::OpenTopographySource::new(api_key, elev_dir);
+                        let gps = crate::coordinates::GPS { lat: lat as f64 + 0.5, lon: lon as f64 + 0.5, alt: 0.0 };
+                        let _ = src.query(&gps);
+                        if tile_path.exists() {
+                            let key = crate::elevation::elevation_dht_key(lat, lon);
+                            let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+                            println!("📥 [Idle] Elevation tile cached and announced: N{} E{}", lat, lon);
+                        }
+                    }
+                }
+            }
+            TileRequest::TerrainChunk { .. } => {} // not handled yet
+        }
+        // Brief pause between fetches to avoid hammering APIs
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]

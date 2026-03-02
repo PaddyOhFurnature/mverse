@@ -55,6 +55,7 @@ use libp2p::{
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 use futures::StreamExt;
 
@@ -140,6 +141,12 @@ pub enum NetworkCommand {
         peer_id: PeerId,
         request: TileRequest,
         response_tx: crossbeam::channel::Sender<TileResponse>,
+    },
+
+    /// Queue a tile for background fetch — called when an inbound request can't be served from disk.
+    /// The idle downloader will fetch from the network/internet, cache locally, and announce.
+    QueueIdleFetch {
+        request: TileRequest,
     },
 }
 
@@ -345,6 +352,9 @@ pub struct NetworkNode {
     /// Root directory for local tile cache. When set, inbound TileRequests are served
     /// from disk before responding NotFound. Set via set_tile_cache_root().
     tile_cache_root: Option<std::path::PathBuf>,
+
+    /// Shared queue of tiles this node should fetch when idle.
+    idle_queue: Option<Arc<std::sync::Mutex<std::collections::VecDeque<TileRequest>>>>,
 }
 
 /// Returns true if this address is useful to advertise in DHT.
@@ -405,6 +415,7 @@ impl NetworkNode {
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
             tile_cache_root: None,
+            idle_queue: None,
         })
     }
     
@@ -439,6 +450,7 @@ impl NetworkNode {
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
             tile_cache_root: None,
+            idle_queue: None,
         })
     }
 
@@ -446,6 +458,22 @@ impl NetworkNode {
     /// Call immediately after construction.
     pub fn set_tile_cache_root(&mut self, dir: std::path::PathBuf) {
         self.tile_cache_root = Some(dir);
+    }
+
+    /// Set the idle fetch queue so inbound misses can be queued for background download.
+    pub fn set_idle_queue(&mut self, q: Arc<std::sync::Mutex<std::collections::VecDeque<TileRequest>>>) {
+        self.idle_queue = Some(q);
+    }
+
+    /// Push a tile request onto the idle fetch queue.
+    pub fn queue_idle_fetch(&mut self, request: TileRequest) {
+        if let Some(ref q) = self.idle_queue {
+            if let Ok(mut queue) = q.lock() {
+                if queue.len() < 256 {
+                    queue.push_back(request);
+                }
+            }
+        }
     }
     
     /// Build the libp2p Swarm with all protocols configured
@@ -1221,6 +1249,16 @@ impl NetworkNode {
                 } else {
                     TileResponse::NotFound
                 };
+                // If we can't serve it, queue for background fetch so we can serve it next time
+                if matches!(response, TileResponse::NotFound) {
+                    if let Some(ref q) = self.idle_queue {
+                        if let Ok(mut queue) = q.lock() {
+                            if queue.len() < 256 {
+                                queue.push_back(request.clone());
+                            }
+                        }
+                    }
+                }
                 let _ = self.swarm.behaviour_mut().tile_rr.send_response(channel, response);
                 None
             }
