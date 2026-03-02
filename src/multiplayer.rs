@@ -107,6 +107,7 @@ impl TileFetcher {
         let key = crate::osm::osm_dht_key(s, w, n, e);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
+}
 
 /// Result type for multiplayer operations
 pub type Result<T> = std::result::Result<T, MultiplayerError>;
