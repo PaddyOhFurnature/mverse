@@ -6,7 +6,7 @@
 //! three tiers of storage, checked in order:
 //!
 //! 1. **In-memory cache** — fast lookup for recently seen records
-//! 2. **Disk cache** — `~/.metaverse/key_cache/<prefix>/<peer_id_hex>.keyrec`
+//! 2. **Disk cache** — `./key_cache/<prefix>/<peer_id_hex>.keyrec`
 //!    Survives restarts. Used when DHT lookup fails or peer is offline.
 //! 3. **DHT / gossipsub** — the authoritative P2P source; servers advertise
 //!    as providers for every record they have seen
@@ -112,7 +112,7 @@ pub struct KeyRegistry {
     /// Our own PeerId — used to protect local record from remote override.
     local_peer_id: Option<PeerId>,
 
-    /// Base directory for disk cache. Defaults to `~/.metaverse/key_cache/`.
+    /// Base directory for disk cache. Defaults to `./key_cache/`.
     cache_dir: Option<PathBuf>,
 
     /// Stats for diagnostics.
@@ -144,7 +144,7 @@ impl KeyRegistry {
         }
     }
 
-    /// Set the disk cache directory (defaults to `~/.metaverse/key_cache/`).
+    /// Set the disk cache directory (defaults to `./key_cache/`).
     pub fn set_cache_dir(&mut self, dir: PathBuf) {
         self.cache_dir = Some(dir);
     }
@@ -457,9 +457,8 @@ impl KeyRegistry {
         if let Some(ref dir) = self.cache_dir {
             return Some(dir.clone());
         }
-        // Default: ~/.metaverse/key_cache/
-        let home = dirs::home_dir()?;
-        Some(home.join(".metaverse").join("key_cache"))
+        // Default: ./key_cache/ (relative to working directory — portable)
+        Some(PathBuf::from("key_cache"))
     }
 
     /// Derive the cache file path for a given `PeerId`.

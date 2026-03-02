@@ -36,15 +36,15 @@
 //! 2. Build and self-sign a KeyRecord (Identity::create_key_record)
 //! 3. Publish to gossipsub "key-registry" topic
 //! 4. Servers store in SQLite, advertise as DHT providers
-//! 5. Other peers cache at ~/.metaverse/key_cache/<peer_id_hex>.keyrec
+//! 5. Other peers cache at ./key_cache/<peer_id_hex>.keyrec
 //! 6. Offline: local cache is authoritative when DHT unreachable
 //! ```
 //!
 //! # Persistence
 //!
-//! - Keypair: `~/.metaverse/identity.key` (bincode, chmod 600)
-//! - Key record: `~/.metaverse/identity.keyrec` (bincode, auto-generated alongside keypair)
-//! - Env override: `METAVERSE_IDENTITY_FILE=~/.metaverse/mykey.key`
+//! - Keypair: `./identity.key` (bincode, chmod 600 — relative to working directory)
+//! - Key record: `./identity.keyrec` (bincode, auto-generated alongside keypair)
+//! - Env override: `METAVERSE_IDENTITY_FILE=<path>`
 //!
 //! **BACK UP YOUR KEY FILE. There is no recovery.**
 
@@ -581,30 +581,13 @@ struct StoredIdentity {
 impl Identity {
     /// Get the default path for storing identity.
     ///
-    /// Returns `~/.metaverse/identity.key`.
-    /// Override with `METAVERSE_IDENTITY_FILE=~/.metaverse/mykey.key`.
+    /// Returns `./identity.key` (relative to working directory — portable).
+    /// Override with `METAVERSE_IDENTITY_FILE=<path>`.
     fn default_path() -> Result<PathBuf> {
         if let Ok(custom_path) = std::env::var("METAVERSE_IDENTITY_FILE") {
-            let path = if custom_path.starts_with("~/") {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(&custom_path[2..])
-                } else {
-                    PathBuf::from(custom_path)
-                }
-            } else {
-                PathBuf::from(custom_path)
-            };
-            return Ok(path);
+            return Ok(PathBuf::from(custom_path));
         }
-
-        let home = dirs::home_dir().ok_or_else(|| {
-            IdentityError::IoError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not find home directory",
-            ))
-        })?;
-
-        Ok(home.join(".metaverse").join("identity.key"))
+        Ok(PathBuf::from("identity.key"))
     }
 
     /// Derive the `.keyrec` path from a `.key` path.
@@ -612,21 +595,9 @@ impl Identity {
         key_path.with_extension("keyrec")
     }
 
-    /// Ensure `~/.metaverse/` exists. Returns the directory path.
+    /// Ensure the working directory exists (it always does). Returns `.`.
     pub fn ensure_metaverse_dir() -> Result<PathBuf> {
-        let home = dirs::home_dir().ok_or_else(|| {
-            IdentityError::IoError(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not find home directory",
-            ))
-        })?;
-
-        let dir = home.join(".metaverse");
-        if !dir.exists() {
-            fs::create_dir_all(&dir).map_err(IdentityError::DirectoryCreationFailed)?;
-            eprintln!("[identity] Created ~/.metaverse/");
-        }
-        Ok(dir)
+        Ok(PathBuf::from("."))
     }
 
     /// Generate a new random `Identity`.

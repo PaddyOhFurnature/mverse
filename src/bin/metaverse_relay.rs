@@ -4,7 +4,7 @@
 //! Automatically falls back to plain log when piped/redirected.
 //! Use --headless to force plain log mode (set-and-forget servers).
 //!
-//! Config: ./relay.json or ~/.metaverse/relay.json (local takes priority).
+//! Config: ./relay.json  (relative to working directory — portable)
 //! CLI args override config file values.
 //!
 //! Keybindings: [m] Main  [l] Log  [h] Help  [q] Quit
@@ -36,6 +36,7 @@ use std::{
     collections::{HashMap, VecDeque},
     error::Error,
     io::{self, IsTerminal},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 use clap::Parser;
@@ -115,16 +116,11 @@ impl Default for UiConfig {
 }
 
 fn load_config() -> RelayConfig {
-    let paths = [
-        std::path::PathBuf::from("relay.json"),
-        dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.json"),
-    ];
-    for path in &paths {
-        if path.exists() {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                if let Ok(cfg) = serde_json::from_str::<RelayConfig>(&text) {
-                    return cfg;
-                }
+    let path = std::path::PathBuf::from("relay.json");
+    if path.exists() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(cfg) = serde_json::from_str::<RelayConfig>(&text) {
+                return cfg;
             }
         }
     }
@@ -132,9 +128,8 @@ fn load_config() -> RelayConfig {
 }
 
 fn write_default_config_if_missing() {
-    let path = dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.json");
+    let path = std::path::PathBuf::from("relay.json");
     if !path.exists() {
-        if let Some(p) = path.parent() { std::fs::create_dir_all(p).ok(); }
         if let Ok(json) = serde_json::to_string_pretty(&RelayConfig::default()) {
             std::fs::write(&path, json).ok();
         }
@@ -507,7 +502,7 @@ fn draw_help(frame: &mut Frame, state: &AppState) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
-    let cfg = dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.json");
+    let cfg = PathBuf::from("relay.json");
     let lines = vec![
         Line::from(Span::styled(" Metaverse Relay — Help ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
         Line::from(""),
@@ -620,9 +615,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // ── --init-key: generate/show relay identity then exit ───────────────────
     if args.init_key {
-        let key_path = dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.key");
+        let key_path = PathBuf::from("relay.key");
         let keyrec_path = key_path.with_extension("keyrec");
-        std::fs::create_dir_all(key_path.parent().unwrap())?;
 
         let local_key = if key_path.exists() {
             println!("🔑 Loading existing relay key from: {}", key_path.display());
@@ -668,8 +662,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     config.headless = headless;
 
     // Load or generate persistent identity
-    let key_path = dirs::home_dir().unwrap_or_default().join(".metaverse").join("relay.key");
-    std::fs::create_dir_all(key_path.parent().unwrap())?;
+    let key_path = PathBuf::from("relay.key");
     let local_key = if key_path.exists() {
         identity::Keypair::from_protobuf_encoding(&std::fs::read(&key_path)?)?
     } else {

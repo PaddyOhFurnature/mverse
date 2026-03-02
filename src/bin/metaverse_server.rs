@@ -10,7 +10,7 @@
 //! Falls back to plain log when piped/redirected or --headless is set.
 //! Web dashboard always running on web_port (default 8080).
 //!
-//! Config: ./server.json  or  ~/.metaverse/server.json  (local wins)
+//! Config: ./server.json  (relative to working directory — portable)
 //! CLI args override config file values.
 //!
 //! Keybindings: [m] Main  [p] Peers  [w] World  [l] Log  [c] Config  [h] Help  [q] Quit
@@ -226,11 +226,8 @@ impl Default for UiConfig {
     }
 }
 
-fn config_paths() -> [PathBuf; 2] {
-    [
-        PathBuf::from("server.json"),
-        dirs::home_dir().unwrap_or_default().join(".metaverse").join("server.json"),
-    ]
+fn config_paths() -> [PathBuf; 1] {
+    [PathBuf::from("server.json")]
 }
 
 fn load_config() -> ServerConfig {
@@ -248,9 +245,8 @@ fn load_config() -> ServerConfig {
 }
 
 fn write_default_config_if_missing() {
-    let path = dirs::home_dir().unwrap_or_default().join(".metaverse").join("server.json");
+    let path = PathBuf::from("server.json");
     if !path.exists() {
-        if let Some(p) = path.parent() { std::fs::create_dir_all(p).ok(); }
         if let Ok(json) = serde_json::to_string_pretty(&ServerConfig::default()) {
             let _ = std::fs::write(&path, json);
             eprintln!("📝 Created default config at {}", path.display());
@@ -265,7 +261,7 @@ fn write_default_config_if_missing() {
 #[command(about = "Metaverse P2P server — relay + world authority + TUI + web dashboard")]
 #[command(version)]
 struct Args {
-    /// Config file path (default: ./server.json or ~/.metaverse/server.json)
+    /// Config file path (default: ./server.json)
     #[arg(long, value_name = "PATH")]
     config: Option<String>,
     /// TCP relay port
@@ -1672,7 +1668,7 @@ fn draw_world(frame: &mut Frame, world: &WorldStats, state: &AppState, area: Rec
         stat_line("Shedding:      ",
             if world.shedding_chunks { "YES ⚠️".to_string() } else { "No".to_string() }),
         stat_line("World dir:     ",
-            state.config.world_dir.as_deref().unwrap_or("~/.metaverse/world_data").to_string()),
+            state.config.world_dir.as_deref().unwrap_or("world_data").to_string()),
     ];
     frame.render_widget(
         Paragraph::new(items)
@@ -3212,7 +3208,7 @@ impl WorldSystems {
 
         let world_dir = config.world_dir.as_deref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".metaverse").join("world_data"));
+            .unwrap_or_else(|| PathBuf::from("world_data"));
         std::fs::create_dir_all(&world_dir).ok()?;
 
         // Load persisted user ops from disk
@@ -3343,8 +3339,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Identity
     let identity_path = config.identity_file.as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".metaverse").join("server.key"));
-    std::fs::create_dir_all(identity_path.parent().unwrap())?;
+        .unwrap_or_else(|| PathBuf::from("server.key"));
+    if let Some(parent) = identity_path.parent() {
+        if !parent.as_os_str().is_empty() { std::fs::create_dir_all(parent)?; }
+    }
 
     let local_key = if config.temp_identity {
         println!("🔑 Using temporary identity");
@@ -3490,11 +3488,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Key registry database
     let key_db = {
-        let db_path = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".metaverse")
-            .join("key_registry.db");
-        std::fs::create_dir_all(db_path.parent().unwrap()).ok();
+        let db_path = PathBuf::from("key_registry.db");
         match KeyDatabase::open(&db_path) {
             Ok(db) => {
                 println!("🗄️  Key registry DB: {} ({} records)", db_path.display(), db.count());
@@ -3610,7 +3604,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     app_state.log("✅ Metaverse server started");
     if world_enabled && world.is_some() {
-        app_state.log(format!("🌍 World state: {}", app_state.config.world_dir.as_deref().unwrap_or("~/.metaverse/world_data")));
+        app_state.log(format!("🌍 World state: {}", app_state.config.world_dir.as_deref().unwrap_or("world_data")));
     }
     // Queue DHT provider announcements for all pre-loaded chunks
     if let Some(ref w) = world {

@@ -4,7 +4,7 @@
 //! containing the current list of bootstrap/relay nodes.
 //!
 //! Flow:
-//!   1. Try local cache (`~/.metaverse/bootstrap_cache.json`) - instant startup
+//!   1. Try local cache (`./bootstrap_cache.json`) - instant startup
 //!   2. Fetch remote URL in background - update cache if newer
 //!   3. Fall back to hardcoded nodes if both fail
 //!
@@ -60,8 +60,7 @@ pub const HARDCODED_FALLBACK: &[&str] = &[];
 // ─── Cache path ──────────────────────────────────────────────────────────────
 
 fn cache_path() -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join(".metaverse").join("bootstrap_cache.json")
+    PathBuf::from("bootstrap_cache.json")
 }
 
 // ─── Main API ────────────────────────────────────────────────────────────────
