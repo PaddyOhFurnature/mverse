@@ -40,6 +40,7 @@
 //! ```
 
 use crate::identity::Identity;
+use crate::tile_protocol::{TileCodec, TileRequest, TileResponse, TILE_PROTOCOL};
 use libp2p::{
     autonat,
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
@@ -49,6 +50,7 @@ use libp2p::{
     noise,
     relay,
     dcutr,
+    request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
@@ -131,6 +133,14 @@ pub enum NetworkCommand {
 
     /// Shutdown the network thread
     Shutdown,
+
+    /// Request a tile from a specific peer via request-response protocol.
+    /// Response delivered via `response_tx`.
+    RequestTile {
+        peer_id: PeerId,
+        request: TileRequest,
+        response_tx: crossbeam::channel::Sender<TileResponse>,
+    },
 }
 
 /// Errors that can occur during network operations
@@ -291,6 +301,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) relay_server: relay::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
+    pub(crate) tile_rr: request_response::Behaviour<TileCodec>,
 }
 
 /// P2P networking node
@@ -326,6 +337,10 @@ pub struct NetworkNode {
     /// Known game peers and their last seen address — used to redial after reconnect
     /// since RoutingUpdated only fires for NEW DHT entries, not already-known peers
     known_game_peers: HashMap<PeerId, Multiaddr>,
+
+    /// Pending outbound tile requests, keyed by request ID.
+    /// When the response arrives, the value (Sender) is used to deliver it.
+    pending_tile_requests: HashMap<request_response::OutboundRequestId, crossbeam::channel::Sender<TileResponse>>,
 }
 
 /// Returns true if this address is useful to advertise in DHT.
@@ -384,6 +399,7 @@ impl NetworkNode {
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
             known_game_peers: HashMap::new(),
+            pending_tile_requests: HashMap::new(),
         })
     }
     
@@ -416,6 +432,7 @@ impl NetworkNode {
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
             known_game_peers: HashMap::new(),
+            pending_tile_requests: HashMap::new(),
         })
     }
     
@@ -552,6 +569,10 @@ impl NetworkNode {
                     relay_server,
                     autonat,
                     dcutr,
+                    tile_rr: request_response::Behaviour::new(
+                        [(libp2p::StreamProtocol::new(TILE_PROTOCOL), ProtocolSupport::Full)],
+                        request_response::Config::default(),
+                    ),
                 })
             })
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
@@ -1153,11 +1174,47 @@ impl NetworkNode {
                 }
             }
 
+            // Tile request-response: response received
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
+                request_response::Event::Message {
+                    message: request_response::Message::Response { request_id, response },
+                    ..
+                }
+            )) => {
+                if let Some(tx) = self.pending_tile_requests.remove(&request_id) {
+                    let _ = tx.send(response);
+                }
+                None
+            }
+
+            // Tile request-response: outbound request failed
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
+                request_response::Event::OutboundFailure { request_id, .. }
+            )) => {
+                if let Some(tx) = self.pending_tile_requests.remove(&request_id) {
+                    let _ = tx.send(TileResponse::NotFound);
+                }
+                None
+            }
+
+            // Tile request-response: inbound request — client doesn't serve tiles yet
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
+                request_response::Event::Message {
+                    message: request_response::Message::Request { channel, .. },
+                    ..
+                }
+            )) => {
+                let _ = self.swarm.behaviour_mut().tile_rr.send_response(channel, TileResponse::NotFound);
+                None
+            }
+
+            // Ignore other tile_rr events
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(_)) => None,
+
             // Ignore other events
             _ => None,
         }
     }
-    
     /// Get local peer ID
     pub fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
@@ -1221,6 +1278,13 @@ impl NetworkNode {
     pub fn get_providers(&mut self, key: Vec<u8>) {
         use kad::RecordKey;
         self.swarm.behaviour_mut().kademlia.get_providers(RecordKey::new(&key));
+    }
+
+    /// Send a tile request to a specific peer.
+    /// The response (or failure) will be delivered via `response_tx`.
+    pub fn request_tile(&mut self, peer_id: PeerId, request: TileRequest, response_tx: crossbeam::channel::Sender<TileResponse>) {
+        let id = self.swarm.behaviour_mut().tile_rr.send_request(&peer_id, request);
+        self.pending_tile_requests.insert(id, response_tx);
     }
 }
 

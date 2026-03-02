@@ -68,8 +68,39 @@ use crate::{
 use libp2p::PeerId;
 use crossbeam::channel::{self, Sender, Receiver};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use sha2::{Sha256, Digest as _};
+
+/// Lightweight handle that terrain workers can use to request tiles from DHT peers.
+/// Clone-cheap (Arc inside). Can be used from sync (rayon) threads — blocks with timeout.
+#[derive(Clone)]
+pub struct TileFetcher {
+    cmd_tx: crossbeam::channel::Sender<NetworkCommand>,
+    /// Known peers that serve tiles (Server tier or storage > 0).
+    known_tile_servers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+}
+
+impl TileFetcher {
+    /// Try to fetch an OSM tile from a known peer. Blocks for up to 8 seconds.
+    /// Returns raw bincode bytes on success, None on failure.
+    pub fn fetch_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
+        let peer = {
+            let servers = self.known_tile_servers.lock().ok()?;
+            servers.first().copied()?
+        };
+        let (tx, rx) = crossbeam::channel::bounded(1);
+        self.cmd_tx.send(NetworkCommand::RequestTile {
+            peer_id: peer,
+            request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
+            response_tx: tx,
+        }).ok()?;
+        match rx.recv_timeout(std::time::Duration::from_secs(8)) {
+            Ok(crate::tile_protocol::TileResponse::Found(bytes)) => Some(bytes),
+            _ => None,
+        }
+    }
+}
 
 /// Result type for multiplayer operations
 pub type Result<T> = std::result::Result<T, MultiplayerError>;
@@ -252,6 +283,9 @@ pub struct MultiplayerSystem {
 
     /// Statistics
     stats: MultiplayerStats,
+
+    /// Known peers that can serve tiles (servers with storage > 0).
+    known_tile_servers: Arc<std::sync::Mutex<Vec<PeerId>>>,
 }
 
 /// Statistics for monitoring and debugging
@@ -346,6 +380,7 @@ impl MultiplayerSystem {
             content_cache: std::collections::HashMap::new(),
             world_objects_cache: std::collections::HashMap::new(),
             stats: MultiplayerStats::default(),
+            known_tile_servers: Arc::new(std::sync::Mutex::new(Vec::new())),
         })
     }
     
@@ -776,6 +811,11 @@ impl MultiplayerSystem {
                 if let Some(ref mut sharding) = self.spatial_sharding {
                     sharding.remove_peer(&peer_id);
                 }
+
+                // Remove from tile server list
+                if let Ok(mut servers) = self.known_tile_servers.lock() {
+                    servers.retain(|p| p != &peer_id);
+                }
             }
             
             NetworkEvent::PeerDiscovered { peer_id } => {
@@ -836,6 +876,24 @@ impl MultiplayerSystem {
                         }
                         Ok(_)  => eprintln!("📍 [Session] Session record signature invalid — ignoring"),
                         Err(e) => eprintln!("📍 [Session] Failed to deserialize session record: {}", e),
+                    }
+                } else if key.starts_with(b"caps/") {
+                    // NodeCapabilities record — track as tile server if eligible
+                    if let Some(caps) = crate::node_capabilities::NodeCapabilities::from_bytes(&value) {
+                        if let Ok(key_str) = std::str::from_utf8(&key) {
+                            if let Some(peer_id_str) = key_str.strip_prefix("caps/") {
+                                if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
+                                    use crate::node_capabilities::NodeTier;
+                                    if matches!(caps.tier, NodeTier::Server) || caps.available_storage_bytes > 0 {
+                                        if let Ok(mut servers) = self.known_tile_servers.lock() {
+                                            if !servers.contains(&peer_id) {
+                                                servers.push(peer_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     // Attempt to deserialize as a KeyRecord and update the registry
@@ -1536,6 +1594,14 @@ impl MultiplayerSystem {
         let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key, value: caps.to_bytes() });
     }
 
+    /// Returns a lightweight tile fetcher handle that terrain workers can use.
+    pub fn tile_fetcher(&self) -> TileFetcher {
+        TileFetcher {
+            cmd_tx: self.cmd_tx.clone(),
+            known_tile_servers: Arc::clone(&self.known_tile_servers),
+        }
+    }
+
     // ── Meshsite content ──────────────────────────────────────────────────────
 
     /// Publish a signed `ContentItem` to the gossipsub mesh.
@@ -2081,6 +2147,9 @@ fn run_network_thread(
                     }
                     NetworkCommand::DialPeer { peer_id } => {
                         network.dial_peer_id(peer_id);
+                    }
+                    NetworkCommand::RequestTile { peer_id, request, response_tx } => {
+                        network.request_tile(peer_id, request, response_tx);
                     }
                 }
             }

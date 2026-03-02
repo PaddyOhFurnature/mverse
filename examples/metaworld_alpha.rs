@@ -1215,7 +1215,8 @@ fn main() {
     // Create terrain generator with origin for coordinate conversion
     let elevation_pipeline_1 = elevation_pipeline;
     let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel)
-        .with_osm_cache(data_dir.join("osm"));
+        .with_osm_cache(data_dir.join("osm"))
+        .with_tile_fetcher(Arc::new(multiplayer.tile_fetcher()));
     let generator_arc = Arc::new(Mutex::new(generator));
     
     // Create second elevation pipeline for chunk_manager (same source as above)
@@ -1225,7 +1226,8 @@ fn main() {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
     }
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
-        .with_osm_cache(data_dir.join("osm"));
+        .with_osm_cache(data_dir.join("osm"))
+        .with_tile_fetcher(Arc::new(multiplayer.tile_fetcher()));
 
     // Third elevation pipeline for OSM inference (objects need ground-truth elevation)
     let mut osm_elev_pipeline = ElevationPipeline::new();

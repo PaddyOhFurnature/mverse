@@ -26,6 +26,8 @@ pub struct TerrainGenerator {
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
     osm_cache_dir: Option<std::path::PathBuf>,
+    /// Optional handle to request OSM tiles from P2P peers when not cached locally.
+    tile_fetcher: Option<Arc<crate::multiplayer::TileFetcher>>,
 }
 
 impl TerrainGenerator {
@@ -41,6 +43,7 @@ impl TerrainGenerator {
             origin_gps,
             origin_voxel,
             osm_cache_dir: None,
+            tile_fetcher: None,
         }
     }
     
@@ -55,12 +58,19 @@ impl TerrainGenerator {
             origin_gps,
             origin_voxel,
             osm_cache_dir: None,
+            tile_fetcher: None,
         }
     }
 
     /// Set OSM cache directory for water-aware terrain generation.
     pub fn with_osm_cache(mut self, dir: std::path::PathBuf) -> Self {
         self.osm_cache_dir = Some(dir);
+        self
+    }
+
+    /// Set an optional P2P tile fetcher for fetching OSM tiles from peers on cache miss.
+    pub fn with_tile_fetcher(mut self, fetcher: Arc<crate::multiplayer::TileFetcher>) -> Self {
+        self.tile_fetcher = Some(fetcher);
         self
     }
     
@@ -262,7 +272,22 @@ impl TerrainGenerator {
         // Load OSM data for this chunk (water + roads for terrain carving)
         let (chunk_water_polys, chunk_waterway_lines, chunk_roads) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-            let osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+            let mut osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+            // On disk miss, try fetching from a P2P peer
+            if osm.is_empty() {
+                if let Some(ref fetcher) = self.tile_fetcher {
+                    let tile_size = 0.01_f64;
+                    let s = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
+                    let w = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
+                    if let Some(bytes) = fetcher.fetch_osm(s, w, s + tile_size, w + tile_size) {
+                        if let Ok(data) = bincode::deserialize::<crate::osm::OsmData>(&bytes) {
+                            let cache = crate::osm::OsmDiskCache::new(dir);
+                            cache.save(s, w, s + tile_size, w + tile_size, &data);
+                            osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+                        }
+                    }
+                }
+            }
             (osm.water, osm.waterway_lines, osm.roads)
         } else {
             (vec![], vec![], vec![])

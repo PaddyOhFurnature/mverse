@@ -29,8 +29,72 @@ pub enum TileResponse {
 /// Protocol identifier string.
 pub const TILE_PROTOCOL: &str = "/metaverse/tiles/1.0.0";
 
-/// Codec marker for the tile request-response protocol.
-/// The actual `request_response::Codec` impl lives in the server binary
-/// to keep async code out of the library (avoiding complex codegen).
+/// Codec for the tile request-response protocol (serde_json framing).
 #[derive(Clone, Default)]
 pub struct TileCodec;
+
+impl libp2p::request_response::Codec for TileCodec {
+    type Protocol = libp2p::StreamProtocol;
+    type Request  = TileRequest;
+    type Response = TileResponse;
+
+    fn read_request<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Self::Request>> + Send + 'a>>
+    where T: futures::AsyncRead + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncReadExt;
+            let mut buf = Vec::new();
+            io.take(1_048_576).read_to_end(&mut buf).await?;
+            serde_json::from_slice(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    fn read_response<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Self::Response>> + Send + 'a>>
+    where T: futures::AsyncRead + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncReadExt;
+            let mut buf = Vec::new();
+            io.take(16_777_216).read_to_end(&mut buf).await?;
+            serde_json::from_slice(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    fn write_request<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+        req: Self::Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
+    where T: futures::AsyncWrite + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncWriteExt;
+            let data = serde_json::to_vec(&req)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            io.write_all(&data).await
+        })
+    }
+
+    fn write_response<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+        resp: Self::Response,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
+    where T: futures::AsyncWrite + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncWriteExt;
+            let data = serde_json::to_vec(&resp)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            io.write_all(&data).await
+        })
+    }
+}
