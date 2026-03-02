@@ -82,29 +82,54 @@ pub struct TileFetcher {
 }
 
 impl TileFetcher {
-    /// Try to fetch an OSM tile from a known peer. Blocks for up to 8 seconds.
+    /// Try to fetch an OSM tile from a known peer. Tries ALL known servers in order (3s per peer).
     /// Returns raw bincode bytes on success, None on failure.
     pub fn fetch_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
-        let peer = {
-            let servers = self.known_tile_servers.lock().ok()?;
-            servers.first().copied()?
-        };
-        let (tx, rx) = crossbeam::channel::bounded(1);
-        self.cmd_tx.send(NetworkCommand::RequestTile {
-            peer_id: peer,
-            request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
-            response_tx: tx,
-        }).ok()?;
-        match rx.recv_timeout(std::time::Duration::from_secs(8)) {
-            Ok(crate::tile_protocol::TileResponse::Found(bytes)) => Some(bytes),
-            _ => None,
+        let servers: Vec<PeerId> = self.known_tile_servers.lock().ok()?.clone();
+        for peer in servers {
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            if self.cmd_tx.send(NetworkCommand::RequestTile {
+                peer_id: peer,
+                request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
+                response_tx: tx,
+            }).is_err() { continue; }
+            match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
+                _ => continue,
+            }
         }
+        None
     }
 
     /// Announce to the DHT that this node now has an OSM tile cached.
     /// Non-blocking — fire and forget.
     pub fn announce_osm(&self, s: f64, w: f64, n: f64, e: f64) {
         let key = crate::osm::osm_dht_key(s, w, n, e);
+        let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+    }
+
+    /// Try to fetch an elevation tile (1°×1° SRTM) from a known peer. Blocks up to 9s.
+    /// Returns raw GeoTIFF bytes on success, None on failure.
+    pub fn fetch_elevation(&self, lat: i32, lon: i32) -> Option<Vec<u8>> {
+        let servers: Vec<PeerId> = self.known_tile_servers.lock().ok()?.clone();
+        for peer in servers {
+            let (tx, rx) = crossbeam::channel::bounded(1);
+            if self.cmd_tx.send(NetworkCommand::RequestTile {
+                peer_id: peer,
+                request: crate::tile_protocol::TileRequest::ElevationTile { lat, lon },
+                response_tx: tx,
+            }).is_err() { continue; }
+            match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
+                _ => continue,
+            }
+        }
+        None
+    }
+
+    /// Announce to the DHT that this node now has an elevation tile cached.
+    pub fn announce_elevation(&self, lat: i32, lon: i32) {
+        let key = crate::elevation::elevation_dht_key(lat, lon);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
 }
@@ -293,6 +318,9 @@ pub struct MultiplayerSystem {
 
     /// Known peers that can serve tiles (servers with storage > 0).
     known_tile_servers: Arc<std::sync::Mutex<Vec<PeerId>>>,
+
+    /// Root directory for world data (osm/, elevation_cache/, chunks/).
+    world_data_dir: std::path::PathBuf,
 }
 
 /// Statistics for monitoring and debugging
@@ -339,8 +367,10 @@ impl MultiplayerSystem {
         let local_peer_id = *identity.peer_id();
         
         // Spawn background thread with tokio runtime
+        let world_data_dir = std::path::PathBuf::from("./world_data");
+        let world_data_dir_clone = world_data_dir.clone();
         std::thread::spawn(move || {
-            run_network_thread(identity_clone, cmd_rx, event_tx);
+            run_network_thread(identity_clone, cmd_rx, event_tx, world_data_dir_clone);
         });
         
         Ok(Self {
@@ -388,6 +418,7 @@ impl MultiplayerSystem {
             world_objects_cache: std::collections::HashMap::new(),
             stats: MultiplayerStats::default(),
             known_tile_servers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            world_data_dir,
         })
     }
     
@@ -1634,6 +1665,41 @@ impl MultiplayerSystem {
         }
     }
 
+    /// Announce that this node has an elevation tile cached.
+    pub fn announce_elevation_tile(&self, lat: i32, lon: i32) {
+        let key = crate::elevation::elevation_dht_key(lat, lon);
+        let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+    }
+
+    /// Scan a local elevation cache directory and announce every tile already on disk.
+    /// Call once at startup after the network is running.
+    pub fn announce_cached_elevation_tiles(&self, cache_dir: &std::path::Path) {
+        // Files are at: cache_dir/N{lat}/E{lon}/srtm_n{lat}_e{lon}.tif
+        if let Ok(entries) = std::fs::read_dir(cache_dir) {
+            for lat_dir in entries.flatten() {
+                let lat_name = lat_dir.file_name().to_string_lossy().to_string();
+                let lat: i32 = if let Some(n) = lat_name.strip_prefix('N') {
+                    n.parse().unwrap_or(i32::MAX)
+                } else if let Some(s) = lat_name.strip_prefix('S') {
+                    -(s.parse::<i32>().unwrap_or(i32::MAX))
+                } else { continue };
+                if lat == i32::MAX { continue; }
+                if let Ok(lon_dirs) = std::fs::read_dir(lat_dir.path()) {
+                    for lon_dir in lon_dirs.flatten() {
+                        let lon_name = lon_dir.file_name().to_string_lossy().to_string();
+                        let lon: i32 = if let Some(e) = lon_name.strip_prefix('E') {
+                            e.parse().unwrap_or(i32::MAX)
+                        } else if let Some(w) = lon_name.strip_prefix('W') {
+                            -(w.parse::<i32>().unwrap_or(i32::MAX))
+                        } else { continue };
+                        if lon == i32::MAX { continue; }
+                        self.announce_elevation_tile(lat, lon);
+                    }
+                }
+            }
+        }
+    }
+
     // ── Meshsite content ──────────────────────────────────────────────────────
 
     /// Publish a signed `ContentItem` to the gossipsub mesh.
@@ -2018,6 +2084,7 @@ fn run_network_thread(
     identity: Identity,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    world_data_dir: std::path::PathBuf,
 ) {
     // Create tokio runtime in this thread
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -2030,7 +2097,8 @@ fn run_network_thread(
         // Create network node asynchronously (mDNS needs tokio context)
         println!("🔧 [Network Thread] Creating NetworkNode...");
         let mut network = match NetworkNode::new_async(identity).await {
-            Ok(n) => {
+            Ok(mut n) => {
+                n.set_tile_cache_root(world_data_dir);
                 println!("✅ [Network Thread] NetworkNode created successfully");
                 n
             }

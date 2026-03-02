@@ -505,6 +505,60 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     Ok(Elevation { meters: 0.0 })
 }
 
+/// Elevation source that fetches tiles from P2P peers via libp2p request-response.
+///
+/// Checks local cache first (fast path). On a peer hit, saves the GeoTIFF bytes
+/// to the local elevation_cache/ and announces to DHT so others can find us.
+pub struct P2PElevationSource {
+    fetcher: std::sync::Arc<crate::multiplayer::TileFetcher>,
+    cache_dir: PathBuf,
+}
+
+impl P2PElevationSource {
+    pub fn new(
+        fetcher: std::sync::Arc<crate::multiplayer::TileFetcher>,
+        cache_dir: PathBuf,
+    ) -> Self {
+        Self { fetcher, cache_dir }
+    }
+}
+
+impl ElevationSource for P2PElevationSource {
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let lat = gps.lat.floor() as i32;
+        let lon = gps.lon.floor() as i32;
+
+        let tile_path = self.cache_dir
+            .join(format!("N{:02}", lat.unsigned_abs()))
+            .join(format!("E{:03}", lon.unsigned_abs()))
+            .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+
+        if !tile_path.exists() {
+            // Fetch raw GeoTIFF bytes from a peer
+            if let Some(bytes) = self.fetcher.fetch_elevation(lat, lon) {
+                if let Some(parent) = tile_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&tile_path, &bytes).is_ok() {
+                    // Announce to DHT — we now have this tile
+                    self.fetcher.announce_elevation(lat, lon);
+                }
+            }
+        }
+
+        if !tile_path.exists() {
+            return Ok(None); // Peer didn't have it either
+        }
+
+        match extract_elevation(&tile_path, gps) {
+            Ok(elev) => Ok(Some(elev)),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn name(&self) -> &str { "P2P elevation (libp2p)" }
+}
+
 /// Multi-source elevation pipeline
 pub struct ElevationPipeline {
     sources: Vec<Box<dyn ElevationSource>>,

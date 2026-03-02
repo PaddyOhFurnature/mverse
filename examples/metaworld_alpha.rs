@@ -75,7 +75,7 @@ use metaverse_core::{
                 MODULE_DOOR_RADIUS, MODULES},
     billboard::{BillboardPipeline, ModuleBillboards, TerminalScreen},
     coordinates::{GPS, ECEF},
-    elevation::{ElevationPipeline, OpenTopographySource},
+    elevation::{ElevationPipeline, OpenTopographySource, P2PElevationSource},
     identity::{Identity, KeyType},
     marching_cubes::{extract_chunk_mesh, extract_water_surface_mesh},
     materials::MaterialId,
@@ -1190,17 +1190,17 @@ fn main() {
     
     let origin_gps = GPS::new(-27.463675, 153.035645, 10.0); // Story Bridge, Brisbane
     
-    let mut elevation_pipeline = ElevationPipeline::new();
-    
-    // Standardise on OpenTopography API only — ensures all clients generate
-    // identical terrain from the same source data. NAS file is excluded because
-    // different SRTM datasets (NAS vs API) produce slightly different heights,
-    // causing 1-2 block offsets between clients even at the same GPS coordinates.
+    // Standardise on P2P + OpenTopography — P2P first to avoid unnecessary API calls.
     let data_dir = std::path::PathBuf::from("world_data");
-    let cache_dir = data_dir.join("elevation_cache");
+    let elev_cache = data_dir.join("elevation_cache");
     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").ok();
-    if let Some(key) = api_key {
-        elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir)));
+    let tile_fetcher = Arc::new(multiplayer.tile_fetcher());
+
+    let mut elevation_pipeline = ElevationPipeline::new();
+    // P2P first — try peers before hitting the API
+    elevation_pipeline.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
+    if let Some(ref key) = api_key {
+        elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     } else {
         println!("⚠️  No OPENTOPOGRAPHY_API_KEY set — terrain will be flat");
     }
@@ -1216,24 +1216,24 @@ fn main() {
     let elevation_pipeline_1 = elevation_pipeline;
     let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel)
         .with_osm_cache(data_dir.join("osm"))
-        .with_tile_fetcher(Arc::new(multiplayer.tile_fetcher()));
+        .with_tile_fetcher(Arc::clone(&tile_fetcher));
     let generator_arc = Arc::new(Mutex::new(generator));
     
     // Create second elevation pipeline for chunk_manager (same source as above)
     let mut elevation_pipeline_2 = ElevationPipeline::new();
-    let cache_dir_2 = data_dir.join("elevation_cache");
-    if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
-        elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key, cache_dir_2)));
+    elevation_pipeline_2.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
+    if let Some(ref key) = api_key {
+        elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
         .with_osm_cache(data_dir.join("osm"))
-        .with_tile_fetcher(Arc::new(multiplayer.tile_fetcher()));
+        .with_tile_fetcher(Arc::clone(&tile_fetcher));
 
     // Third elevation pipeline for OSM inference (objects need ground-truth elevation)
     let mut osm_elev_pipeline = ElevationPipeline::new();
-    let cache_dir_3 = data_dir.join("elevation_cache");
-    if let Some(key) = std::env::var("OPENTOPOGRAPHY_API_KEY").ok() {
-        osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key, cache_dir_3)));
+    osm_elev_pipeline.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
+    if let Some(ref key) = api_key {
+        osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
     let osm_cache_dir = data_dir.join("osm");
     
@@ -1248,6 +1248,8 @@ fn main() {
     multiplayer.publish_node_capabilities(0);
     // Announce any OSM tiles already cached locally — other peers can find and fetch from us
     multiplayer.announce_cached_osm_tiles(&data_dir.join("osm"));
+    // Announce any elevation tiles already cached locally
+    multiplayer.announce_cached_elevation_tiles(&elev_cache);
     
     // World data directory - single shared location
     let world_dir = std::path::PathBuf::from("world_data");

@@ -3596,6 +3596,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.log(format!("📡 Queued DHT announcements for {} OSM tile(s)", tile_count));
         }
     }
+    // Queue DHT provider announcements for all cached elevation tiles
+    {
+        let elev_dir = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        ).join("elevation_cache");
+        let mut elev_count = 0usize;
+        // Structure: elevation_cache/N{lat}/E{lon}/srtm_n{lat}_e{lon}.tif
+        if let Ok(lat_dirs) = std::fs::read_dir(&elev_dir) {
+            for lat_entry in lat_dirs.flatten() {
+                let lat_name = lat_entry.file_name().to_string_lossy().to_string();
+                let lat: i32 = if let Some(n) = lat_name.strip_prefix('N') {
+                    n.parse().unwrap_or(i32::MAX)
+                } else if let Some(s) = lat_name.strip_prefix('S') {
+                    -(s.parse::<i32>().unwrap_or(i32::MAX))
+                } else { continue };
+                if lat == i32::MAX { continue; }
+                if let Ok(lon_dirs) = std::fs::read_dir(lat_entry.path()) {
+                    for lon_entry in lon_dirs.flatten() {
+                        let lon_name = lon_entry.file_name().to_string_lossy().to_string();
+                        let lon: i32 = if let Some(e) = lon_name.strip_prefix('E') {
+                            e.parse().unwrap_or(i32::MAX)
+                        } else if let Some(w) = lon_name.strip_prefix('W') {
+                            -(w.parse::<i32>().unwrap_or(i32::MAX))
+                        } else { continue };
+                        if lon == i32::MAX { continue; }
+                        app_state.pending_dht_provide.push(metaverse_core::elevation::elevation_dht_key(lat, lon));
+                        elev_count += 1;
+                    }
+                }
+            }
+        }
+        if elev_count > 0 {
+            app_state.log(format!("📡 Queued DHT announcements for {} elevation tile(s)", elev_count));
+        }
+    }
     // Spawn region prefetch background task (server only)
     if !app_state.config.prefetch_regions.is_empty() {
         let regions = app_state.config.prefetch_regions.clone();

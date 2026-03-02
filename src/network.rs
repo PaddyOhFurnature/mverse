@@ -341,6 +341,10 @@ pub struct NetworkNode {
     /// Pending outbound tile requests, keyed by request ID.
     /// When the response arrives, the value (Sender) is used to deliver it.
     pending_tile_requests: HashMap<request_response::OutboundRequestId, crossbeam::channel::Sender<TileResponse>>,
+
+    /// Root directory for local tile cache. When set, inbound TileRequests are served
+    /// from disk before responding NotFound. Set via set_tile_cache_root().
+    tile_cache_root: Option<std::path::PathBuf>,
 }
 
 /// Returns true if this address is useful to advertise in DHT.
@@ -400,6 +404,7 @@ impl NetworkNode {
             relay_addrs: HashMap::new(),
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
+            tile_cache_root: None,
         })
     }
     
@@ -433,7 +438,14 @@ impl NetworkNode {
             relay_addrs: HashMap::new(),
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
+            tile_cache_root: None,
         })
+    }
+
+    /// Set the world data root directory so this node can serve tile requests from cache.
+    /// Call immediately after construction.
+    pub fn set_tile_cache_root(&mut self, dir: std::path::PathBuf) {
+        self.tile_cache_root = Some(dir);
     }
     
     /// Build the libp2p Swarm with all protocols configured
@@ -1197,14 +1209,19 @@ impl NetworkNode {
                 None
             }
 
-            // Tile request-response: inbound request — client doesn't serve tiles yet
+            // Tile request-response: inbound request — serve from local cache if available
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
                 request_response::Event::Message {
-                    message: request_response::Message::Request { channel, .. },
+                    message: request_response::Message::Request { request, channel, .. },
                     ..
                 }
             )) => {
-                let _ = self.swarm.behaviour_mut().tile_rr.send_response(channel, TileResponse::NotFound);
+                let response = if let Some(ref root) = self.tile_cache_root {
+                    serve_tile_locally(&request, root)
+                } else {
+                    TileResponse::NotFound
+                };
+                let _ = self.swarm.behaviour_mut().tile_rr.send_response(channel, response);
                 None
             }
 
@@ -1285,6 +1302,34 @@ impl NetworkNode {
     pub fn request_tile(&mut self, peer_id: PeerId, request: TileRequest, response_tx: crossbeam::channel::Sender<TileResponse>) {
         let id = self.swarm.behaviour_mut().tile_rr.send_request(&peer_id, request);
         self.pending_tile_requests.insert(id, response_tx);
+    }
+}
+
+/// Serve a tile from the local disk cache. Returns NotFound if not cached.
+fn serve_tile_locally(request: &TileRequest, world_data_dir: &std::path::Path) -> TileResponse {
+    match request {
+        TileRequest::OsmTile { s, w, n, e } => {
+            let cache = crate::osm::OsmDiskCache::new(&world_data_dir.join("osm"));
+            match cache.load(*s, *w, *n, *e) {
+                Some(data) => match bincode::serialize(&data) {
+                    Ok(bytes) => TileResponse::Found(bytes),
+                    Err(_) => TileResponse::NotFound,
+                },
+                None => TileResponse::NotFound,
+            }
+        }
+        TileRequest::ElevationTile { lat, lon } => {
+            let path = world_data_dir
+                .join("elevation_cache")
+                .join(format!("N{:02}", lat.unsigned_abs()))
+                .join(format!("E{:03}", lon.unsigned_abs()))
+                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+            match std::fs::read(&path) {
+                Ok(bytes) => TileResponse::Found(bytes),
+                Err(_) => TileResponse::NotFound,
+            }
+        }
+        TileRequest::TerrainChunk { .. } => TileResponse::NotFound,
     }
 }
 
