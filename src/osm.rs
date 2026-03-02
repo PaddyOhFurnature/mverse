@@ -195,6 +195,13 @@ fn wait_global_cooldown() {
     *last = Some(Instant::now());
 }
 
+/// Overpass API mirror endpoints — tried in order on failure.
+const OVERPASS_ENDPOINTS: &[&str] = &[
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+];
+
 /// Fetch features in a bounding box from Overpass API.
 /// Query is intentionally minimal — buildings and main roads only.
 /// Water / parks / amenities are skipped to keep each packet small.
@@ -232,16 +239,25 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64)
         .build()
         .map_err(|e| e.to_string())?;
 
-    let resp = client
-        .post("https://overpass-api.de/api/interpreter")
-        .body(query)
-        .send()
-        .map_err(|e| format!("Overpass request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Overpass HTTP {}", resp.status()));
+    let mut last_err = String::new();
+    for endpoint in OVERPASS_ENDPOINTS {
+        let result = client
+            .post(*endpoint)
+            .body(query.clone())
+            .send();
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.text().map_err(|e| e.to_string());
+            }
+            Ok(resp) => {
+                last_err = format!("Overpass {} HTTP {}", endpoint, resp.status());
+            }
+            Err(e) => {
+                last_err = format!("Overpass {} failed: {}", endpoint, e);
+            }
+        }
     }
-    resp.text().map_err(|e| e.to_string())
+    Err(last_err)
 }
 
 // ── JSON parser ───────────────────────────────────────────────────────────────
@@ -482,12 +498,30 @@ impl OsmDiskCache {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Compute a stable DHT announce key for an OSM tile bounding box.
+pub fn osm_dht_key(s: f64, w: f64, n: f64, e: f64) -> Vec<u8> {
+    let s = format!("osm:{:.4}:{:.4}:{:.4}:{:.4}", s, w, n, e);
+    sha2_stable_hash(s.as_bytes())
+}
+
+/// Stable non-cryptographic hash used for DHT keys (8 bytes).
+pub fn sha2_stable_hash(data: &[u8]) -> Vec<u8> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    data.hash(&mut h);
+    h.finish().to_le_bytes().to_vec()
+}
+
 /// Fetch OSM data for a bounding box. Checks disk cache first.
 /// `cache_dir` is typically `world_data/osm/`.
 ///
 /// Overpass API is only queried if the env var `METAVERSE_OVERPASS=1` is set.
 /// Default: return empty (use heuristics) if no local tile cache.
 /// This avoids blocking the game thread on 30s network timeouts.
+///
+/// If `METAVERSE_TILE_SERVER` is set (e.g. `http://myserver:8080`), the server's
+/// tile endpoint is tried first before falling back to Overpass.
 pub fn fetch_osm_for_bounds(
     south: f64, west: f64, north: f64, east: f64,
     cache_dir: &Path,
@@ -499,6 +533,31 @@ pub fn fetch_osm_for_bounds(
         return Ok(cached);
     }
 
+    // Try peer tile server first (set METAVERSE_TILE_SERVER=http://host:port)
+    if let Ok(server_url) = std::env::var("METAVERSE_TILE_SERVER") {
+        if !server_url.is_empty() {
+            let url = format!(
+                "{}/api/v1/tiles/osm?s={:.4}&w={:.4}&n={:.4}&e={:.4}",
+                server_url, south, west, north, east
+            );
+            if let Ok(client) = reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+            {
+                if let Ok(resp) = client.get(&url).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            if let Ok(data) = bincode::deserialize::<OsmData>(&bytes) {
+                                cache.save(south, west, north, east, &data);
+                                return Ok(data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // No local tile — only hit Overpass if explicitly enabled.
     // Without this guard the game thread blocks 30s per chunk on a timeout.
     if std::env::var("METAVERSE_OVERPASS").as_deref() != Ok("1") {
@@ -507,6 +566,30 @@ pub fn fetch_osm_for_bounds(
 
     // Overpass path (opt-in only)
     println!("🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
+    let json = query_overpass(south, west, north, east)?;
+    let data = parse_overpass_json(&json)?;
+    if !data.is_empty() {
+        println!("   b:{} r:{} a:{}", data.buildings.len(), data.roads.len(), data.amenities.len());
+    }
+    cache.save(south, west, north, east, &data);
+    Ok(data)
+}
+
+/// Server-side OSM fetch: always tries Overpass (with mirror fallback), no env var gate.
+/// Used by the server tile HTTP endpoint to populate the tile cache on demand.
+pub fn fetch_osm_for_bounds_server(
+    south: f64, west: f64, north: f64, east: f64,
+    cache_dir: &Path,
+) -> Result<OsmData, String> {
+    let cache = OsmDiskCache::new(cache_dir);
+
+    // Cache hit — instant
+    if let Some(cached) = cache.load(south, west, north, east) {
+        return Ok(cached);
+    }
+
+    // Always fetch from Overpass (with mirror fallback) — no env var gate
+    println!("🗺️  [server] Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
     let json = query_overpass(south, west, north, east)?;
     let data = parse_overpass_json(&json)?;
     if !data.is_empty() {

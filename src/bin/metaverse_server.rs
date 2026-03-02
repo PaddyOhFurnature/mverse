@@ -54,6 +54,7 @@ use axum::{
     Json, Router,
 };
 use metaverse_core::web_ui::{NodeStatus, PeerSummary, DASHBOARD_HTML};
+use metaverse_core::node_config::{NodeConfig as ServerConfig, PrefetchRegion};
 use rusqlite::{params, Connection};
 use sha2::{Sha256, Digest};
 use rand::RngCore;
@@ -61,170 +62,7 @@ use rand::RngCore;
 use libc;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct ServerConfig {
-    // ── Network / Relay ──────────────────────────────────────────────────
-    /// TCP relay port
-    pub port: u16,
-    /// WebSocket port (default port + 5000)
-    pub ws_port: Option<u16>,
-    /// Advertised external address (e.g. /ip4/1.2.3.4/tcp/4001)
-    pub external_addr: Option<String>,
-    /// Human-readable name shown in TUI header and DHT
-    pub node_name: Option<String>,
-    /// Node type advertised to peers ("server" or "relay")
-    pub node_type: String,
-    /// Priority score advertised in DHT (higher = preferred by clients)
-    pub priority_score: u32,
-
-    // ── Relay limits ─────────────────────────────────────────────────────
-    pub max_circuits: usize,
-    pub max_circuit_duration_secs: u64,
-    pub max_circuit_bytes: u64,
-
-    // ── Peer access control ──────────────────────────────────────────────
-    /// Known peer relay multiaddrs to dial at startup
-    pub peers: Vec<String>,
-    /// Blocked peer IDs (rejected at connection)
-    pub blacklist: Vec<String>,
-    /// If non-empty, ONLY these peer IDs may connect
-    pub whitelist: Vec<String>,
-    /// Relay slot priority for these peer IDs
-    pub priority_peers: Vec<String>,
-
-    // ── Bandwidth / load limits ──────────────────────────────────────────
-    /// Maximum bandwidth in MB/s (0 = unlimited)
-    pub max_bandwidth_mbps: u32,
-    /// Maximum simultaneous peers (0 = unlimited)
-    pub max_peers: u32,
-    /// Drop connections with RTT above this ms (0 = no limit)
-    pub max_ping_ms: u32,
-    /// Retry attempts for failed dials
-    pub max_retries: u32,
-    /// Whether this server is expected to be online 24/7 (advertised in NodeCapabilities).
-    pub always_on: bool,
-
-    // ── Load shedding ────────────────────────────────────────────────────
-    /// Drop Low-priority relay circuits when CPU exceeds this % (0 = disabled)
-    pub cpu_shed_threshold_pct: u8,
-    /// Stop loading new chunks when RAM exceeds this % (0 = disabled)
-    pub ram_shed_threshold_pct: u8,
-
-    // ── World state ──────────────────────────────────────────────────────
-    pub world_enabled: bool,
-    pub world_dir: Option<String>,
-    /// Maximum world data folder size in GB (0 = unlimited)
-    pub max_world_data_gb: u32,
-    pub max_loaded_chunks: usize,
-    pub chunk_load_radius_m: f64,
-    pub chunk_unload_radius_m: f64,
-    pub world_save_interval_secs: u64,
-
-    // ── Identity ─────────────────────────────────────────────────────────
-    pub identity_file: Option<String>,
-    pub temp_identity: bool,
-
-    // ── UI ───────────────────────────────────────────────────────────────
-    /// Force plain-log (auto-detected from terminal)
-    pub headless: bool,
-    pub ui: UiConfig,
-
-    // ── Web dashboard ────────────────────────────────────────────────────
-    pub web_enabled: bool,
-    pub web_port: u16,
-    pub web_bind: String,
-    pub web_auth: bool,
-    pub web_username: String,
-    pub web_password: String,
-
-    // ── Logging ──────────────────────────────────────────────────────────
-    pub log_level: String,
-
-    // ── Server sync ──────────────────────────────────────────────────────
-    /// HTTP base URLs of peer servers to sync key records with.
-    /// Format: "http://192.168.1.100:8080" (no trailing slash).
-    /// On startup and every 10 minutes the server will query
-    /// `GET /api/v1/sync/keys?since=<last_sync_ms>&limit=1000` on each.
-    pub known_servers: Vec<String>,
-
-    // ── Auto-update ──────────────────────────────────────────────────────────
-    /// GitHub repo to check for binary updates, e.g. `"PaddyOhFurnature/mverse"`.
-    /// Uses the GitHub Releases API — asset names must match the binary filename.
-    /// Set to empty string to disable auto-update.
-    #[serde(default = "default_github_repo")]
-    pub github_repo: String,
-    /// How often to check for updates, in seconds. Default: 21600 (6 hours).
-    #[serde(default = "default_update_interval")]
-    pub update_check_interval_secs: u64,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            port: 4001,
-            ws_port: None,
-            external_addr: None,
-            node_name: None,
-            node_type: "server".to_string(),
-            priority_score: 100,
-            max_circuits: 100,
-            max_circuit_duration_secs: 3600,
-            max_circuit_bytes: 1_073_741_824,
-            peers: vec![],
-            blacklist: vec![],
-            whitelist: vec![],
-            priority_peers: vec![],
-            max_bandwidth_mbps: 0,
-            max_peers: 0,
-            max_ping_ms: 0,
-            max_retries: 5,
-            always_on: true,
-            cpu_shed_threshold_pct: 90,
-            ram_shed_threshold_pct: 85,
-            world_enabled: true,
-            world_dir: None,
-            max_world_data_gb: 10,
-            max_loaded_chunks: 1000,
-            chunk_load_radius_m: 500.0,
-            chunk_unload_radius_m: 600.0,
-            world_save_interval_secs: 300,
-            identity_file: None,
-            temp_identity: false,
-            headless: false,
-            ui: UiConfig::default(),
-            web_enabled: true,
-            web_port: 8080,
-            web_bind: "0.0.0.0".to_string(),
-            web_auth: false,
-            web_username: "admin".to_string(),
-            web_password: String::new(),
-            log_level: "info".to_string(),
-            known_servers: vec![],
-            github_repo: default_github_repo(),
-            update_check_interval_secs: default_update_interval(),
-        }
-    }
-}
-
-fn default_update_interval() -> u64 { 21600 } // 6 hours
-fn default_github_repo() -> String { "PaddyOhFurnature/mverse".to_string() }
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct UiConfig {
-    pub show_cpu: bool,
-    pub show_ram: bool,
-    pub refresh_ms: u64,
-    pub max_log_entries: usize,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self { show_cpu: true, show_ram: true, refresh_ms: 500, max_log_entries: 1000 }
-    }
-}
+// ServerConfig is now NodeConfig from metaverse_core::node_config (type alias above).
 
 fn config_paths() -> [PathBuf; 1] {
     [PathBuf::from("server.json")]
@@ -241,13 +79,13 @@ fn load_config() -> ServerConfig {
             }
         }
     }
-    ServerConfig::default()
+    metaverse_core::node_config::NodeConfig::server_defaults()
 }
 
 fn write_default_config_if_missing() {
     let path = PathBuf::from("server.json");
     if !path.exists() {
-        if let Ok(json) = serde_json::to_string_pretty(&ServerConfig::default()) {
+        if let Ok(json) = serde_json::to_string_pretty(&metaverse_core::node_config::NodeConfig::server_defaults()) {
             let _ = std::fs::write(&path, json);
             eprintln!("📝 Created default config at {}", path.display());
         }
@@ -415,6 +253,9 @@ pub struct SharedState {
     /// Set when an auto-update is available; cleared after applying the update.
     #[serde(skip)]
     pub update_available: Option<String>,
+    /// World data directory (for tile cache access from web handlers).
+    #[serde(skip)]
+    pub world_dir: String,
 }
 
 impl Default for SharedState {
@@ -437,6 +278,7 @@ impl Default for SharedState {
             swarm_tx: None,
             config_reload_tx: None,
             update_available: None,
+            world_dir: "world_data".to_string(),
         }
     }
 }
@@ -2869,6 +2711,113 @@ async fn sync_content_from_servers(state: &AppState) {
 
 type WebState = Arc<RwLock<SharedState>>;
 
+// ── Tile distribution endpoints ───────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct OsmTileQuery { s: f64, w: f64, n: f64, e: f64 }
+
+async fn api_v1_tile_osm(
+    State(st): State<WebState>,
+    axum::extract::Query(q): axum::extract::Query<OsmTileQuery>,
+) -> impl IntoResponse {
+    let world_dir = st.read().unwrap().world_dir.clone();
+    let cache_dir = std::path::PathBuf::from(&world_dir).join("osm");
+
+    // Try disk cache first
+    let cache = metaverse_core::osm::OsmDiskCache::new(&cache_dir);
+    if let Some(data) = cache.load(q.s, q.w, q.n, q.e) {
+        if let Ok(bytes) = bincode::serialize(&data) {
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                bytes,
+            ).into_response();
+        }
+    }
+
+    // Cache miss — fetch from Overpass (with mirror fallback)
+    let result = tokio::task::spawn_blocking(move || {
+        metaverse_core::osm::fetch_osm_for_bounds_server(q.s, q.w, q.n, q.e, &cache_dir)
+    }).await;
+
+    match result {
+        Ok(Ok(data)) => {
+            if let Ok(bytes) = bincode::serialize(&data) {
+                (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                ).into_response()
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ElevationTileQuery { lat: i32, lon: i32 }
+
+async fn api_v1_tile_elevation(
+    State(st): State<WebState>,
+    axum::extract::Query(q): axum::extract::Query<ElevationTileQuery>,
+) -> impl IntoResponse {
+    let world_dir = st.read().unwrap().world_dir.clone();
+    let cache_dir = std::path::PathBuf::from(&world_dir).join("elevation_cache");
+
+    let tile_path = cache_dir
+        .join(format!("N{:02}", q.lat.unsigned_abs()))
+        .join(format!("E{:03}", q.lon.unsigned_abs()))
+        .join(format!("srtm_n{:02}_e{:03}.tif", q.lat.unsigned_abs(), q.lon.unsigned_abs()));
+
+    if tile_path.exists() {
+        if let Ok(bytes) = tokio::fs::read(&tile_path).await {
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                bytes,
+            ).into_response();
+        }
+    }
+
+    // Fetch from OpenTopography
+    let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+
+    let result = tokio::task::spawn_blocking(move || {
+        let src = metaverse_core::elevation::OpenTopographySource::new(api_key, cache_dir);
+        src.fetch_tile_bytes(q.lat, q.lon)
+    }).await;
+
+    match result {
+        Ok(Ok(bytes)) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        ).into_response(),
+        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
+async fn api_v1_asset(
+    axum::extract::Path(path): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let safe_path = path.replace("..", "");
+    let full_path = std::path::PathBuf::from("assets").join(&safe_path);
+    match tokio::fs::read(&full_path).await {
+        Ok(bytes) => {
+            let mime = if safe_path.ends_with(".glb") { "model/gltf-binary" }
+                       else if safe_path.ends_with(".png") { "image/png" }
+                       else { "application/octet-stream" };
+            (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn web_root() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
@@ -3526,6 +3475,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (config_reload_tx, config_reload_rx) = tokio::sync::mpsc::channel::<ServerConfig>(8);
 
     // Shared state for web server
+    let world_dir_str = config.world_dir.clone().unwrap_or_else(|| "world_data".to_string());
     let shared = Arc::new(RwLock::new(SharedState {
         local_peer_id: local_peer_id.to_string(),
         public_ip: public_ip.clone(),
@@ -3538,6 +3488,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gossip_tx: Some(gossip_tx),
         swarm_tx: Some(swarm_web_tx),
         config_reload_tx: Some(config_reload_tx),
+        world_dir: world_dir_str,
         ..Default::default()
     }));
 
@@ -3586,6 +3537,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/world/objects",
                     get(api_v1_world_objects_get).post(api_v1_world_objects_post))
                 .route("/api/v1/world/objects/:id", axum::routing::delete(api_v1_world_objects_delete))
+                // ── Tile distribution endpoints ────────────────────────────
+                .route("/api/v1/tiles/osm",       get(api_v1_tile_osm))
+                .route("/api/v1/tiles/elevation", get(api_v1_tile_elevation))
+                .route("/api/v1/assets/*path",    get(api_v1_asset))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);
@@ -3617,6 +3572,47 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if count > 0 {
             app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
         }
+    }
+    // Queue DHT provider announcements for all cached OSM tiles
+    {
+        let osm_dir = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        ).join("osm");
+        let mut tile_count = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&osm_dir) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
+                    // Filename: osm_S_W_N_E.bin — parse the 4 floats
+                    if name.starts_with("osm_") && name.ends_with(".bin") {
+                        let parts: Vec<&str> = name[4..name.len()-4].split('_').collect();
+                        if parts.len() == 4 {
+                            if let (Ok(s), Ok(w), Ok(n), Ok(e)) = (
+                                parts[0].parse::<f64>(), parts[1].parse::<f64>(),
+                                parts[2].parse::<f64>(), parts[3].parse::<f64>(),
+                            ) {
+                                app_state.pending_dht_provide.push(metaverse_core::osm::osm_dht_key(s, w, n, e));
+                                tile_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if tile_count > 0 {
+            app_state.log(format!("📡 Queued DHT announcements for {} OSM tile(s)", tile_count));
+        }
+    }
+    // Spawn region prefetch background task (server only)
+    if !app_state.config.prefetch_regions.is_empty() {
+        let regions = app_state.config.prefetch_regions.clone();
+        let world_dir_pb = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        let prefetch_swarm_tx = shared.read().unwrap().swarm_tx.clone();
+        tokio::spawn(async move {
+            prefetch_regions_task(regions, world_dir_pb, prefetch_swarm_tx).await;
+        });
+        app_state.log(format!("🗺️  Region prefetch: {} region(s) scheduled", app_state.config.prefetch_regions.len()));
     }
     // Publish NodeCapabilities to DHT immediately (will re-announce every 30 min)
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
@@ -3957,4 +3953,44 @@ async fn run_tui(
     }
     eprintln!("👋 Metaverse server stopped. Log: {}", log_path);
     result
+}
+
+// ─── Region prefetch task ─────────────────────────────────────────────────────
+
+async fn prefetch_regions_task(
+    regions: Vec<PrefetchRegion>,
+    world_dir: std::path::PathBuf,
+    swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+) {
+    for region in &regions {
+        let tile_size = 0.01_f64;
+        let radius_deg = region.radius_km / 111.0;
+        let lat_min = ((region.lat - radius_deg) / tile_size).floor() * tile_size;
+        let lat_max = ((region.lat + radius_deg) / tile_size).ceil() * tile_size;
+        let lon_min = ((region.lon - radius_deg) / tile_size).floor() * tile_size;
+        let lon_max = ((region.lon + radius_deg) / tile_size).ceil() * tile_size;
+
+        let osm_dir = world_dir.join("osm");
+        let mut lat = lat_min;
+        while lat < lat_max {
+            let mut lon = lon_min;
+            while lon < lon_max {
+                let (s, w, n, e) = (lat, lon, lat + tile_size, lon + tile_size);
+                let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
+                if cache.load(s, w, n, e).is_none() {
+                    let osm_dir2 = osm_dir.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        metaverse_core::osm::fetch_osm_for_bounds_server(s, w, n, e, &osm_dir2)
+                    }).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                }
+                if let Some(ref tx) = swarm_tx {
+                    let key = metaverse_core::osm::osm_dht_key(s, w, n, e);
+                    let _ = tx.send(SwarmAction::StartProviding(key)).await;
+                }
+                lon += tile_size;
+            }
+            lat += tile_size;
+        }
+    }
 }

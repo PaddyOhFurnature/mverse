@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
     Frame, Terminal,
 };
-use serde::{Deserialize, Serialize};
+use serde_json;
 use sysinfo::System;
 use std::{
     collections::{HashMap, VecDeque},
@@ -42,78 +42,9 @@ use std::{
 use clap::Parser;
 
 use metaverse_core::web_ui::{NodeStatus, PeerSummary, SharedStatus, build_base_router};
+use metaverse_core::node_config::{NodeConfig as RelayConfig};
 
-// ─── Config ──────────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct RelayConfig {
-    pub port: u16,
-    pub external_addr: Option<String>,
-    pub max_circuits: usize,
-    pub max_circuit_duration: u64,
-    pub max_circuit_bytes: u64,
-    pub peers: Vec<String>,
-    pub blacklist: Vec<String>,
-    pub whitelist: Vec<String>,
-    pub priority_peers: Vec<String>,
-    pub node_name: Option<String>,
-    pub headless: bool,
-    pub always_on: bool,
-    pub web_port: u16,
-    pub no_web: bool,
-    pub ui: UiConfig,
-    /// GitHub repo to check for binary updates, e.g. `"PaddyOhFurnature/mverse"`.
-    /// Set to empty string to disable auto-update.
-    #[serde(default = "default_github_repo")]
-    pub github_repo: String,
-    /// How often to check for updates, in seconds. Default: 21600 (6 hours).
-    #[serde(default = "default_update_interval")]
-    pub update_check_interval_secs: u64,
-}
-
-impl Default for RelayConfig {
-    fn default() -> Self {
-        Self {
-            port: 4001,
-            external_addr: None,
-            max_circuits: 100,
-            max_circuit_duration: 3600,
-            max_circuit_bytes: 1_073_741_824,
-            peers: vec![],
-            blacklist: vec![],
-            whitelist: vec![],
-            priority_peers: vec![],
-            node_name: None,
-            headless: false,
-            always_on: true,
-            web_port: 8081,
-            no_web: false,
-            ui: UiConfig::default(),
-            github_repo: default_github_repo(),
-            update_check_interval_secs: 21600,
-        }
-    }
-}
-
-fn default_update_interval() -> u64 { 21600 }
-fn default_github_repo() -> String { "PaddyOhFurnature/mverse".to_string() }
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
-pub struct UiConfig {
-    pub show_cpu: bool,
-    pub show_ram: bool,
-    pub show_dht: bool,
-    pub refresh_ms: u64,
-    pub max_log_entries: usize,
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self { show_cpu: true, show_ram: true, show_dht: true, refresh_ms: 500, max_log_entries: 500 }
-    }
-}
+// ─── Config type alias ────────────────────────────────────────────────────────
 
 fn load_config() -> RelayConfig {
     let path = std::path::PathBuf::from("relay.json");
@@ -124,13 +55,13 @@ fn load_config() -> RelayConfig {
             }
         }
     }
-    RelayConfig::default()
+    metaverse_core::node_config::NodeConfig::relay_defaults()
 }
 
 fn write_default_config_if_missing() {
     let path = std::path::PathBuf::from("relay.json");
     if !path.exists() {
-        if let Ok(json) = serde_json::to_string_pretty(&RelayConfig::default()) {
+        if let Ok(json) = serde_json::to_string_pretty(&metaverse_core::node_config::NodeConfig::relay_defaults()) {
             std::fs::write(&path, json).ok();
         }
     }
@@ -179,11 +110,11 @@ fn apply_cli_overrides(config: &mut RelayConfig, args: &Args) {
     if let Some(v) = args.port                 { config.port = v; }
     if let Some(ref v) = args.external_addr    { config.external_addr = Some(v.clone()); }
     if let Some(v) = args.max_circuits         { config.max_circuits = v; }
-    if let Some(v) = args.max_circuit_duration { config.max_circuit_duration = v; }
+    if let Some(v) = args.max_circuit_duration { config.max_circuit_duration_secs = v; }
     if let Some(v) = args.max_circuit_bytes    { config.max_circuit_bytes = v; }
     if !args.peer.is_empty()                   { config.peers.extend(args.peer.iter().cloned()); }
     if args.headless                            { config.headless = true; }
-    if args.no_web                             { config.no_web = true; }
+    if args.no_web                             { config.web_enabled = false; }
     if let Some(v) = args.web_port             { config.web_port = v; }
     if let Some(ref v) = args.name             { config.node_name = Some(v.clone()); }
 }
@@ -685,7 +616,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Build swarm
     let max_circuits = config.max_circuits;
-    let max_circuit_duration = Duration::from_secs(config.max_circuit_duration);
+    let max_circuit_duration = Duration::from_secs(config.max_circuit_duration_secs);
     let max_circuit_bytes = config.max_circuit_bytes;
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
@@ -763,7 +694,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ..NodeStatus::default()
     }));
 
-    if !config.no_web {
+    if config.web_enabled {
         let ws = std::sync::Arc::clone(&web_status);
         let web_port = config.web_port;
         let config_val = serde_json::to_value(&config).unwrap_or_default();

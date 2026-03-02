@@ -44,3 +44,4 @@ pub mod autoupdate;     // Binary auto-update: check manifest, verify, exec-rest
 pub mod worldnet;       // WORLDNET OS — distributed OS layer, address system, pixel renderer
 pub mod osm;            // OpenStreetMap data loading from local PBF
 pub mod world_inference; // Infer placed objects from OSM data + elevation
+pub mod node_config;    // Unified node configuration — shared by client, server, and relay
