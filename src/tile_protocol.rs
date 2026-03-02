@@ -4,7 +4,12 @@
 //! DHT get_providers() tells you who has a tile; this protocol fetches it.
 //! Works over any libp2p transport — TCP, QUIC, WebSocket, or packet radio.
 
+use async_trait::async_trait;
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use libp2p::request_response::Codec;
+use libp2p::StreamProtocol;
 use serde::{Deserialize, Serialize};
+use std::io;
 
 /// A request for tile data from a peer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +25,7 @@ pub enum TileRequest {
 /// Response to a tile request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TileResponse {
-    /// Tile found — raw bincode/GeoTIFF bytes
+    /// Tile found — raw bytes (bincode for OSM/terrain, raw GeoTIFF for elevation)
     Found(Vec<u8>),
     /// Peer does not have this tile
     NotFound,
@@ -29,51 +34,68 @@ pub enum TileResponse {
 /// Protocol identifier string.
 pub const TILE_PROTOCOL: &str = "/metaverse/tiles/1.0.0";
 
-/// Codec for the tile request-response protocol (serde_json framing).
-#[derive(Clone, Default)]
+/// Length-prefixed bincode codec for the tile protocol.
+///
+/// Uses a 4-byte big-endian length prefix followed by bincode bytes.
+/// Binary only — no JSON (project rule: all cache/database files are bincode).
+#[derive(Debug, Clone, Default)]
 pub struct TileCodec;
 
-#[async_trait::async_trait]
-impl libp2p::request_response::Codec for TileCodec {
-    type Protocol = libp2p::StreamProtocol;
-    type Request  = TileRequest;
+#[async_trait]
+impl Codec for TileCodec {
+    type Protocol = StreamProtocol;
+    type Request = TileRequest;
     type Response = TileResponse;
 
-    async fn read_request<T>(&mut self, _protocol: &Self::Protocol, io: &mut T)
-    -> std::io::Result<Self::Request>
-    where T: futures::AsyncRead + Unpin + Send {
-        use futures::AsyncReadExt;
-        let mut buf = Vec::new();
-        io.take(1_048_576).read_to_end(&mut buf).await?;
-        serde_json::from_slice(&buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    async fn read_request<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > 1 << 20 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "tile request too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    async fn read_response<T>(&mut self, _protocol: &Self::Protocol, io: &mut T)
-    -> std::io::Result<Self::Response>
-    where T: futures::AsyncRead + Unpin + Send {
-        use futures::AsyncReadExt;
-        let mut buf = Vec::new();
-        io.take(16_777_216).read_to_end(&mut buf).await?;
-        serde_json::from_slice(&buf)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Response>
+    where
+        T: AsyncRead + Unpin + Send,
+    {
+        let mut len_buf = [0u8; 4];
+        io.read_exact(&mut len_buf).await?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len > 64 << 20 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "tile response too large"));
+        }
+        let mut buf = vec![0u8; len];
+        io.read_exact(&mut buf).await?;
+        bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    async fn write_request<T>(&mut self, _protocol: &Self::Protocol, io: &mut T, req: Self::Request)
-    -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
-        use futures::AsyncWriteExt;
-        let data = serde_json::to_vec(&req)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        io.write_all(&data).await
+    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = bincode::serialize(&req)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+        io.write_all(&bytes).await?;
+        io.close().await
     }
 
-    async fn write_response<T>(&mut self, _protocol: &Self::Protocol, io: &mut T, resp: Self::Response)
-    -> std::io::Result<()>
-    where T: futures::AsyncWrite + Unpin + Send {
-        use futures::AsyncWriteExt;
-        let data = serde_json::to_vec(&resp)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        io.write_all(&data).await
+    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, resp: Self::Response) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let bytes = bincode::serialize(&resp)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        io.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+        io.write_all(&bytes).await?;
+        io.close().await
     }
 }

@@ -1,0 +1,4 @@
+[toolchain]
+# Pin to 1.88.0 — rustc 1.93.1 ships LLVM 21.1 which has a codegen SIGSEGV
+# triggered by async-trait in large crates. 1.88.0 (LLVM 19) does not.
+channel = "1.88.0"
