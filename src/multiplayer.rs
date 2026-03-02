@@ -100,7 +100,13 @@ impl TileFetcher {
             _ => None,
         }
     }
-}
+
+    /// Announce to the DHT that this node now has an OSM tile cached.
+    /// Non-blocking — fire and forget.
+    pub fn announce_osm(&self, s: f64, w: f64, n: f64, e: f64) {
+        let key = crate::osm::osm_dht_key(s, w, n, e);
+        let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+    }
 
 /// Result type for multiplayer operations
 pub type Result<T> = std::result::Result<T, MultiplayerError>;
@@ -1602,6 +1608,31 @@ impl MultiplayerSystem {
         }
     }
 
+    /// Announce that this node has an OSM tile cached — other peers can find and fetch it.
+    pub fn announce_osm_tile(&self, s: f64, w: f64, n: f64, e: f64) {
+        let key = crate::osm::osm_dht_key(s, w, n, e);
+        let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+    }
+
+    /// Scan a local OSM cache directory and announce every tile already on disk.
+    /// Call once on startup so peers can find tiles this node caches.
+    pub fn announce_cached_osm_tiles(&self, cache_dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(cache_dir) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            // filenames: osm_S_W_N_E.bin  e.g. osm_-27.4600_153.0300_-27.4500_153.0400.bin
+            if !name.starts_with("osm_") || !name.ends_with(".bin") { continue; }
+            let inner = &name[4..name.len()-4]; // strip "osm_" prefix and ".bin"
+            let parts: Vec<&str> = inner.split('_').collect();
+            // parts may be like ["", "27.4600", "153.0300", "", "27.4500", "153.0400"]
+            // because negative numbers produce extra '_' splits; re-join carefully
+            if let Some((s, w, n, e)) = parse_osm_filename_coords(inner) {
+                self.announce_osm_tile(s, w, n, e);
+            }
+        }
+    }
+
     // ── Meshsite content ──────────────────────────────────────────────────────
 
     /// Publish a signed `ContentItem` to the gossipsub mesh.
@@ -1948,6 +1979,34 @@ fn peer_id_to_token(peer_id: &PeerId) -> u16 {
     }
     let token = ((h ^ (h >> 16)) as u16).max(1); // never return 0
     token
+}
+
+/// Parse `s, w, n, e` from the inner part of an OSM cache filename.
+/// Input: the part between "osm_" and ".bin", e.g. "-27.4600_153.0300_-27.4500_153.0400".
+/// Returns None if parsing fails.
+fn parse_osm_filename_coords(inner: &str) -> Option<(f64, f64, f64, f64)> {
+    // The format is S_W_N_E where each value may start with '-'.
+    // We split on '_' but negative values mean the first char after a separator is '-'.
+    // Strategy: find the four numbers by splitting on '_' while allowing '-' after '_'.
+    let mut nums = Vec::with_capacity(4);
+    let mut current = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '_' {
+            if let Ok(v) = current.parse::<f64>() { nums.push(v); }
+            current.clear();
+            // If next char is '-', consume it as part of the next number
+            if chars.peek() == Some(&'-') {
+                current.push(chars.next().unwrap());
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        if let Ok(v) = current.parse::<f64>() { nums.push(v); }
+    }
+    if nums.len() == 4 { Some((nums[0], nums[1], nums[2], nums[3])) } else { None }
 }
 
 /// Background network thread runner

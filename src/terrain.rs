@@ -283,6 +283,8 @@ impl TerrainGenerator {
                         if let Ok(data) = bincode::deserialize::<crate::osm::OsmData>(&bytes) {
                             let cache = crate::osm::OsmDiskCache::new(dir);
                             cache.save(s, w, s + tile_size, w + tile_size, &data);
+                            // Announce to DHT — we now have this tile cached
+                            fetcher.announce_osm(s, w, s + tile_size, w + tile_size);
                             osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
                         }
                     }

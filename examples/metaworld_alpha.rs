@@ -1246,6 +1246,8 @@ fn main() {
     }
     // Advertise this client's capabilities to the DHT (0 = no storage contribution by default)
     multiplayer.publish_node_capabilities(0);
+    // Announce any OSM tiles already cached locally — other peers can find and fetch from us
+    multiplayer.announce_cached_osm_tiles(&data_dir.join("osm"));
     
     // World data directory - single shared location
     let world_dir = std::path::PathBuf::from("world_data");
