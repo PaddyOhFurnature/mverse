@@ -155,6 +155,12 @@ pub struct OsmData {
     pub buildings: Vec<OsmBuilding>,
     pub roads: Vec<OsmRoad>,
     pub water: Vec<OsmWater>,
+    /// Open (non-closed) waterway centrelines — river/canal/etc. ways that are
+    /// mapped as lines rather than area polygons.  Used as a fallback water
+    /// detector when no polygon covers a column: a column within
+    /// `WATERWAY_HALF_WIDTH_DEG` of any centreline segment is treated as water.
+    #[serde(default)]
+    pub waterway_lines: Vec<Vec<GPS>>,
     pub parks: Vec<OsmPark>,
     pub amenities: Vec<OsmAmenity>,
 }
@@ -164,6 +170,7 @@ impl OsmData {
         self.buildings.is_empty()
             && self.roads.is_empty()
             && self.water.is_empty()
+            && self.waterway_lines.is_empty()
             && self.parks.is_empty()
             && self.amenities.is_empty()
     }
@@ -196,16 +203,27 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64)
 {
     wait_global_cooldown();
 
+    // Water queries use an expanded bbox (buf=0.005°) so large river/bay polygons whose
+    // member-way nodes lie just outside the strict tile boundary are still captured.
+    let buf = 0.005_f64;
+    let ws = south - buf;
+    let ww = west - buf;
+    let wn = north + buf;
+    let we = east + buf;
     let query = format!(
         "[out:json][timeout:25];\n(\
           way[\"building\"]({s},{w},{n},{e});\
           way[\"highway\"~\"^(motorway|trunk|primary|secondary|tertiary|residential|service|living_street|unclassified)$\"]({s},{w},{n},{e});\
           node[\"amenity\"~\"^(bench|waste_basket|street_lamp|traffic_signals|post_box)$\"]({s},{w},{n},{e});\
-          way[\"natural\"=\"water\"]({s},{w},{n},{e});\
-          way[\"waterway\"~\"^(river|canal|reservoir|dock|riverbank)$\"]({s},{w},{n},{e});\
-          relation[\"type\"=\"multipolygon\"][\"natural\"=\"water\"]({s},{w},{n},{e});\
+          way[\"natural\"=\"water\"]({ws},{ww},{wn},{we});\
+          way[\"natural\"=\"riverbank\"]({ws},{ww},{wn},{we});\
+          way[\"waterway\"~\"^(river|canal|reservoir|dock|riverbank)$\"]({ws},{ww},{wn},{we});\
+          relation[\"type\"=\"multipolygon\"][\"natural\"=\"water\"]({ws},{ww},{wn},{we});\
+          relation[\"type\"=\"multipolygon\"][\"waterway\"=\"river\"]({ws},{ww},{wn},{we});\
+          relation[\"type\"=\"multipolygon\"][\"natural\"=\"riverbank\"]({ws},{ww},{wn},{we});\
         );\nout body;\n>;\nout skel qt;",
         s = south, w = west, n = north, e = east,
+        ws = ws, ww = ww, wn = wn, we = we,
     );
 
     let client = reqwest::blocking::Client::builder()
@@ -317,18 +335,29 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                             .unwrap_or(0),
                     });
                 } else if tags["natural"].as_str() == Some("water")
+                    || tags["natural"].as_str() == Some("riverbank")
                     || tags["waterway"].as_str().is_some()
                 {
-                    data.water.push(OsmWater {
-                        osm_id: id,
-                        polygon: nodes,
-                        holes: vec![],
-                        name: tags["name"].as_str().map(|s| s.to_string()),
-                        water_type: tags["water"].as_str()
-                            .or(tags["waterway"].as_str())
-                            .unwrap_or("water")
-                            .to_string(),
-                    });
+                    // Closed way → area polygon; open way → centreline
+                    let is_closed = nodes.len() >= 3
+                        && nodes.first().map(|p| (p.lat, p.lon))
+                            == nodes.last().map(|p| (p.lat, p.lon));
+                    if is_closed || tags["natural"].as_str().is_some() {
+                        data.water.push(OsmWater {
+                            osm_id: id,
+                            polygon: nodes,
+                            holes: vec![],
+                            name: tags["name"].as_str().map(|s| s.to_string()),
+                            water_type: tags["water"].as_str()
+                                .or(tags["waterway"].as_str())
+                                .or(tags["natural"].as_str())
+                                .unwrap_or("water")
+                                .to_string(),
+                        });
+                    } else {
+                        // Open waterway centreline — kept as a buffer fallback
+                        data.waterway_lines.push(nodes);
+                    }
                 } else if tags["leisure"].as_str() == Some("park") {
                     data.parks.push(OsmPark {
                         osm_id: id,
@@ -415,7 +444,7 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-const OSM_CACHE_VERSION: u32 = 2;
+const OSM_CACHE_VERSION: u32 = 5;
 
 /// Cache OSM tile data on disk in binary (bincode) format.
 /// Key is derived from the bounding box rounded to 4 decimal places.
@@ -495,6 +524,14 @@ pub fn fetch_osm_for_bounds(
 /// the public API and causes 504s. Instead we snap to a 0.01° tile (~1km²)
 /// that covers ~25 chunks, fetch and cache that once, then clip to the
 /// specific chunk bounds. One network request covers a whole neighbourhood.
+///
+/// ## Cross-tile water polygon fix
+/// Large water polygons (rivers, bays) are stored only in the tile whose Overpass
+/// query captured them. A polygon stored in tile N can extend far into tile N+1.
+/// Chunks inside tile N+1 would miss the polygon entirely.
+/// Fix: after loading the primary tile, merge water polygons from the four
+/// neighbouring tiles (N/S/E/W). Buildings/roads/parks are NOT merged (they are
+/// duplicated across tiles already and the primary tile is sufficient).
 pub fn fetch_osm_for_chunk(
     chunk_lat_min: f64, chunk_lat_max: f64,
     chunk_lon_min: f64, chunk_lon_max: f64,
@@ -509,6 +546,13 @@ pub fn fetch_osm_for_chunk(
     let tile_n = tile_s + tile_size;
     let tile_e = tile_w + tile_size;
 
+    // Clip bounds (+ small margin) used for all filtering below
+    let margin = 0.0003;
+    let lat_min = chunk_lat_min - margin;
+    let lat_max = chunk_lat_max + margin;
+    let lon_min = chunk_lon_min - margin;
+    let lon_max = chunk_lon_max + margin;
+
     // Fetch the whole tile (instant if cached; empty if no local data)
     let tile = match fetch_osm_for_bounds(tile_s, tile_w, tile_n, tile_e, cache_dir) {
         Ok(data) => data,
@@ -519,13 +563,176 @@ pub fn fetch_osm_for_chunk(
         }
     };
 
-    // Clip tile features to this chunk's bounds (+ small margin)
-    let margin = 0.0003;
-    let lat_min = chunk_lat_min - margin;
-    let lat_max = chunk_lat_max + margin;
-    let lon_min = chunk_lon_min - margin;
-    let lon_max = chunk_lon_max + margin;
-    clip_osm_to_bounds(tile, lat_min, lat_max, lon_min, lon_max)
+    // Clip primary tile — buildings, roads, parks, amenities come only from here
+    let mut result = clip_osm_to_bounds(tile, lat_min, lat_max, lon_min, lon_max);
+
+    // Gather extra water polygons from the eight neighbouring tiles (cardinal + diagonal).
+    // Large river/bay polygons are stored in whichever tile captured them; they
+    // may extend far across tile boundaries so neighbouring tiles must be checked.
+    let neighbour_offsets: [(f64, f64); 8] = [
+        (-tile_size,  0.0),        // south
+        ( tile_size,  0.0),        // north
+        ( 0.0,       -tile_size),  // west
+        ( 0.0,        tile_size),  // east
+        (-tile_size, -tile_size),  // SW
+        (-tile_size,  tile_size),  // SE
+        ( tile_size, -tile_size),  // NW
+        ( tile_size,  tile_size),  // NE
+    ];
+    for (dlat, dlon) in neighbour_offsets {
+        let ns = tile_s + dlat;
+        let nw = tile_w + dlon;
+        let nn = ns + tile_size;
+        let ne = nw + tile_size;
+        if let Ok(nb_tile) = fetch_osm_for_bounds(ns, nw, nn, ne, cache_dir) {
+            let poly_intersects = |pts: &[crate::coordinates::GPS]| -> bool {
+                if pts.iter().any(|p| p.lat >= lat_min && p.lat <= lat_max
+                                  && p.lon >= lon_min && p.lon <= lon_max) {
+                    return true;
+                }
+                let p_lat_min = pts.iter().map(|p| p.lat).fold(f64::INFINITY, f64::min);
+                let p_lat_max = pts.iter().map(|p| p.lat).fold(f64::NEG_INFINITY, f64::max);
+                let p_lon_min = pts.iter().map(|p| p.lon).fold(f64::INFINITY, f64::min);
+                let p_lon_max = pts.iter().map(|p| p.lon).fold(f64::NEG_INFINITY, f64::max);
+                p_lat_min <= lat_max && p_lat_max >= lat_min
+                    && p_lon_min <= lon_max && p_lon_max >= lon_min
+            };
+            for w in nb_tile.water {
+                // Skip if already present (matched by osm_id)
+                if result.water.iter().any(|x| x.osm_id == w.osm_id) {
+                    continue;
+                }
+                if poly_intersects(&w.polygon) {
+                    result.water.push(w);
+                }
+            }
+            for line in nb_tile.waterway_lines {
+                if poly_intersects(&line) {
+                    result.waterway_lines.push(line);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// For chunks in the OSM data gap (no polygon water, has centreline), find the 4 "bracket"
+/// points that define the water corridor:
+///   ⟦ = 2 bank points where polygon coverage ENDS (upstream side)
+///   ⟧ = 2 bank points where polygon coverage BEGINS (downstream side)
+/// Returns a 4-point synthetic bridge polygon for PIP water detection in gap chunks.
+///
+/// Algorithm:
+///   1. Compute dominant river direction from waterway centreline points.
+///   2. Walk tiles in both directions until a tile with polygon water is found (up to 6 tiles).
+///   3. At each end, collect polygon points and find the gap-facing boundary layer.
+///   4. From that layer pick left bank (max perp) and right bank (min perp).
+///   5. Return [left_up, right_up, right_down, left_down] as a convex bridge quad.
+pub fn find_gap_bridge_polygon(
+    chunk_lat_min: f64, chunk_lat_max: f64,
+    chunk_lon_min: f64, chunk_lon_max: f64,
+    waterway_lines: &[Vec<GPS>],
+    cache_dir: &std::path::Path,
+) -> Option<Vec<GPS>> {
+    if waterway_lines.is_empty() { return None; }
+
+    let tile_size = 0.01_f64;
+    let chunk_lat_centre = (chunk_lat_min + chunk_lat_max) * 0.5;
+    let chunk_lon_centre = (chunk_lon_min + chunk_lon_max) * 0.5;
+
+    // Find dominant river direction from all centreline points (first→last overall vector)
+    let all_pts: Vec<GPS> = waterway_lines.iter().flat_map(|l| l.iter().cloned()).collect();
+    if all_pts.len() < 2 { return None; }
+    let first = &all_pts[0];
+    let last  = &all_pts[all_pts.len() - 1];
+    let dlat = last.lat - first.lat;
+    let dlon = last.lon - first.lon;
+    let len  = (dlat * dlat + dlon * dlon).sqrt();
+    if len < 1e-10 { return None; }
+
+    let dir_lat  =  dlat / len;   // unit vector along river
+    let dir_lon  =  dlon / len;
+    let perp_lat = -dir_lon;      // unit vector perpendicular (cross-river)
+    let perp_lon =  dir_lat;
+
+    let project_along = |lat: f64, lon: f64| lat * dir_lat + lon * dir_lon;
+    let project_perp  = |lat: f64, lon: f64| lat * perp_lat + lon * perp_lon;
+    let chunk_proj = project_along(chunk_lat_centre, chunk_lon_centre);
+
+    // Walk tiles in one river direction until polygon water found.
+    // Returns (left_bank_GPS, right_bank_GPS) at the gap-facing edge of that tile.
+    let find_bracket = |dir_sign: f64| -> Option<(GPS, GPS)> {
+        let mut seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+        let chunk_tile_s = (chunk_lat_centre / tile_size).floor() as i64;
+        let chunk_tile_w = (chunk_lon_centre / tile_size).floor() as i64;
+        seen.insert((chunk_tile_s, chunk_tile_w));
+
+        for step in 1..=8usize {
+            // Overshoot slightly so we always cross tile boundaries
+            let offset = step as f64 * tile_size * 1.2;
+            let check_lat = chunk_lat_centre + dir_lat * offset * dir_sign;
+            let check_lon = chunk_lon_centre + dir_lon * offset * dir_sign;
+            let snapped_s = (check_lat / tile_size).floor() * tile_size;
+            let snapped_w = (check_lon / tile_size).floor() * tile_size;
+            let tile_key  = (
+                (snapped_s / tile_size).round() as i64,
+                (snapped_w / tile_size).round() as i64,
+            );
+            if !seen.insert(tile_key) { continue; }   // already tried this tile
+
+            if let Ok(tile_data) = fetch_osm_for_bounds(
+                snapped_s, snapped_w,
+                snapped_s + tile_size, snapped_w + tile_size,
+                cache_dir,
+            ) {
+                if tile_data.water.is_empty() { continue; }
+
+                // Collect all polygon points from this tile
+                let poly_pts: Vec<GPS> = tile_data.water.iter()
+                    .flat_map(|w| w.polygon.iter().cloned())
+                    .collect();
+                if poly_pts.is_empty() { continue; }
+
+                // Find the gap-facing boundary layer:
+                // the cluster of points whose along-river projection is closest to the gap chunk.
+                let min_dist = poly_pts.iter()
+                    .map(|p| (project_along(p.lat, p.lon) - chunk_proj).abs())
+                    .fold(f64::INFINITY, f64::min);
+
+                // Keep all points within one tile-width of the closest group
+                let boundary_pts: Vec<&GPS> = poly_pts.iter()
+                    .filter(|p| {
+                        (project_along(p.lat, p.lon) - chunk_proj).abs() <= min_dist + tile_size
+                    })
+                    .collect();
+                if boundary_pts.is_empty() { continue; }
+
+                // Left bank = max perpendicular projection, right bank = min
+                let left = boundary_pts.iter()
+                    .max_by(|a, b|
+                        project_perp(a.lat, a.lon)
+                            .partial_cmp(&project_perp(b.lat, b.lon))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    )?;
+                let right = boundary_pts.iter()
+                    .min_by(|a, b|
+                        project_perp(a.lat, a.lon)
+                            .partial_cmp(&project_perp(b.lat, b.lon))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    )?;
+
+                return Some((**left, **right));
+            }
+        }
+        None
+    };
+
+    let (left_a, right_a) = find_bracket(-1.0)?;  // ⟦ — upstream bracket
+    let (left_b, right_b) = find_bracket( 1.0)?;  // ⟧ — downstream bracket
+
+    // Bridge polygon: four corners in winding order for a valid PIP test
+    Some(vec![left_a, right_a, right_b, left_b])
 }
 
 /// Ray-casting point-in-polygon test for GPS coordinates.
@@ -547,7 +754,40 @@ pub fn point_in_polygon(lat: f64, lon: f64, polygon: &[crate::coordinates::GPS])
     inside
 }
 
-/// Filter an OsmData to only features that intersect a bounding box.
+/// Half-width in degrees used as the buffer around open waterway centrelines
+/// when doing neighbour-tile intersection filtering.
+/// 0.002° ≈ 222m at Brisbane latitude.
+pub const WATERWAY_HALF_WIDTH_DEG: f64 = 0.002;
+
+/// Returns true if (lat, lon) is within `hw` degrees of any
+/// segment of an open waterway centreline polyline.
+/// Uses a squared perpendicular-distance test in lat/lon space.
+pub fn point_near_waterway_line(lat: f64, lon: f64, line: &[GPS], hw: f64) -> bool {
+    let hw2 = hw * hw;
+    for seg in line.windows(2) {
+        let (ax, ay) = (seg[0].lat, seg[0].lon);
+        let (bx, by) = (seg[1].lat, seg[1].lon);
+        let dx = bx - ax;
+        let dy = by - ay;
+        let len2 = dx * dx + dy * dy;
+        // squared distance from (lat,lon) to segment AB
+        let dist2 = if len2 < 1e-14 {
+            // degenerate segment — just check distance to point A
+            let ex = lat - ax; let ey = lon - ay;
+            ex * ex + ey * ey
+        } else {
+            let t = ((lat - ax) * dx + (lon - ay) * dy) / len2;
+            let t = t.clamp(0.0, 1.0);
+            let px = ax + t * dx - lat;
+            let py = ay + t * dy - lon;
+            px * px + py * py
+        };
+        if dist2 <= hw2 { return true; }
+    }
+    false
+}
+
+
 fn clip_osm_to_bounds(
     data: OsmData,
     lat_min: f64, lat_max: f64,
@@ -586,6 +826,11 @@ fn clip_osm_to_bounds(
         // Water is now rendered as voxels, so polygon vertex count per-chunk doesn't matter.
         water: data.water.into_iter().filter(|w| {
             poly_intersects(&w.polygon)
+        }).collect(),
+
+        // Waterway centrelines: keep any that have at least one node near the chunk.
+        waterway_lines: data.waterway_lines.into_iter().filter(|pts| {
+            poly_intersects(pts)
         }).collect(),
 
         parks: data.parks.into_iter().filter(|p| {

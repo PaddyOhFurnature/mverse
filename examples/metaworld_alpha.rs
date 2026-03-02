@@ -1153,6 +1153,9 @@ fn main() {
     let mut water_poly_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
     // Set to true whenever new objects are registered, triggering a mesh rebuild
     let mut osm_geom_dirty = false;
+    // Debug: press O to toggle bright-yellow OSM water polygon outlines
+    let mut show_osm_debug = false;
+    let mut osm_debug_buffer: Option<MeshBuffer> = None;
 
     // WORLDNET terminal screen — rendered onto the kiosk top face
     let terminal_screen = TerminalScreen::new(&context, &billboard_pipeline, SIGNUP_TERMINAL_POS);
@@ -1877,6 +1880,12 @@ fn main() {
                                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                 }
                                 // Q/E no longer dig/place — use mouse buttons
+                                // O — toggle OSM water polygon debug outlines (bright yellow)
+                                KeyCode::KeyO => {
+                                    show_osm_debug = !show_osm_debug;
+                                    println!("🗺️  OSM debug outlines: {}", if show_osm_debug { "ON" } else { "OFF" });
+                                    osm_geom_dirty = true; // rebuild debug mesh
+                                }
                                 _ => {}
                             }
                         }
@@ -2974,6 +2983,14 @@ fn main() {
                         // The OSM polygon overlay is disabled — terrain voxels handle the
                         // river surface following the actual slope per column.
                         water_mesh_buffer = None;
+                        // Debug: build bright-yellow polygon outline mesh when O is pressed
+                        osm_debug_buffer = if show_osm_debug {
+                            let dbg = build_osm_debug_outlines(&water_polygons);
+                            if dbg.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &dbg)) }
+                        } else {
+                            None
+                        };
                         osm_geom_dirty = false;
                     }
 
@@ -3139,6 +3156,14 @@ fn main() {
                                     }
                                     // Restore main pipeline for anything that follows
                                     pipeline.set_pipeline(&mut render_pass);
+                                    // Debug: OSM water polygon outlines (press O to toggle)
+                                    if let Some(buf) = &osm_debug_buffer {
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                        buf.render(&mut render_pass);
+                                        pipeline.set_pipeline(&mut render_pass);
+                                    }
                                 }
 
                                 // Render placed world-object billboards (any game mode)
@@ -3577,5 +3602,27 @@ fn build_water_mesh(water_polygons: &[Vec<Vec3>]) -> Mesh {
         }
     }
 
+    mesh
+}
+
+/// Build bright-yellow outline mesh of OSM water polygon edges (debug overlay).
+/// Press O to toggle. Shows exactly where OSM polygon coverage exists.
+fn build_osm_debug_outlines(water_polygons: &[Vec<Vec3>]) -> Mesh {
+    let mut mesh = Mesh::new();
+    let yellow = Vec3::new(1.0, 1.0, 0.0);
+    for poly in water_polygons {
+        if poly.len() < 2 { continue; }
+        let n = poly.len();
+        for i in 0..n {
+            let a = poly[i];
+            let b = poly[(i + 1) % n];
+            // Raise slightly above terrain so lines are visible
+            let a_up = Vec3::new(a.x, a.y + 0.5, a.z);
+            let b_up = Vec3::new(b.x, b.y + 0.5, b.z);
+            let va = mesh.add_vertex(Vertex::new(a_up, yellow));
+            let vb = mesh.add_vertex(Vertex::new(b_up, yellow));
+            mesh.add_line(va, vb);
+        }
+    }
     mesh
 }

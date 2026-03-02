@@ -260,12 +260,12 @@ impl TerrainGenerator {
         let elevation = Arc::clone(&self.elevation);
 
         // Load OSM data for this chunk (water + roads for terrain carving)
-        let (chunk_water_polys, chunk_roads) = if let Some(ref dir) = self.osm_cache_dir {
+        let (chunk_water_polys, chunk_waterway_lines, chunk_roads) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
             let osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
-            (osm.water, osm.roads)
+            (osm.water, osm.waterway_lines, osm.roads)
         } else {
-            (vec![], vec![])
+            (vec![], vec![], vec![])
         };
 
         // Two-pass chunk generation:
@@ -283,6 +283,8 @@ impl TerrainGenerator {
         struct ColSample {
             voxel_x: i64,
             voxel_z: i64,
+            lat:              f64,
+            lon:              f64,
             surface_elevation: f64,
             surface_voxel_y:   i64,
             in_water:          bool,
@@ -321,7 +323,7 @@ impl TerrainGenerator {
                 let surface_voxel_y = self.origin_voxel.y
                     + (surface_elevation - self.origin_gps.alt) as i64;
 
-                // Water if inside outer polygon AND outside all inner holes
+                // Water from OSM polygon only (centreline handled in post-pass below).
                 let in_water = !chunk_water_polys.is_empty()
                     && chunk_water_polys.iter().any(|w| {
                         crate::osm::point_in_polygon(
@@ -335,6 +337,8 @@ impl TerrainGenerator {
 
                 columns.push(ColSample {
                     voxel_x, voxel_z,
+                    lat: sample_gps.lat,
+                    lon: sample_gps.lon,
                     surface_elevation, surface_voxel_y, in_water,
                     is_road: false,
                 });
