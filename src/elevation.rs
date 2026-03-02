@@ -346,23 +346,6 @@ impl OpenTopographySource {
         
         Ok(tile_path)
     }
-    /// Fetch tile from API and return raw bytes. Also writes to disk cache.
-    /// Used by the server tile HTTP endpoint.
-    pub fn fetch_tile_bytes(&self, lat: i32, lon: i32) -> Result<Vec<u8>, ElevationError> {
-        let tile_path = self.fetch_tile(lat, lon)?;
-        std::fs::read(&tile_path).map_err(|e| ElevationError::FileNotFound(e.to_string()))
-    }
-}
-
-/// Trait for fetching raw elevation tile bytes (used by server tile endpoints).
-pub trait ElevationTileFetch {
-    fn fetch_tile_bytes(&self, lat: i32, lon: i32) -> Result<Vec<u8>, ElevationError>;
-}
-
-impl ElevationTileFetch for OpenTopographySource {
-    fn fetch_tile_bytes(&self, lat: i32, lon: i32) -> Result<Vec<u8>, ElevationError> {
-        self.fetch_tile_bytes(lat, lon)
-    }
 }
 
 /// Compute a stable DHT announce key for an elevation tile.

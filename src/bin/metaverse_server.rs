@@ -27,6 +27,8 @@ use libp2p::{
     Multiaddr, PeerId, SwarmBuilder,
 };
 use libp2p::kad::store::MemoryStore;
+use libp2p::request_response::{self, ProtocolSupport};
+use metaverse_core::tile_protocol::{TileCodec, TileRequest, TileResponse, TILE_PROTOCOL};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
@@ -60,6 +62,76 @@ use sha2::{Sha256, Digest};
 use rand::RngCore;
 #[cfg(unix)]
 use libc;
+
+// ─── Tile request-response codec ─────────────────────────────────────────────
+// Implemented in the binary (not the library) to keep complex async codegen out
+// of the shared lib, which avoids triggering LLVM crashes on this large crate.
+
+impl libp2p::request_response::Codec for TileCodec {
+    type Protocol = libp2p::StreamProtocol;
+    type Request  = TileRequest;
+    type Response = TileResponse;
+
+    fn read_request<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Self::Request>> + Send + 'a>>
+    where T: futures::AsyncRead + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncReadExt;
+            let mut buf = Vec::new();
+            io.take(1_048_576).read_to_end(&mut buf).await?;
+            serde_json::from_slice(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    fn read_response<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<Self::Response>> + Send + 'a>>
+    where T: futures::AsyncRead + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncReadExt;
+            let mut buf = Vec::new();
+            io.take(16_777_216).read_to_end(&mut buf).await?;
+            serde_json::from_slice(&buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })
+    }
+
+    fn write_request<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+        req: Self::Request,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
+    where T: futures::AsyncWrite + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncWriteExt;
+            let data = serde_json::to_vec(&req)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            io.write_all(&data).await
+        })
+    }
+
+    fn write_response<'a, 'b, T>(
+        &'a mut self,
+        _protocol: &'b Self::Protocol,
+        io: &'a mut T,
+        resp: Self::Response,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send + 'a>>
+    where T: futures::AsyncWrite + Unpin + Send + 'a {
+        Box::pin(async move {
+            use futures::AsyncWriteExt;
+            let data = serde_json::to_vec(&resp)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            io.write_all(&data).await
+        })
+    }
+}
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 // ServerConfig is now NodeConfig from metaverse_core::node_config (type alias above).
@@ -169,6 +241,7 @@ struct ServerBehaviour {
     identify: identify::Behaviour,
     mdns: mdns::tokio::Behaviour,
     gossipsub: gossipsub::Behaviour,
+    tile_rr: request_response::Behaviour<TileCodec>,
 }
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -319,6 +392,11 @@ struct AppState {
     pending_voxel_ops: Vec<metaverse_core::messages::SignedOperation>,
     /// DHT provider keys to announce on next tick (populated at startup).
     pending_dht_provide: Vec<Vec<u8>>,
+    /// In-flight outbound tile requests awaiting peer response.
+    pending_tile_requests: std::collections::HashMap<
+        request_response::OutboundRequestId,
+        tokio::sync::oneshot::Sender<TileResponse>,
+    >,
 }
 
 impl AppState {
@@ -351,6 +429,7 @@ impl AppState {
             pending_chunk_requests: Vec::new(),
             pending_voxel_ops: Vec::new(),
             pending_dht_provide: Vec::new(),
+            pending_tile_requests: std::collections::HashMap::new(),
         }
     }
 
@@ -1068,6 +1147,17 @@ pub enum SwarmAction {
     PutDhtRecord { key: Vec<u8>, value: Vec<u8> },
     /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
     DisconnectPeer(PeerId),
+    /// Request a tile from a specific peer
+    TileRequest {
+        peer_id: PeerId,
+        request: TileRequest,
+        response_tx: tokio::sync::oneshot::Sender<TileResponse>,
+    },
+    /// Respond to an inbound tile request from a peer
+    RespondTile {
+        channel: request_response::ResponseChannel<TileResponse>,
+        response: TileResponse,
+    },
 }
 
 fn handle_swarm_event(
@@ -1288,9 +1378,71 @@ fn handle_swarm_event(
             actions.push(SwarmAction::AddKadAddress(peer, Multiaddr::empty()));
             actions.push(SwarmAction::RefreshDhtCount);
         }
+        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
+            request_response::Event::Message {
+                message: request_response::Message::Request { request, channel, .. },
+                ..
+            }
+        )) => {
+            let world_dir = state.config.world_dir.clone()
+                .unwrap_or_else(|| "world_data".to_string());
+            let response = serve_tile_request(&request, &world_dir);
+            actions.push(SwarmAction::RespondTile { channel, response });
+        }
+        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
+            request_response::Event::Message {
+                message: request_response::Message::Response { request_id, response },
+                ..
+            }
+        )) => {
+            if let Some(tx) = state.pending_tile_requests.remove(&request_id) {
+                let _ = tx.send(response);
+            }
+        }
+        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
+            request_response::Event::OutboundFailure { request_id, .. }
+        )) => {
+            if let Some(tx) = state.pending_tile_requests.remove(&request_id) {
+                let _ = tx.send(TileResponse::NotFound);
+            }
+        }
         _ => {}
     }
+
     actions
+}
+
+fn serve_tile_request(request: &TileRequest, world_dir: &str) -> TileResponse {
+    use metaverse_core::tile_protocol::TileRequest::*;
+    use std::path::PathBuf;
+    match request {
+        OsmTile { s, w, n, e } => {
+            let cache_dir = PathBuf::from(world_dir).join("osm");
+            let cache = metaverse_core::osm::OsmDiskCache::new(&cache_dir);
+            match cache.load(*s, *w, *n, *e) {
+                Some(data) => match bincode::serialize(&data) {
+                    Ok(bytes) => TileResponse::Found(bytes),
+                    Err(_) => TileResponse::NotFound,
+                },
+                None => TileResponse::NotFound,
+            }
+        }
+        ElevationTile { lat, lon } => {
+            let cache_dir = PathBuf::from(world_dir).join("elevation_cache");
+            let path = cache_dir
+                .join(format!("N{:02}", lat.unsigned_abs()))
+                .join(format!("E{:03}", lon.unsigned_abs()))
+                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+            match std::fs::read(&path) {
+                Ok(bytes) => TileResponse::Found(bytes),
+                Err(_) => TileResponse::NotFound,
+            }
+        }
+        TerrainChunk { .. } => {
+            // Terrain chunks are not yet served via P2P (future work)
+            TileResponse::NotFound
+        }
+    }
 }
 
 fn apply_swarm_actions(
@@ -1346,6 +1498,13 @@ fn apply_swarm_actions(
             SwarmAction::DisconnectPeer(peer_id) => {
                 let _ = swarm.disconnect_peer_id(peer_id);
                 state.log(format!("🔌 [LoadShed] Disconnected {} to relieve load", peer_id));
+            }
+            SwarmAction::TileRequest { peer_id, request, response_tx } => {
+                let id = swarm.behaviour_mut().tile_rr.send_request(&peer_id, request);
+                state.pending_tile_requests.insert(id, response_tx);
+            }
+            SwarmAction::RespondTile { channel, response } => {
+                let _ = swarm.behaviour_mut().tile_rr.send_response(channel, response);
             }
         }
     }
@@ -2711,113 +2870,6 @@ async fn sync_content_from_servers(state: &AppState) {
 
 type WebState = Arc<RwLock<SharedState>>;
 
-// ── Tile distribution endpoints ───────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct OsmTileQuery { s: f64, w: f64, n: f64, e: f64 }
-
-async fn api_v1_tile_osm(
-    State(st): State<WebState>,
-    axum::extract::Query(q): axum::extract::Query<OsmTileQuery>,
-) -> impl IntoResponse {
-    let world_dir = st.read().unwrap().world_dir.clone();
-    let cache_dir = std::path::PathBuf::from(&world_dir).join("osm");
-
-    // Try disk cache first
-    let cache = metaverse_core::osm::OsmDiskCache::new(&cache_dir);
-    if let Some(data) = cache.load(q.s, q.w, q.n, q.e) {
-        if let Ok(bytes) = bincode::serialize(&data) {
-            return (
-                StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-                bytes,
-            ).into_response();
-        }
-    }
-
-    // Cache miss — fetch from Overpass (with mirror fallback)
-    let result = tokio::task::spawn_blocking(move || {
-        metaverse_core::osm::fetch_osm_for_bounds_server(q.s, q.w, q.n, q.e, &cache_dir)
-    }).await;
-
-    match result {
-        Ok(Ok(data)) => {
-            if let Ok(bytes) = bincode::serialize(&data) {
-                (
-                    StatusCode::OK,
-                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-                    bytes,
-                ).into_response()
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct ElevationTileQuery { lat: i32, lon: i32 }
-
-async fn api_v1_tile_elevation(
-    State(st): State<WebState>,
-    axum::extract::Query(q): axum::extract::Query<ElevationTileQuery>,
-) -> impl IntoResponse {
-    let world_dir = st.read().unwrap().world_dir.clone();
-    let cache_dir = std::path::PathBuf::from(&world_dir).join("elevation_cache");
-
-    let tile_path = cache_dir
-        .join(format!("N{:02}", q.lat.unsigned_abs()))
-        .join(format!("E{:03}", q.lon.unsigned_abs()))
-        .join(format!("srtm_n{:02}_e{:03}.tif", q.lat.unsigned_abs(), q.lon.unsigned_abs()));
-
-    if tile_path.exists() {
-        if let Ok(bytes) = tokio::fs::read(&tile_path).await {
-            return (
-                StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-                bytes,
-            ).into_response();
-        }
-    }
-
-    // Fetch from OpenTopography
-    let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-
-    let result = tokio::task::spawn_blocking(move || {
-        let src = metaverse_core::elevation::OpenTopographySource::new(api_key, cache_dir);
-        src.fetch_tile_bytes(q.lat, q.lon)
-    }).await;
-
-    match result {
-        Ok(Ok(bytes)) => (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-            bytes,
-        ).into_response(),
-        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
-}
-
-async fn api_v1_asset(
-    axum::extract::Path(path): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let safe_path = path.replace("..", "");
-    let full_path = std::path::PathBuf::from("assets").join(&safe_path);
-    match tokio::fs::read(&full_path).await {
-        Ok(bytes) => {
-            let mime = if safe_path.ends_with(".glb") { "model/gltf-binary" }
-                       else if safe_path.ends_with(".png") { "image/png" }
-                       else { "application/octet-stream" };
-            (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime)], bytes).into_response()
-        }
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 async fn web_root() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
@@ -3390,6 +3442,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
                     .expect("mDNS init failed"),
                 gossipsub,
+                tile_rr: request_response::Behaviour::new(
+                    [(
+                        libp2p::StreamProtocol::new(TILE_PROTOCOL),
+                        ProtocolSupport::Full,
+                    )],
+                    request_response::Config::default(),
+                ),
             })
         })?
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -3537,10 +3596,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/world/objects",
                     get(api_v1_world_objects_get).post(api_v1_world_objects_post))
                 .route("/api/v1/world/objects/:id", axum::routing::delete(api_v1_world_objects_delete))
-                // ── Tile distribution endpoints ────────────────────────────
-                .route("/api/v1/tiles/osm",       get(api_v1_tile_osm))
-                .route("/api/v1/tiles/elevation", get(api_v1_tile_elevation))
-                .route("/api/v1/assets/*path",    get(api_v1_asset))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .with_state(web_shared);
@@ -3557,6 +3612,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut app_state = AppState::new(
         config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx, swarm_web_rx, config_reload_rx,
     );
+
+    // Channel for terrain workers (or future callers) to send tile requests through the swarm.
+    let (tile_req_tx, mut tile_req_rx) = tokio::sync::mpsc::channel::<(
+        PeerId,
+        TileRequest,
+        tokio::sync::oneshot::Sender<TileResponse>,
+    )>(64);
+    // Keep tx alive for future terrain-worker integration.
+    let _ = &tile_req_tx;
     app_state.log("✅ Metaverse server started");
     if world_enabled && world.is_some() {
         app_state.log(format!("🌍 World state: {}", app_state.config.world_dir.as_deref().unwrap_or("world_data")));
@@ -3619,9 +3683,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     app_state.log(format!("📡 NodeCapabilities published (tier=server, always_on={})", app_state.config.always_on));
 
     if headless {
-        run_headless(swarm, app_state, world).await
+        run_headless(swarm, app_state, world, tile_req_rx).await
     } else {
-        run_tui(swarm, app_state, world).await
+        run_tui(swarm, app_state, world, tile_req_rx).await
     }
 }
 
@@ -3631,6 +3695,7 @@ async fn run_headless(
     mut swarm: libp2p::Swarm<ServerBehaviour>,
     mut state: AppState,
     mut world: Option<WorldSystems>,
+    mut tile_req_rx: tokio::sync::mpsc::Receiver<(PeerId, TileRequest, tokio::sync::oneshot::Sender<TileResponse>)>,
 ) -> Result<(), Box<dyn Error>> {
     let mut world_config = state.config.clone();
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
@@ -3771,6 +3836,13 @@ async fn run_headless(
             Some(new_cfg) = state.config_reload_rx.recv() => {
                 apply_config_hot_reload(&mut state, new_cfg, &mut world_config);
             }
+            // P2P tile requests from terrain workers
+            Some((peer_id, req, resp_tx)) = tile_req_rx.recv() => {
+                apply_swarm_actions(
+                    vec![SwarmAction::TileRequest { peer_id, request: req, response_tx: resp_tx }],
+                    &mut state, &mut swarm,
+                );
+            }
         }
     }
 }
@@ -3781,6 +3853,7 @@ async fn run_tui(
     mut swarm: libp2p::Swarm<ServerBehaviour>,
     mut state: AppState,
     mut world: Option<WorldSystems>,
+    mut tile_req_rx: tokio::sync::mpsc::Receiver<(PeerId, TileRequest, tokio::sync::oneshot::Sender<TileResponse>)>,
 ) -> Result<(), Box<dyn Error>> {
     // Redirect stdout → server.log so worker println! doesn't corrupt the terminal.
     // Ratatui uses stderr, which stays clean.
@@ -3936,6 +4009,13 @@ async fn run_tui(
                 Some(new_cfg) = state.config_reload_rx.recv() => {
                     apply_config_hot_reload(&mut state, new_cfg, &mut world_config);
                 }
+                // P2P tile requests from terrain workers
+                Some((peer_id, req, resp_tx)) = tile_req_rx.recv() => {
+                    apply_swarm_actions(
+                        vec![SwarmAction::TileRequest { peer_id, request: req, response_tx: resp_tx }],
+                        &mut state, &mut swarm,
+                    );
+                }
             }
             if state.should_quit { break; }
         }
@@ -3980,7 +4060,7 @@ async fn prefetch_regions_task(
                 if cache.load(s, w, n, e).is_none() {
                     let osm_dir2 = osm_dir.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        metaverse_core::osm::fetch_osm_for_bounds_server(s, w, n, e, &osm_dir2)
+                        metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir2)
                     }).await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 }
