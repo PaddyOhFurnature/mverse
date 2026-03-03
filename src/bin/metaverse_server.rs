@@ -3305,6 +3305,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     apply_cli_overrides(&mut config, &args);
     write_default_config_if_missing();
 
+    // ── Early update check (before TUI, clean terminal) ──────────────────────
+    // 5-second timeout so startup isn't delayed when offline.
+    if !config.github_repo.is_empty() {
+        let repo = config.github_repo.clone();
+        let current = env!("CARGO_PKG_VERSION");
+        let check = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            metaverse_core::autoupdate::check_for_update(&repo, current),
+        ).await;
+        if let Ok(Some((tag, url, _notes))) = check {
+            eprintln!("🔄 Update available: {} — downloading…", tag);
+            match metaverse_core::autoupdate::apply_update(&tag, &url).await {
+                Ok(()) => {} // apply_update does not return on success (exec-restart)
+                Err(e) => eprintln!("⚠️  Auto-update failed: {} — continuing with current version", e),
+            }
+        }
+    }
+
     // Headless if flag/config or not a terminal
     let headless = config.headless || !io::stdout().is_terminal();
     config.headless = headless;
@@ -3878,15 +3896,11 @@ async fn run_headless(
                 let repo = state.config.github_repo.clone();
                 if !repo.is_empty() {
                     let current = env!("CARGO_PKG_VERSION");
-                    if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                        eprintln!("[AutoUpdate] New release: {}", tag);
+                    if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                        state.log(format!("🔄 Update available: {} — will apply on next restart", tag));
                         if let Ok(mut st) = state.shared.write() {
-                            st.update_available = Some(tag.clone());
+                            st.update_available = Some(tag);
                         }
-                        if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
-                            eprintln!("[AutoUpdate] Update failed: {}", e);
-                        }
-                        // apply_update does not return on success (exec-restart)
                     }
                 }
             }
@@ -4043,13 +4057,10 @@ async fn run_tui(
                     let repo = state.config.github_repo.clone();
                     if !repo.is_empty() {
                         let current = env!("CARGO_PKG_VERSION");
-                        if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                            eprintln!("[AutoUpdate] New release: {}", tag);
+                        if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                            state.log(format!("🔄 Update available: {} — will apply on next restart", tag));
                             if let Ok(mut st) = state.shared.write() {
-                                st.update_available = Some(tag.clone());
-                            }
-                            if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
-                                eprintln!("[AutoUpdate] Update failed: {}", e);
+                                st.update_available = Some(tag);
                             }
                         }
                     }
