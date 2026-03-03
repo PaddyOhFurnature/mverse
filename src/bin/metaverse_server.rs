@@ -261,6 +261,9 @@ pub struct SharedState {
     pub world_dir: String,
     /// Recent log entries (last 200), synced from AppState.log — shown in web dashboard.
     pub recent_logs: Vec<String>,
+    /// Log buffer written by background tasks (SRTM download etc.) — drained into AppState.log on sync.
+    #[serde(skip)]
+    pub task_log: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Default for SharedState {
@@ -285,6 +288,7 @@ impl Default for SharedState {
             update_available: None,
             world_dir: "world_data".to_string(),
             recent_logs: Vec::new(),
+            task_log: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -440,6 +444,13 @@ impl AppState {
         }).collect();
         let name = self.config.node_name.clone().unwrap_or_else(|| "server".to_string());
         let circuit_count = self.active_circuits.len();
+        // Drain pending task-log messages before acquiring write lock (avoids double borrow)
+        let task_log_arc = self.shared.read().ok()
+            .map(|s| Arc::clone(&s.task_log));
+        let pending: Vec<String> = task_log_arc
+            .as_ref()
+            .and_then(|tl| tl.lock().ok().map(|mut v| v.drain(..).collect()))
+            .unwrap_or_default();
         if let Ok(mut s) = self.shared.write() {
             s.uptime_secs = uptime;
             s.node_name = name;
@@ -459,9 +470,13 @@ impl AppState {
             if let Some(ref db) = s.key_db {
                 s.key_count = db.count();
             }
-            // Sync last 200 log entries for web dashboard
+            // Sync last 200 log entries for web dashboard (updated after draining pending below)
             s.recent_logs = self.log.iter().rev().take(200).cloned().collect::<Vec<_>>();
             s.recent_logs.reverse();
+        }
+        // Now safe to mutably borrow self.log — shared write guard already dropped
+        for msg in pending {
+            self.log(msg);
         }
         self.last_shared_sync = Instant::now();
     }
@@ -3564,9 +3579,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Keep tx alive for future terrain-worker integration.
     let _ = &tile_req_tx;
     app_state.log("✅ Metaverse server started");
-    if world_enabled && world.is_some() {
-        app_state.log(format!("🌍 World state: {}", app_state.config.world_dir.as_deref().unwrap_or("world_data")));
-    }
+    // Log effective config values so operator can confirm config is being read
+    app_state.log(format!("📋 Config: name={}, world_dir={}, srtm={}, api_key={}",
+        app_state.config.node_name.as_deref().unwrap_or("(none)"),
+        app_state.config.world_dir.as_deref().unwrap_or("world_data"),
+        if app_state.config.download_all_srtm { "enabled" } else { "disabled" },
+        if app_state.config.data.opentopography_api_key.is_empty() { "NOT SET" } else { "set" },
+    ));
+    // Create world data directories up front so operators can see where data goes
+    let world_data_root = std::path::PathBuf::from(
+        app_state.config.world_dir.as_deref().unwrap_or("world_data")
+    );
+    std::fs::create_dir_all(world_data_root.join("elevation_cache")).ok();
+    std::fs::create_dir_all(world_data_root.join("osm")).ok();
+    std::fs::create_dir_all(world_data_root.join("terrain")).ok();
+    app_state.log(format!("📁 World data dir: {}", world_data_root.display()));
     // Queue DHT provider announcements for all pre-loaded chunks
     if let Some(ref w) = world {
         let uc = w.user_content.lock().unwrap();
@@ -3665,10 +3692,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
         let api_key = app_state.config.data.opentopography_api_key.clone();
         let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
+        let task_log_srtm = Arc::clone(&shared.read().unwrap().task_log);
         tokio::spawn(async move {
-            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm).await;
+            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm, task_log_srtm).await;
         });
         app_state.log("📥 Global SRTM download started in background".to_string());
+    } else if app_state.config.download_all_srtm {
+        app_state.log("⚠️  download_all_srtm=true but opentopography_api_key is not set — skipping".to_string());
     }
 
     // PBF import
@@ -3677,9 +3707,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let world_dir_pbf = std::path::PathBuf::from(
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         );
+        let task_log_pbf = Arc::clone(&shared.read().unwrap().task_log);
         app_state.log(format!("📥 PBF import: {}", pbf.display()));
         tokio::spawn(async move {
-            import_pbf_task(pbf, world_dir_pbf).await;
+            import_pbf_task(pbf, world_dir_pbf, task_log_pbf).await;
         });
     }
 
@@ -4051,18 +4082,57 @@ async fn download_all_srtm_task(
     world_dir: std::path::PathBuf,
     api_key: String,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+    task_log: Arc<std::sync::Mutex<Vec<String>>>,
 ) {
-    use metaverse_core::elevation::ElevationSource as _;
+    macro_rules! tlog {
+        ($($arg:tt)*) => {{
+            if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); }
+        }};
+    }
 
     let elev_dir = world_dir.join("elevation_cache");
     std::fs::create_dir_all(&elev_dir).ok();
+    let total_tiles: u32 = 120 * 360;
     let mut total = 0u32;
     let mut skipped = 0u32;
     let mut errors = 0u32;
-    let total_tiles: u32 = 120 * 360;
     let mut processed = 0u32;
 
-    println!("📥 [SRTM] Starting global download: {} tiles to check (lat -60..60, all lon)", total_tiles);
+    tlog!("📥 [SRTM] Starting global download: {} tiles (lat -60..60, all lon)", total_tiles);
+
+    // Test one known-land tile first to validate API key / connectivity
+    {
+        let key_c = api_key.clone();
+        let tp = elev_dir.join("N51").join("E000").join("srtm_n51_e000.tif");
+        let tp2 = tp.clone();
+        let test = tokio::task::spawn_blocking(move || {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build().ok()?;
+            let url = format!(
+                "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
+                 south=51&north=52&west=0&east=1&outputFormat=GTiff&API_Key={}", key_c);
+            let resp = client.get(&url).send().ok()?;
+            if !resp.status().is_success() { return Some(Err(format!("HTTP {}", resp.status()))); }
+            let bytes = resp.bytes().ok()?;
+            if bytes.len() < 1024 { return Some(Err("empty response".to_string())); }
+            std::fs::create_dir_all(tp2.parent()?).ok();
+            std::fs::write(&tp2, &bytes).ok();
+            Some(Ok(()))
+        }).await;
+        match test {
+            Ok(Some(Ok(()))) => tlog!("✅ [SRTM] API key validated — beginning global download"),
+            Ok(Some(Err(e))) => {
+                tlog!("❌ [SRTM] API key test failed: {} — check opentopography_api_key in config", e);
+                return;
+            }
+            _ => {
+                tlog!("❌ [SRTM] API key test failed — check network and opentopography_api_key");
+                return;
+            }
+        }
+        if tp.exists() { total += 1; skipped = 0; }
+    }
 
     for lat in -60i32..60 {
         for lon in -180i32..180 {
@@ -4074,55 +4144,83 @@ async fn download_all_srtm_task(
             let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
             processed += 1;
             if tile_path.exists() { skipped += 1; continue; }
+
             let key_c = api_key.clone();
-            let cache_c = elev_dir.clone();
-            let lat_f = lat as f64 + 0.5;
-            let lon_f = lon as f64 + 0.5;
-            let result = tokio::task::spawn_blocking(move || {
-                let src = metaverse_core::elevation::OpenTopographySource::new(key_c, cache_c);
-                let gps = metaverse_core::coordinates::GPS::new(lat_f, lon_f, 0.0);
-                src.query(&gps)
+            let tp = tile_path.clone();
+            let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build().map_err(|e| e.to_string())?;
+                let south = lat as f64;
+                let north = (lat + 1) as f64;
+                let west = lon as f64;
+                let east = (lon + 1) as f64;
+                let url = format!(
+                    "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
+                     south={}&north={}&west={}&east={}&outputFormat=GTiff&API_Key={}",
+                    south, north, west, east, key_c);
+                let resp = client.get(&url).send().map_err(|e| e.to_string())?;
+                if !resp.status().is_success() { return Err(format!("HTTP {}", resp.status())); }
+                let bytes = resp.bytes().map_err(|e| e.to_string())?;
+                if bytes.len() < 1024 { return Err(format!("tiny response ({}B)", bytes.len())); }
+                std::fs::create_dir_all(tp.parent().unwrap()).map_err(|e| e.to_string())?;
+                std::fs::write(&tp, &bytes).map_err(|e| e.to_string())?;
+                Ok(())
             }).await;
-            if tile_path.exists() {
-                total += 1;
-                if let Some(ref tx) = swarm_tx {
-                    let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
-                    let _ = tx.send(SwarmAction::StartProviding(key)).await;
-                }
-            } else {
-                errors += 1;
-                if let Ok(Err(ref e)) = result {
-                    if errors <= 10 || errors % 1000 == 0 {
-                        println!("⚠️  [SRTM] {}/{}: {}", lat, lon, e);
+
+            match result {
+                Ok(Ok(())) => {
+                    total += 1;
+                    if let Some(ref tx) = swarm_tx {
+                        let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
+                        let _ = tx.send(SwarmAction::StartProviding(key)).await;
                     }
                 }
+                Ok(Err(ref e)) if e.contains("tiny") => { errors += 1; } // ocean/void — silent
+                Ok(Err(ref e)) => {
+                    errors += 1;
+                    if errors <= 5 || errors % 200 == 0 {
+                        tlog!("⚠️  [SRTM] {}/{}: {}", lat, lon, e);
+                    }
+                }
+                Err(ref e) => {
+                    errors += 1;
+                    tlog!("⚠️  [SRTM] task error {}/{}: {}", lat, lon, e);
+                }
             }
-            // Progress log every 360 tiles (one latitude row)
+
+            // Progress every latitude row (~1%)
             if processed % 360 == 0 {
                 let pct = processed * 100 / total_tiles;
-                println!("📥 [SRTM] {}% — {} new, {} cached, {} ocean/void",
-                    pct, total, skipped, errors);
+                tlog!("📥 [SRTM] {}% ({}/{}) — {} downloaded, {} cached, {} ocean/void",
+                    pct, processed, total_tiles, total, skipped, errors);
             }
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            // Rate limit: 1 request/sec to respect OpenTopography limits
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }
-    println!("✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void skipped",
+    tlog!("✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void",
         total, skipped, errors);
 }
 
 async fn import_pbf_task(
     pbf_path: std::path::PathBuf,
     world_dir: std::path::PathBuf,
+    task_log: Arc<std::sync::Mutex<Vec<String>>>,
 ) {
+    macro_rules! tlog {
+        ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
+    }
     let osm_dir = world_dir.join("osm");
     std::fs::create_dir_all(&osm_dir).ok();
+    tlog!("📥 [PBF] Starting import of {}", pbf_path.display());
     let result = tokio::task::spawn_blocking(move || {
         metaverse_core::osm::import_pbf_to_cache(&pbf_path, &osm_dir)
     }).await;
     match result {
-        Ok(Ok(n)) => println!("✅ [PBF] Import complete: {} tiles written", n),
-        Ok(Err(e)) => eprintln!("❌ [PBF] Import failed: {}", e),
-        Err(e) => eprintln!("❌ [PBF] Import task panicked: {}", e),
+        Ok(Ok(n)) => tlog!("✅ [PBF] Import complete: {} OSM tiles written", n),
+        Ok(Err(e)) => tlog!("❌ [PBF] Import failed: {}", e),
+        Err(e) => tlog!("❌ [PBF] Import task panicked: {}", e),
     }
 }
 
