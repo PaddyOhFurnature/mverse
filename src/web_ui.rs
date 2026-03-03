@@ -298,7 +298,6 @@ function pgOverview(d){
 </div>
 ${(ex.recent_activity&&ex.recent_activity.length)?`<div class="sec"><div class="card-title" style="margin-bottom:6px">Recent Activity</div><div style="font-size:.8em;line-height:1.6">${ex.recent_activity.map(l=>{const cls=l.includes('✅')||l.includes('saved')||l.includes('complete')?'ok':l.includes('❌')||l.includes('error')||l.includes('failed')?'err':l.includes('⚠')||l.includes('warn')?'warn':'';return `<div class="${cls}" style="padding:1px 0;border-bottom:1px solid rgba(48,54,61,.3)">${l}</div>`;}).join('')}</div></div>`:''}`;
 }
-}
 
 function pgPeers(d){
   const ps=d.peers||[];

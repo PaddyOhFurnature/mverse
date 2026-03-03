@@ -544,6 +544,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     apply_cli_overrides(&mut config, &args);
     write_default_config_if_missing();
 
+    // ── Early update check (before TUI, clean terminal) ──────────────────────
+    if !config.github_repo.is_empty() {
+        let repo = config.github_repo.clone();
+        let current = env!("CARGO_PKG_VERSION");
+        let check = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            metaverse_core::autoupdate::check_for_update(&repo, current),
+        ).await;
+        if let Ok(Some((tag, url, _notes))) = check {
+            eprintln!("🔄 Update available: {} — downloading…", tag);
+            match metaverse_core::autoupdate::apply_update(&tag, &url).await {
+                Ok(()) => {}
+                Err(e) => eprintln!("⚠️  Auto-update failed: {} — continuing", e),
+            }
+        }
+    }
+
+
     // ── --init-key: generate/show relay identity then exit ───────────────────
     if args.init_key {
         let key_path = PathBuf::from("relay.key");
@@ -736,11 +754,8 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
                 let repo = state.config.github_repo.clone();
                 if !repo.is_empty() {
                     let current = env!("CARGO_PKG_VERSION");
-                    if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                        eprintln!("[AutoUpdate] New release: {}", tag);
-                        if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
-                            eprintln!("[AutoUpdate] Update failed: {}", e);
-                        }
+                    if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                        eprintln!("🔄 Update available: {} — will apply on next restart", tag);
                     }
                 }
             }
@@ -779,11 +794,8 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
                     let repo = state.config.github_repo.clone();
                     if !repo.is_empty() {
                         let current = env!("CARGO_PKG_VERSION");
-                        if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                            eprintln!("[AutoUpdate] New release: {}", tag);
-                            if let Err(e) = metaverse_core::autoupdate::apply_update(&tag, &url).await {
-                                eprintln!("[AutoUpdate] Update failed: {}", e);
-                            }
+                        if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                            eprintln!("🔄 Update available: {} — will apply on next restart", tag);
                         }
                     }
                 }
