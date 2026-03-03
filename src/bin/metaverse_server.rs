@@ -3645,6 +3645,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
         app_state.log(format!("📥 Bulk download: {} bbox(es) queued", app_state.config.download_on_start.len()));
     }
+
+    // Global SRTM download
+    if app_state.config.download_all_srtm && !app_state.config.data.opentopography_api_key.is_empty() {
+        let world_dir_srtm = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        let api_key = app_state.config.data.opentopography_api_key.clone();
+        let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
+        tokio::spawn(async move {
+            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm).await;
+        });
+        app_state.log("📥 Global SRTM download started in background".to_string());
+    }
+
+    // PBF import
+    if let Some(ref pbf_path) = app_state.config.data.osm_pbf_path.clone() {
+        let pbf = std::path::PathBuf::from(pbf_path);
+        let world_dir_pbf = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        app_state.log(format!("📥 PBF import: {}", pbf.display()));
+        tokio::spawn(async move {
+            import_pbf_task(pbf, world_dir_pbf).await;
+        });
+    }
+
     // Publish NodeCapabilities to DHT immediately (will re-announce every 30 min)
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
     app_state.log(format!("📡 NodeCapabilities published (tier=server, always_on={})", app_state.config.always_on));
@@ -4007,6 +4033,64 @@ async fn run_tui(
 /// Download all OSM tiles and SRTM elevation tiles within the given bounding boxes.
 /// OSM is fetched in 0.01° tiles from Overpass; SRTM in 1° tiles from OpenTopography.
 /// Already-cached tiles are skipped. Results are announced to DHT.
+/// Download all global SRTM 1°×1° tiles. SRTM covers lat -60..60, lon -180..180.
+/// Skips already-cached tiles. Announces each downloaded tile to DHT.
+async fn download_all_srtm_task(
+    world_dir: std::path::PathBuf,
+    api_key: String,
+    swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+) {
+    use metaverse_core::elevation::ElevationSource as _;
+
+    let elev_dir = world_dir.join("elevation_cache");
+    std::fs::create_dir_all(&elev_dir).ok();
+    let mut total = 0u32;
+    let mut skipped = 0u32;
+    for lat in -60i32..60 {
+        for lon in -180i32..180 {
+            let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+            let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+            let tile_path = elev_dir.join(&lat_dir).join(&lon_dir)
+                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+            if tile_path.exists() { skipped += 1; continue; }
+            let key_c = api_key.clone();
+            let cache_c = elev_dir.clone();
+            let lat_f = lat as f64 + 0.5;
+            let lon_f = lon as f64 + 0.5;
+            let _ = tokio::task::spawn_blocking(move || {
+                let src = metaverse_core::elevation::OpenTopographySource::new(key_c, cache_c);
+                let gps = metaverse_core::coordinates::GPS::new(lat_f, lon_f, 0.0);
+                src.query(&gps)
+            }).await;
+            if tile_path.exists() {
+                total += 1;
+                if let Some(ref tx) = swarm_tx {
+                    let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
+                    let _ = tx.send(SwarmAction::StartProviding(key)).await;
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    }
+    println!("✅ [SRTM] Global download complete: {} new, {} already cached", total, skipped);
+}
+
+async fn import_pbf_task(
+    pbf_path: std::path::PathBuf,
+    world_dir: std::path::PathBuf,
+) {
+    let osm_dir = world_dir.join("osm");
+    std::fs::create_dir_all(&osm_dir).ok();
+    let result = tokio::task::spawn_blocking(move || {
+        metaverse_core::osm::import_pbf_to_cache(&pbf_path, &osm_dir)
+    }).await;
+    match result {
+        Ok(Ok(n)) => println!("✅ [PBF] Import complete: {} tiles written", n),
+        Ok(Err(e)) => eprintln!("❌ [PBF] Import failed: {}", e),
+        Err(e) => eprintln!("❌ [PBF] Import task panicked: {}", e),
+    }
+}
+
 async fn bulk_download_task(
     bboxes: Vec<metaverse_core::node_config::DownloadBbox>,
     world_dir: std::path::PathBuf,

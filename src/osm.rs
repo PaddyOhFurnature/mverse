@@ -880,3 +880,188 @@ fn clip_osm_to_bounds(
         }).collect(),
     }
 }
+
+/// Import OSM data from a PBF file into the tile cache.
+///
+/// Streams through the PBF, collects all nodes/ways/relations, then tiles them
+/// into 0.01°×0.01° grid cells and saves each non-empty tile as a bincode cache file.
+/// Already-cached tiles are skipped (idempotent).
+/// Returns the number of tiles written.
+pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Path) -> Result<usize, String> {
+    use std::collections::HashMap;
+    use osmpbfreader::{OsmPbfReader, OsmObj};
+
+    let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
+    let mut reader = OsmPbfReader::new(file);
+
+    let mut node_coords: HashMap<i64, (f64, f64)> = HashMap::new();
+    let mut buildings_raw: Vec<(u64, Vec<(f64, f64)>, String, u8)> = Vec::new();
+    let mut roads_raw: Vec<(u64, Vec<(f64, f64)>, String, Option<String>, bool, bool, i8)> = Vec::new();
+    let mut water_raw: Vec<(u64, Vec<(f64, f64)>, Option<String>, String)> = Vec::new();
+    let mut waterway_lines_raw: Vec<(u64, Vec<(f64, f64)>)> = Vec::new();
+    let mut parks_raw: Vec<(u64, Vec<(f64, f64)>, Option<String>)> = Vec::new();
+    let mut amenities_raw: Vec<(u64, f64, f64, String, Option<String>)> = Vec::new();
+
+    for obj in reader.iter().filter_map(|r| r.ok()) {
+        match obj {
+            OsmObj::Node(n) => {
+                node_coords.insert(n.id.0, (n.lat(), n.lon()));
+                if let Some(amenity) = n.tags.get("amenity") {
+                    let atype = amenity.as_str();
+                    if matches!(atype, "bench" | "waste_basket" | "street_lamp" | "traffic_signals" | "post_box") {
+                        amenities_raw.push((
+                            n.id.0 as u64, n.lat(), n.lon(), atype.to_string(),
+                            n.tags.get("name").map(|s| s.to_string()),
+                        ));
+                    }
+                }
+            }
+            OsmObj::Way(w) => {
+                let coords: Vec<(f64, f64)> = w.nodes.iter()
+                    .filter_map(|id| node_coords.get(&id.0).copied())
+                    .collect();
+                if coords.len() < 2 { continue; }
+
+                if w.tags.contains_key("building") {
+                    let btype = w.tags.get("building").map(|s| s.as_str()).unwrap_or("yes").to_string();
+                    let levels: u8 = w.tags.get("building:levels")
+                        .and_then(|s| s.parse().ok()).unwrap_or(2);
+                    buildings_raw.push((w.id.0 as u64, coords, btype, levels));
+                } else if let Some(highway) = w.tags.get("highway") {
+                    let hval = highway.as_str();
+                    if matches!(hval,
+                        "motorway" | "motorway_link" | "trunk" | "trunk_link" |
+                        "primary" | "primary_link" | "secondary" | "secondary_link" |
+                        "tertiary" | "tertiary_link" | "residential" | "living_street" |
+                        "unclassified" | "service" | "footway" | "path" | "pedestrian" | "cycleway"
+                    ) {
+                        let name = w.tags.get("name").map(|s| s.to_string());
+                        let is_bridge = w.tags.get("bridge").map(|s| s != "no").unwrap_or(false);
+                        let is_tunnel = w.tags.get("tunnel").map(|s| s != "no").unwrap_or(false);
+                        let layer: i8 = w.tags.get("layer").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        roads_raw.push((w.id.0 as u64, coords, hval.to_string(), name, is_bridge, is_tunnel, layer));
+                    }
+                } else if let Some(natural) = w.tags.get("natural") {
+                    if natural == "water" || natural == "riverbank" {
+                        let name = w.tags.get("name").map(|s| s.to_string());
+                        water_raw.push((w.id.0 as u64, coords, name, natural.to_string()));
+                    }
+                } else if let Some(waterway) = w.tags.get("waterway") {
+                    let wval = waterway.as_str();
+                    if matches!(wval, "river" | "canal" | "stream" | "drain") {
+                        let closed = coords.first() == coords.last() && coords.len() > 3;
+                        if closed {
+                            water_raw.push((w.id.0 as u64, coords, w.tags.get("name").map(|s| s.to_string()), wval.to_string()));
+                        } else {
+                            waterway_lines_raw.push((w.id.0 as u64, coords));
+                        }
+                    }
+                } else if w.tags.get("leisure").map(|s| s.as_str()) == Some("park")
+                    || w.tags.get("landuse").map(|s| s.as_str()) == Some("grass")
+                {
+                    parks_raw.push((w.id.0 as u64, coords, w.tags.get("name").map(|s| s.to_string())));
+                }
+            }
+            OsmObj::Relation(_) => {}
+        }
+    }
+
+    let tile_size = 0.01_f64;
+    let snap = |v: f64| (v / tile_size).floor() * tile_size;
+
+    let mut tiles: HashMap<(i64, i64), OsmData> = HashMap::new();
+
+    let to_gps = |coords: &[(f64, f64)]| -> Vec<crate::coordinates::GPS> {
+        coords.iter().map(|&(lat, lon)| crate::coordinates::GPS::new(lat, lon, 0.0)).collect()
+    };
+
+    let bbox_tiles = |coords: &[(f64, f64)]| -> Vec<(i64, i64)> {
+        if coords.is_empty() { return vec![]; }
+        let min_lat = coords.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let max_lat = coords.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
+        let min_lon = coords.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let max_lon = coords.iter().map(|c| c.1).fold(f64::NEG_INFINITY, f64::max);
+        let mut out = Vec::new();
+        let mut s = (snap(min_lat) / tile_size).round() as i64;
+        let s_max = (snap(max_lat) / tile_size).round() as i64;
+        while s <= s_max {
+            let mut w = (snap(min_lon) / tile_size).round() as i64;
+            let w_max = (snap(max_lon) / tile_size).round() as i64;
+            while w <= w_max {
+                out.push((s, w));
+                w += 1;
+            }
+            s += 1;
+        }
+        out
+    };
+
+    let point_tile = |lat: f64, lon: f64| -> (i64, i64) {
+        ((snap(lat) / tile_size).round() as i64, (snap(lon) / tile_size).round() as i64)
+    };
+
+    for (id, coords, btype, levels) in buildings_raw {
+        let height_m = levels as f64 * 3.0;
+        for tk in bbox_tiles(&coords) {
+            tiles.entry(tk).or_default().buildings.push(OsmBuilding {
+                osm_id: id, polygon: to_gps(&coords),
+                height_m, building_type: btype.clone(), levels,
+            });
+        }
+    }
+
+    for (id, coords, hway, name, is_bridge, is_tunnel, layer) in roads_raw {
+        let road_type = RoadType::from_highway_tag(&hway);
+        for tk in bbox_tiles(&coords) {
+            tiles.entry(tk).or_default().roads.push(OsmRoad {
+                osm_id: id, nodes: to_gps(&coords), road_type: road_type.clone(),
+                name: name.clone(), is_bridge, is_tunnel, layer,
+            });
+        }
+    }
+
+    for (id, coords, name, wtype) in water_raw {
+        for tk in bbox_tiles(&coords) {
+            tiles.entry(tk).or_default().water.push(OsmWater {
+                osm_id: id, polygon: to_gps(&coords), holes: vec![],
+                name: name.clone(), water_type: wtype.clone(),
+            });
+        }
+    }
+
+    for (_id, coords) in waterway_lines_raw {
+        for tk in bbox_tiles(&coords) {
+            tiles.entry(tk).or_default().waterway_lines.push(to_gps(&coords));
+        }
+    }
+
+    for (id, coords, name) in parks_raw {
+        for tk in bbox_tiles(&coords) {
+            tiles.entry(tk).or_default().parks.push(OsmPark {
+                osm_id: id, polygon: to_gps(&coords), name: name.clone(),
+            });
+        }
+    }
+
+    for (id, lat, lon, amenity, name) in amenities_raw {
+        let tk = point_tile(lat, lon);
+        tiles.entry(tk).or_default().amenities.push(OsmAmenity {
+            osm_id: id, lat, lon, amenity, name,
+        });
+    }
+
+    let cache = OsmDiskCache::new(cache_dir);
+    let mut written = 0usize;
+    for ((s_i, w_i), data) in tiles {
+        if data.is_empty() { continue; }
+        let s = s_i as f64 * tile_size;
+        let w = w_i as f64 * tile_size;
+        let n = s + tile_size;
+        let e = w + tile_size;
+        if cache.load(s, w, n, e).is_none() {
+            cache.save(s, w, n, e, &data);
+            written += 1;
+        }
+    }
+    Ok(written)
+}

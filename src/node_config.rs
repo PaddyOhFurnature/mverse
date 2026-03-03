@@ -125,6 +125,11 @@ pub struct NodeConfig {
     /// Any node (client or server) will download all missing tiles in these boxes.
     pub download_on_start: Vec<DownloadBbox>,
 
+    /// Download all global SRTM 1°×1° elevation tiles on startup.
+    /// Requires opentopography_api_key in [data] to be set.
+    /// Tiles already on disk are skipped. Runs in background.
+    pub download_all_srtm: bool,
+
     // ── Load shedding ─────────────────────────────────────────────────────
     pub cpu_shed_threshold_pct: u8,
     pub ram_shed_threshold_pct: u8,
@@ -256,6 +261,7 @@ impl Default for NodeConfig {
             cache_radius_chunks: 0,
             data: DataSourceConfig::default(),
             download_on_start: vec![],
+            download_all_srtm: false,
             cpu_shed_threshold_pct: 90,
             ram_shed_threshold_pct: 85,
             web_port: 8080,
