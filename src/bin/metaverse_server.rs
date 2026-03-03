@@ -26,7 +26,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     Multiaddr, PeerId, SwarmBuilder,
 };
-use libp2p::kad::store::MemoryStore;
+use libp2p::kad::store::{MemoryStore, MemoryStoreConfig};
 use libp2p::request_response::{self, ProtocolSupport};
 use metaverse_core::tile_protocol::{TileCodec, TileRequest, TileResponse, TILE_PROTOCOL};
 use ratatui::{
@@ -1435,7 +1435,11 @@ fn apply_swarm_actions(
             SwarmAction::StartProviding(key) => {
                 use libp2p::kad::RecordKey;
                 if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
-                    eprintln!("⚠️  [DHT] start_providing failed: {:?}", e);
+                    // Only log unexpected errors, not MaxProvidedKeys (handled by config)
+                    let msg = format!("{:?}", e);
+                    if !msg.contains("MaxProvidedKeys") {
+                        eprintln!("⚠️  [DHT] start_providing failed: {}", msg);
+                    }
                 }
             }
             SwarmAction::PutDhtRecord { key, value } => {
@@ -3379,8 +3383,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Kademlia
             let mut kad_config = kad::Config::default();
             kad_config.set_query_timeout(Duration::from_secs(60));
+            let mut mem_store_cfg = MemoryStoreConfig::default();
+            mem_store_cfg.max_provided_keys = 10_000_000; // enough for millions of tiles
             let mut kademlia = kad::Behaviour::with_config(
-                peer_id, MemoryStore::new(peer_id), kad_config,
+                peer_id, MemoryStore::with_config(peer_id, mem_store_cfg), kad_config,
             );
             kademlia.set_mode(Some(kad::Mode::Server));
 
@@ -3644,33 +3650,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
         }
     }
-    // Queue DHT provider announcements for all cached OSM tiles
+    // Queue DHT provider announcements for cached OSM tiles — announce at 1°×1° granularity
+    // (not per-tile: millions of 0.01° keys would overflow any DHT provider table)
     {
         let osm_dir = std::path::PathBuf::from(
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         ).join("osm");
-        let mut tile_count = 0usize;
+        let mut region_keys: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
         if let Ok(entries) = std::fs::read_dir(&osm_dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
-                    // Filename: osm_S_W_N_E.bin — parse the 4 floats
                     if name.starts_with("osm_") && name.ends_with(".bin") {
                         let parts: Vec<&str> = name[4..name.len()-4].split('_').collect();
                         if parts.len() == 4 {
-                            if let (Ok(s), Ok(w), Ok(n), Ok(e)) = (
-                                parts[0].parse::<f64>(), parts[1].parse::<f64>(),
-                                parts[2].parse::<f64>(), parts[3].parse::<f64>(),
-                            ) {
-                                app_state.pending_dht_provide.push(metaverse_core::osm::osm_dht_key(s, w, n, e));
-                                tile_count += 1;
+                            if let (Ok(s), Ok(w)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                // Announce at 1°×1° granularity — same as SRTM
+                                region_keys.insert((s.floor() as i32, w.floor() as i32));
                             }
                         }
                     }
                 }
             }
         }
+        let tile_count = region_keys.len();
+        for (lat, lon) in region_keys {
+            app_state.pending_dht_provide.push(metaverse_core::osm::osm_dht_key(
+                lat as f64, lon as f64, lat as f64 + 1.0, lon as f64 + 1.0,
+            ));
+        }
         if tile_count > 0 {
-            app_state.log(format!("📡 Queued DHT announcements for {} OSM tile(s)", tile_count));
+            app_state.log(format!("📡 Queued DHT announcements for {} OSM region(s)", tile_count));
         }
     }
     // Queue DHT provider announcements for all cached elevation tiles
@@ -3898,9 +3907,10 @@ async fn run_headless(
                         }
                     }
                 }
-                // DHT provider announcements (startup + newly written chunks)
+                // DHT provider announcements (startup + newly written chunks) — max 20 per tick
                 {
-                    let keys: Vec<_> = std::mem::take(&mut state.pending_dht_provide);
+                    let count = state.pending_dht_provide.len().min(20);
+                    let keys: Vec<_> = state.pending_dht_provide.drain(..count).collect();
                     for key in keys {
                         apply_swarm_actions(vec![SwarmAction::StartProviding(key)], &mut state, &mut swarm);
                     }
@@ -4070,9 +4080,10 @@ async fn run_tui(
                             }
                         }
                     }
-                    // DHT provider announcements
+                    // DHT provider announcements — max 20 per tick
                     {
-                        let keys: Vec<_> = std::mem::take(&mut state.pending_dht_provide);
+                        let count = state.pending_dht_provide.len().min(20);
+                        let keys: Vec<_> = state.pending_dht_provide.drain(..count).collect();
                         for key in keys {
                             apply_swarm_actions(vec![SwarmAction::StartProviding(key)], &mut state, &mut swarm);
                         }
