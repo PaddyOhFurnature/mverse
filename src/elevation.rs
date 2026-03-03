@@ -62,6 +62,7 @@ impl std::error::Error for ElevationError {}
 pub struct OpenTopographySource {
     api_key: String,
     cache_dir: PathBuf,
+    srtm_source_dir: Option<PathBuf>,
     // Use Mutex for thread-safe interior mutability (rate limiting state)
     last_request: Arc<Mutex<Option<std::time::Instant>>>,
 }
@@ -281,8 +282,15 @@ impl OpenTopographySource {
         Self {
             api_key,
             cache_dir,
+            srtm_source_dir: None,
             last_request: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Register a local directory to scan for pre-downloaded SRTM .tif files.
+    pub fn with_srtm_source_dir(mut self, dir: PathBuf) -> Self {
+        self.srtm_source_dir = Some(dir);
+        self
     }
     
     /// Fetch tile from API (respects 2-second rate limit per RULES.md)
@@ -363,7 +371,23 @@ impl ElevationSource for OpenTopographySource {
         // Determine which 1° tile contains this point
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
-        
+
+        // Check local source directory for pre-downloaded files
+        if let Some(ref src_dir) = self.srtm_source_dir {
+            let fname = format!("srtm_n{:02}_e{:03}.tif", lat_tile.unsigned_abs(), lon_tile.unsigned_abs());
+            let candidate = src_dir.join(&fname);
+            if candidate.exists() {
+                let dest_dir = self.cache_dir.join(
+                    if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) }
+                ).join(
+                    if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) }
+                );
+                std::fs::create_dir_all(&dest_dir).ok();
+                let dest = dest_dir.join(&fname);
+                if !dest.exists() { std::fs::copy(&candidate, &dest).ok(); }
+            }
+        }
+
         // Check cache first
         let tile_path = self.cache_dir
             .join(format!("N{:02}", lat_tile.abs()))

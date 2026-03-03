@@ -26,14 +26,40 @@ impl Default for UiConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct DataSourceConfig {
+    /// Overpass API endpoints tried in order. Empty = use built-in defaults.
+    pub overpass_endpoints: Vec<String>,
+    /// OpenTopography API key for SRTM download. Empty = disable API download.
+    pub opentopography_api_key: String,
+    /// Path to a directory of pre-downloaded SRTM 1°×1° .tif files.
+    /// Files must be named srtm_n{lat}_e{lon}.tif (standard naming).
+    pub srtm_source_dir: Option<String>,
+    /// Path to a local OSM PBF extract (e.g. from Geofabrik).
+    /// When set, OSM tile queries check this file before hitting Overpass.
+    pub osm_pbf_path: Option<String>,
+}
+
+impl Default for DataSourceConfig {
+    fn default() -> Self {
+        Self {
+            overpass_endpoints: vec![],
+            opentopography_api_key: String::new(),
+            srtm_source_dir: None,
+            osm_pbf_path: None,
+        }
+    }
+}
+
+/// Bounding box for bulk data download on startup.
+/// Both OSM tiles and SRTM elevation tiles are downloaded for this area.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct PrefetchRegion {
-    /// Latitude of region centre (decimal degrees)
-    pub lat: f64,
-    /// Longitude of region centre (decimal degrees)
-    pub lon: f64,
-    /// Radius in km to pre-cache
-    pub radius_km: f64,
+pub struct DownloadBbox {
+    pub south: f64,
+    pub west:  f64,
+    pub north: f64,
+    pub east:  f64,
 }
 
 // ─── Main config ─────────────────────────────────────────────────────────────
@@ -91,13 +117,13 @@ pub struct NodeConfig {
     /// Cache OSM/elevation/terrain tiles within this many chunks of visited area.
     pub cache_radius_chunks:    u32,
 
+    // ── Data sources ──────────────────────────────────────────────────────
+    pub data: DataSourceConfig,
+
     // ── Tile distribution ─────────────────────────────────────────────────
-    /// HTTP base URL of a peer server to fetch tiles from before hitting external APIs.
-    /// E.g. "http://myserver.example.com:8080"
-    /// Clients/relays set this to their server URL to avoid direct API calls.
-    pub tile_server_url:        Option<String>,
-    /// Regions to pre-populate with OSM + elevation tiles on startup (server only).
-    pub prefetch_regions:       Vec<PrefetchRegion>,
+    /// Bounding boxes to bulk-download OSM + SRTM data for on startup.
+    /// Any node (client or server) will download all missing tiles in these boxes.
+    pub download_on_start: Vec<DownloadBbox>,
 
     // ── Load shedding ─────────────────────────────────────────────────────
     pub cpu_shed_threshold_pct: u8,
@@ -228,8 +254,8 @@ impl Default for NodeConfig {
             world_save_interval_secs: 300,
             storage_budget_gb: 10,
             cache_radius_chunks: 0,
-            tile_server_url: None,
-            prefetch_regions: vec![],
+            data: DataSourceConfig::default(),
+            download_on_start: vec![],
             cpu_shed_threshold_pct: 90,
             ram_shed_threshold_pct: 85,
             web_port: 8080,

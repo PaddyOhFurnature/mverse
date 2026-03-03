@@ -205,7 +205,7 @@ const OVERPASS_ENDPOINTS: &[&str] = &[
 /// Fetch features in a bounding box from Overpass API.
 /// Query is intentionally minimal — buildings and main roads only.
 /// Water / parks / amenities are skipped to keep each packet small.
-pub fn query_overpass(south: f64, west: f64, north: f64, east: f64)
+pub fn query_overpass(south: f64, west: f64, north: f64, east: f64, endpoints: &[String])
     -> Result<String, String>
 {
     wait_global_cooldown();
@@ -239,8 +239,14 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64)
         .build()
         .map_err(|e| e.to_string())?;
 
+    let effective: Vec<&str> = if endpoints.is_empty() {
+        OVERPASS_ENDPOINTS.to_vec()
+    } else {
+        endpoints.iter().map(|s| s.as_str()).collect()
+    };
+
     let mut last_err = String::new();
-    for endpoint in OVERPASS_ENDPOINTS {
+    for endpoint in &effective {
         let result = client
             .post(*endpoint)
             .body(query.clone())
@@ -522,6 +528,7 @@ pub fn sha2_stable_hash(data: &[u8]) -> Vec<u8> {
 pub fn fetch_osm_for_bounds(
     south: f64, west: f64, north: f64, east: f64,
     cache_dir: &Path,
+    overpass_endpoints: &[String],
 ) -> Result<OsmData, String> {
     let cache = OsmDiskCache::new(cache_dir);
 
@@ -538,7 +545,7 @@ pub fn fetch_osm_for_bounds(
 
     // Overpass path (opt-in only)
     println!("🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
-    let json = query_overpass(south, west, north, east)?;
+    let json = query_overpass(south, west, north, east, overpass_endpoints)?;
     let data = parse_overpass_json(&json)?;
     if !data.is_empty() {
         println!("   b:{} r:{} a:{}", data.buildings.len(), data.roads.len(), data.amenities.len());
@@ -585,7 +592,7 @@ pub fn fetch_osm_for_chunk(
     let lon_max = chunk_lon_max + margin;
 
     // Fetch the whole tile (instant if cached; empty if no local data)
-    let tile = match fetch_osm_for_bounds(tile_s, tile_w, tile_n, tile_e, cache_dir) {
+    let tile = match fetch_osm_for_bounds(tile_s, tile_w, tile_n, tile_e, cache_dir, &[]) {
         Ok(data) => data,
         Err(_) => {
             // No local tile — inference will use GPS heuristics instead.
@@ -615,7 +622,7 @@ pub fn fetch_osm_for_chunk(
         let nw = tile_w + dlon;
         let nn = ns + tile_size;
         let ne = nw + tile_size;
-        if let Ok(nb_tile) = fetch_osm_for_bounds(ns, nw, nn, ne, cache_dir) {
+        if let Ok(nb_tile) = fetch_osm_for_bounds(ns, nw, nn, ne, cache_dir, &[]) {
             let poly_intersects = |pts: &[crate::coordinates::GPS]| -> bool {
                 if pts.iter().any(|p| p.lat >= lat_min && p.lat <= lat_max
                                   && p.lon >= lon_min && p.lon <= lon_max) {
@@ -715,7 +722,7 @@ pub fn find_gap_bridge_polygon(
             if let Ok(tile_data) = fetch_osm_for_bounds(
                 snapped_s, snapped_w,
                 snapped_s + tile_size, snapped_w + tile_size,
-                cache_dir,
+                cache_dir, &[],
             ) {
                 if tile_data.water.is_empty() { continue; }
 

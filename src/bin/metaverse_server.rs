@@ -56,7 +56,7 @@ use axum::{
     Json, Router,
 };
 use metaverse_core::web_ui::{NodeStatus, PeerSummary, DASHBOARD_HTML};
-use metaverse_core::node_config::{NodeConfig as ServerConfig, PrefetchRegion};
+use metaverse_core::node_config::NodeConfig as ServerConfig;
 use rusqlite::{params, Connection};
 use sha2::{Sha256, Digest};
 use rand::RngCore;
@@ -3631,17 +3631,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.log(format!("📡 Queued DHT announcements for {} elevation tile(s)", elev_count));
         }
     }
-    // Spawn region prefetch background task (server only)
-    if !app_state.config.prefetch_regions.is_empty() {
-        let regions = app_state.config.prefetch_regions.clone();
+    // Bulk download: download_on_start bboxes
+    if !app_state.config.download_on_start.is_empty() {
+        let bboxes = app_state.config.download_on_start.clone();
         let world_dir_pb = std::path::PathBuf::from(
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         );
+        let endpoints = app_state.config.data.overpass_endpoints.clone();
+        let elev_api_key = app_state.config.data.opentopography_api_key.clone();
         let prefetch_swarm_tx = shared.read().unwrap().swarm_tx.clone();
         tokio::spawn(async move {
-            prefetch_regions_task(regions, world_dir_pb, prefetch_swarm_tx).await;
+            bulk_download_task(bboxes, world_dir_pb, endpoints, elev_api_key, prefetch_swarm_tx).await;
         });
-        app_state.log(format!("🗺️  Region prefetch: {} region(s) scheduled", app_state.config.prefetch_regions.len()));
+        app_state.log(format!("📥 Bulk download: {} bbox(es) queued", app_state.config.download_on_start.len()));
     }
     // Publish NodeCapabilities to DHT immediately (will re-announce every 30 min)
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
@@ -4000,42 +4002,84 @@ async fn run_tui(
     result
 }
 
-// ─── Region prefetch task ─────────────────────────────────────────────────────
+// ─── Bulk download task ───────────────────────────────────────────────────────
 
-async fn prefetch_regions_task(
-    regions: Vec<PrefetchRegion>,
+/// Download all OSM tiles and SRTM elevation tiles within the given bounding boxes.
+/// OSM is fetched in 0.01° tiles from Overpass; SRTM in 1° tiles from OpenTopography.
+/// Already-cached tiles are skipped. Results are announced to DHT.
+async fn bulk_download_task(
+    bboxes: Vec<metaverse_core::node_config::DownloadBbox>,
     world_dir: std::path::PathBuf,
+    overpass_endpoints: Vec<String>,
+    opentopo_api_key: String,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
 ) {
-    for region in &regions {
-        let tile_size = 0.01_f64;
-        let radius_deg = region.radius_km / 111.0;
-        let lat_min = ((region.lat - radius_deg) / tile_size).floor() * tile_size;
-        let lat_max = ((region.lat + radius_deg) / tile_size).ceil() * tile_size;
-        let lon_min = ((region.lon - radius_deg) / tile_size).floor() * tile_size;
-        let lon_max = ((region.lon + radius_deg) / tile_size).ceil() * tile_size;
+    use metaverse_core::elevation::ElevationSource as _;
 
-        let osm_dir = world_dir.join("osm");
-        let mut lat = lat_min;
-        while lat < lat_max {
-            let mut lon = lon_min;
-            while lon < lon_max {
-                let (s, w, n, e) = (lat, lon, lat + tile_size, lon + tile_size);
+    let osm_dir = world_dir.join("osm");
+    let elev_dir = world_dir.join("elevation_cache");
+    std::fs::create_dir_all(&osm_dir).ok();
+    std::fs::create_dir_all(&elev_dir).ok();
+
+    for bbox in &bboxes {
+        // ── OSM: 0.01° tiles ──────────────────────────────────────────────
+        let tile = 0.01_f64;
+        let mut lat = (bbox.south / tile).floor() * tile;
+        while lat < bbox.north {
+            let mut lon = (bbox.west / tile).floor() * tile;
+            while lon < bbox.east {
+                let (s, w, n, e) = (lat, lon, lat + tile, lon + tile);
                 let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
                 if cache.load(s, w, n, e).is_none() {
                     let osm_dir2 = osm_dir.clone();
+                    let ep = overpass_endpoints.clone();
                     let _ = tokio::task::spawn_blocking(move || {
-                        metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir2)
+                        metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir2, &ep)
                     }).await;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 }
                 if let Some(ref tx) = swarm_tx {
                     let key = metaverse_core::osm::osm_dht_key(s, w, n, e);
                     let _ = tx.send(SwarmAction::StartProviding(key)).await;
                 }
-                lon += tile_size;
+                lon += tile;
             }
-            lat += tile_size;
+            lat += tile;
+        }
+
+        // ── SRTM: 1° tiles ───────────────────────────────────────────────
+        if !opentopo_api_key.is_empty() {
+            let lat_lo = bbox.south.floor() as i32;
+            let lat_hi = bbox.north.ceil() as i32;
+            let lon_lo = bbox.west.floor() as i32;
+            let lon_hi = bbox.east.ceil() as i32;
+            for lat_tile in lat_lo..lat_hi {
+                for lon_tile in lon_lo..lon_hi {
+                    let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) };
+                    let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) };
+                    let tile_path = elev_dir.join(&lat_dir).join(&lon_dir)
+                        .join(format!("srtm_n{:02}_e{:03}.tif", lat_tile.unsigned_abs(), lon_tile.unsigned_abs()));
+                    if !tile_path.exists() {
+                        let key_c = opentopo_api_key.clone();
+                        let cache_c = elev_dir.clone();
+                        let lat_f = lat_tile as f64 + 0.5;
+                        let lon_f = lon_tile as f64 + 0.5;
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let src = metaverse_core::elevation::OpenTopographySource::new(key_c, cache_c);
+                            let gps = metaverse_core::coordinates::GPS::new(lat_f, lon_f, 0.0);
+                            src.query(&gps)
+                        }).await;
+                        if tile_path.exists() {
+                            if let Some(ref tx) = swarm_tx {
+                                let key = metaverse_core::elevation::elevation_dht_key(lat_tile, lon_tile);
+                                let _ = tx.send(SwarmAction::StartProviding(key)).await;
+                            }
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
         }
     }
+    println!("✅ [Download] Bulk download complete");
 }

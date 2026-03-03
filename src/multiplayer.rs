@@ -2426,7 +2426,7 @@ fn idle_downloader_thread(
                 std::fs::create_dir_all(&osm_dir).ok();
                 let cache = crate::osm::OsmDiskCache::new(&osm_dir);
                 if cache.load(s, w, n, e).is_none() {
-                    if crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir).is_ok() {
+                    if crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir, &[]).is_ok() {
                         let key = crate::osm::osm_dht_key(s, w, n, e);
                         let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
                         println!("📥 [Idle] OSM tile cached and announced: {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
