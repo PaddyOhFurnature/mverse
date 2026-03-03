@@ -333,6 +333,9 @@ struct AppState {
     pending_voxel_ops: Vec<metaverse_core::messages::SignedOperation>,
     /// DHT provider keys to announce on next tick (populated at startup).
     pending_dht_provide: Vec<Vec<u8>>,
+    /// Per-peer connection event throttle: (window_start, events_in_window, suppressed_count).
+    /// Prevents rapid reconnect spam flooding the log.
+    conn_log_throttle: HashMap<PeerId, (Instant, u32, u32)>,
     /// In-flight outbound tile requests awaiting peer response.
     pending_tile_requests: std::collections::HashMap<
         request_response::OutboundRequestId,
@@ -371,6 +374,7 @@ impl AppState {
             pending_voxel_ops: Vec::new(),
             pending_dht_provide: Vec::new(),
             pending_tile_requests: std::collections::HashMap::new(),
+            conn_log_throttle: HashMap::new(),
         }
     }
 
@@ -380,6 +384,40 @@ impl AppState {
         self.log.push_back(entry.clone());
         while self.log.len() > self.config.ui.max_log_entries { self.log.pop_front(); }
         if self.config.headless { println!("{}", entry); }
+    }
+
+    /// Log a peer connection/disconnection event, suppressing rapid-reconnect spam.
+    /// After 3 events in a 60-second window, subsequent events are suppressed until the window resets.
+    /// On reset, emits a "Nx reconnects suppressed" summary if any were dropped.
+    fn log_peer_event(&mut self, peer_id: PeerId, msg: impl Into<String>) {
+        let msg = msg.into();
+        let now = Instant::now();
+        // Determine what to log without holding borrow on self during self.log() call
+        let to_log: Option<(Option<String>, String)> = {
+            let entry = self.conn_log_throttle.entry(peer_id).or_insert((now, 0u32, 0u32));
+            let (window_start, count, suppressed) = &mut *entry;
+            if now.duration_since(*window_start) > std::time::Duration::from_secs(60) {
+                let sup = *suppressed;
+                *window_start = now;
+                *count = 1;
+                *suppressed = 0;
+                let summary = if sup > 0 {
+                    Some(format!("🔁 {} — {} rapid reconnects suppressed",
+                        AppState::short(&peer_id.to_string()), sup))
+                } else { None };
+                Some((summary, msg))
+            } else if *count < 3 {
+                *count += 1;
+                Some((None, msg))
+            } else {
+                *suppressed += 1;
+                None
+            }
+        };
+        if let Some((summary, main_msg)) = to_log {
+            if let Some(s) = summary { self.log(s); }
+            self.log(main_msg);
+        }
     }
 
     fn refresh_sys(&mut self) {
@@ -1136,21 +1174,29 @@ fn handle_swarm_event(
                 return actions;
             }
             state.connected_peers.insert(peer_id, (Instant::now(), addr.clone(), "unknown".to_string()));
-            state.log(format!("🔗 Connected  {} via {}", AppState::short(&pid_str), short_addr(&addr)));
+            state.log_peer_event(peer_id, format!("🔗 Connected  {} via {}", AppState::short(&pid_str), short_addr(&addr)));
         }
         SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
             if num_established == 0 {
                 state.connected_peers.remove(&peer_id);
-                let reason = cause.map(|e| format!(" ({})", e)).unwrap_or_default();
-                state.log(format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
+                let reason = cause.map(|e| {
+                    let s = e.to_string();
+                    // Strip verbose nested error wrappers, keep just the core message
+                    if let Some(pos) = s.rfind(": ") { s[pos+2..].to_string() } else { s }
+                }).unwrap_or_default();
+                let reason = if reason.is_empty() { String::new() } else { format!(" ({})", reason) };
+                state.log_peer_event(peer_id, format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
             state.log(format!("👂 Listening  {}", address));
         }
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            let err_str = error.to_string();
+            // Suppress QUIC "Unsupported resolved address" — expected noise since we use TCP/WS only
+            if err_str.contains("Unsupported resolved address") || err_str.contains("quic") { return actions; }
             if let Some(pid) = peer_id {
-                state.log(format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), error));
+                state.log_peer_event(pid, format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), err_str));
             }
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(ev)) => match ev {
@@ -1205,7 +1251,10 @@ fn handle_swarm_event(
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
             for (peer_id, addr) in peers {
-                state.log(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
+                // Only log mDNS for new peers not yet connected
+                if !state.connected_peers.contains_key(&peer_id) {
+                    state.log(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
+                }
                 actions.push(SwarmAction::AddKadAddress(peer_id, addr.clone()));
                 actions.push(SwarmAction::DialPeer(peer_id, addr));
             }
