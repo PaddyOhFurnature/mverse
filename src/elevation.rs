@@ -338,10 +338,14 @@ impl OpenTopographySource {
         }
         
         // Save to cache
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
         let tile_path = self.cache_dir
-            .join(format!("N{:02}", lat.abs()))
-            .join(format!("E{:03}", lon.abs()))
-            .join(format!("srtm_n{:02}_e{:03}.tif", lat.abs(), lon.abs()));
+            .join(&lat_dir)
+            .join(&lon_dir)
+            .join(format!("srtm_{}{:02}_{}{:03}.tif",
+                if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
+                if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs()));
         
         std::fs::create_dir_all(tile_path.parent().unwrap())
             .map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
@@ -374,25 +378,31 @@ impl ElevationSource for OpenTopographySource {
 
         // Check local source directory for pre-downloaded files
         if let Some(ref src_dir) = self.srtm_source_dir {
-            let fname = format!("srtm_n{:02}_e{:03}.tif", lat_tile.unsigned_abs(), lon_tile.unsigned_abs());
-            let candidate = src_dir.join(&fname);
-            if candidate.exists() {
-                let dest_dir = self.cache_dir.join(
-                    if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) }
-                ).join(
-                    if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) }
-                );
-                std::fs::create_dir_all(&dest_dir).ok();
-                let dest = dest_dir.join(&fname);
-                if !dest.exists() { std::fs::copy(&candidate, &dest).ok(); }
+            let fname = format!("srtm_{}{:02}_{}{:03}.tif",
+                if lat_tile >= 0 { 'n' } else { 's' }, lat_tile.unsigned_abs(),
+                if lon_tile >= 0 { 'e' } else { 'w' }, lon_tile.unsigned_abs());
+            // Also try legacy n/e-only naming for compat with third-party sources
+            let fname_legacy = format!("srtm_n{:02}_e{:03}.tif", lat_tile.unsigned_abs(), lon_tile.unsigned_abs());
+            let lat_dir_s = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) };
+            let lon_dir_s = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) };
+            let dest_dir = self.cache_dir.join(&lat_dir_s).join(&lon_dir_s);
+            for candidate in [src_dir.join(&fname), src_dir.join(&fname_legacy)] {
+                if candidate.exists() {
+                    std::fs::create_dir_all(&dest_dir).ok();
+                    let dest = dest_dir.join(&fname);
+                    if !dest.exists() { std::fs::copy(&candidate, &dest).ok(); }
+                    break;
+                }
             }
         }
 
-        // Check cache first
-        let tile_path = self.cache_dir
-            .join(format!("N{:02}", lat_tile.abs()))
-            .join(format!("E{:03}", lon_tile.abs()))
-            .join(format!("srtm_n{:02}_e{:03}.tif", lat_tile.abs(), lon_tile.abs()));
+        // Check cache first — use N/S/E/W prefixes correctly
+        let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) };
+        let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) };
+        let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+            if lat_tile >= 0 { 'n' } else { 's' }, lat_tile.unsigned_abs(),
+            if lon_tile >= 0 { 'e' } else { 'w' }, lon_tile.unsigned_abs());
+        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
         
         let tile_file = if tile_path.exists() {
             tile_path

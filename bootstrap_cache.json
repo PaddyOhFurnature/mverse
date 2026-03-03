@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "network": "mainnet",
+  "updated_at": "2026-02-22T11:00:00Z",
+  "ttl_seconds": 3600,
+  "bootstrap_nodes": [
+    {
+      "id": "server1-tcp",
+      "name": "AU Server 1 - TCP",
+      "multiaddr": "/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "capabilities": [
+        "relay",
+        "bootstrap",
+        "dht",
+        "world-authority"
+      ],
+      "priority": 100,
+      "verified": true,
+      "region": "AU"
+    },
+    {
+      "id": "server1-ws",
+      "name": "AU Server 1 - WebSocket",
+      "multiaddr": "/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "capabilities": [
+        "relay",
+        "bootstrap",
+        "dht",
+        "world-authority"
+      ],
+      "priority": 95,
+      "verified": true,
+      "region": "AU"
+    }
+  ]
+}

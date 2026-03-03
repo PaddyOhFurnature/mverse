@@ -169,6 +169,7 @@ pre{color:var(--dim);font-size:.8em;overflow:auto;max-height:55vh;white-space:pr
     <a id="nav-keys"    style="display:none" onclick="go('keys',this)"><span class="ic">⚿</span>Keys</a>
     <a id="nav-content" style="display:none" onclick="go('content',this)"><span class="ic">≡</span>Content</a>
     <a id="nav-objects" onclick="go('objects',this)"><span class="ic">📌</span>Objects</a>
+    <a onclick="go('logs',this)"><span class="ic">≡</span>Logs</a>
     <a onclick="go('config',this)"><span class="ic">⚙</span>Config</a>
   </nav>
   <div class="node-meta">
@@ -187,7 +188,7 @@ pre{color:var(--dim);font-size:.8em;overflow:auto;max-height:55vh;white-space:pr
 </main>
 <script>
 const S={page:'overview',data:null,timer:null};
-const TITLES={overview:'Overview',peers:'Peers',network:'Network',world:'World',keys:'Keys',content:'Content',objects:'Objects',config:'Config'};
+const TITLES={overview:'Overview',peers:'Peers',network:'Network',world:'World',keys:'Keys',content:'Content',objects:'Objects',logs:'Logs',config:'Config'};
 
 function fmt(v){return v==null||v===undefined?'—':v}
 function fmtB(b){b=b||0;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';if(b<1073741824)return (b/1048576).toFixed(1)+' MB';return (b/1073741824).toFixed(2)+' GB'}
@@ -217,6 +218,8 @@ async function poll(){
     const li=document.getElementById('live-ind');
     li.textContent='● offline';li.className='live err';
   }
+  // Auto-refresh log page
+  if(S.page==='logs'){const el=document.getElementById('content');fetchPage('/api/logs',el,data=>pgLogs(data));}
   S.timer=setTimeout(poll,5000);
 }
 
@@ -242,6 +245,7 @@ function render(p,d){
   else if(p==='network') el.innerHTML=pgNetwork(d);
   else if(p==='world')   el.innerHTML=pgWorld(d);
   else if(p==='config')  fetchPage('/api/config',el,raw=>pgConfig(raw));
+  else if(p==='logs')    fetchPage('/api/logs',el,data=>pgLogs(data));
   else if(p==='keys')    fetchPage('/api/keys',el,data=>pgKeys(data));
   else if(p==='content') fetchPage('/api/v1/content',el,data=>pgContent(data));
   else if(p==='objects') fetchPage('/api/v1/world/objects',el,data=>pgObjects(data));
@@ -386,6 +390,16 @@ ${objs.map(o=>`<tr>
 
 function pgConfig(cfg){
   return `<div class="sec"><div class="card-title">Current Configuration</div><pre>${JSON.stringify(cfg,null,2)}</pre></div>`;
+}
+
+function pgLogs(lines){
+  const entries=Array.isArray(lines)?lines:[];
+  if(!entries.length)return '<div class="sec"><span class="empty">No log entries yet.</span></div>';
+  const rows=entries.slice().reverse().map(l=>{
+    const cls=l.includes('✅')||l.includes('📥')?'ok':l.includes('⚠')||l.includes('warn')?'warn':l.includes('❌')||l.includes('error')||l.includes('Error')?'err':'';
+    return `<div class="${cls}" style="padding:2px 0;border-bottom:1px solid rgba(48,54,61,.3);word-break:break-all">${l}</div>`;
+  }).join('');
+  return `<div class="sec"><div class="card-title" style="margin-bottom:8px">Last ${entries.length} log entries (newest first)</div><div style="font-size:.8em;overflow-y:auto;max-height:70vh">${rows}</div></div>`;
 }
 
 poll();

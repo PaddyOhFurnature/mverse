@@ -259,6 +259,8 @@ pub struct SharedState {
     /// World data directory (for tile cache access from web handlers).
     #[serde(skip)]
     pub world_dir: String,
+    /// Recent log entries (last 200), synced from AppState.log — shown in web dashboard.
+    pub recent_logs: Vec<String>,
 }
 
 impl Default for SharedState {
@@ -282,6 +284,7 @@ impl Default for SharedState {
             config_reload_tx: None,
             update_available: None,
             world_dir: "world_data".to_string(),
+            recent_logs: Vec::new(),
         }
     }
 }
@@ -456,6 +459,9 @@ impl AppState {
             if let Some(ref db) = s.key_db {
                 s.key_count = db.count();
             }
+            // Sync last 200 log entries for web dashboard
+            s.recent_logs = self.log.iter().rev().take(200).cloned().collect::<Vec<_>>();
+            s.recent_logs.reverse();
         }
         self.last_shared_sync = Instant::now();
     }
@@ -2861,6 +2867,11 @@ async fn web_api_health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
+async fn web_api_logs(State(s): State<WebState>) -> impl IntoResponse {
+    let logs = s.read().unwrap().recent_logs.clone();
+    Json(logs)
+}
+
 /// GET /api/keys[?type=<key_type>]  — list all key records (or filter by type)
 async fn web_api_keys(
     State(s): State<WebState>,
@@ -3502,6 +3513,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/", get(web_root))
                 .route("/health", get(web_api_health))
                 .route("/api/status", get(web_api_status))
+                .route("/api/logs", get(web_api_logs))
                 .route("/api/peers", get(web_api_peers))
                 .route("/api/keys", get(web_api_keys))
                 .route("/api/keys/relays", get(web_api_keys_relays))
@@ -4046,18 +4058,27 @@ async fn download_all_srtm_task(
     std::fs::create_dir_all(&elev_dir).ok();
     let mut total = 0u32;
     let mut skipped = 0u32;
+    let mut errors = 0u32;
+    let total_tiles: u32 = 120 * 360;
+    let mut processed = 0u32;
+
+    println!("📥 [SRTM] Starting global download: {} tiles to check (lat -60..60, all lon)", total_tiles);
+
     for lat in -60i32..60 {
         for lon in -180i32..180 {
             let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
             let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-            let tile_path = elev_dir.join(&lat_dir).join(&lon_dir)
-                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+                if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
+                if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
+            let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+            processed += 1;
             if tile_path.exists() { skipped += 1; continue; }
             let key_c = api_key.clone();
             let cache_c = elev_dir.clone();
             let lat_f = lat as f64 + 0.5;
             let lon_f = lon as f64 + 0.5;
-            let _ = tokio::task::spawn_blocking(move || {
+            let result = tokio::task::spawn_blocking(move || {
                 let src = metaverse_core::elevation::OpenTopographySource::new(key_c, cache_c);
                 let gps = metaverse_core::coordinates::GPS::new(lat_f, lon_f, 0.0);
                 src.query(&gps)
@@ -4068,11 +4089,25 @@ async fn download_all_srtm_task(
                     let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
                     let _ = tx.send(SwarmAction::StartProviding(key)).await;
                 }
+            } else {
+                errors += 1;
+                if let Ok(Err(ref e)) = result {
+                    if errors <= 10 || errors % 1000 == 0 {
+                        println!("⚠️  [SRTM] {}/{}: {}", lat, lon, e);
+                    }
+                }
+            }
+            // Progress log every 360 tiles (one latitude row)
+            if processed % 360 == 0 {
+                let pct = processed * 100 / total_tiles;
+                println!("📥 [SRTM] {}% — {} new, {} cached, {} ocean/void",
+                    pct, total, skipped, errors);
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
-    println!("✅ [SRTM] Global download complete: {} new, {} already cached", total, skipped);
+    println!("✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void skipped",
+        total, skipped, errors);
 }
 
 async fn import_pbf_task(
