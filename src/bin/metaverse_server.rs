@@ -4195,40 +4195,9 @@ async fn download_all_srtm_task(
     let mut processed = 0u32;
 
     tlog!("📥 [SRTM] Starting global download: {} tiles (lat -60..60, all lon)", total_tiles);
+    tlog!("ℹ️  [SRTM] OpenTopography free tier: 200 API calls/24hrs — already-cached tiles are skipped");
 
-    // Test one known-land tile first to validate API key / connectivity
-    {
-        let key_c = api_key.clone();
-        let tp = elev_dir.join("N51").join("E000").join("srtm_n51_e000.tif");
-        let tp2 = tp.clone();
-        let test = tokio::task::spawn_blocking(move || {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build().ok()?;
-            let url = format!(
-                "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
-                 south=51&north=52&west=0&east=1&outputFormat=GTiff&API_Key={}", key_c);
-            let resp = client.get(&url).send().ok()?;
-            if !resp.status().is_success() { return Some(Err(format!("HTTP {}", resp.status()))); }
-            let bytes = resp.bytes().ok()?;
-            if bytes.len() < 1024 { return Some(Err("empty response".to_string())); }
-            std::fs::create_dir_all(tp2.parent()?).ok();
-            std::fs::write(&tp2, &bytes).ok();
-            Some(Ok(()))
-        }).await;
-        match test {
-            Ok(Some(Ok(()))) => tlog!("✅ [SRTM] API key validated — beginning global download"),
-            Ok(Some(Err(e))) => {
-                tlog!("❌ [SRTM] API key test failed: {} — check opentopography_api_key in config", e);
-                return;
-            }
-            _ => {
-                tlog!("❌ [SRTM] API key test failed — check network and opentopography_api_key");
-                return;
-            }
-        }
-        if tp.exists() { total += 1; skipped = 0; }
-    }
+    let mut rate_limited_until: Option<std::time::Instant> = None;
 
     for lat in -60i32..60 {
         for lon in -180i32..180 {
@@ -4248,6 +4217,11 @@ async fn download_all_srtm_task(
                 let _ = std::fs::remove_file(&tile_path);
             }
 
+            // If currently rate limited, skip the API call for this tile
+            if rate_limited_until.map(|u| std::time::Instant::now() < u).unwrap_or(false) {
+                continue;
+            }
+
             let key_c = api_key.clone();
             let tp = tile_path.clone();
             let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
@@ -4263,7 +4237,15 @@ async fn download_all_srtm_task(
                      south={}&north={}&west={}&east={}&outputFormat=GTiff&API_Key={}",
                     south, north, west, east, key_c);
                 let resp = client.get(&url).send().map_err(|e| e.to_string())?;
-                if !resp.status().is_success() { return Err(format!("HTTP {}", resp.status())); }
+                let status = resp.status();
+                if !status.is_success() {
+                    let body = resp.text().unwrap_or_default();
+                    // Distinguish rate-limit from bad key
+                    if status.as_u16() == 401 && body.to_lowercase().contains("rate limit") {
+                        return Err(format!("RATE_LIMITED:{}", body));
+                    }
+                    return Err(format!("HTTP {} {}", status.as_u16(), body.chars().take(120).collect::<String>()));
+                }
                 let bytes = resp.bytes().map_err(|e| e.to_string())?;
                 if bytes.len() < 1024 { return Err(format!("tiny response ({}B)", bytes.len())); }
                 std::fs::create_dir_all(tp.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -4279,6 +4261,14 @@ async fn download_all_srtm_task(
                         let _ = tx.send(SwarmAction::StartProviding(key)).await;
                     }
                 }
+                Ok(Err(ref e)) if e.starts_with("RATE_LIMITED:") => {
+                    // OpenTopography daily quota exhausted — wait 6 hours before continuing
+                    let wait_secs = 6 * 3600u64;
+                    tlog!("⏸ [SRTM] Rate limited by OpenTopography (200 calls/day). Pausing {} h — {} downloaded so far, {} remaining",
+                        wait_secs / 3600, total, total_tiles - processed);
+                    rate_limited_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(wait_secs));
+                    errors += 1;
+                }
                 Ok(Err(ref e)) if e.contains("tiny") => { errors += 1; } // ocean/void — silent
                 Ok(Err(ref e)) => {
                     errors += 1;
@@ -4292,13 +4282,24 @@ async fn download_all_srtm_task(
                 }
             }
 
+            // If rate limited, wait out the back-off period before making more API calls
+            if let Some(until) = rate_limited_until {
+                let now = std::time::Instant::now();
+                if now < until {
+                    tokio::time::sleep(until - now).await;
+                }
+                rate_limited_until = None;
+                tlog!("▶️  [SRTM] Resuming after rate-limit pause");
+            }
+
             // Progress every latitude row (~1%)
             if processed % 360 == 0 {
                 let pct = processed * 100 / total_tiles;
                 tlog!("📥 [SRTM] {}% ({}/{}) — {} downloaded, {} cached, {} ocean/void",
                     pct, processed, total_tiles, total, skipped, errors);
             }
-            // Rate limit: 1 request/sec to respect OpenTopography limits
+            // Rate limit: pause between API calls (free tier = 200/day ≈ 1 per 432s, but
+            // most iterations are cache hits; actual API calls get a longer pause)
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
     }
