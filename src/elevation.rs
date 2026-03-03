@@ -403,9 +403,16 @@ impl ElevationSource for OpenTopographySource {
             if lat_tile >= 0 { 'n' } else { 's' }, lat_tile.unsigned_abs(),
             if lon_tile >= 0 { 'e' } else { 'w' }, lon_tile.unsigned_abs());
         let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+        // HGT files downloaded from Skadi/Copernicus fallback sources use GDAL-standard naming
+        let hgt_name = format!("{}{:02}{}{:03}.hgt",
+            if lat_tile >= 0 { 'N' } else { 'S' }, lat_tile.unsigned_abs(),
+            if lon_tile >= 0 { 'E' } else { 'W' }, lon_tile.unsigned_abs());
+        let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
         
         let tile_file = if tile_path.exists() {
             tile_path
+        } else if hgt_path.exists() {
+            hgt_path
         } else {
             // Fetch from API
             self.fetch_tile(lat_tile, lon_tile)?

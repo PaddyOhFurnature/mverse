@@ -3476,17 +3476,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
 
     // Bootstrap from metaverse bootstrap file
-    if let Ok(data) = std::fs::read_to_string("bootstrap.json") {
-        #[derive(serde::Deserialize)]
-        struct BootstrapFile { bootstrap_nodes: Vec<BootstrapNodeFile> }
-        #[derive(serde::Deserialize)]
+    {
+        #[derive(serde::Deserialize, Clone)]
+        struct BootstrapFile {
+            bootstrap_nodes: Vec<BootstrapNodeFile>,
+            #[serde(default)]
+            fallback_discovery: FallbackDiscovery,
+        }
+        #[derive(serde::Deserialize, Clone, Default)]
+        struct FallbackDiscovery {
+            #[serde(default)]
+            http_rendezvous: Vec<String>,
+        }
+        #[derive(serde::Deserialize, Clone)]
         struct BootstrapNodeFile { multiaddr: String }
-        if let Ok(bf) = serde_json::from_str::<BootstrapFile>(&data) {
-            for n in bf.bootstrap_nodes {
+
+        let dial_nodes = |nodes: &[BootstrapNodeFile], swarm: &mut libp2p::Swarm<ServerBehaviour>| {
+            for n in nodes {
                 if let Ok(addr) = n.multiaddr.parse::<Multiaddr>() {
                     let _ = swarm.dial(addr);
                 }
             }
+        };
+
+        let mut http_rendezvous_urls: Vec<String> = Vec::new();
+
+        // Load and apply local bootstrap.json
+        if let Ok(data) = std::fs::read_to_string("bootstrap.json") {
+            if let Ok(bf) = serde_json::from_str::<BootstrapFile>(&data) {
+                dial_nodes(&bf.bootstrap_nodes, &mut swarm);
+                http_rendezvous_urls = bf.fallback_discovery.http_rendezvous.clone();
+            }
+        }
+        // Also apply bootstrap_cache.json (saved from previous remote fetch)
+        if let Ok(data) = std::fs::read_to_string("bootstrap_cache.json") {
+            if let Ok(bf) = serde_json::from_str::<BootstrapFile>(&data) {
+                dial_nodes(&bf.bootstrap_nodes, &mut swarm);
+            }
+        }
+
+        // Fetch http_rendezvous URLs in background; save to bootstrap_cache.json for next startup
+        if !http_rendezvous_urls.is_empty() {
+            tokio::spawn(async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build().unwrap_or_default();
+                for url in &http_rendezvous_urls {
+                    if let Ok(resp) = client.get(url).send().await {
+                        if let Ok(text) = resp.text().await {
+                            let _ = std::fs::write("bootstrap_cache.json", &text);
+                            break; // First successful URL wins
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -4195,9 +4238,9 @@ async fn download_all_srtm_task(
     let mut processed = 0u32;
 
     tlog!("📥 [SRTM] Starting global download: {} tiles (lat -60..60, all lon)", total_tiles);
-    tlog!("ℹ️  [SRTM] OpenTopography free tier: 200 API calls/24hrs — already-cached tiles are skipped");
+    tlog!("ℹ️  [SRTM] Sources: OpenTopography (key) → Copernicus DEM AWS → AWS Terrain Tiles (skadi)");
 
-    let mut rate_limited_until: Option<std::time::Instant> = None;
+    let mut opentopo_rate_limited_until: Option<std::time::Instant> = None;
 
     for lat in -60i32..60 {
         for lon in -180i32..180 {
@@ -4207,69 +4250,142 @@ async fn download_all_srtm_task(
                 if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
                 if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
             let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+            // HGT naming used by Skadi fallback downloads
+            let hgt_name = format!("{}{:02}{}{:03}.hgt",
+                if lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
+                if lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
+            let hgt_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
             processed += 1;
-            // Skip only if file exists AND is a valid size (>=1KB). Retry 0-byte/corrupt files.
-            if tile_path.exists() {
-                if tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
-                    skipped += 1; continue;
-                }
-                // Bad file — delete and re-download
-                let _ = std::fs::remove_file(&tile_path);
-            }
 
-            // If currently rate limited, skip the API call for this tile
-            if rate_limited_until.map(|u| std::time::Instant::now() < u).unwrap_or(false) {
-                continue;
+            // Skip if any valid cached file exists
+            let cached_ok = |p: &std::path::Path| p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024;
+            if cached_ok(&tile_path) || cached_ok(&hgt_path) {
+                skipped += 1; continue;
             }
+            // Remove corrupt 0-byte files
+            if tile_path.exists() { let _ = std::fs::remove_file(&tile_path); }
+            if hgt_path.exists() { let _ = std::fs::remove_file(&hgt_path); }
 
+            let opentopo_ok = !opentopo_rate_limited_until.map(|u| std::time::Instant::now() < u).unwrap_or(false);
             let key_c = api_key.clone();
             let tp = tile_path.clone();
-            let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let hp = hgt_path.clone();
+
+            let result = tokio::task::spawn_blocking(move || -> Result<SrtmSource, String> {
                 let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
+                    .timeout(std::time::Duration::from_secs(60))
                     .build().map_err(|e| e.to_string())?;
-                let south = lat as f64;
-                let north = (lat + 1) as f64;
-                let west = lon as f64;
-                let east = (lon + 1) as f64;
-                let url = format!(
-                    "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
-                     south={}&north={}&west={}&east={}&outputFormat=GTiff&API_Key={}",
-                    south, north, west, east, key_c);
-                let resp = client.get(&url).send().map_err(|e| e.to_string())?;
-                let status = resp.status();
-                if !status.is_success() {
-                    let body = resp.text().unwrap_or_default();
-                    // Distinguish rate-limit from bad key
-                    if status.as_u16() == 401 && body.to_lowercase().contains("rate limit") {
-                        return Err(format!("RATE_LIMITED:{}", body));
+
+                // --- Source 1: OpenTopography (GeoTIFF, requires API key) ---
+                if opentopo_ok && !key_c.is_empty() {
+                    let south = lat as f64; let north = (lat + 1) as f64;
+                    let west = lon as f64; let east = (lon + 1) as f64;
+                    let url = format!(
+                        "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
+                         south={}&north={}&west={}&east={}&outputFormat=GTiff&API_Key={}",
+                        south, north, west, east, key_c);
+                    match client.get(&url).send() {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            if status.is_success() {
+                                if let Ok(bytes) = resp.bytes() {
+                                    if bytes.len() >= 1024 {
+                                        std::fs::create_dir_all(tp.parent().unwrap()).ok();
+                                        if std::fs::write(&tp, &bytes).is_ok() {
+                                            return Ok(SrtmSource::OpenTopography);
+                                        }
+                                    }
+                                }
+                            } else {
+                                let body = resp.text().unwrap_or_default();
+                                if status.as_u16() == 401 && body.to_lowercase().contains("rate limit") {
+                                    return Err(format!("RATE_LIMITED:{}", body));
+                                }
+                                // Fall through to next source
+                            }
+                        }
+                        Err(_) => { /* network error, try next source */ }
                     }
-                    return Err(format!("HTTP {} {}", status.as_u16(), body.chars().take(120).collect::<String>()));
                 }
-                let bytes = resp.bytes().map_err(|e| e.to_string())?;
-                if bytes.len() < 1024 { return Err(format!("tiny response ({}B)", bytes.len())); }
-                std::fs::create_dir_all(tp.parent().unwrap()).map_err(|e| e.to_string())?;
-                std::fs::write(&tp, &bytes).map_err(|e| e.to_string())?;
-                Ok(())
+
+                // --- Source 2: Copernicus DEM GLO-30 (AWS S3, free, no key, GeoTIFF) ---
+                {
+                    let ns = if lat >= 0 { "N" } else { "S" };
+                    let ew = if lon >= 0 { "E" } else { "W" };
+                    let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+                    let tile_id = format!("Copernicus_DSM_COG_10_{}{:02}_00_{}{:03}_00_DEM", ns, la, ew, lo);
+                    let url = format!("https://copernicus-dem-30m.s3.amazonaws.com/{}/{}.tif", tile_id, tile_id);
+                    match client.get(&url).send() {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(bytes) = resp.bytes() {
+                                if bytes.len() >= 1024 {
+                                    std::fs::create_dir_all(tp.parent().unwrap()).ok();
+                                    if std::fs::write(&tp, &bytes).is_ok() {
+                                        return Ok(SrtmSource::Copernicus);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {} // Fall through
+                    }
+                }
+
+                // --- Source 3: AWS Terrain Tiles / Skadi (free, no key, HGT.gz) ---
+                {
+                    let ns = if lat >= 0 { "N" } else { "S" };
+                    let ew = if lon >= 0 { "E" } else { "W" };
+                    let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+                    let url = format!(
+                        "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{}{:02}/{}{:02}{}{:03}.hgt.gz",
+                        ns, la, ns, la, ew, lo);
+                    match client.get(&url).send() {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(bytes) = resp.bytes() {
+                                if bytes.len() >= 512 {
+                                    // Decompress gzip
+                                    use std::io::Read;
+                                    let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                                    let mut raw = Vec::new();
+                                    if decoder.read_to_end(&mut raw).is_ok() && raw.len() >= 1024 {
+                                        std::fs::create_dir_all(hp.parent().unwrap()).ok();
+                                        if std::fs::write(&hp, &raw).is_ok() {
+                                            return Ok(SrtmSource::Skadi);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                Err("all_sources_failed".to_string())
             }).await;
 
             match result {
-                Ok(Ok(())) => {
+                Ok(Ok(src)) => {
                     total += 1;
                     if let Some(ref tx) = swarm_tx {
                         let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
                         let _ = tx.send(SwarmAction::StartProviding(key)).await;
                     }
+                    if total <= 3 || total % 500 == 0 {
+                        tlog!("📥 [SRTM] {}/{}: downloaded via {}", lat, lon, src.name());
+                    }
                 }
                 Ok(Err(ref e)) if e.starts_with("RATE_LIMITED:") => {
-                    // OpenTopography daily quota exhausted — wait 6 hours before continuing
                     let wait_secs = 6 * 3600u64;
-                    tlog!("⏸ [SRTM] Rate limited by OpenTopography (200 calls/day). Pausing {} h — {} downloaded so far, {} remaining",
-                        wait_secs / 3600, total, total_tiles - processed);
-                    rate_limited_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(wait_secs));
+                    tlog!("⏸ [SRTM] OpenTopography rate limited (200 calls/day). Pausing {} h, using free sources meanwhile",
+                        wait_secs / 3600);
+                    opentopo_rate_limited_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(wait_secs));
+                    errors += 1;
+                    // Don't skip tile — next iteration will try Copernicus/Skadi
+                    // Re-enqueue this tile by decrementing to re-run: mark as error only
+                }
+                Ok(Err(ref e)) if e == "all_sources_failed" => {
+                    // Likely ocean tile — all sources returned empty/404
                     errors += 1;
                 }
-                Ok(Err(ref e)) if e.contains("tiny") => { errors += 1; } // ocean/void — silent
                 Ok(Err(ref e)) => {
                     errors += 1;
                     if errors <= 5 || errors % 200 == 0 {
@@ -4282,14 +4398,13 @@ async fn download_all_srtm_task(
                 }
             }
 
-            // If rate limited, wait out the back-off period before making more API calls
-            if let Some(until) = rate_limited_until {
+            // Resume OpenTopography after rate-limit window expires
+            if let Some(until) = opentopo_rate_limited_until {
                 let now = std::time::Instant::now();
-                if now < until {
-                    tokio::time::sleep(until - now).await;
+                if now >= until {
+                    opentopo_rate_limited_until = None;
+                    tlog!("▶️  [SRTM] OpenTopography rate-limit window expired, resuming");
                 }
-                rate_limited_until = None;
-                tlog!("▶️  [SRTM] Resuming after rate-limit pause");
             }
 
             // Progress every latitude row (~1%)
@@ -4298,13 +4413,24 @@ async fn download_all_srtm_task(
                 tlog!("📥 [SRTM] {}% ({}/{}) — {} downloaded, {} cached, {} ocean/void",
                     pct, processed, total_tiles, total, skipped, errors);
             }
-            // Rate limit: pause between API calls (free tier = 200/day ≈ 1 per 432s, but
-            // most iterations are cache hits; actual API calls get a longer pause)
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            // Small delay between tiles (free sources are unlimited but be polite)
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
     tlog!("✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void",
         total, skipped, errors);
+}
+
+#[derive(Debug)]
+enum SrtmSource { OpenTopography, Copernicus, Skadi }
+impl SrtmSource {
+    fn name(&self) -> &'static str {
+        match self {
+            SrtmSource::OpenTopography => "OpenTopography",
+            SrtmSource::Copernicus => "Copernicus DEM AWS",
+            SrtmSource::Skadi => "AWS Terrain Tiles",
+        }
+    }
 }
 
 async fn import_pbf_task(

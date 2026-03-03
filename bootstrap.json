@@ -30,7 +30,9 @@
 
   "fallback_discovery": {
     "dns_seeds": [],
-    "http_rendezvous": [],
+    "http_rendezvous": [
+      "https://gist.githubusercontent.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17/raw/bootstrap.json"
+    ],
     "ipfs_gateways": []
   },
 

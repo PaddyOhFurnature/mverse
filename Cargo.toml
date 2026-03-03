@@ -1,6 +1,6 @@
 [package]
 name = "metaverse_core"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 
 [dependencies]
@@ -31,6 +31,7 @@ pollster = "0.4"
 glam = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
 zip = "0.6"
+flate2 = "1"
 
 # Phase 3: Physics
 rapier3d = { version = "0.22", features = ["debug-render", "serde-serialize"] }

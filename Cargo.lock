@@ -3746,7 +3746,7 @@ dependencies = [
 
 [[package]]
 name = "metaverse_core"
-version = "0.1.18"
+version = "0.1.19"
 dependencies = [
  "async-trait",
  "axum",
@@ -3763,6 +3763,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "env_logger",
+ "flate2",
  "font8x8",
  "futures 0.3.32",
  "gdal",
