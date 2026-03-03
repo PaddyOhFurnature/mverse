@@ -4350,6 +4350,7 @@ async fn download_osm_regions_task(
         let dest = osm_dir.join(&filename);
 
         // Skip only if file exists and is >1MB (partial/empty files get re-downloaded)
+        // Skip completed file
         if dest.exists() {
             if let Ok(meta) = std::fs::metadata(&dest) {
                 if meta.len() > 1_000_000 {
@@ -4358,34 +4359,70 @@ async fn download_osm_regions_task(
                     continue;
                 }
             }
-            // Partial/empty file — delete and retry
             let _ = std::fs::remove_file(&dest);
         }
 
         let url = format!("https://download.geofabrik.de/{}-latest.osm.pbf", region.trim_matches('/'));
 
-        match client.get(&url).send().await {
+        // Check for a partial .tmp file to resume from
+        let tmp = dest.with_extension("pbf.tmp");
+        let resume_offset: u64 = tokio::fs::metadata(&tmp).await.map(|m| m.len()).unwrap_or(0);
+
+        let req = if resume_offset > 0 {
+            tlog!("⬇ [OSM] {} — resuming from {:.1} MB…", filename, resume_offset as f64 / 1_048_576.0);
+            client.get(&url).header("Range", format!("bytes={}-", resume_offset))
+        } else {
+            client.get(&url)
+        };
+
+        match req.send().await {
             Err(e) => { tlog!("❌ [OSM] {} — request failed: {}", region, e); continue; }
-            Ok(resp) if !resp.status().is_success() => {
-                tlog!("❌ [OSM] {} — HTTP {}", region, resp.status());
+            Ok(resp) if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
+                // 416: range is beyond EOF — .tmp is already the full file
+                tlog!("✅ [OSM] {} — download complete (already full), converting…", filename);
+                if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
+                    tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
+                } else {
+                    let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
+                    let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
+                        match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
+                            Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
+                                if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
+                            Err(e) => tlog2!("❌ [OSM] conversion failed: {}", e),
+                        }
+                    });
+                }
                 continue;
+            }
+            Ok(resp) if !resp.status().is_success() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT => {
+                tlog!("❌ [OSM] {} — HTTP {}", region, resp.status()); continue;
             }
             Ok(resp) => {
                 let content_len = resp.content_length().unwrap_or(0);
-                tlog!("⬇ [OSM] {} — streaming to disk{}…", filename,
-                    if content_len > 0 { format!(" ({:.1} MB)", content_len as f64 / 1_048_576.0) } else { String::new() });
+                let total_est = if resume_offset > 0 { resume_offset + content_len } else { content_len };
+                tlog!("⬇ [OSM] {} — streaming{}…", filename,
+                    if total_est > 0 { format!(" ({:.1} MB total)", total_est as f64 / 1_048_576.0) } else { String::new() });
 
-                // Stream directly to a temp file — avoids buffering GBs in RAM
-                let tmp = dest.with_extension("pbf.tmp");
-                let mut file = match tokio::fs::File::create(&tmp).await {
-                    Ok(f) => f,
-                    Err(e) => { tlog!("❌ [OSM] {} — create tmp failed: {}", filename, e); continue; }
+                // Open for append if resuming, otherwise create fresh
+                let mut file = if resume_offset > 0 {
+                    match tokio::fs::OpenOptions::new().append(true).open(&tmp).await {
+                        Ok(f) => f,
+                        Err(e) => { tlog!("❌ [OSM] {} — open for resume failed: {}", filename, e); continue; }
+                    }
+                } else {
+                    match tokio::fs::File::create(&tmp).await {
+                        Ok(f) => f,
+                        Err(e) => { tlog!("❌ [OSM] {} — create tmp failed: {}", filename, e); continue; }
+                    }
                 };
+
                 use tokio::io::AsyncWriteExt;
                 use futures::StreamExt as _;
                 let mut stream = resp.bytes_stream();
-                let mut written: u64 = 0;
-                let mut last_log = 0u64;
+                let mut written: u64 = resume_offset; // count total bytes including resumed portion
+                let mut last_log = resume_offset;
                 let mut ok = true;
                 while let Some(chunk) = stream.next().await {
                     match chunk {
@@ -4395,7 +4432,6 @@ async fn download_osm_regions_task(
                                 tlog!("❌ [OSM] {} — write error: {}", filename, e); ok = false; break;
                             }
                             written += b.len() as u64;
-                            // Log progress every 100 MB
                             if written - last_log >= 100 * 1_048_576 {
                                 last_log = written;
                                 tlog!("⬇ [OSM] {} — {:.1} MB written…", filename, written as f64 / 1_048_576.0);
@@ -4409,24 +4445,13 @@ async fn download_osm_regions_task(
                         tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
                     } else {
                         tlog!("✅ [OSM] {} complete ({:.1} MB) — starting tile conversion…", filename, written as f64 / 1_048_576.0);
-                        // Auto-convert to bincode tiles in a blocking task
-                        let dest_c = dest.clone();
-                        let osm_dir_c = osm_dir.clone();
-                        let task_log_c = Arc::clone(&task_log);
-                        let swarm_tx_c = swarm_tx.clone();
+                        let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
+                        let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
                         tokio::task::spawn_blocking(move || {
-                            macro_rules! tlog2 {
-                                ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log_c.lock() { buf.push(format!($($arg)*)); } }};
-                            }
+                            macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
                             match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
-                                Ok(n) => {
-                                    tlog2!("✅ [OSM] {} converted: {} tiles written", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
-                                    // Announce tiles to DHT
-                                    if let Some(tx) = swarm_tx_c {
-                                        // Signal bulk announce — server will re-scan and announce all OSM tiles
-                                        let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec()));
-                                    }
-                                }
+                                Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
+                                    if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
                                 Err(e) => tlog2!("❌ [OSM] {} conversion failed: {}", dest_c.file_name().unwrap_or_default().to_string_lossy(), e),
                             }
                         });
