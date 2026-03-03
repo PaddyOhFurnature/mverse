@@ -370,6 +370,128 @@ pub fn elevation_dht_key(lat: i32, lon: i32) -> Vec<u8> {
     h.finish().to_le_bytes().to_vec()
 }
 
+/// Copernicus DEM GLO-30 via AWS S3 (free, no API key, Cloud-Optimized GeoTIFF)
+///
+/// Covers the globe at 30m (~1 arc-second) resolution. No rate limit.
+/// URL template: https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N51_00_E000_00_DEM/...tif
+pub struct CopernicusElevationSource {
+    pub cache_dir: PathBuf,
+}
+
+impl CopernicusElevationSource {
+    pub fn new(cache_dir: PathBuf) -> Self { Self { cache_dir } }
+
+    fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
+        let ns = if lat >= 0 { "N" } else { "S" };
+        let ew = if lon >= 0 { "E" } else { "W" };
+        let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+        let tile_id = format!("Copernicus_DSM_COG_10_{}{:02}_00_{}{:03}_00_DEM", ns, la, ew, lo);
+        let url = format!("https://copernicus-dem-30m.s3.amazonaws.com/{}/{}.tif", tile_id, tile_id);
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", la) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lo) };
+        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir)
+            .join(format!("srtm_{}{:02}_{}{:03}.tif",
+                if lat >= 0 { 'n' } else { 's' }, la,
+                if lon >= 0 { 'e' } else { 'w' }, lo));
+        std::fs::create_dir_all(tile_path.parent().unwrap())
+            .map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+        let resp = reqwest::blocking::get(&url)
+            .map_err(|e| ElevationError::NetworkError(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ElevationError::NetworkError(format!("HTTP {}", resp.status())));
+        }
+        let bytes = resp.bytes().map_err(|e| ElevationError::NetworkError(e.to_string()))?;
+        if bytes.len() < 1024 { return Err(ElevationError::FileNotFound("empty tile (ocean)".into())); }
+        std::fs::write(&tile_path, &bytes).map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+        Ok(tile_path)
+    }
+}
+
+impl ElevationSource for CopernicusElevationSource {
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let lat_tile = gps.lat.floor() as i32;
+        let lon_tile = gps.lon.floor() as i32;
+        let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
+        let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", la) };
+        let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lo) };
+        let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+            if lat_tile >= 0 { 'n' } else { 's' }, la,
+            if lon_tile >= 0 { 'e' } else { 'w' }, lo);
+        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+        let tile_file = if tile_path.exists() && tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            tile_path
+        } else {
+            self.fetch_tile(lat_tile, lon_tile)?
+        };
+        Ok(Some(extract_elevation(&tile_file, gps)?))
+    }
+    fn name(&self) -> &str { "Copernicus DEM (AWS)" }
+}
+
+/// AWS Terrain Tiles / Skadi (free, no API key, SRTM1 HGT.gz)
+///
+/// Mirrors SRTM 1-arc-second data at 1°×1° tiles. No rate limit.
+/// URL: https://s3.amazonaws.com/elevation-tiles-prod/skadi/{NS}{lat}/{NS}{lat}{EW}{lon}.hgt.gz
+pub struct SkadiElevationSource {
+    pub cache_dir: PathBuf,
+}
+
+impl SkadiElevationSource {
+    pub fn new(cache_dir: PathBuf) -> Self { Self { cache_dir } }
+
+    fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
+        let ns = if lat >= 0 { "N" } else { "S" };
+        let ew = if lon >= 0 { "E" } else { "W" };
+        let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+        let url = format!(
+            "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{}{:02}/{}{:02}{}{:03}.hgt.gz",
+            ns, la, ns, la, ew, lo);
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", la) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lo) };
+        // HGT files must use GDAL-standard naming: N51E000.hgt
+        let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, la, ew, lo);
+        let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+        std::fs::create_dir_all(hgt_path.parent().unwrap())
+            .map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+        let resp = reqwest::blocking::get(&url)
+            .map_err(|e| ElevationError::NetworkError(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ElevationError::NetworkError(format!("HTTP {}", resp.status())));
+        }
+        let bytes = resp.bytes().map_err(|e| ElevationError::NetworkError(e.to_string()))?;
+        if bytes.len() < 512 { return Err(ElevationError::FileNotFound("empty tile (ocean)".into())); }
+        // Decompress gzip → raw HGT
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+        let mut raw = Vec::new();
+        decoder.read_to_end(&mut raw).map_err(|e| ElevationError::ParseError(e.to_string()))?;
+        if raw.len() < 1024 { return Err(ElevationError::FileNotFound("decompressed empty".into())); }
+        std::fs::write(&hgt_path, &raw).map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+        Ok(hgt_path)
+    }
+}
+
+impl ElevationSource for SkadiElevationSource {
+    fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let lat_tile = gps.lat.floor() as i32;
+        let lon_tile = gps.lon.floor() as i32;
+        let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
+        let ns = if lat_tile >= 0 { "N" } else { "S" };
+        let ew = if lon_tile >= 0 { "E" } else { "W" };
+        let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", la) };
+        let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lo) };
+        let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, la, ew, lo);
+        let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+        let tile_file = if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            hgt_path
+        } else {
+            self.fetch_tile(lat_tile, lon_tile)?
+        };
+        Ok(Some(extract_elevation(&tile_file, gps)?))
+    }
+    fn name(&self) -> &str { "AWS Terrain Tiles (Skadi)" }
+}
+
 impl ElevationSource for OpenTopographySource {
     fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         // Determine which 1° tile contains this point

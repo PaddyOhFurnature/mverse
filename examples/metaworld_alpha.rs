@@ -75,7 +75,7 @@ use metaverse_core::{
                 MODULE_DOOR_RADIUS, MODULES},
     billboard::{BillboardPipeline, ModuleBillboards, TerminalScreen},
     coordinates::{GPS, ECEF},
-    elevation::{ElevationPipeline, OpenTopographySource, P2PElevationSource},
+    elevation::{ElevationPipeline, OpenTopographySource, P2PElevationSource, CopernicusElevationSource, SkadiElevationSource},
     identity::{Identity, KeyType},
     marching_cubes::{extract_chunk_mesh, extract_water_surface_mesh},
     materials::MaterialId,
@@ -1197,13 +1197,16 @@ fn main() {
     let tile_fetcher = Arc::new(multiplayer.tile_fetcher());
 
     let mut elevation_pipeline = ElevationPipeline::new();
-    // P2P first — try peers before hitting the API
+    // P2P first — try peers before hitting any API
     elevation_pipeline.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
     if let Some(ref key) = api_key {
         elevation_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     } else {
-        println!("⚠️  No OPENTOPOGRAPHY_API_KEY set — terrain will be flat");
+        println!("⚠️  No OPENTOPOGRAPHY_API_KEY set — using free elevation sources only");
     }
+    // Free fallback sources — no API key required
+    elevation_pipeline.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
+    elevation_pipeline.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
     
     // Convert GPS origin to voxel coordinates  
     let origin_ecef = origin_gps.to_ecef();
@@ -1225,6 +1228,8 @@ fn main() {
     if let Some(ref key) = api_key {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
+    elevation_pipeline_2.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
+    elevation_pipeline_2.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
         .with_osm_cache(data_dir.join("osm"))
         .with_tile_fetcher(Arc::clone(&tile_fetcher));
@@ -1235,6 +1240,8 @@ fn main() {
     if let Some(ref key) = api_key {
         osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
+    osm_elev_pipeline.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
+    osm_elev_pipeline.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
     let osm_cache_dir = data_dir.join("osm");
     
     // User content layer - separates edits from base terrain

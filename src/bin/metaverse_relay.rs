@@ -680,7 +680,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if let Ok(a) = ext_tcp.parse() { swarm.add_external_address(a); }
     if let Ok(a) = ext_ws.parse()  { swarm.add_external_address(a); }
 
-    // Dial peer relays
+    // Dial peer relays from config
     for peer_addr in config.peers.clone() {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             if let Some(libp2p::multiaddr::Protocol::P2p(pid)) = addr.iter().last() {
@@ -692,6 +692,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    // Bootstrap from bootstrap.json (and cached remote copy)
+    {
+        #[derive(serde::Deserialize)]
+        struct BootstrapFile { bootstrap_nodes: Vec<BootstrapNode> }
+        #[derive(serde::Deserialize)]
+        struct BootstrapNode { multiaddr: String }
+        let dial_from_json = |data: &str, swarm: &mut libp2p::Swarm<RelayBehaviour>| {
+            if let Ok(bf) = serde_json::from_str::<BootstrapFile>(data) {
+                for n in &bf.bootstrap_nodes {
+                    if let Ok(addr) = n.multiaddr.parse::<Multiaddr>() {
+                        let _ = swarm.dial(addr);
+                    }
+                }
+            }
+        };
+        if let Ok(data) = std::fs::read_to_string("bootstrap.json") { dial_from_json(&data, &mut swarm); }
+        if let Ok(data) = std::fs::read_to_string("bootstrap_cache.json") { dial_from_json(&data, &mut swarm); }
+        // Fetch gist in background and save to bootstrap_cache.json for next startup
+        tokio::spawn(async {
+            let urls = [
+                "https://raw.githubusercontent.com/PaddyOhFurnature/mverse/main/bootstrap.json",
+                "https://gist.githubusercontent.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17/raw/bootstrap.json",
+            ];
+            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+            for url in &urls {
+                if let Ok(r) = client.get(*url).send().await {
+                    if let Ok(t) = r.text().await { let _ = std::fs::write("bootstrap_cache.json", t); break; }
+                }
+            }
+        });
+    }
+
     if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
 
     let mut state = AppState::new(config.clone(), local_peer_id.to_string(), public_ip.clone());
