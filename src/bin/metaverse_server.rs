@@ -70,18 +70,22 @@ fn config_paths() -> [PathBuf; 1] {
     [PathBuf::from("server.json")]
 }
 
-fn load_config() -> ServerConfig {
+fn load_config() -> (ServerConfig, Option<String>) {
     for path in &config_paths() {
         if path.exists() {
             if let Ok(text) = std::fs::read_to_string(path) {
                 match serde_json::from_str::<ServerConfig>(&text) {
-                    Ok(cfg) => return cfg,
-                    Err(e) => eprintln!("⚠️  Config parse error in {}: {}", path.display(), e),
+                    Ok(cfg) => return (cfg, None),
+                    Err(e) => {
+                        let msg = format!("❌ Config parse error in {} — using defaults: {}", path.display(), e);
+                        eprintln!("{}", msg);
+                        return (metaverse_core::node_config::NodeConfig::server_defaults(), Some(msg));
+                    }
                 }
             }
         }
     }
-    metaverse_core::node_config::NodeConfig::server_defaults()
+    (metaverse_core::node_config::NodeConfig::server_defaults(), None)
 }
 
 fn write_default_config_if_missing() {
@@ -2634,7 +2638,7 @@ fn spawn_sighup_handler(state: &AppState) {
             };
             while sig.recv().await.is_some() {
                 eprintln!("🔄 SIGHUP — reloading config from disk");
-                let new_cfg = load_config();
+                let (new_cfg, _) = load_config();
                 let _ = tx.send(new_cfg).await;
             }
         });
@@ -3280,9 +3284,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     // Load config (custom path if specified)
-    let mut config = if let Some(ref path) = args.config {
+    let (mut config, config_error) = if let Some(ref path) = args.config {
         let text = std::fs::read_to_string(path)?;
-        serde_json::from_str::<ServerConfig>(&text)?
+        (serde_json::from_str::<ServerConfig>(&text)?, None)
     } else {
         load_config()
     };
@@ -3579,6 +3583,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Keep tx alive for future terrain-worker integration.
     let _ = &tile_req_tx;
     app_state.log("✅ Metaverse server started");
+    if let Some(ref err) = config_error {
+        app_state.log(err.clone());
+        app_state.log("⚠️  Check server.json — strings must be quoted, e.g. \"node_name\": \"MyServer\"".to_string());
+    }
     // Log effective config values so operator can confirm config is being read
     app_state.log(format!("📋 Config: name={}, world_dir={}, srtm={}, api_key={}",
         app_state.config.node_name.as_deref().unwrap_or("(none)"),

@@ -178,6 +178,7 @@ impl NodeConfig {
     /// Defaults for a server node (no graphics).
     pub fn server_defaults() -> Self {
         Self {
+            node_name: Some("MyServer".to_string()),
             node_type: "server".to_string(),
             port: 4001,
             always_on: true,
