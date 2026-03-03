@@ -4199,7 +4199,14 @@ async fn download_all_srtm_task(
                 if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
             let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
             processed += 1;
-            if tile_path.exists() { skipped += 1; continue; }
+            // Skip only if file exists AND is a valid size (>=1KB). Retry 0-byte/corrupt files.
+            if tile_path.exists() {
+                if tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+                    skipped += 1; continue;
+                }
+                // Bad file — delete and re-download
+                let _ = std::fs::remove_file(&tile_path);
+            }
 
             let key_c = api_key.clone();
             let tp = tile_path.clone();
@@ -4311,6 +4318,7 @@ async fn download_osm_regions_task(
         let filename = format!("{}-latest.osm.pbf", slug);
         let dest = osm_dir.join(&filename);
 
+        // Skip only if file exists and is >1MB (partial/empty files get re-downloaded)
         if dest.exists() {
             if let Ok(meta) = std::fs::metadata(&dest) {
                 if meta.len() > 1_000_000 {
@@ -4319,10 +4327,11 @@ async fn download_osm_regions_task(
                     continue;
                 }
             }
+            // Partial/empty file — delete and retry
+            let _ = std::fs::remove_file(&dest);
         }
 
         let url = format!("https://download.geofabrik.de/{}-latest.osm.pbf", region.trim_matches('/'));
-        tlog!("⬇ [OSM] Downloading {} …", url);
 
         match client.get(&url).send().await {
             Err(e) => { tlog!("❌ [OSM] {} — request failed: {}", region, e); continue; }
@@ -4332,20 +4341,48 @@ async fn download_osm_regions_task(
             }
             Ok(resp) => {
                 let content_len = resp.content_length().unwrap_or(0);
-                if content_len > 0 {
-                    tlog!("⬇ [OSM] {} — {:.1} MB to download", filename, content_len as f64 / 1_048_576.0);
+                tlog!("⬇ [OSM] {} — streaming to disk{}…", filename,
+                    if content_len > 0 { format!(" ({:.1} MB)", content_len as f64 / 1_048_576.0) } else { String::new() });
+
+                // Stream directly to a temp file — avoids buffering GBs in RAM
+                let tmp = dest.with_extension("pbf.tmp");
+                let mut file = match tokio::fs::File::create(&tmp).await {
+                    Ok(f) => f,
+                    Err(e) => { tlog!("❌ [OSM] {} — create tmp failed: {}", filename, e); continue; }
+                };
+                use tokio::io::AsyncWriteExt;
+                use futures::StreamExt as _;
+                let mut stream = resp.bytes_stream();
+                let mut written: u64 = 0;
+                let mut last_log = 0u64;
+                let mut ok = true;
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Err(e) => { tlog!("❌ [OSM] {} — stream error at {:.1} MB: {}", filename, written as f64 / 1_048_576.0, e); ok = false; break; }
+                        Ok(b) => {
+                            if let Err(e) = file.write_all(&b).await {
+                                tlog!("❌ [OSM] {} — write error: {}", filename, e); ok = false; break;
+                            }
+                            written += b.len() as u64;
+                            // Log progress every 100 MB
+                            if written - last_log >= 100 * 1_048_576 {
+                                last_log = written;
+                                tlog!("⬇ [OSM] {} — {:.1} MB written…", filename, written as f64 / 1_048_576.0);
+                            }
+                        }
+                    }
                 }
-                match resp.bytes().await {
-                    Err(e) => { tlog!("❌ [OSM] {} — read failed: {}", region, e); continue; }
-                    Ok(bytes) => {
-                        if bytes.len() < 1024 {
-                            tlog!("❌ [OSM] {} — response too small ({} bytes), invalid region?", region, bytes.len());
-                            continue;
-                        }
-                        match std::fs::write(&dest, &bytes) {
-                            Ok(_) => tlog!("✅ [OSM] {} saved ({:.1} MB)", filename, bytes.len() as f64 / 1_048_576.0),
-                            Err(e) => tlog!("❌ [OSM] {} — write failed: {}", filename, e),
-                        }
+                drop(file);
+                if ok && written > 1024 {
+                    if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
+                        tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
+                    } else {
+                        tlog!("✅ [OSM] {} complete ({:.1} MB)", filename, written as f64 / 1_048_576.0);
+                    }
+                } else {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    if !ok { /* error already logged */ } else {
+                        tlog!("❌ [OSM] {} — response too small, invalid region?", filename);
                     }
                 }
             }
