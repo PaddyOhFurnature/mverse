@@ -130,10 +130,14 @@ pub struct NodeConfig {
     /// Tiles already on disk are skipped. Runs in background.
     pub download_all_srtm: bool,
 
-    /// List of Geofabrik region paths to download OSM PBF data for on startup.
-    /// Format: continent/country or continent/country/region
+    /// Download all continent-level OSM PBF files from Geofabrik on startup.
+    /// Downloads all 8 continents to {world_dir}/osm/. Files already on disk are skipped.
+    /// Set to true for a full-planet dataset equivalent.
+    #[serde(default)]
+    pub download_all_osm: bool,
+
+    /// List of specific Geofabrik region paths to download OSM PBF data for on startup.
     /// e.g. ["europe/germany", "north-america/us/california", "australia-oceania"]
-    /// Files are saved to {world_dir}/osm/ and skipped if already present.
     /// Full list at https://download.geofabrik.de/
     #[serde(default)]
     pub osm_download_regions: Vec<String>,
@@ -271,6 +275,7 @@ impl Default for NodeConfig {
             data: DataSourceConfig::default(),
             download_on_start: vec![],
             download_all_srtm: false,
+            download_all_osm: false,
             osm_download_regions: vec![],
             cpu_shed_threshold_pct: 90,
             ram_shed_threshold_pct: 85,

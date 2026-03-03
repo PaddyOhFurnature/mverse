@@ -3734,17 +3734,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Geofabrik OSM region download
-    if !app_state.config.osm_download_regions.is_empty() {
-        let regions = app_state.config.osm_download_regions.clone();
-        let world_dir_osm = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
-        );
-        let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
-        app_state.log(format!("📥 Geofabrik OSM download started for {} region(s): {}", regions.len(), regions.join(", ")));
-        tokio::spawn(async move {
-            download_osm_regions_task(regions, world_dir_osm, task_log_osm).await;
-        });
+    // Geofabrik OSM download — all continents or specific regions
+    {
+        const ALL_CONTINENTS: &[&str] = &[
+            "africa", "antarctica", "asia", "australia-oceania",
+            "central-america", "europe", "north-america", "south-america",
+        ];
+        let mut regions = app_state.config.osm_download_regions.clone();
+        if app_state.config.download_all_osm {
+            for c in ALL_CONTINENTS {
+                if !regions.iter().any(|r| r == c) {
+                    regions.push(c.to_string());
+                }
+            }
+        }
+        if !regions.is_empty() {
+            let world_dir_osm = std::path::PathBuf::from(
+                app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            );
+            let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
+            app_state.log(format!("📥 Geofabrik OSM download started for {} region(s)", regions.len()));
+            tokio::spawn(async move {
+                download_osm_regions_task(regions, world_dir_osm, task_log_osm).await;
+            });
+        }
     }
 
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
