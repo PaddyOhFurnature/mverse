@@ -130,6 +130,14 @@ pub struct NodeConfig {
     /// Tiles already on disk are skipped. Runs in background.
     pub download_all_srtm: bool,
 
+    /// List of Geofabrik region paths to download OSM PBF data for on startup.
+    /// Format: continent/country or continent/country/region
+    /// e.g. ["europe/germany", "north-america/us/california", "australia-oceania"]
+    /// Files are saved to {world_dir}/osm/ and skipped if already present.
+    /// Full list at https://download.geofabrik.de/
+    #[serde(default)]
+    pub osm_download_regions: Vec<String>,
+
     // ── Load shedding ─────────────────────────────────────────────────────
     pub cpu_shed_threshold_pct: u8,
     pub ram_shed_threshold_pct: u8,
@@ -263,6 +271,7 @@ impl Default for NodeConfig {
             data: DataSourceConfig::default(),
             download_on_start: vec![],
             download_all_srtm: false,
+            osm_download_regions: vec![],
             cpu_shed_threshold_pct: 90,
             ram_shed_threshold_pct: 85,
             web_port: 8080,

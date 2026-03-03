@@ -140,6 +140,9 @@ pub async fn apply_update(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // Reset terminal state before exec so the new process inherits a clean terminal.
+        // LeaveAlternateScreen + reset colours + show cursor.
+        eprint!("\x1b[?1049l\x1b[0m\x1b[?25h");
         let args: Vec<String> = std::env::args().collect();
         let err = std::process::Command::new(&exe_path)
             .args(&args[1..])

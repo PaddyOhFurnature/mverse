@@ -1504,7 +1504,7 @@ fn draw(frame: &mut Frame, state: &AppState, world: &WorldStats) {
     draw_system(frame, state, left_rows[0]);
     draw_network(frame, state, left_rows[1]);
     draw_world(frame, world, state, right_rows[0]);
-    draw_node_info(frame, state, right_rows[1]);
+    draw_activity(frame, state, right_rows[1]);
 
     // Footer
     let footer = format!(
@@ -1633,20 +1633,31 @@ fn draw_world(frame: &mut Frame, world: &WorldStats, state: &AppState, area: Rec
     );
 }
 
-fn draw_node_info(frame: &mut Frame, state: &AppState, area: Rect) {
-    let items: Vec<Line> = vec![
-        stat_line("Node type:  ", state.config.node_type.clone()),
-        stat_line("Priority:   ", format!("{}", state.config.priority_score)),
-        stat_line("Max circuits:", format!("{}", state.config.max_circuits)),
-        stat_line("Max peers:  ", if state.config.max_peers == 0 { "∞".to_string() } else { state.config.max_peers.to_string() }),
-        stat_line("Bandwidth:  ", if state.config.max_bandwidth_mbps == 0 { "∞".to_string() } else { format!("{} MB/s", state.config.max_bandwidth_mbps) }),
-        stat_line("Web:        ", format!("http://{}:{}", state.public_ip, state.config.web_port)),
-        stat_line("Peer ID:    ", state.local_peer_id[state.local_peer_id.len().saturating_sub(20)..].to_string()),
-        stat_line("Version:    ", env!("CARGO_PKG_VERSION").to_string()),
-    ];
+fn draw_activity(frame: &mut Frame, state: &AppState, area: Rect) {
+    // Show last N log entries — most useful thing on the TUI
+    let height = area.height.saturating_sub(2) as usize; // minus border
+    let entries: Vec<Line> = state.log.iter().rev().take(height)
+        .map(|msg| {
+            let style = if msg.contains('✅') || msg.contains("complete") || msg.contains("saved") {
+                Style::default().fg(Color::Green)
+            } else if msg.contains('❌') || msg.contains("error") || msg.contains("Error") || msg.contains("failed") {
+                Style::default().fg(Color::Red)
+            } else if msg.contains('⚠') || msg.contains("warn") {
+                Style::default().fg(Color::Yellow)
+            } else if msg.contains("⬇") || msg.contains("📥") || msg.contains("download") || msg.contains("Download") {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            Line::from(Span::styled(msg.clone(), style))
+        })
+        .collect::<Vec<_>>()
+        .into_iter().rev().collect();
+
     frame.render_widget(
-        Paragraph::new(items)
-            .block(Block::default().title(" Node ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
+        Paragraph::new(entries)
+            .block(Block::default().title(" Activity ").title_style(Style::default().fg(Color::Yellow)).borders(Borders::ALL))
+            .wrap(ratatui::widgets::Wrap { trim: true }),
         area,
     );
 }
@@ -2862,6 +2873,7 @@ async fn web_api_status(State(s): State<WebState>) -> impl IntoResponse {
         extra:            serde_json::json!({
                               "key_count": st.key_count,
                               "world":     serde_json::to_value(&st.world).unwrap_or_default(),
+                              "recent_activity": st.recent_logs.iter().rev().take(12).cloned().collect::<Vec<_>>(),
                           }),
     };
     drop(st);
@@ -3722,7 +3734,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Publish NodeCapabilities to DHT immediately (will re-announce every 30 min)
+    // Geofabrik OSM region download
+    if !app_state.config.osm_download_regions.is_empty() {
+        let regions = app_state.config.osm_download_regions.clone();
+        let world_dir_osm = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
+        app_state.log(format!("📥 Geofabrik OSM download started for {} region(s): {}", regions.len(), regions.join(", ")));
+        tokio::spawn(async move {
+            download_osm_regions_task(regions, world_dir_osm, task_log_osm).await;
+        });
+    }
+
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
     app_state.log(format!("📡 NodeCapabilities published (tier=server, always_on={})", app_state.config.always_on));
 
@@ -4230,6 +4254,80 @@ async fn import_pbf_task(
         Ok(Err(e)) => tlog!("❌ [PBF] Import failed: {}", e),
         Err(e) => tlog!("❌ [PBF] Import task panicked: {}", e),
     }
+}
+
+/// Download OSM PBF files from Geofabrik for a list of region paths.
+/// Region format: "europe/germany", "north-america/us/california", "australia-oceania", etc.
+/// Files are saved to {world_dir}/osm/{slug}-latest.osm.pbf and skipped if already present.
+async fn download_osm_regions_task(
+    regions: Vec<String>,
+    world_dir: std::path::PathBuf,
+    task_log: Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    macro_rules! tlog {
+        ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
+    }
+    let osm_dir = world_dir.join("osm");
+    std::fs::create_dir_all(&osm_dir).ok();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(7200)) // 2hr — planet files are large
+        .user_agent("metaverse-server/geofabrik-downloader")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => { tlog!("❌ [OSM] Failed to build HTTP client: {}", e); return; }
+    };
+
+    tlog!("📥 [OSM] Starting Geofabrik download for {} region(s)", regions.len());
+
+    for region in &regions {
+        // slug = last path component, e.g. "europe/germany" → "germany"
+        let slug = region.trim_matches('/').split('/').last().unwrap_or(region.as_str()).to_string();
+        let filename = format!("{}-latest.osm.pbf", slug);
+        let dest = osm_dir.join(&filename);
+
+        if dest.exists() {
+            if let Ok(meta) = std::fs::metadata(&dest) {
+                if meta.len() > 1_000_000 {
+                    tlog!("⏭ [OSM] {} already exists ({:.1} MB), skipping",
+                        filename, meta.len() as f64 / 1_048_576.0);
+                    continue;
+                }
+            }
+        }
+
+        let url = format!("https://download.geofabrik.de/{}-latest.osm.pbf", region.trim_matches('/'));
+        tlog!("⬇ [OSM] Downloading {} …", url);
+
+        match client.get(&url).send().await {
+            Err(e) => { tlog!("❌ [OSM] {} — request failed: {}", region, e); continue; }
+            Ok(resp) if !resp.status().is_success() => {
+                tlog!("❌ [OSM] {} — HTTP {}", region, resp.status());
+                continue;
+            }
+            Ok(resp) => {
+                let content_len = resp.content_length().unwrap_or(0);
+                if content_len > 0 {
+                    tlog!("⬇ [OSM] {} — {:.1} MB to download", filename, content_len as f64 / 1_048_576.0);
+                }
+                match resp.bytes().await {
+                    Err(e) => { tlog!("❌ [OSM] {} — read failed: {}", region, e); continue; }
+                    Ok(bytes) => {
+                        if bytes.len() < 1024 {
+                            tlog!("❌ [OSM] {} — response too small ({} bytes), invalid region?", region, bytes.len());
+                            continue;
+                        }
+                        match std::fs::write(&dest, &bytes) {
+                            Ok(_) => tlog!("✅ [OSM] {} saved ({:.1} MB)", filename, bytes.len() as f64 / 1_048_576.0),
+                            Err(e) => tlog!("❌ [OSM] {} — write failed: {}", filename, e),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    tlog!("✅ [OSM] Geofabrik download complete");
 }
 
 async fn bulk_download_task(
