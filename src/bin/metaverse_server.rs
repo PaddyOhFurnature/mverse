@@ -3739,7 +3739,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_state.log("⚠️  download_all_srtm=true but opentopography_api_key is not set — skipping".to_string());
     }
 
-    // PBF import
+    // PBF import (explicit path in config)
     if let Some(ref pbf_path) = app_state.config.data.osm_pbf_path.clone() {
         let pbf = std::path::PathBuf::from(pbf_path);
         let world_dir_pbf = std::path::PathBuf::from(
@@ -3750,6 +3750,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::spawn(async move {
             import_pbf_task(pbf, world_dir_pbf, task_log_pbf).await;
         });
+    }
+
+    // Auto-convert any existing PBF files in osm/ that have not yet been tiled
+    // (e.g. downloaded in a previous run, or pre-placed by the user)
+    {
+        let osm_dir = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        ).join("osm");
+        if let Ok(entries) = std::fs::read_dir(&osm_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if meta.len() > 1_000_000 {
+                            let task_log_c = Arc::clone(&shared.read().unwrap().task_log);
+                            let osm_dir_c = osm_dir.clone();
+                            app_state.log(format!("📥 Converting existing PBF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                            tokio::task::spawn_blocking(move || {
+                                match metaverse_core::osm::import_pbf_to_cache(&path, &osm_dir_c) {
+                                    Ok(n) => { if let Ok(mut buf) = task_log_c.lock() { buf.push(format!("✅ [OSM] {} → {} tiles", path.file_name().unwrap_or_default().to_string_lossy(), n)); } }
+                                    Err(e) => { if let Ok(mut buf) = task_log_c.lock() { buf.push(format!("❌ [OSM] conversion failed: {}", e)); } }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Geofabrik OSM download — all continents or specific regions
@@ -3771,9 +3799,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 app_state.config.world_dir.as_deref().unwrap_or("world_data")
             );
             let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
+            let swarm_tx_osm = shared.read().unwrap().swarm_tx.clone();
             app_state.log(format!("📥 Geofabrik OSM download started for {} region(s)", regions.len()));
             tokio::spawn(async move {
-                download_osm_regions_task(regions, world_dir_osm, task_log_osm).await;
+                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm).await;
             });
         }
     }
@@ -4290,9 +4319,11 @@ async fn import_pbf_task(
 /// Download OSM PBF files from Geofabrik for a list of region paths.
 /// Region format: "europe/germany", "north-america/us/california", "australia-oceania", etc.
 /// Files are saved to {world_dir}/osm/{slug}-latest.osm.pbf and skipped if already present.
+/// After each successful download, automatically converts to bincode tiles in background.
 async fn download_osm_regions_task(
     regions: Vec<String>,
     world_dir: std::path::PathBuf,
+    swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     macro_rules! tlog {
@@ -4377,7 +4408,28 @@ async fn download_osm_regions_task(
                     if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
                         tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
                     } else {
-                        tlog!("✅ [OSM] {} complete ({:.1} MB)", filename, written as f64 / 1_048_576.0);
+                        tlog!("✅ [OSM] {} complete ({:.1} MB) — starting tile conversion…", filename, written as f64 / 1_048_576.0);
+                        // Auto-convert to bincode tiles in a blocking task
+                        let dest_c = dest.clone();
+                        let osm_dir_c = osm_dir.clone();
+                        let task_log_c = Arc::clone(&task_log);
+                        let swarm_tx_c = swarm_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            macro_rules! tlog2 {
+                                ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log_c.lock() { buf.push(format!($($arg)*)); } }};
+                            }
+                            match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
+                                Ok(n) => {
+                                    tlog2!("✅ [OSM] {} converted: {} tiles written", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
+                                    // Announce tiles to DHT
+                                    if let Some(tx) = swarm_tx_c {
+                                        // Signal bulk announce — server will re-scan and announce all OSM tiles
+                                        let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec()));
+                                    }
+                                }
+                                Err(e) => tlog2!("❌ [OSM] {} conversion failed: {}", dest_c.file_name().unwrap_or_default().to_string_lossy(), e),
+                            }
+                        });
                     }
                 } else {
                     let _ = tokio::fs::remove_file(&tmp).await;
