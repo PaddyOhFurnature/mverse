@@ -1090,36 +1090,6 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
 
     let cache = OsmDiskCache::new(cache_dir);
 
-    // ── PASS 1: collect only the node IDs referenced by ways we care about ──────
-    // This limits node_coords to ~5-10% of all nodes, dramatically reducing RAM.
-    let needed_ids: Vec<i64> = {
-        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
-        let mut reader = OsmPbfReader::new(file);
-        let mut ids: Vec<i64> = Vec::new();
-        for obj in reader.iter().filter_map(|r| r.ok()) {
-            if let OsmObj::Way(w) = obj {
-                if w.tags.contains_key("building")
-                    || w.tags.contains_key("highway")
-                    || w.tags.contains_key("natural")
-                    || w.tags.contains_key("waterway")
-                    || w.tags.contains_key("leisure")
-                    || w.tags.contains_key("landuse")
-                    || w.tags.contains_key("railway")
-                    || w.tags.contains_key("barrier")
-                    || w.tags.contains_key("power")
-                    || w.tags.contains_key("aeroway")
-                {
-                    for nr in &w.nodes { ids.push(nr.0); }
-                }
-            }
-        }
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    };
-
-    // ── PASS 2: load only needed node coords; tile everything immediately ────────
-    let mut node_coords: HashMap<i64, (f32, f32)> = HashMap::with_capacity(needed_ids.len());
     let mut tiles: HashMap<(i64, i64), OsmData> = HashMap::new();
     let mut total_pushed: usize = 0;
     let mut written = 0usize;
@@ -1139,16 +1109,44 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
         }
     };
 
+    // ── PASS 1: collect only the node IDs referenced by ways we care about ──────
+    // Use a HashSet to deduplicate on insert (avoids collecting duplicates then sorting).
+    let needed_ids: std::collections::HashSet<i64> = {
+        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
+        let mut reader = OsmPbfReader::new(file);
+        let mut ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        for obj in reader.iter().filter_map(|r| r.ok()) {
+            if let OsmObj::Way(w) = obj {
+                if w.tags.contains_key("building")
+                    || w.tags.contains_key("highway")
+                    || w.tags.contains_key("natural")
+                    || w.tags.contains_key("waterway")
+                    || w.tags.contains_key("leisure")
+                    || w.tags.contains_key("landuse")
+                    || w.tags.contains_key("railway")
+                    || w.tags.contains_key("barrier")
+                    || w.tags.contains_key("power")
+                    || w.tags.contains_key("aeroway")
+                {
+                    for nr in &w.nodes { ids.insert(nr.0); }
+                }
+            }
+        }
+        ids
+    };
+
+    // ── PASS 2a: load only needed node coords into a sorted Vec; also collect point features ──
+    // Vec<(id, lat, lon)> sorted by id uses ~3x less RAM than HashMap<i64,(f32,f32)>
+    // because HashMap has ~40 bytes of overhead per entry beyond the key+value.
+    let mut node_coords: Vec<(i64, f32, f32)> = Vec::with_capacity(needed_ids.len());
     {
         let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
         let mut reader = OsmPbfReader::new(file);
-
         for obj in reader.iter().filter_map(|r| r.ok()) {
             match obj {
                 OsmObj::Node(n) => {
-                    // Store coords only if needed by a relevant way
-                    if needed_ids.binary_search(&n.id.0).is_ok() {
-                        node_coords.insert(n.id.0, (n.lat() as f32, n.lon() as f32));
+                    if needed_ids.contains(&n.id.0) {
+                        node_coords.push((n.id.0, n.lat() as f32, n.lon() as f32));
                     }
                     // Point features: tile directly (lat/lon available without lookup)
                     if let Some(amenity) = n.tags.get("amenity") {
@@ -1171,12 +1169,39 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
                             total_pushed += 1;
                         }
                     }
+                    if total_pushed >= FLUSH_THRESHOLD {
+                        flush(&mut tiles, &mut written);
+                        total_pushed = 0;
+                    }
                 }
+                OsmObj::Way(_) | OsmObj::Relation(_) => break, // nodes always come first in PBF
+            }
+        }
+    }
+    // Sort by id for O(log n) binary_search lookup; drop needed_ids to free its RAM.
+    node_coords.sort_unstable_by_key(|t| t.0);
+    drop(needed_ids);
+
+    // Lookup helper: binary search into sorted node_coords.
+    let lookup = |id: i64| -> Option<(f64, f64)> {
+        node_coords.binary_search_by_key(&id, |t| t.0)
+            .ok()
+            .map(|i| (node_coords[i].1 as f64, node_coords[i].2 as f64))
+    };
+
+    // ── PASS 2b: read ways only; look up node coords from sorted Vec ─────────────
+    {
+        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
+        let mut reader = OsmPbfReader::new(file);
+
+        for obj in reader.iter().filter_map(|r| r.ok()) {
+            match obj {
+                OsmObj::Node(_) => {} // already handled in pass 2a
 
                 OsmObj::Way(w) => {
                     // Resolve node coords (f32 → f64 for GPS)
                     let coords: Vec<(f64, f64)> = w.nodes.iter()
-                        .filter_map(|id| node_coords.get(&id.0).map(|&(lat, lon)| (lat as f64, lon as f64)))
+                        .filter_map(|id| lookup(id.0))
                         .collect();
                     if coords.len() < 2 { continue; }
 

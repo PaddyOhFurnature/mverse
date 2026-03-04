@@ -3834,30 +3834,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    // Auto-convert any existing PBF files in osm/ that have not yet been tiled
-    // (e.g. downloaded in a previous run, or pre-placed by the user)
+    // Auto-convert any existing PBF files in osm/ that have not yet been tiled.
+    // Conversions run one-at-a-time (smallest file first) to avoid exhausting RAM.
+    // The same serialisation lock is passed to the download task so no two conversions overlap.
+    let conv_lock: Arc<std::sync::Mutex<()>> = Arc::new(std::sync::Mutex::new(()));
     {
         let osm_dir = std::path::PathBuf::from(
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         ).join("osm");
+        let mut pbfs_to_convert: Vec<(u64, std::path::PathBuf)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&osm_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("pbf") {
                     if let Ok(meta) = std::fs::metadata(&path) {
                         if meta.len() > 1_000_000 {
-                            let task_log_c = Arc::clone(&shared.read().unwrap().task_log);
-                            let osm_dir_c = osm_dir.clone();
-                            app_state.log(format!("📥 Converting existing PBF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
-                            tokio::task::spawn_blocking(move || {
-                                match metaverse_core::osm::import_pbf_to_cache(&path, &osm_dir_c) {
-                                    Ok(n) => { if let Ok(mut buf) = task_log_c.lock() { buf.push(format!("✅ [OSM] {} → {} tiles", path.file_name().unwrap_or_default().to_string_lossy(), n)); } }
-                                    Err(e) => { if let Ok(mut buf) = task_log_c.lock() { buf.push(format!("❌ [OSM] conversion failed: {}", e)); } }
-                                }
-                            });
+                            pbfs_to_convert.push((meta.len(), path));
                         }
                     }
                 }
+            }
+        }
+        if !pbfs_to_convert.is_empty() {
+            // Sort smallest-first so quick ones finish and release memory before big ones start.
+            pbfs_to_convert.sort_by_key(|(sz, _)| *sz);
+            let task_log_c = Arc::clone(&shared.read().unwrap().task_log);
+            let lock_c = Arc::clone(&conv_lock);
+            for (_, path) in pbfs_to_convert {
+                app_state.log(format!("📥 Converting existing PBF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                let task_log_cc = Arc::clone(&task_log_c);
+                let osm_dir_c = osm_dir.clone();
+                let lock_cc = Arc::clone(&lock_c);
+                tokio::task::spawn_blocking(move || {
+                    let _guard = lock_cc.lock().unwrap(); // serialise: only one conversion at a time
+                    match metaverse_core::osm::import_pbf_to_cache(&path, &osm_dir_c) {
+                        Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} → {} tiles", path.file_name().unwrap_or_default().to_string_lossy(), n)); } }
+                        Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] conversion failed: {}", e)); } }
+                    }
+                });
             }
         }
     }
@@ -3883,8 +3897,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
             let swarm_tx_osm = shared.read().unwrap().swarm_tx.clone();
             app_state.log(format!("📥 Geofabrik OSM download started for {} region(s)", regions.len()));
+            let lock_osm = Arc::clone(&conv_lock);
             tokio::spawn(async move {
-                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm).await;
+                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm, lock_osm).await;
             });
         }
     }
@@ -4493,6 +4508,7 @@ async fn download_osm_regions_task(
     world_dir: std::path::PathBuf,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
+    conv_lock: Arc<std::sync::Mutex<()>>,
 ) {
     macro_rules! tlog {
         ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
@@ -4553,7 +4569,9 @@ async fn download_osm_regions_task(
                 } else {
                     let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
                     let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
+                    let lock_c = Arc::clone(&conv_lock);
                     tokio::task::spawn_blocking(move || {
+                        let _guard = lock_c.lock().unwrap();
                         macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
                         match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
                             Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
@@ -4615,7 +4633,9 @@ async fn download_osm_regions_task(
                         tlog!("✅ [OSM] {} complete ({:.1} MB) — starting tile conversion…", filename, written as f64 / 1_048_576.0);
                         let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
                         let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
+                        let lock_c = Arc::clone(&conv_lock);
                         tokio::task::spawn_blocking(move || {
+                            let _guard = lock_c.lock().unwrap();
                             macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
                             match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
                                 Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
