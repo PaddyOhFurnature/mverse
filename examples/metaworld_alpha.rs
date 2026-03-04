@@ -977,6 +977,25 @@ enum PlayerModeLocal {
 fn main() {
     env_logger::init();
 
+    // ── Auto-update check (before window opens so exec-restart is clean) ──────
+    {
+        let rt = tokio::runtime::Runtime::new().expect("tokio rt");
+        let result = rt.block_on(async {
+            let timeout = std::time::Duration::from_secs(8);
+            tokio::time::timeout(
+                timeout,
+                metaverse_core::autoupdate::check_for_update("PaddyOhFurnature/mverse", env!("CARGO_PKG_VERSION")),
+            ).await
+        });
+        if let Ok(Some((tag, url, _notes))) = result {
+            eprintln!("🔄 Update available: {} — downloading…", tag);
+            let apply = rt.block_on(metaverse_core::autoupdate::apply_update(&tag, &url));
+            if let Err(e) = apply {
+                eprintln!("⚠️  Auto-update failed: {} — continuing with current version", e);
+            }
+        }
+    }
+
     // ============================================================
     // ZONE CONFIGURATION
     // ============================================================
