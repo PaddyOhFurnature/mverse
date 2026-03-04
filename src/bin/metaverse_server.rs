@@ -510,6 +510,32 @@ fn short_id(id: &str) -> String {
     if id.len() > 12 { format!("…{}", &id[id.len()-10..]) } else { id.to_string() }
 }
 
+/// Returns true if the given multiaddr is worth adding to Kademlia / dialling.
+/// Filters out loopback, link-local, Docker/VMware bridge ranges and any QUIC
+/// addresses (the server transport only speaks TCP + WebSocket).
+fn is_kad_routable(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::Ip4(ip) => {
+                if ip.is_loopback()    { return false; } // 127.x
+                if ip.is_link_local()  { return false; } // 169.254.x
+                let o = ip.octets();
+                if o[0] == 172 && o[1] >= 16 && o[1] <= 31 { return false; } // docker / lxc
+                if o[0] == 192 && o[1] == 168 && o[2] == 122 { return false; } // libvirt
+                if o[0] == 10  && o[1] == 0   && o[2] == 2   { return false; } // VirtualBox NAT
+            }
+            Protocol::Ip6(ip) => {
+                if ip.is_loopback() { return false; }
+            }
+            // Server has no QUIC transport — skip QUIC addresses to prevent "unsupported" errors
+            Protocol::Udp(_) | Protocol::QuicV1 | Protocol::Quic => { return false; }
+            _ => {}
+        }
+    }
+    true
+}
+
 // ─── World stats helper ───────────────────────────────────────────────────────
 
 fn world_data_size_mb(world_dir: &std::path::Path) -> f64 {
@@ -1218,7 +1244,9 @@ fn handle_swarm_event(
                 entry.2 = peer_type.to_string();
             }
             for addr in info.listen_addrs {
-                actions.push(SwarmAction::AddKadAddress(peer_id, addr));
+                if is_kad_routable(&addr) {
+                    actions.push(SwarmAction::AddKadAddress(peer_id, addr));
+                }
             }
             actions.push(SwarmAction::RefreshDhtCount);
         }
@@ -1430,7 +1458,7 @@ fn apply_swarm_actions(
     for action in actions {
         match action {
             SwarmAction::AddKadAddress(peer_id, addr) => {
-                if addr != Multiaddr::empty() {
+                if addr != Multiaddr::empty() && is_kad_routable(&addr) {
                     swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
                 }
             }
@@ -1439,7 +1467,7 @@ fn apply_swarm_actions(
                     .kademlia.kbuckets().map(|b| b.num_entries()).sum();
             }
             SwarmAction::DialPeer(peer_id, addr) => {
-                if !swarm.is_connected(&peer_id) {
+                if is_kad_routable(&addr) && !swarm.is_connected(&peer_id) {
                     let _ = swarm.dial(addr);
                 }
             }
@@ -3413,11 +3441,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             kademlia.set_mode(Some(kad::Mode::Server));
 
             // Identify — advertise "metaverse-server" protocol so peers can detect node type.
-            // push_listen_addr_updates disabled to prevent Kademlia from dialing back to peers
-            // and creating duplicate connections that cycle.
+            // push_listen_addr_updates enabled so clients learn the server's relay circuit
+            // address after it is registered (without this they can't reach a server behind NAT).
             let identify = identify::Behaviour::new(
                 identify::Config::new("/metaverse-server/1.0.0".to_string(), key.public())
-                    .with_push_listen_addr_updates(false),
+                    .with_push_listen_addr_updates(true),
             );
 
             // Gossipsub — for world data sync topics
