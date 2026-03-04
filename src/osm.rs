@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -1050,7 +1050,27 @@ fn clip_osm_to_bounds(
 ///   Pass 1: collect node IDs referenced by relevant ways only (~5-10% of all nodes).
 ///   Pass 2: load only those node coords, tile features immediately, flush every 2M features.
 /// Returns the number of tiles written.
-pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Path) -> Result<usize, String> {
+pub fn import_pbf_to_cache(
+    pbf_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+) -> Result<usize, String> {
+    import_pbf_to_cache_inner(pbf_path, cache_dir, None)
+}
+
+/// Same as `import_pbf_to_cache` but with a progress log sink for dashboard visibility.
+pub fn import_pbf_with_log(
+    pbf_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+) -> Result<usize, String> {
+    import_pbf_to_cache_inner(pbf_path, cache_dir, Some(log))
+}
+
+fn import_pbf_to_cache_inner(
+    pbf_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<usize, String> {
     use std::collections::HashMap;
     use osmpbfreader::{OsmPbfReader, OsmObj};
 
@@ -1089,6 +1109,19 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
     }
 
     let cache = OsmDiskCache::new(cache_dir);
+
+    let fname = pbf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_mb = std::fs::metadata(pbf_path).map(|m| m.len() / 1_048_576).unwrap_or(0);
+
+    macro_rules! plog {
+        ($($arg:tt)*) => {{
+            if let Some(ref log) = progress_log {
+                if let Ok(mut buf) = log.lock() { buf.push(format!($($arg)*)); }
+            }
+        }};
+    }
+
+    plog!("🔄 [OSM] {} — starting conversion ({} MB)", fname, file_mb);
 
     let mut tiles: HashMap<(i64, i64), OsmData> = HashMap::new();
     let mut total_pushed: usize = 0;
@@ -1135,6 +1168,8 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
         ids
     };
 
+    plog!("🔄 [OSM] {} — pass 1 done ({} relevant node IDs). Starting pass 2…", fname, needed_ids.len());
+
     // ── PASS 2a: load only needed node coords into a sorted Vec; also collect point features ──
     // Vec<(id, lat, lon)> sorted by id uses ~3x less RAM than HashMap<i64,(f32,f32)>
     // because HashMap has ~40 bytes of overhead per entry beyond the key+value.
@@ -1171,6 +1206,7 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
                     }
                     if total_pushed >= FLUSH_THRESHOLD {
                         flush(&mut tiles, &mut written);
+                        plog!("🔄 [OSM] {} — pass 2 nodes: {} tiles written so far…", fname, written);
                         total_pushed = 0;
                     }
                 }
@@ -1360,6 +1396,7 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
                     total_pushed += n_tiles;
                     if total_pushed >= FLUSH_THRESHOLD {
                         flush(&mut tiles, &mut written);
+                        plog!("🔄 [OSM] {} — pass 2 ways: {} tiles written so far…", fname, written);
                         total_pushed = 0;
                     }
                 }
@@ -1370,5 +1407,6 @@ pub fn import_pbf_to_cache(pbf_path: &std::path::Path, cache_dir: &std::path::Pa
     }
 
     flush(&mut tiles, &mut written);
+    plog!("✅ [OSM] {} — conversion complete: {} tiles written", fname, written);
     Ok(written)
 }

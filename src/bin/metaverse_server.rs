@@ -3912,7 +3912,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let lock_cc = Arc::clone(&lock_c);
                 tokio::task::spawn_blocking(move || {
                     let _guard = lock_cc.lock().unwrap(); // serialise: only one conversion at a time
-                    match metaverse_core::osm::import_pbf_to_cache(&path, &osm_dir_c) {
+                    match metaverse_core::osm::import_pbf_with_log(&path, &osm_dir_c, Arc::clone(&task_log_cc)) {
                         Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} → {} tiles", path.file_name().unwrap_or_default().to_string_lossy(), n)); } }
                         Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] conversion failed: {}", e)); } }
                     }
@@ -4555,8 +4555,9 @@ async fn import_pbf_task(
     let osm_dir = world_dir.join("osm");
     std::fs::create_dir_all(&osm_dir).ok();
     tlog!("📥 [PBF] Starting import of {}", pbf_path.display());
+    let log_c = Arc::clone(&task_log);
     let result = tokio::task::spawn_blocking(move || {
-        metaverse_core::osm::import_pbf_to_cache(&pbf_path, &osm_dir)
+        metaverse_core::osm::import_pbf_with_log(&pbf_path, &osm_dir, log_c)
     }).await;
     match result {
         Ok(Ok(n)) => tlog!("✅ [PBF] Import complete: {} OSM tiles written", n),
@@ -4639,7 +4640,7 @@ async fn download_osm_regions_task(
                     tokio::task::spawn_blocking(move || {
                         let _guard = lock_c.lock().unwrap();
                         macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
-                        match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
+                        match metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c)) {
                             Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
                                 if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
                             Err(e) => tlog2!("❌ [OSM] conversion failed: {}", e),
@@ -4703,7 +4704,7 @@ async fn download_osm_regions_task(
                         tokio::task::spawn_blocking(move || {
                             let _guard = lock_c.lock().unwrap();
                             macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
-                            match metaverse_core::osm::import_pbf_to_cache(&dest_c, &osm_dir_c) {
+                            match metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c)) {
                                 Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
                                     if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
                                 Err(e) => tlog2!("❌ [OSM] {} conversion failed: {}", dest_c.file_name().unwrap_or_default().to_string_lossy(), e),
