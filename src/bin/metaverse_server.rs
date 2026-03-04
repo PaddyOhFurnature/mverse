@@ -530,6 +530,8 @@ fn is_kad_routable(addr: &Multiaddr) -> bool {
             }
             // Server has no QUIC transport — skip QUIC addresses to prevent "unsupported" errors
             Protocol::Udp(_) | Protocol::QuicV1 | Protocol::Quic => { return false; }
+            // Circuit relay addresses are ephemeral — not useful for routing table
+            Protocol::P2pCircuit => { return false; }
             _ => {}
         }
     }
@@ -1144,6 +1146,8 @@ pub enum SwarmAction {
     PublishGossip { topic: String, data: Vec<u8> },
     StartProviding(Vec<u8>),
     PutDhtRecord { key: Vec<u8>, value: Vec<u8> },
+    /// Remove a peer from the Kademlia routing table (used when ephemeral clients disconnect).
+    RemoveKadPeer(PeerId),
     /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
     DisconnectPeer(PeerId),
     /// Request a tile from a specific peer
@@ -1184,6 +1188,14 @@ fn handle_swarm_event(
         }
         SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
             if num_established == 0 {
+                // Remove ephemeral (non-server, non-relay) peers from Kademlia routing table.
+                // Without this, Kademlia spams dial attempts to their stale addresses after disconnect.
+                let ptype = state.connected_peers.get(&peer_id)
+                    .map(|e| e.2.as_str())
+                    .unwrap_or("unknown");
+                if ptype != "server" && ptype != "relay" {
+                    actions.push(SwarmAction::RemoveKadPeer(peer_id));
+                }
                 state.connected_peers.remove(&peer_id);
                 let reason = cause.map(|e| format!(" (Connection error: {})", e)).unwrap_or_default();
                 state.log(format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
@@ -1457,6 +1469,9 @@ fn apply_swarm_actions(
 ) {
     for action in actions {
         match action {
+            SwarmAction::RemoveKadPeer(peer_id) => {
+                swarm.behaviour_mut().kademlia.remove_peer(&peer_id);
+            }
             SwarmAction::AddKadAddress(peer_id, addr) => {
                 if addr != Multiaddr::empty() && is_kad_routable(&addr) {
                     swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
