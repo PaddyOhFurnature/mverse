@@ -787,8 +787,12 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
                 let repo = state.config.github_repo.clone();
                 if !repo.is_empty() {
                     let current = env!("CARGO_PKG_VERSION");
-                    if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                        eprintln!("🔄 Update available: {} — will apply on next restart", tag);
+                    if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                        eprintln!("🔄 Update available: {} — downloading…", tag);
+                        match metaverse_core::autoupdate::apply_update(&tag, &url).await {
+                            Ok(()) => {}
+                            Err(e) => eprintln!("⚠️  Auto-update failed: {} — continuing", e),
+                        }
                     }
                 }
             }
@@ -827,8 +831,12 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
                     let repo = state.config.github_repo.clone();
                     if !repo.is_empty() {
                         let current = env!("CARGO_PKG_VERSION");
-                        if let Some((tag, _url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
-                            eprintln!("🔄 Update available: {} — will apply on next restart", tag);
+                        if let Some((tag, url, _notes)) = metaverse_core::autoupdate::check_for_update(&repo, current).await {
+                            eprintln!("🔄 Update available: {} — downloading…", tag);
+                            match metaverse_core::autoupdate::apply_update(&tag, &url).await {
+                                Ok(()) => {}
+                                Err(e) => eprintln!("⚠️  Auto-update failed: {} — continuing", e),
+                            }
                         }
                     }
                 }

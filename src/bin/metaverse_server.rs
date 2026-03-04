@@ -1256,7 +1256,9 @@ fn handle_swarm_event(
                 entry.2 = peer_type.to_string();
             }
             for addr in info.listen_addrs {
-                if is_kad_routable(&addr) {
+                // Only add server/relay peers to Kademlia — clients are ephemeral
+                // and adding them causes Kademlia to spam dial-back retries after disconnect.
+                if (peer_type == "server" || peer_type == "relay") && is_kad_routable(&addr) {
                     actions.push(SwarmAction::AddKadAddress(peer_id, addr));
                 }
             }
@@ -1268,7 +1270,7 @@ fn handle_swarm_event(
                 if !state.connected_peers.contains_key(&peer_id) {
                     state.log(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
                 }
-                actions.push(SwarmAction::AddKadAddress(peer_id, addr.clone()));
+                // Dial the peer; Identify will fire and add to Kademlia if they're a server/relay
                 actions.push(SwarmAction::DialPeer(peer_id, addr));
             }
         }
@@ -4154,9 +4156,30 @@ async fn run_tui(
     // Spawn SIGHUP handler — sends reloaded config into config_reload_rx (Unix only).
     spawn_sighup_handler(&state);
 
+    // SIGTERM / SIGINT → clean shutdown via a shared channel.
+    let (quit_tx, mut quit_rx) = tokio::sync::mpsc::channel::<()>(1);
+    #[cfg(unix)]
+    {
+        let tx = quit_tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut s) = signal(SignalKind::terminate()) {
+                if s.recv().await.is_some() { let _ = tx.send(()).await; }
+            }
+        });
+        let tx = quit_tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut s) = signal(SignalKind::interrupt()) {
+                if s.recv().await.is_some() { let _ = tx.send(()).await; }
+            }
+        });
+    }
+
     let result: Result<(), Box<dyn Error>> = async {
         loop {
             tokio::select! {
+                Some(_) = quit_rx.recv() => { state.should_quit = true; }
                 _ = tui_tick.tick() => {
                     state.refresh_sys();
                     let ws = world.as_ref().map(|w| &w.stats).unwrap_or(&dummy_world);
