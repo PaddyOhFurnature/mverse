@@ -88,6 +88,8 @@ impl TileFetcher {
     /// Returns raw bincode bytes on success, None on failure.
     pub fn fetch_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
+        if peers.is_empty() { return None; }
+        println!("📡 [P2P] Requesting OSM tile s={s:.2} w={w:.2} n={n:.2} e={e:.2} from {} peer(s)", peers.len());
         for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
             if self.cmd_tx.send(NetworkCommand::RequestTile {
@@ -96,10 +98,14 @@ impl TileFetcher {
                 response_tx: tx,
             }).is_err() { continue; }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
+                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => {
+                    println!("✅ [P2P] Got OSM tile s={s:.2} w={w:.2} ({} bytes) from peer", bytes.len());
+                    return Some(bytes);
+                }
                 _ => continue,
             }
         }
+        println!("⚠️ [P2P] OSM tile s={s:.2} w={w:.2} not found on any peer");
         // No peer had it — queue for background download
         if let Ok(mut q) = self.idle_queue.lock() {
             if q.len() < 256 {
@@ -120,6 +126,8 @@ impl TileFetcher {
     /// Returns raw GeoTIFF bytes on success, None on failure.
     pub fn fetch_elevation(&self, lat: i32, lon: i32) -> Option<Vec<u8>> {
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
+        if peers.is_empty() { return None; }
+        println!("📡 [P2P] Requesting SRTM tile lat={lat} lon={lon} from {} peer(s)", peers.len());
         for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
             if self.cmd_tx.send(NetworkCommand::RequestTile {
@@ -128,10 +136,14 @@ impl TileFetcher {
                 response_tx: tx,
             }).is_err() { continue; }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => return Some(bytes),
+                Ok(crate::tile_protocol::TileResponse::Found(bytes)) => {
+                    println!("✅ [P2P] Got SRTM tile lat={lat} lon={lon} ({} bytes) from peer", bytes.len());
+                    return Some(bytes);
+                }
                 _ => continue,
             }
         }
+        println!("⚠️ [P2P] SRTM tile lat={lat} lon={lon} not found on any peer");
         // No peer had it — queue for background download
         if let Ok(mut q) = self.idle_queue.lock() {
             if q.len() < 256 {

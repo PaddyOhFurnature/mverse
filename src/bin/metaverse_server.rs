@@ -1208,6 +1208,11 @@ fn handle_swarm_event(
             let err_str = error.to_string();
             if let Some(pid) = peer_id {
                 state.log(format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), err_str));
+                // If this peer is no longer connected, remove from Kademlia to stop infinite retry.
+                // Kademlia learns peer addresses from connections and retries them after disconnect.
+                if !state.connected_peers.contains_key(&pid) {
+                    actions.push(SwarmAction::RemoveKadPeer(pid));
+                }
             }
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(ev)) => match ev {
@@ -1399,13 +1404,24 @@ fn handle_swarm_event(
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
             request_response::Event::Message {
+                peer,
                 message: request_response::Message::Request { request, channel, .. },
                 ..
             }
         )) => {
             let world_dir = state.config.world_dir.clone()
                 .unwrap_or_else(|| "world_data".to_string());
+            let tile_desc = match &request {
+                TileRequest::OsmTile { s, w, n, e } => format!("OSM s={s:.2} w={w:.2} n={n:.2} e={e:.2}"),
+                TileRequest::ElevationTile { lat, lon } => format!("SRTM lat={lat} lon={lon}"),
+                TileRequest::TerrainChunk { cx, cz } => format!("chunk cx={cx} cz={cz}"),
+            };
             let response = serve_tile_request(&request, &world_dir);
+            let found = matches!(response, TileResponse::Found(_));
+            state.log(format!("📡 [P2P] {} {} from {}",
+                if found { "📤" } else { "❌" },
+                tile_desc,
+                AppState::short(&peer.to_string())));
             actions.push(SwarmAction::RespondTile { channel, response });
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
