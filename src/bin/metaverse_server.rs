@@ -1398,9 +1398,17 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(ServerBehaviourEvent::Kademlia(
             kad::Event::RoutingUpdated { peer, .. }
         )) => {
-            state.dht_peer_count = 0; // will be refreshed via RefreshDhtCount
-            actions.push(SwarmAction::AddKadAddress(peer, Multiaddr::empty()));
-            actions.push(SwarmAction::RefreshDhtCount);
+            // Only allow server/relay peers in the routing table.
+            // Kademlia auto-adds peers it talks to; remove clients immediately
+            // to prevent Kademlia from dialing their private/circuit addresses.
+            let ptype = state.connected_peers.get(&peer).map(|e| e.2.as_str()).unwrap_or("unknown");
+            if ptype == "server" || ptype == "relay" {
+                state.dht_peer_count = 0;
+                actions.push(SwarmAction::AddKadAddress(peer, Multiaddr::empty()));
+                actions.push(SwarmAction::RefreshDhtCount);
+            } else {
+                actions.push(SwarmAction::RemoveKadPeer(peer));
+            }
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
             request_response::Event::Message {
@@ -1464,13 +1472,25 @@ fn serve_tile_request(request: &TileRequest, world_dir: &str) -> TileResponse {
         }
         ElevationTile { lat, lon } => {
             let cache_dir = PathBuf::from(world_dir).join("elevation_cache");
-            let path = cache_dir
-                .join(format!("N{:02}", lat.unsigned_abs()))
-                .join(format!("E{:03}", lon.unsigned_abs()))
-                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
-            match std::fs::read(&path) {
-                Ok(bytes) => TileResponse::Found(bytes),
-                Err(_) => TileResponse::NotFound,
+            let lat_prefix = if *lat >= 0 { 'n' } else { 's' };
+            let lon_prefix = if *lon >= 0 { 'e' } else { 'w' };
+            let lat_dir = if *lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+            let lon_dir = if *lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs());
+            let path = cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+            // Also check HGT format (Skadi downloads)
+            let hgt_prefix_up: char = if *lat >= 0 { 'N' } else { 'S' };
+            let hgt_lon_prefix_up: char = if *lon >= 0 { 'E' } else { 'W' };
+            let hgt_name = format!("{}{:02}{}{:03}.hgt",
+                hgt_prefix_up, lat.unsigned_abs(), hgt_lon_prefix_up, lon.unsigned_abs());
+            let hgt_path = cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                TileResponse::Found(bytes)
+            } else if let Ok(bytes) = std::fs::read(&hgt_path) {
+                TileResponse::Found(bytes)
+            } else {
+                TileResponse::NotFound
             }
         }
         TerrainChunk { .. } => {

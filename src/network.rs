@@ -1357,14 +1357,24 @@ fn serve_tile_locally(request: &TileRequest, world_data_dir: &std::path::Path) -
             }
         }
         TileRequest::ElevationTile { lat, lon } => {
-            let path = world_data_dir
-                .join("elevation_cache")
-                .join(format!("N{:02}", lat.unsigned_abs()))
-                .join(format!("E{:03}", lon.unsigned_abs()))
-                .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
-            match std::fs::read(&path) {
-                Ok(bytes) => TileResponse::Found(bytes),
-                Err(_) => TileResponse::NotFound,
+            let lat_prefix = if *lat >= 0 { 'n' } else { 's' };
+            let lon_prefix = if *lon >= 0 { 'e' } else { 'w' };
+            let lat_dir = if *lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+            let lon_dir = if *lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs());
+            let path = world_data_dir.join("elevation_cache").join(&lat_dir).join(&lon_dir).join(&tile_name);
+            // Also check HGT format (Skadi downloads)
+            let hgt_name = format!("{}{:02}{}{:03}.hgt",
+                if *lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
+                if *lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
+            let hgt_path = world_data_dir.join("elevation_cache").join(&lat_dir).join(&lon_dir).join(&hgt_name);
+            if let Ok(bytes) = std::fs::read(&path) {
+                TileResponse::Found(bytes)
+            } else if let Ok(bytes) = std::fs::read(&hgt_path) {
+                TileResponse::Found(bytes)
+            } else {
+                TileResponse::NotFound
             }
         }
         TileRequest::TerrainChunk { .. } => TileResponse::NotFound,

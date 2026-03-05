@@ -691,10 +691,15 @@ impl ElevationSource for P2PElevationSource {
         let lat = gps.lat.floor() as i32;
         let lon = gps.lon.floor() as i32;
 
+        let lat_prefix = if lat >= 0 { 'n' } else { 's' };
+        let lon_prefix = if lon >= 0 { 'e' } else { 'w' };
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
         let tile_path = self.cache_dir
-            .join(format!("N{:02}", lat.unsigned_abs()))
-            .join(format!("E{:03}", lon.unsigned_abs()))
-            .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+            .join(&lat_dir)
+            .join(&lon_dir)
+            .join(format!("srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs()));
 
         if !tile_path.exists() {
             // Fetch raw GeoTIFF bytes from a peer
