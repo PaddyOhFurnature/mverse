@@ -344,6 +344,8 @@ struct AppState {
         request_response::OutboundRequestId,
         tokio::sync::oneshot::Sender<TileResponse>,
     >,
+    /// Channel to the on-demand SRTM downloader — send (lat,lon) to prioritise a tile.
+    srtm_priority_tx: Option<tokio::sync::mpsc::Sender<(i32, i32)>>,
 }
 
 impl AppState {
@@ -377,6 +379,7 @@ impl AppState {
             pending_voxel_ops: Vec::new(),
             pending_dht_provide: Vec::new(),
             pending_tile_requests: std::collections::HashMap::new(),
+            srtm_priority_tx: None,
             shed_cooldown: HashMap::new(),
             last_shed_at: Instant::now() - Duration::from_secs(3600),
         }
@@ -1430,6 +1433,19 @@ fn handle_swarm_event(
                 if found { "📤" } else { "❌" },
                 tile_desc,
                 AppState::short(&peer.to_string())));
+            // If server doesn't have it, queue it (and neighbours) for on-demand download
+            if !found {
+                if let TileRequest::ElevationTile { lat, lon } = &request {
+                    if let Some(ref tx) = state.srtm_priority_tx {
+                        // Enqueue requested tile + 2-degree radius so surrounding terrain loads too
+                        for dlat in -2i32..=2 {
+                            for dlon in -2i32..=2 {
+                                let _ = tx.try_send((*lat + dlat, *lon + dlon));
+                            }
+                        }
+                    }
+                }
+            }
             actions.push(SwarmAction::RespondTile { channel, response });
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
@@ -3886,6 +3902,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_state.log(format!("📥 Bulk download: {} bbox(es) queued", app_state.config.download_on_start.len()));
     }
 
+    // On-demand SRTM priority downloader — always active so clients can get tiles
+    // even when global download hasn't reached that region yet.
+    {
+        let world_dir_srtm = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        let api_key = app_state.config.data.opentopography_api_key.clone();
+        let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
+        let task_log_srtm = Arc::clone(&shared.read().unwrap().task_log);
+        let (srtm_prio_tx, srtm_prio_rx) = tokio::sync::mpsc::channel::<(i32, i32)>(512);
+        app_state.srtm_priority_tx = Some(srtm_prio_tx);
+        tokio::spawn(async move {
+            download_srtm_on_demand_task(world_dir_srtm, api_key, srtm_prio_rx, swarm_tx_srtm, task_log_srtm).await;
+        });
+    }
+
     // Global SRTM download
     if app_state.config.download_all_srtm && !app_state.config.data.opentopography_api_key.is_empty() {
         let world_dir_srtm = std::path::PathBuf::from(
@@ -4364,6 +4396,133 @@ async fn run_tui(
 /// Already-cached tiles are skipped. Results are announced to DHT.
 /// Download all global SRTM 1°×1° tiles. SRTM covers lat -60..60, lon -180..180.
 /// Skips already-cached tiles. Announces each downloaded tile to DHT.
+
+/// On-demand SRTM downloader: listens for (lat, lon) requests via channel,
+/// downloads those specific tiles immediately (deduplicates via seen set),
+/// and announces to DHT. Tiles outside -60..60 are silently skipped (no SRTM data).
+async fn download_srtm_on_demand_task(
+    world_dir: std::path::PathBuf,
+    api_key: String,
+    mut rx: tokio::sync::mpsc::Receiver<(i32, i32)>,
+    swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+    task_log: Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    macro_rules! tlog {
+        ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
+    }
+    let elev_dir = world_dir.join("elevation_cache");
+    let mut seen = std::collections::HashSet::<(i32, i32)>::new();
+
+    while let Some((lat, lon)) = rx.recv().await {
+        // SRTM only covers lat -60..60
+        if lat < -60 || lat >= 60 { continue; }
+        if !seen.insert((lat, lon)) { continue; } // already downloaded or in-progress
+
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+        let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+            if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
+            if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
+        let hgt_name = format!("{}{:02}{}{:03}.hgt",
+            if lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
+            if lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
+        let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+        let hgt_path  = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+
+        let cached_ok = |p: &std::path::Path| p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024;
+        if cached_ok(&tile_path) || cached_ok(&hgt_path) { continue; }
+
+        let key_c = api_key.clone();
+        let tp = tile_path.clone();
+        let hp = hgt_path.clone();
+        tlog!("📥 [SRTM] On-demand download: lat={} lon={}", lat, lon);
+
+        let result = tokio::task::spawn_blocking(move || -> Result<SrtmSource, String> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build().map_err(|e| e.to_string())?;
+            // Source 1: OpenTopography
+            if !key_c.is_empty() {
+                let url = format!(
+                    "https://portal.opentopography.org/API/globaldem?demtype=SRTMGL1&\
+                     south={}&north={}&west={}&east={}&outputFormat=GTiff&API_Key={}",
+                    lat, lat + 1, lon, lon + 1, key_c);
+                if let Ok(resp) = client.get(&url).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            if bytes.len() >= 1024 {
+                                std::fs::create_dir_all(tp.parent().unwrap()).ok();
+                                if std::fs::write(&tp, &bytes).is_ok() { return Ok(SrtmSource::OpenTopography); }
+                            }
+                        }
+                    }
+                }
+            }
+            // Source 2: Copernicus DEM GLO-30
+            {
+                let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
+                let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+                let tile_id = format!("Copernicus_DSM_COG_10_{}{:02}_00_{}{:03}_00_DEM", ns, la, ew, lo);
+                let url = format!("https://copernicus-dem-30m.s3.amazonaws.com/{}/{}.tif", tile_id, tile_id);
+                if let Ok(resp) = client.get(&url).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            if bytes.len() >= 1024 {
+                                std::fs::create_dir_all(tp.parent().unwrap()).ok();
+                                if std::fs::write(&tp, &bytes).is_ok() { return Ok(SrtmSource::Copernicus); }
+                            }
+                        }
+                    }
+                }
+            }
+            // Source 3: AWS Skadi (HGT.gz)
+            {
+                let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
+                let la = lat.unsigned_abs(); let lo = lon.unsigned_abs();
+                let url = format!(
+                    "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{}{:02}/{}{:02}{}{:03}.hgt.gz",
+                    ns, la, ns, la, ew, lo);
+                if let Ok(resp) = client.get(&url).send() {
+                    if resp.status().is_success() {
+                        if let Ok(bytes) = resp.bytes() {
+                            if bytes.len() >= 512 {
+                                use std::io::Read;
+                                let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                                let mut raw = Vec::new();
+                                if decoder.read_to_end(&mut raw).is_ok() && raw.len() >= 1024 {
+                                    std::fs::create_dir_all(hp.parent().unwrap()).ok();
+                                    if std::fs::write(&hp, &raw).is_ok() { return Ok(SrtmSource::Skadi); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err("all_sources_failed".to_string())
+        }).await;
+
+        match result {
+            Ok(Ok(src)) => {
+                tlog!("✅ [SRTM] On-demand: lat={} lon={} via {}", lat, lon, src.name());
+                if let Some(ref tx) = swarm_tx {
+                    let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
+                    let _ = tx.send(SwarmAction::StartProviding(key)).await;
+                }
+            }
+            Ok(Err(ref e)) if e == "all_sources_failed" => {
+                // Ocean tile — mark as seen so we don't retry
+            }
+            Ok(Err(ref e)) => {
+                tlog!("⚠️ [SRTM] On-demand failed lat={} lon={}: {}", lat, lon, e);
+                seen.remove(&(lat, lon)); // allow retry later
+            }
+            Err(_) => {
+                seen.remove(&(lat, lon));
+            }
+        }
+    }
+}
+
 async fn download_all_srtm_task(
     world_dir: std::path::PathBuf,
     api_key: String,
