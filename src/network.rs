@@ -48,6 +48,7 @@ use libp2p::{
     kad::{self, store::MemoryStore},
     mdns,
     noise,
+    ping,
     relay,
     dcutr,
     request_response::{self, ProtocolSupport},
@@ -304,6 +305,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) gossipsub: gossipsub::Behaviour,
     pub(crate) mdns: mdns::tokio::Behaviour,
     pub(crate) identify: identify::Behaviour,
+    pub(crate) ping: ping::Behaviour,
     pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) relay_server: relay::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
@@ -487,7 +489,7 @@ impl NetworkNode {
             .with_tokio()
             // TCP transport (primary, works on open networks)
             .with_tcp(
-                tcp::Config::default(),
+                tcp::Config::default().nodelay(true),
                 noise::Config::new,
                 yamux::Config::default,
             )
@@ -605,6 +607,11 @@ impl NetworkNode {
                     gossipsub,
                     mdns,
                     identify,
+                    ping: ping::Behaviour::new(
+                        ping::Config::new()
+                            .with_interval(Duration::from_secs(15))
+                            .with_timeout(Duration::from_secs(20))
+                    ),
                     relay_client: relay_behaviour,
                     relay_server,
                     autonat,

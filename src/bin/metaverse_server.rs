@@ -3559,7 +3559,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     max_circuit_bytes,
                     ..Default::default()
                 }),
-                ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
+                ping: libp2p::ping::Behaviour::new(
+                    libp2p::ping::Config::new()
+                        .with_interval(Duration::from_secs(15))
+                        .with_timeout(Duration::from_secs(20))
+                ),
                 kademlia,
                 identify,
                 mdns: mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)
