@@ -4053,7 +4053,10 @@ async fn run_headless(
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
     let update_interval = state.config.update_check_interval_secs.max(60);
-    let mut update_tick = tokio::time::interval(Duration::from_secs(update_interval));
+    let mut update_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(update_interval),
+        Duration::from_secs(update_interval),
+    );
     let dummy_world = WorldStats::default();
 
     // Spawn a SIGHUP handler that sends the reloaded config to config_reload_rx (Unix only).
@@ -4229,7 +4232,10 @@ async fn run_tui(
     let mut sync_tick = tokio::time::interval(Duration::from_secs(600)); // 10-min server sync
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800)); // 30-min caps refresh
     let update_interval_tui = state.config.update_check_interval_secs.max(60);
-    let mut update_tick_tui = tokio::time::interval(Duration::from_secs(update_interval_tui));
+    let mut update_tick_tui = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(update_interval_tui),
+        Duration::from_secs(update_interval_tui),
+    );
     let mut world_config = state.config.clone();
     let dummy_world = WorldStats::default();
 

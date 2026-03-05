@@ -147,7 +147,10 @@ pub async fn apply_update(
         let err = std::process::Command::new(&exe_path)
             .args(&args[1..])
             .exec(); // only returns on error
-        return Err(format!("exec restart failed: {}", err).into());
+        // exec() failed but binary is already replaced on disk.
+        // Exit so the supervisor (systemd / shell) restarts with the new binary.
+        eprintln!("[AutoUpdate] exec failed: {} — exiting for supervisor restart", err);
+        std::process::exit(0);
     }
 
     // Non-Unix fallback: exit and let the supervisor (systemd / etc.) restart.

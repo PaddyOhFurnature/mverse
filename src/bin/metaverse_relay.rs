@@ -774,7 +774,10 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
     let mut web_tick  = tokio::time::interval(Duration::from_secs(3));
     let update_interval = state.config.update_check_interval_secs.max(60);
-    let mut update_tick = tokio::time::interval(Duration::from_secs(update_interval));
+    let mut update_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(update_interval),
+        Duration::from_secs(update_interval),
+    );
     loop {
         tokio::select! {
             _ = caps_tick.tick() => {
@@ -814,7 +817,10 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
     let mut tick = tokio::time::interval(Duration::from_millis(state.config.ui.refresh_ms));
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
     let update_interval_tui = state.config.update_check_interval_secs.max(60);
-    let mut update_tick_tui = tokio::time::interval(Duration::from_secs(update_interval_tui));
+    let mut update_tick_tui = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(update_interval_tui),
+        Duration::from_secs(update_interval_tui),
+    );
 
     let result: Result<(), Box<dyn Error>> = async {
         loop {
