@@ -660,34 +660,8 @@ impl NetworkNode {
     }
 
     /// Fetch bootstrap nodes from the remote URL (or cache/fallback) and dial them all.
-    /// Also dials Protocol Labs public relay nodes and registers relay circuit listeners.
     /// Call this once after `listen_on` to join the network.
     pub async fn connect_to_bootstrap(&mut self) {
-        // Protocol Labs public relay/bootstrap nodes - permanent infrastructure, no hosting needed
-        // Both sides connect OUTBOUND to these - works through CGNAT, VPN, Starlink, 4G
-        let public_relay_nodes: &[(&str, &str)] = &[
-            ("QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-             "/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN"),
-            ("QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-             "/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa"),
-            ("QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-             "/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb"),
-            ("QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
-             "/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt"),
-        ];
-
-        // Dial Protocol Labs nodes and mark them as known relay nodes
-        for (peer_id_str, addr) in public_relay_nodes {
-            if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
-                self.relay_nodes.insert(peer_id);
-            }
-            match self.dial(addr) {
-                Ok(()) => println!("[bootstrap] Dialing public relay: {}", addr),
-                Err(e) => eprintln!("[bootstrap] Failed to dial {}: {}", addr, e),
-            }
-        }
-
-        // Also dial nodes from our bootstrap.json (Gist / cache / hardcoded fallback)
         let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
         println!("[bootstrap] Dialing {} node(s) from bootstrap file", nodes.len());
         for addr in &nodes {
