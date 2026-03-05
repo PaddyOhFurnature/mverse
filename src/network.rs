@@ -287,7 +287,8 @@ pub enum NetworkEvent {
 /// - Gossipsub: Pubsub for state sync (primary communication)
 /// - mDNS: Local network auto-discovery
 /// - Identify: Peer information exchange
-/// - Relay Client: Can USE other peers as relays for NAT traversal (no relay server — clients don't relay for others)
+/// - Relay Client: Can USE other peers as relays for NAT traversal
+/// - Relay Server: Can RELAY for other peers (every node is a potential relay in P2P)
 /// - DCUtR: Direct Connection Upgrade (hole punching)
 #[derive(NetworkBehaviour)]
 pub(crate) struct MetaverseBehaviour {
@@ -297,6 +298,7 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) identify: identify::Behaviour,
     pub(crate) ping: ping::Behaviour,
     pub(crate) relay_client: relay::client::Behaviour,
+    pub(crate) relay_server: relay::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
     pub(crate) tile_rr: request_response::Behaviour<TileCodec>,
@@ -577,6 +579,19 @@ impl NetworkNode {
                     },
                 );
                 
+                // Every node in a P2P network can relay for others — conservative limits for
+                // non-dedicated nodes so they don't become overloaded.
+                let relay_server_config = relay::Config {
+                    max_reservations: 128,
+                    max_reservations_per_peer: 4,
+                    max_circuits: 16,
+                    max_circuits_per_peer: 4,
+                    max_circuit_duration: Duration::from_secs(3600),
+                    max_circuit_bytes: 1024 * 1024,
+                    ..Default::default()
+                };
+                let relay_server = relay::Behaviour::new(local_peer_id, relay_server_config);
+                
                 // DCUtR for hole punching — attempts direct connection upgrade after
                 // meeting via relay. Falls back gracefully on CGNAT/strict NAT.
                 let dcutr = dcutr::Behaviour::new(local_peer_id);
@@ -592,6 +607,7 @@ impl NetworkNode {
                             .with_timeout(Duration::from_secs(20))
                     ),
                     relay_client: relay_behaviour,
+                    relay_server,
                     autonat,
                     dcutr,
                     tile_rr: request_response::Behaviour::new(
@@ -1018,6 +1034,38 @@ impl NetworkNode {
                         println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
                         None
                     }
+                }
+            }
+            
+            // Relay server events - this node acting as relay for other peers
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayServer(event)) => {
+                match event {
+                    relay::Event::ReservationReqAccepted { src_peer_id, renewed, .. } => {
+                        println!("✅ [RELAY SERVER] Reservation {} for peer: {}", 
+                            if renewed { "renewed" } else { "accepted" }, src_peer_id);
+                        None
+                    }
+                    relay::Event::ReservationTimedOut { src_peer_id } => {
+                        println!("⏱️  [RELAY SERVER] Reservation timed out for: {}", src_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
+                        println!("🔄 [RELAY SERVER] Circuit: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
+                        println!("❌ [RELAY SERVER] Circuit denied: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
+                        println!("🔚 [RELAY SERVER] Circuit closed: {} → {}", src_peer_id, dst_peer_id);
+                        None
+                    }
+                    relay::Event::ReservationReqDenied { src_peer_id, .. } => {
+                        println!("❌ [RELAY SERVER] Reservation denied for: {}", src_peer_id);
+                        None
+                    }
+                    _ => None,
                 }
             }
             
