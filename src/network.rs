@@ -665,15 +665,22 @@ impl NetworkNode {
         let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
         println!("[bootstrap] Dialing {} node(s) from bootstrap file", nodes.len());
         for addr in &nodes {
-            // Mark as relay node so we listen on circuit when connected
             if let Ok(ma) = addr.parse::<Multiaddr>() {
+                // Pre-seed relay_nodes with the peer ID from the address (for the common case
+                // where the server hasn't changed its key).
                 if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = ma.iter().last() {
                     self.relay_nodes.insert(peer_id);
                 }
-            }
-            match self.dial(addr) {
-                Ok(()) => println!("[bootstrap] Dialing: {}", addr),
-                Err(e) => eprintln!("[bootstrap] Failed to dial {}: {}", addr, e),
+                // Dial WITHOUT the /p2p/<peer-id> suffix so the connection succeeds even if
+                // the server regenerated its key (peer ID changed). Identify will reveal the
+                // actual peer ID and is_dedicated_relay checks protocol strings, not peer ID.
+                let base_addr: Multiaddr = ma.iter()
+                    .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                    .collect();
+                match self.swarm.dial(base_addr.clone()) {
+                    Ok(()) => println!("[bootstrap] Dialing: {}", base_addr),
+                    Err(e) => eprintln!("[bootstrap] Failed to dial {}: {}", base_addr, e),
+                }
             }
         }
 
