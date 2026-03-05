@@ -609,7 +609,7 @@ impl NetworkNode {
                     identify,
                     ping: ping::Behaviour::new(
                         ping::Config::new()
-                            .with_interval(Duration::from_secs(15))
+                            .with_interval(Duration::from_secs(5))
                             .with_timeout(Duration::from_secs(20))
                     ),
                     relay_client: relay_behaviour,
@@ -992,13 +992,16 @@ impl NetworkNode {
                         self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                     }
                 }
-                // If peer advertises circuit relay v2 support, mark as relay and listen via it
-                let _relay_proto = libp2p::core::upgrade::Version::V1;
-                let is_relay = info.protocols.iter().any(|p| {
-                    p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop")
+                // Only register circuit relay through actual dedicated relay/server nodes,
+                // NOT through other game clients (they also run relay::Behaviour but we
+                // should not route through them — it pollutes relay_nodes and breaks
+                // game_peer_count() logic).
+                let is_dedicated_relay = info.protocols.iter().any(|p| {
+                    let s = p.as_ref();
+                    s.contains("metaverse-server") || s.contains("metaverse-relay")
                 });
-                if is_relay && !self.relay_nodes.contains(&peer_id) {
-                    println!("[relay] Peer {} supports relay, listening via circuit", peer_id);
+                if is_dedicated_relay && !self.relay_nodes.contains(&peer_id) {
+                    println!("[relay] Peer {} is a server/relay, listening via circuit", peer_id);
                     self.relay_nodes.insert(peer_id);
                     if let Some(addr) = info.listen_addrs.first() {
                         let relay_base: Multiaddr = addr.iter()

@@ -649,7 +649,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut kademlia = kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
             let identify = identify::Behaviour::new(
-                identify::Config::new("/metaverse/1.0.0".to_string(), key.public())
+                identify::Config::new("/metaverse-relay/1.0.0".to_string(), key.public())
                     .with_push_listen_addr_updates(true),
             );
             Ok(RelayBehaviour {

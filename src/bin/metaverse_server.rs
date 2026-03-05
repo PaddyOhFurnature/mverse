@@ -1252,11 +1252,19 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(ServerBehaviourEvent::Identify(
             identify::Event::Received { peer_id, info, .. }
         )) => {
-            // Detect peer type from protocol strings
-            let peer_type = if info.protocols.iter().any(|p| p.as_ref().contains("relay")) {
-                "relay"
-            } else if info.protocols.iter().any(|p| p.as_ref().contains("metaverse-server")) {
+            // Detect peer type from protocol strings — check metaverse-server first because
+            // all nodes (clients included) also advertise the relay protocol, so checking
+            // for "relay" first would misclassify game clients as relays.
+            let peer_type = if info.protocols.iter().any(|p| p.as_ref().contains("metaverse-server")) {
                 "server"
+            } else if info.protocols.iter().any(|p| p.as_ref().contains("metaverse-relay")) {
+                "relay"
+            } else if !info.protocols.iter().any(|p| p.as_ref().contains("metaverse"))
+                && info.protocols.iter().any(|p| p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop"))
+            {
+                // Peer has no metaverse protocol at all but IS a relay — must be a
+                // standalone relay node (e.g. Protocol Labs bootstrap/relay nodes).
+                "relay"
             } else {
                 "client"
             };
@@ -3561,7 +3569,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }),
                 ping: libp2p::ping::Behaviour::new(
                     libp2p::ping::Config::new()
-                        .with_interval(Duration::from_secs(15))
+                        .with_interval(Duration::from_secs(5))
                         .with_timeout(Duration::from_secs(20))
                 ),
                 kademlia,
