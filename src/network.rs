@@ -363,16 +363,15 @@ fn is_routable_addr(addr: &Multiaddr) -> bool {
     for proto in addr.iter() {
         match proto {
             Protocol::Ip4(ip) => {
-                if ip.is_loopback()           { return false; } // 127.x
-                if ip.is_link_local()         { return false; } // 169.254.x
-                // Filter common virtual bridge ranges (libvirt, docker, vmware)
+                if ip.is_loopback()   { return false; } // 127.x
+                if ip.is_link_local() { return false; } // 169.254.x
                 let octets = ip.octets();
-                if octets[0] == 192 && octets[1] == 168 && octets[2] == 122 { return false; } // libvirt
-                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31   { return false; } // docker
-                if octets[0] == 10  && octets[1] == 0   && octets[2] == 2   { return false; } // VirtualBox NAT
+                if octets[0] == 10                                         { return false; } // 10.x.x.x
+                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 { return false; } // 172.16-31.x
+                if octets[0] == 192 && octets[1] == 168                    { return false; } // 192.168.x.x
             }
             Protocol::Ip6(ip) => {
-                if ip.is_loopback()    { return false; }
+                if ip.is_loopback() { return false; }
             }
             _ => {}
         }
@@ -956,8 +955,12 @@ impl NetworkNode {
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 num_established,
+                cause,
                 ..
             } => {
+                if let Some(ref err) = cause {
+                    eprintln!("⚠️  [NET] Connection to {} closed: {}", peer_id, err);
+                }
                 if num_established == 0 {
                     self.connected_peers.remove(&peer_id);
                     self.circuit_registered.remove(&peer_id);
@@ -1001,9 +1004,11 @@ impl NetworkNode {
                     // (deduplication has already happened by this point — safe to call).
                     if !self.circuit_registered.contains(&peer_id) {
                         // Prefer a routable address from identify; fall back to what we saw
+                        // at connection time (covers servers that only advertise private IPs)
                         let relay_base = info.listen_addrs.iter()
                             .find(|a| is_routable_addr(a))
                             .or_else(|| self.relay_addrs.get(&peer_id))
+                            .or_else(|| self.known_game_peers.get(&peer_id))
                             .map(|a| a.iter()
                                 .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                                 .collect::<Multiaddr>());
@@ -1276,6 +1281,17 @@ impl NetworkNode {
 
             // Ignore other tile_rr events
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(_)) => None,
+
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                let pid_str = peer_id.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+                eprintln!("✗  [NET] Dial failed {} — {}", pid_str, error);
+                None
+            }
+
+            SwarmEvent::IncomingConnectionError { error, .. } => {
+                eprintln!("✗  [NET] Incoming connection error: {}", error);
+                None
+            }
 
             // Ignore other events
             _ => None,

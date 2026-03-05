@@ -667,7 +667,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .expect("mDNS init failed"),
             })
         })?
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(3600)))
         .build();
 
     let ws_port = config.port + 5000;
