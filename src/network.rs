@@ -287,18 +287,8 @@ pub enum NetworkEvent {
 /// - Gossipsub: Pubsub for state sync (primary communication)
 /// - mDNS: Local network auto-discovery
 /// - Identify: Peer information exchange
-/// - Relay Client: Can USE other peers as relays for NAT traversal
-/// - Relay Server: Can BE a relay to help other peers connect (mesh topology)
+/// - Relay Client: Can USE other peers as relays for NAT traversal (no relay server — clients don't relay for others)
 /// - DCUtR: Direct Connection Upgrade (hole punching)
-///
-/// Every peer is simultaneously:
-/// - A client (can use relays)
-/// - A server (can be a relay)
-/// - A DHT node (helps with discovery)
-/// - A content node (shares data via gossipsub)
-///
-/// This creates a true mesh network where dedicated relays are just
-/// "always-on peers" rather than special infrastructure.
 #[derive(NetworkBehaviour)]
 pub(crate) struct MetaverseBehaviour {
     pub(crate) kademlia: kad::Behaviour<MemoryStore>,
@@ -307,7 +297,6 @@ pub(crate) struct MetaverseBehaviour {
     pub(crate) identify: identify::Behaviour,
     pub(crate) ping: ping::Behaviour,
     pub(crate) relay_client: relay::client::Behaviour,
-    pub(crate) relay_server: relay::Behaviour,
     pub(crate) autonat: autonat::Behaviour,
     pub(crate) dcutr: dcutr::Behaviour,
     pub(crate) tile_rr: request_response::Behaviour<TileCodec>,
@@ -342,6 +331,11 @@ pub struct NetworkNode {
 
     /// Known base address for each relay node (for circuit re-registration)
     relay_addrs: HashMap<PeerId, Multiaddr>,
+
+    /// Relay peers for which we have already called listen_via_relay (circuit registered).
+    /// Cleared when the relay peer fully disconnects (num_established == 0).
+    /// Used to ensure we only register a circuit ONCE — after deduplication — via Identify.
+    circuit_registered: HashSet<PeerId>,
 
     /// Known game peers and their last seen address — used to redial after reconnect
     /// since RoutingUpdated only fires for NEW DHT entries, not already-known peers
@@ -414,6 +408,7 @@ impl NetworkNode {
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
+            circuit_registered: HashSet::new(),
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
             tile_cache_root: None,
@@ -449,6 +444,7 @@ impl NetworkNode {
             connected_peers: HashSet::new(),
             relay_nodes: HashSet::new(),
             relay_addrs: HashMap::new(),
+            circuit_registered: HashSet::new(),
             known_game_peers: HashMap::new(),
             pending_tile_requests: HashMap::new(),
             tile_cache_root: None,
@@ -563,23 +559,6 @@ impl NetworkNode {
                     )
                 );
                 
-                // DCUtR for hole punching
-                // DCUtR disabled - breaks CGNAT connections (carrier NAT is not hole-punchable)
-                // Relay circuit is sufficient and stable
-                
-                // Configure Relay Server - enables this peer to relay for others
-                // Conservative limits for client nodes (not dedicated relays)
-                let relay_server_config = relay::Config {
-                    max_reservations: 128,                              // Allow 128 peers to reserve slots
-                    max_reservations_per_peer: 4,                       // Each peer can reserve 4 slots
-                    max_circuits: 16,                                   // Allow 16 simultaneous relay circuits
-                    max_circuits_per_peer: 4,                           // Each peer can use 4 circuits through us
-                    max_circuit_duration: Duration::from_secs(3600),     // 1 hour per circuit
-                    max_circuit_bytes: 1024 * 1024,                     // 1 MB per circuit (state sync only)
-                    ..Default::default()
-                };
-                let relay_server = relay::Behaviour::new(local_peer_id, relay_server_config);
-                
                 // Configure AutoNAT - detect our own NAT status
                 let autonat = autonat::Behaviour::new(
                     local_peer_id,
@@ -613,7 +592,6 @@ impl NetworkNode {
                             .with_timeout(Duration::from_secs(20))
                     ),
                     relay_client: relay_behaviour,
-                    relay_server,
                     autonat,
                     dcutr,
                     tile_rr: request_response::Behaviour::new(
@@ -623,7 +601,7 @@ impl NetworkNode {
                 })
             })
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
             .build();
         
         Ok(swarm)
@@ -713,17 +691,17 @@ impl NetworkNode {
         // Kick off DHT bootstrap query
         self.swarm.behaviour_mut().kademlia.bootstrap().ok();
 
-        // Re-register circuit relay for every currently connected relay node.
-        // If relay TCP is still up but circuit reservation expired, calling listen_via_relay()
-        // again requests a fresh reservation. ConnectionEstablished won't fire for already-connected
-        // relays, so we must do this explicitly on every reconnect attempt.
+        // Re-register circuit relay for every currently connected relay node that doesn't
+        // already have a circuit registered. Handles the case where the relay TCP connection
+        // stayed alive but the circuit reservation expired.
         let relay_pairs: Vec<(PeerId, Multiaddr)> = self.relay_addrs.iter()
-            .filter(|(p, _)| self.connected_peers.contains(*p))
+            .filter(|(p, _)| self.connected_peers.contains(*p) && !self.circuit_registered.contains(*p))
             .map(|(p, a)| (*p, a.clone()))
             .collect();
         for (relay_peer_id, relay_base) in relay_pairs {
             println!("[relay] Re-registering circuit with connected relay {}", relay_peer_id);
-            self.listen_via_relay(relay_peer_id, relay_base);
+            self.listen_via_relay(relay_peer_id, relay_base.clone());
+            self.circuit_registered.insert(relay_peer_id);
         }
 
         // Redial known game peers that we've dropped.
@@ -940,9 +918,8 @@ impl NetworkNode {
                     let relay_base: Multiaddr = remote_addr.iter()
                         .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                         .collect();
-                    // Store for later circuit re-registration on reconnect
+                    // Store for later circuit registration (listen_via_relay called at Identify::Received)
                     self.relay_addrs.insert(peer_id, relay_base.clone());
-                    self.listen_via_relay(peer_id, relay_base);
                 } else {
                     // Game peer — remember their address so we can redial after reconnect.
                     // RoutingUpdated only fires for NEW DHT entries; if we drop and
@@ -967,6 +944,7 @@ impl NetworkNode {
             } => {
                 if num_established == 0 {
                     self.connected_peers.remove(&peer_id);
+                    self.circuit_registered.remove(&peer_id);
                     Some(NetworkEvent::PeerDisconnected { peer_id })
                 } else {
                     None // Still have other connections to this peer
@@ -993,21 +971,32 @@ impl NetworkNode {
                     }
                 }
                 // Only register circuit relay through actual dedicated relay/server nodes,
-                // NOT through other game clients (they also run relay::Behaviour but we
-                // should not route through them — it pollutes relay_nodes and breaks
-                // game_peer_count() logic).
+                // NOT through other game clients.
                 let is_dedicated_relay = info.protocols.iter().any(|p| {
                     let s = p.as_ref();
                     s.contains("metaverse-server") || s.contains("metaverse-relay")
                 });
-                if is_dedicated_relay && !self.relay_nodes.contains(&peer_id) {
-                    println!("[relay] Peer {} is a server/relay, listening via circuit", peer_id);
-                    self.relay_nodes.insert(peer_id);
-                    if let Some(addr) = info.listen_addrs.first() {
-                        let relay_base: Multiaddr = addr.iter()
-                            .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                            .collect();
-                        self.listen_via_relay(peer_id, relay_base);
+                if is_dedicated_relay {
+                    if !self.relay_nodes.contains(&peer_id) {
+                        println!("[relay] Peer {} is a server/relay", peer_id);
+                        self.relay_nodes.insert(peer_id);
+                    }
+                    // Register circuit relay ONCE per connection session, after Identify fires
+                    // (deduplication has already happened by this point — safe to call).
+                    if !self.circuit_registered.contains(&peer_id) {
+                        // Prefer a routable address from identify; fall back to what we saw
+                        let relay_base = info.listen_addrs.iter()
+                            .find(|a| is_routable_addr(a))
+                            .or_else(|| self.relay_addrs.get(&peer_id))
+                            .map(|a| a.iter()
+                                .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                .collect::<Multiaddr>());
+                        if let Some(base) = relay_base {
+                            println!("[relay] Registering circuit via {}: {}", peer_id, base);
+                            self.relay_addrs.insert(peer_id, base.clone());
+                            self.listen_via_relay(peer_id, base);
+                            self.circuit_registered.insert(peer_id);
+                        }
                     }
                 }
                 None
@@ -1027,42 +1016,6 @@ impl NetworkNode {
                     }
                     relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
                         println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
-                        None
-                    }
-                }
-            }
-            
-            // Relay server events - we're acting as a relay for others
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayServer(event)) => {
-                match event {
-                    relay::Event::ReservationReqAccepted { src_peer_id, renewed, .. } => {
-                        println!("✅ [RELAY SERVER] Reservation {} for peer: {}", 
-                            if renewed { "renewed" } else { "accepted" }, src_peer_id);
-                        None
-                    }
-                    relay::Event::ReservationTimedOut { src_peer_id } => {
-                        println!("⏱️  [RELAY SERVER] Reservation timed out for: {}", src_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
-                        println!("🔄 [RELAY SERVER] Circuit: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
-                        println!("❌ [RELAY SERVER] Circuit denied: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
-                        println!("🔚 [RELAY SERVER] Circuit closed: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::ReservationReqDenied { src_peer_id, .. } => {
-                        println!("❌ [RELAY SERVER] Reservation denied for: {}", src_peer_id);
-                        None
-                    }
-                    // Other relay events (accept failed, deny failed, closed, etc.)
-                    _ => {
-                        println!("ℹ️  [RELAY SERVER] Event: {:?}", event);
                         None
                     }
                 }
