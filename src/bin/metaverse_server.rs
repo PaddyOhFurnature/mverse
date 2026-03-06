@@ -234,6 +234,9 @@ pub struct SharedState {
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
     pub ram_pct: f32,
+    pub swap_used_mb: u64,
+    pub swap_total_mb: u64,
+    pub proc_rss_mb: u64,
     pub shedding_relay: bool,
     pub relay_port: u16,
     pub web_port: u16,
@@ -280,6 +283,7 @@ impl Default for SharedState {
             total_reservations: 0, dht_peer_count: 0, key_count: 0,
             world: WorldStats::default(), net: NetStats::default(),
             cpu_pct: 0.0, ram_used_mb: 0, ram_total_mb: 0, ram_pct: 0.0,
+            swap_used_mb: 0, swap_total_mb: 0, proc_rss_mb: 0,
             shedding_relay: false,
             relay_port: 4001,
             web_port: 8080,
@@ -316,7 +320,11 @@ struct AppState {
     cpu_pct: f32,
     ram_used_mb: u64,
     ram_total_mb: u64,
+    swap_used_mb: u64,
+    swap_total_mb: u64,
+    proc_rss_mb: u64,
     last_sys_refresh: Instant,
+    last_debug_log: Instant,
     last_shared_sync: Instant,
     net: NetStats,
     shedding_relay: bool,
@@ -367,7 +375,9 @@ impl AppState {
             total_connections: 0, total_reservations: 0, dht_peer_count: 0,
             log: VecDeque::new(), should_quit: false,
             sys, cpu_pct, ram_used_mb, ram_total_mb,
+            swap_used_mb: 0, swap_total_mb: 0, proc_rss_mb: 0,
             last_sys_refresh: Instant::now(),
+            last_debug_log: Instant::now() - Duration::from_secs(3600),
             last_shared_sync: Instant::now(),
             net: NetStats::default(),
             shedding_relay: false,
@@ -400,6 +410,23 @@ impl AppState {
         self.cpu_pct = self.sys.global_cpu_usage();
         self.ram_used_mb = self.sys.used_memory() / 1_048_576;
         self.ram_total_mb = self.sys.total_memory() / 1_048_576;
+        self.swap_used_mb = self.sys.used_swap() / 1_048_576;
+        self.swap_total_mb = self.sys.total_swap() / 1_048_576;
+
+        // Read this process's RSS from /proc/self/status (Linux)
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+                for line in status.lines() {
+                    if line.starts_with("VmRSS:") {
+                        if let Some(kb) = line.split_whitespace().nth(1) {
+                            self.proc_rss_mb = kb.parse::<u64>().unwrap_or(0) / 1024;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
         self.last_sys_refresh = Instant::now();
 
         let cpu_thresh = self.config.cpu_shed_threshold_pct;
@@ -447,6 +474,33 @@ impl AppState {
             }
             self.shedding_relay = false;
         }
+
+        // Periodic debug stats (every 60s when log_level = "debug")
+        if (self.config.log_level == "debug" || self.config.log_level == "trace")
+            && self.last_debug_log.elapsed() >= Duration::from_secs(60)
+        {
+            self.last_debug_log = Instant::now();
+            let ram_pct = if self.ram_total_mb > 0 {
+                self.ram_used_mb * 100 / self.ram_total_mb
+            } else { 0 };
+            let swap_pct = if self.swap_total_mb > 0 {
+                self.swap_used_mb * 100 / self.swap_total_mb
+            } else { 0 };
+            let msg = format!(
+                "🔍 [DEBUG] peers={} circuits={} | \
+                 proc_rss={}MB | \
+                 sys_ram={}/{}MB ({}%) | \
+                 swap={}/{}MB ({}%) | \
+                 cpu={:.1}%",
+                self.connected_peers.len(),
+                self.active_circuits.len(),
+                self.proc_rss_mb,
+                self.ram_used_mb, self.ram_total_mb, ram_pct,
+                self.swap_used_mb, self.swap_total_mb, swap_pct,
+                self.cpu_pct,
+            );
+            self.log(msg);
+        }
     }
 
     /// Drain the list of peers to disconnect (populated by load-shedding).
@@ -491,6 +545,9 @@ impl AppState {
             s.ram_used_mb = self.ram_used_mb;
             s.ram_total_mb = self.ram_total_mb;
             s.ram_pct = ram_pct;
+            s.swap_used_mb = self.swap_used_mb;
+            s.swap_total_mb = self.swap_total_mb;
+            s.proc_rss_mb = self.proc_rss_mb;
             s.shedding_relay = self.shedding_relay;
             if let Some(ref db) = s.key_db {
                 s.key_count = db.count();
@@ -1676,6 +1733,7 @@ fn bar(filled: u8, width: u8) -> String {
 fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
     let cpu_pct = state.cpu_pct as u8;
     let ram_pct = if state.ram_total_mb > 0 { (state.ram_used_mb * 100 / state.ram_total_mb) as u8 } else { 0 };
+    let swap_pct = if state.swap_total_mb > 0 { (state.swap_used_mb * 100 / state.swap_total_mb) as u8 } else { 0 };
 
     let cpu_style = if cpu_pct > 80 { Style::default().fg(Color::Red) }
         else if cpu_pct > 50 { Style::default().fg(Color::Yellow) }
@@ -1683,6 +1741,8 @@ fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
     let ram_style = if ram_pct > 85 { Style::default().fg(Color::Red) }
         else if ram_pct > 70 { Style::default().fg(Color::Yellow) }
         else { Style::default().fg(Color::Green) };
+    let swap_style = if swap_pct > 50 { Style::default().fg(Color::Yellow) }
+        else { Style::default().fg(Color::Cyan) };
 
     let disk_pct: u8 = if state.config.max_world_data_gb > 0 {
         let used_gb = state.shared.read().map(|s| s.world.world_data_mb).unwrap_or(0.0) / 1024.0;
@@ -1699,7 +1759,14 @@ fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
         ]),
         Line::from(vec![
             Span::styled(format!("RAM  {} ", bar(ram_pct, 20)), ram_style),
-            Span::styled(format!("{:3}%  {}/{} MB", ram_pct, state.ram_used_mb, state.ram_total_mb), ram_style),
+            Span::styled(
+                format!("{:3}%  {}/{} MB (proc {}MB)", ram_pct, state.ram_used_mb, state.ram_total_mb, state.proc_rss_mb),
+                ram_style,
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("SWP  {} ", bar(swap_pct, 20)), swap_style),
+            Span::styled(format!("{:3}%  {}/{} MB", swap_pct, state.swap_used_mb, state.swap_total_mb), swap_style),
         ]),
         Line::from(vec![
             Span::styled(format!("DSK  {} ", bar(disk_pct, 20)), disk_style),
@@ -3457,6 +3524,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Headless if flag/config or not a terminal
     let headless = config.headless || !io::stdout().is_terminal();
     config.headless = headless;
+
+    // ── OOM protection ──────────────────────────────────────────────────────
+    // Lower this process's OOM priority so the kernel uses swap before killing us.
+    // Requires CAP_SYS_RESOURCE (root or systemd AmbientCapabilities); silently ignored otherwise.
+    #[cfg(target_os = "linux")]
+    {
+        use std::io::Write;
+        match std::fs::OpenOptions::new().write(true).open("/proc/self/oom_score_adj") {
+            Ok(mut f) => {
+                if f.write_all(b"-500\n").is_ok() {
+                    println!("🛡️  OOM score set to -500 (swap preferred over kill)");
+                }
+            }
+            Err(_) => {} // not root — ignore
+        }
+    }
 
     // Identity
     let identity_path = config.identity_file.as_ref()
