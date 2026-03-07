@@ -574,7 +574,9 @@ impl TerrainGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elevation::{OpenTopographySource, NasFileSource};
+    use crate::elevation::OpenTopographySource;
+    #[cfg(feature = "terrain-gdal")]
+    use crate::elevation::NasFileSource;
     use std::path::PathBuf;
     
     #[test]
@@ -584,12 +586,14 @@ mod tests {
         let gps = GPS::new(-27.4775, 153.0355, 0.0);
         
         // Setup elevation pipeline (try NAS, fall back to API)
+        #[cfg(feature = "terrain-gdal")]
         let nas = NasFileSource::new();
         let api_key = "3e607de6969c687053f9e107a4796962".to_string();
         let cache_dir = PathBuf::from("./elevation_cache");
         let api = OpenTopographySource::new(api_key, cache_dir);
         
         let mut pipeline = ElevationPipeline::new();
+        #[cfg(feature = "terrain-gdal")]
         if let Some(nas_source) = nas {
             pipeline.add_source(Box::new(nas_source));
         }
@@ -673,18 +677,20 @@ mod tests {
         println!("Target: <5 seconds for 100m×100m (this is 10m×10m)");
         
         // Setup elevation pipeline with NAS if available
+        #[cfg(feature = "terrain-gdal")]
         let nas = NasFileSource::new();
         let api_key = "3e607de6969c687053f9e107a4796962".to_string();
         let cache_dir = PathBuf::from("./elevation_cache");
         let api = OpenTopographySource::new(api_key, cache_dir);
         
         let mut pipeline = ElevationPipeline::new();
+        #[cfg(feature = "terrain-gdal")]
         if let Some(nas_source) = nas {
             println!("✓ Using NAS file source");
             pipeline.add_source(Box::new(nas_source));
-        } else {
-            println!("⚠ NAS not available, using API (will be slower)");
         }
+        #[cfg(not(feature = "terrain-gdal"))]
+        println!("⚠ NAS not available (terrain-gdal feature disabled), using API");
         pipeline.add_source(Box::new(api));
         
         let origin_gps = GPS::new(0.0, 0.0, 0.0);

@@ -1,6 +1,6 @@
 [package]
 name = "metaverse_core"
-version = "0.1.39"
+version = "0.1.40"
 edition = "2024"
 
 [dependencies]
@@ -113,7 +113,9 @@ shellexpand = "3"
 default = ["terrain", "client"]
 
 # Terrain features (GDAL for elevation data)
-terrain = ["gdal", "gdal-sys", "geoconv"]
+terrain = ["geoconv"]
+# Enable GDAL for NAS-mounted global GeoTIFF support (optional, requires libgdal on the system)
+terrain-gdal = ["gdal", "gdal-sys", "terrain"]
 
 # Client features (rendering, etc)
 client = ["wgpu", "winit", "egui", "egui-wgpu", "egui-winit", "dep:gltf"]

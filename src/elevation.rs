@@ -67,12 +67,15 @@ pub struct OpenTopographySource {
     last_request: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
+#[cfg(feature = "terrain-gdal")]
 /// SRTM data from NAS-mounted global GeoTIFF (200GB world coverage)
 /// 
 /// PERFORMANCE: Caches Dataset handle and elevation data in memory
 /// - Opens file once, reuses handle (was opening 900x per chunk!)
 /// - Caches 1km x 1km tiles in memory (LRU eviction)
 /// - Batch reads reduce network roundtrips
+/// 
+/// Requires the `terrain-gdal` feature (libgdal system library).
 pub struct NasFileSource {
     file_path: PathBuf,
     dataset: Arc<Mutex<Option<gdal::Dataset>>>,
@@ -80,11 +83,13 @@ pub struct NasFileSource {
 }
 
 /// Cache for elevation data (1km x 1km tiles)
+#[cfg(feature = "terrain-gdal")]
 struct ElevationCache {
     tiles: std::collections::HashMap<(i32, i32), CachedTile>,
     max_tiles: usize,
 }
 
+#[cfg(feature = "terrain-gdal")]
 struct CachedTile {
     lat_min: f64,
     lon_min: f64,
@@ -93,6 +98,7 @@ struct CachedTile {
     size: usize,  // pixels per side
 }
 
+#[cfg(feature = "terrain-gdal")]
 impl ElevationCache {
     fn new(max_tiles: usize) -> Self {
         Self {
@@ -136,6 +142,7 @@ impl ElevationCache {
     }
 }
 
+#[cfg(feature = "terrain-gdal")]
 impl NasFileSource {
     /// Create NAS file source
     /// 
@@ -246,6 +253,7 @@ impl NasFileSource {
     }
 }
 
+#[cfg(feature = "terrain-gdal")]
 impl ElevationSource for NasFileSource {
     fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         // Check cache first
@@ -557,51 +565,79 @@ fn is_srtm_void(v: i16) -> bool {
     v == i16::MIN || v == -9999
 }
 
-/// Extract elevation from GeoTIFF at given GPS coordinate.
+/// Extract elevation from a GeoTIFF or HGT file at the given GPS coordinate.
+///
+/// Uses the pure-Rust `tiff` crate (no GDAL required). The geo-transform is
+/// derived from the tile filename (lat/lon encoded in the name), which is
+/// reliable for all SRTM-convention tile naming schemes.
 ///
 /// Handles SRTM void pixels (-32768 / -9999) by expanding the search window
 /// up to FALLBACK_RADIUS pixels outward and averaging valid neighbours.
-/// Returns Ok(None) only when the entire fallback window contains no valid data.
 fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
-    use gdal::Dataset;
-    use gdal::raster::ResampleAlg;
+    let ext = tiff_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if ext == "hgt" {
+        return extract_elevation_hgt(tiff_path, gps);
+    }
 
-    let dataset = Dataset::open(tiff_path)
-        .map_err(|e| ElevationError::FileNotFound(format!("GDAL open failed: {}", e)))?;
+    // Parse tile lat/lon from filename (e.g. srtm_s28_e153.tif → -28, 153)
+    let (tile_lat, tile_lon) = parse_tile_coords_from_path(tiff_path)?;
 
-    let rasterband = dataset.rasterband(1)
-        .map_err(|e| ElevationError::ParseError(format!("No raster band: {}", e)))?;
+    let file = std::fs::File::open(tiff_path)
+        .map_err(|e| ElevationError::FileNotFound(format!("Cannot open {}: {}", tiff_path.display(), e)))?;
+    let reader = std::io::BufReader::new(file);
+    let mut decoder = tiff::decoder::Decoder::new(reader)
+        .map_err(|e| ElevationError::ParseError(format!("TIFF init error: {}", e)))?;
 
-    let geotransform = dataset.geo_transform()
-        .map_err(|e| ElevationError::ParseError(format!("No geotransform: {}", e)))?;
+    let (width, height) = decoder.dimensions()
+        .map_err(|e| ElevationError::ParseError(format!("TIFF dimensions error: {}", e)))?;
 
-    let x_origin    = geotransform[0];
-    let pixel_width = geotransform[1];
-    let y_origin    = geotransform[3];
-    let pixel_height = geotransform[5]; // negative
+    // Geo-transform derived from filename: tile covers [tile_lat, tile_lat+1] × [tile_lon, tile_lon+1]
+    // Top-left corner is (tile_lon, tile_lat+1). Pixels map with (width-1) steps across 1 degree.
+    let x_origin    = tile_lon as f64;
+    let y_origin    = (tile_lat + 1) as f64;
+    let pixel_width  = 1.0 / (width  as f64 - 1.0).max(1.0);
+    let pixel_height = -1.0 / (height as f64 - 1.0).max(1.0);
 
     let pixel_col = ((gps.lon - x_origin) / pixel_width).floor() as isize;
     let pixel_row = ((gps.lat - y_origin) / pixel_height).floor() as isize;
 
     // Clamp so a 2×2 read never goes out of bounds at tile edges.
-    let raster_size = rasterband.size();
-    let pixel_col = pixel_col.max(0).min(raster_size.0 as isize - 2);
-    let pixel_row = pixel_row.max(0).min(raster_size.1 as isize - 2);
+    let pixel_col = pixel_col.max(0).min(width as isize - 2);
+    let pixel_row = pixel_row.max(0).min(height as isize - 2);
 
-    // --- 2×2 bilinear interpolation (primary path) ---
-    let buf2 = rasterband.read_as::<i16>(
-        (pixel_col, pixel_row), (2, 2), (2, 2),
-        Some(ResampleAlg::Bilinear),
-    ).map_err(|e| ElevationError::ParseError(format!("GDAL read failed: {}", e)))?;
+    // Read all pixel data (SRTM 1s tile: 3601×3601 × 2B ≈ 26MB uncompressed, usually compressed)
+    let image = decoder.read_image()
+        .map_err(|e| ElevationError::ParseError(format!("TIFF read error: {}", e)))?;
 
-    let data2 = buf2.data();
+    let w = width as usize;
+    let col = pixel_col as usize;
+    let row = pixel_row as usize;
+
+    let get_i16 = |r: usize, c: usize| -> i16 {
+        let idx = r * w + c;
+        match &image {
+            tiff::decoder::DecodingResult::I16(data) => *data.get(idx).unwrap_or(&0),
+            tiff::decoder::DecodingResult::F32(data) => *data.get(idx).unwrap_or(&0.0) as i16,
+            tiff::decoder::DecodingResult::U16(data) => *data.get(idx).unwrap_or(&0) as i16,
+            tiff::decoder::DecodingResult::I32(data) => *data.get(idx).unwrap_or(&0) as i16,
+            tiff::decoder::DecodingResult::F64(data) => *data.get(idx).unwrap_or(&0.0) as i16,
+            _ => 0,
+        }
+    };
+
+    let data2 = [
+        get_i16(row,     col),
+        get_i16(row,     col + 1),
+        get_i16(row + 1, col),
+        get_i16(row + 1, col + 1),
+    ];
+
     let valid2: Vec<f64> = data2.iter()
         .filter(|&&v| !is_srtm_void(v))
         .map(|&v| v as f64)
         .collect();
 
     if valid2.len() == 4 {
-        // All pixels valid — standard bilinear interpolation with cliff snap.
         let col_frac = ((gps.lon - x_origin) / pixel_width) - pixel_col as f64;
         let row_frac = ((gps.lat - y_origin) / pixel_height) - pixel_row as f64;
 
@@ -629,42 +665,145 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     }
 
     if !valid2.is_empty() {
-        // Partial void — use mean of valid pixels.
         let mean = valid2.iter().sum::<f64>() / valid2.len() as f64;
         return Ok(Elevation { meters: mean });
     }
 
-    // --- All immediate pixels are void: expand outward up to FALLBACK_RADIUS ---
-    // This handles water bodies where SRTM has no-data and the user asks us to
-    // "sample the areas around it" to work out the elevation.
-    const FALLBACK_RADIUS: isize = 8; // ~240m at 30m/pixel
-    let window = FALLBACK_RADIUS * 2 + 1;
-    let top_left_col = pixel_col - FALLBACK_RADIUS;
-    let top_left_row = pixel_row - FALLBACK_RADIUS;
+    // Expand outward up to FALLBACK_RADIUS pixels for void regions
+    const FALLBACK_RADIUS: isize = 8;
+    let r0 = (row as isize - FALLBACK_RADIUS).max(0) as usize;
+    let c0 = (col as isize - FALLBACK_RADIUS).max(0) as usize;
+    let r1 = (row as isize + FALLBACK_RADIUS + 1).min(height as isize) as usize;
+    let c1 = (col as isize + FALLBACK_RADIUS + 1).min(width as isize) as usize;
 
-    if let Ok(buf_large) = rasterband.read_as::<i16>(
-        (top_left_col, top_left_row),
-        (window as usize, window as usize),
-        (window as usize, window as usize),
-        Some(ResampleAlg::NearestNeighbour),
-    ) {
-        let valid_far: Vec<f64> = buf_large.data().iter()
-            .filter(|&&v| !is_srtm_void(v))
-            .map(|&v| v as f64)
-            .collect();
-
-        if !valid_far.is_empty() {
-            // Use MINIMUM of valid neighbours, not mean.
-            // When querying a water-surface pixel, the nearest valid pixels are
-            // the bank edges — the lowest of those is closest to the true water
-            // surface level. Using the mean pulls the result toward hillside
-            // elevation and causes water polygons to float above terrain.
-            let min_far = valid_far.iter().cloned().fold(f64::MAX, f64::min);
-            return Ok(Elevation { meters: min_far });
+    let mut valid_far: Vec<f64> = Vec::new();
+    for r in r0..r1 {
+        for c in c0..c1 {
+            let v = get_i16(r, c);
+            if !is_srtm_void(v) {
+                valid_far.push(v as f64);
+            }
         }
     }
 
-    // No valid data anywhere in fallback window — let pipeline try next source.
+    if !valid_far.is_empty() {
+        let min_far = valid_far.iter().cloned().fold(f64::MAX, f64::min);
+        return Ok(Elevation { meters: min_far });
+    }
+
+    Ok(Elevation { meters: 0.0 })
+}
+
+/// Parse tile (lat, lon) integers from a SRTM-convention filename.
+///
+/// Handles formats:
+/// - `srtm_s28_e153.tif`  → (-28, 153)
+/// - `srtm_n28_e152.tif`  → (28, 152)
+/// - `srtm_S28_E153.tif`  → (-28, 153)
+/// - `N28E153.hgt`         → (28, 153)  (handled by parse_hgt_coords)
+fn parse_tile_coords_from_path(path: &PathBuf) -> Result<(i32, i32), ElevationError> {
+    let stem = path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // srtm_s28_e153 / srtm_n28_w001 etc.
+    if let Some(rest) = stem.strip_prefix("srtm_") {
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() == 2 {
+            let lat = parse_deg_str(parts[0])?;
+            let lon = parse_deg_str(parts[1])?;
+            return Ok((lat, lon));
+        }
+    }
+
+    // Plain N28E153 or S28W001 style
+    if let Some(lat_lon) = parse_hgt_style(&stem) {
+        return Ok(lat_lon);
+    }
+
+    Err(ElevationError::ParseError(format!(
+        "Cannot determine tile lat/lon from filename: {}", path.display()
+    )))
+}
+
+fn parse_deg_str(s: &str) -> Result<i32, ElevationError> {
+    let (sign, digits) = if s.starts_with('n') || s.starts_with('e') {
+        (1, &s[1..])
+    } else if s.starts_with('s') || s.starts_with('w') {
+        (-1, &s[1..])
+    } else {
+        return Err(ElevationError::ParseError(format!("Bad degree token: {}", s)));
+    };
+    let v: i32 = digits.parse()
+        .map_err(|_| ElevationError::ParseError(format!("Bad degree value: {}", s)))?;
+    Ok(sign * v)
+}
+
+fn parse_hgt_style(name: &str) -> Option<(i32, i32)> {
+    // e.g. "n28e153" or "s28w001"
+    let name = name.trim_end_matches(".hgt");
+    let (lat_sign, rest) = if name.starts_with('n') { (1, &name[1..]) }
+        else if name.starts_with('s') { (-1, &name[1..]) }
+        else { return None; };
+    let lat_end = rest.find(|c: char| c == 'e' || c == 'w')?;
+    let lat: i32 = rest[..lat_end].parse().ok()?;
+    let (lon_sign, lon_str) = if rest[lat_end..].starts_with('e') { (1, &rest[lat_end+1..]) }
+        else { (-1, &rest[lat_end+1..]) };
+    let lon: i32 = lon_str.parse().ok()?;
+    Some((lat_sign * lat, lon_sign * lon))
+}
+
+/// Extract elevation from a raw SRTM HGT file (big-endian signed int16, row-major N→S, W→E).
+fn extract_elevation_hgt(hgt_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
+    let stem = hgt_path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let (tile_lat, tile_lon) = parse_hgt_style(&stem).ok_or_else(|| {
+        ElevationError::ParseError(format!("Cannot parse HGT filename: {}", hgt_path.display()))
+    })?;
+
+    let bytes = std::fs::read(hgt_path)
+        .map_err(|e| ElevationError::FileNotFound(format!("Cannot read HGT: {}", e)))?;
+
+    // Determine resolution: 1201×1201 = SRTM3 (3 arc-sec), 3601×3601 = SRTM1 (1 arc-sec)
+    let n_samples = ((bytes.len() / 2) as f64).sqrt().round() as usize;
+    if n_samples * n_samples * 2 != bytes.len() {
+        return Err(ElevationError::ParseError(format!("Bad HGT size: {} bytes", bytes.len())));
+    }
+
+    let x_origin = tile_lon as f64;
+    let y_origin = (tile_lat + 1) as f64;
+    let step = 1.0 / (n_samples as f64 - 1.0);
+
+    let col = ((gps.lon - x_origin) / step).floor() as isize;
+    let row = ((y_origin - gps.lat) / step).floor() as isize;
+    let col = col.max(0).min(n_samples as isize - 2) as usize;
+    let row = row.max(0).min(n_samples as isize - 2) as usize;
+
+    let read_i16 = |r: usize, c: usize| -> i16 {
+        let idx = (r * n_samples + c) * 2;
+        if idx + 1 < bytes.len() {
+            i16::from_be_bytes([bytes[idx], bytes[idx + 1]])
+        } else {
+            0
+        }
+    };
+
+    let data2 = [
+        read_i16(row, col), read_i16(row, col + 1),
+        read_i16(row + 1, col), read_i16(row + 1, col + 1),
+    ];
+    let valid2: Vec<f64> = data2.iter().filter(|&&v| !is_srtm_void(v)).map(|&v| v as f64).collect();
+
+    if valid2.len() == 4 {
+        let col_frac = ((gps.lon - x_origin) / step) - col as f64;
+        let row_frac = ((y_origin - gps.lat) / step) - row as f64;
+        let e0 = data2[0] as f64 * (1.0 - col_frac) + data2[1] as f64 * col_frac;
+        let e1 = data2[2] as f64 * (1.0 - col_frac) + data2[3] as f64 * col_frac;
+        return Ok(Elevation { meters: e0 * (1.0 - row_frac) + e1 * row_frac });
+    }
+    if !valid2.is_empty() {
+        return Ok(Elevation { meters: valid2.iter().sum::<f64>() / valid2.len() as f64 });
+    }
     Ok(Elevation { meters: 0.0 })
 }
 
@@ -753,7 +892,8 @@ impl ElevationPipeline {
     pub fn with_defaults(api_key: String, cache_dir: PathBuf) -> Self {
         let mut pipeline = Self::new();
         
-        // Try NAS file first (highest priority, no rate limits)
+        // Try NAS file first (highest priority, no rate limits, requires terrain-gdal feature)
+        #[cfg(feature = "terrain-gdal")]
         if let Some(nas) = NasFileSource::new() {
             pipeline.add_source(Box::new(nas));
         }
