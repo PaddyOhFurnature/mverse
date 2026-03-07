@@ -602,7 +602,7 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-const OSM_CACHE_VERSION: u32 = 6;
+const OSM_CACHE_VERSION: u32 = 7;
 
 /// Cache OSM tile data on disk in binary (bincode) format.
 /// Key is derived from the bounding box rounded to 4 decimal places.
@@ -621,8 +621,18 @@ impl OsmDiskCache {
         self.dir.join(name)
     }
 
+    /// Returns true only if the tile file exists AND has the current cache version.
+    /// Tiles written by older code versions are treated as absent and will be re-converted.
     pub fn exists(&self, s: f64, w: f64, n: f64, e: f64) -> bool {
-        self.path(s, w, n, e).exists()
+        let p = self.path(s, w, n, e);
+        if let Ok(mut f) = std::fs::File::open(&p) {
+            use std::io::Read;
+            let mut buf = [0u8; 4];
+            if f.read_exact(&mut buf).is_ok() {
+                return u32::from_le_bytes(buf) == OSM_CACHE_VERSION;
+            }
+        }
+        false
     }
 
     pub fn load(&self, s: f64, w: f64, n: f64, e: f64) -> Option<OsmData> {
@@ -1126,18 +1136,21 @@ fn import_pbf_to_cache_inner(
     let mut tiles: HashMap<(i64, i64), OsmData> = HashMap::new();
     let mut total_pushed: usize = 0;
     let mut written = 0usize;
+    let mut skipped = 0usize;
 
     // Flush accumulated tiles to disk and clear the accumulator.
-    let flush = |tiles: &mut HashMap<(i64,i64), OsmData>, written: &mut usize| {
+    let flush = |tiles: &mut HashMap<(i64,i64), OsmData>, written: &mut usize, skipped: &mut usize| {
         for ((s_i, w_i), data) in tiles.drain() {
             if data.is_empty() { continue; }
             let s = s_i as f64 * TILE_SIZE;
-            let w = w_i as f64 * TILE_SIZE;
+            let w_coord = w_i as f64 * TILE_SIZE;
             let n = s + TILE_SIZE;
-            let e = w + TILE_SIZE;
-            if !cache.exists(s, w, n, e) {
-                cache.save(s, w, n, e, &data);
+            let e = w_coord + TILE_SIZE;
+            if !cache.exists(s, w_coord, n, e) {
+                cache.save(s, w_coord, n, e, &data);
                 *written += 1;
+            } else {
+                *skipped += 1;
             }
         }
     };
@@ -1205,8 +1218,8 @@ fn import_pbf_to_cache_inner(
                         }
                     }
                     if total_pushed >= FLUSH_THRESHOLD {
-                        flush(&mut tiles, &mut written);
-                        plog!("🔄 [OSM] {} — pass 2 nodes: {} tiles written so far…", fname, written);
+                        flush(&mut tiles, &mut written, &mut skipped);
+                        plog!("🔄 [OSM] {} — pass 2 nodes: {} new tiles ({} already current)…", fname, written, skipped);
                         total_pushed = 0;
                     }
                 }
@@ -1395,8 +1408,8 @@ fn import_pbf_to_cache_inner(
 
                     total_pushed += n_tiles;
                     if total_pushed >= FLUSH_THRESHOLD {
-                        flush(&mut tiles, &mut written);
-                        plog!("🔄 [OSM] {} — pass 2 ways: {} tiles written so far…", fname, written);
+                        flush(&mut tiles, &mut written, &mut skipped);
+                        plog!("🔄 [OSM] {} — pass 2 ways: {} new tiles ({} already current)…", fname, written, skipped);
                         total_pushed = 0;
                     }
                 }
@@ -1406,7 +1419,7 @@ fn import_pbf_to_cache_inner(
         }
     }
 
-    flush(&mut tiles, &mut written);
-    plog!("✅ [OSM] {} — conversion complete: {} tiles written", fname, written);
+    flush(&mut tiles, &mut written, &mut skipped);
+    plog!("✅ [OSM] {} — done: {} new tiles written, {} already current", fname, written, skipped);
     Ok(written)
 }
