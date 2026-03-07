@@ -1126,16 +1126,27 @@ fn main() {
         &pipeline.model_bind_group_layout,
     );
 
-    // Pre-load Kenney building GLB models — one per category
-    // Indices: 0=commercial, 1=industrial, 2=residential, 3=skyscraper, 4=default
+    // Pre-load Kenney building GLB models — 5 variants per category for visual variety.
+    // Layout: [commercial a-e, industrial a-e, residential type-a to type-e,
+    //          skyscraper a-e, default/generic b-f (commercial alternate)]
+    // Each category occupies GLB_VARIANTS consecutive indices.
+    const GLB_VARIANTS: usize = 5;
     let assets_base = "assets/models";
-    let building_glb_paths = [
-        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-a.glb", assets_base),
-        format!("{}/kenney_city-kit-industrial_1.0/Models/GLB format/building-a.glb", assets_base),
-        format!("{}/kenney_city-kit-suburban_20/Models/GLB format/building-type-a.glb", assets_base),
-        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-skyscraper-a.glb", assets_base),
-        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-b.glb", assets_base),
-    ];
+    let building_glb_paths: Vec<String> = {
+        let letters = ["a", "b", "c", "d", "e"];
+        let mut paths = Vec::with_capacity(GLB_VARIANTS * 5);
+        // commercial (0–4)
+        for &l in &letters { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-{}.glb", assets_base, l)); }
+        // industrial (5–9)
+        for &l in &letters { paths.push(format!("{}/kenney_city-kit-industrial_1.0/Models/GLB format/building-{}.glb", assets_base, l)); }
+        // residential (10–14)
+        for &l in &letters { paths.push(format!("{}/kenney_city-kit-suburban_20/Models/GLB format/building-type-{}.glb", assets_base, l)); }
+        // skyscraper (15–19)
+        for &l in &letters { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-skyscraper-{}.glb", assets_base, l)); }
+        // default/generic (20–24) — reuse commercial f-j
+        for &l in &["f", "g", "h", "i", "j"] { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-{}.glb", assets_base, l)); }
+        paths
+    };
     let building_glb_models: Vec<Option<GlbModel>> = building_glb_paths.iter().map(|p| {
         let model = textured_pipeline.load_glb(&context.device, &context.queue, p);
         if model.is_none() {
@@ -1146,7 +1157,7 @@ fn main() {
         model
     }).collect();
     let glb_models_loaded = building_glb_models.iter().any(|m| m.is_some());
-    println!("🏢 GLB building models loaded: {}/5", building_glb_models.iter().filter(|m| m.is_some()).count());
+    println!("🏢 GLB building models loaded: {}/{}", building_glb_models.iter().filter(|m| m.is_some()).count(), building_glb_models.len());
 
     // Billboard pipeline — renders textured quads on Construct module room walls
     let billboard_pipeline = BillboardPipeline::new(&context);
@@ -2970,17 +2981,17 @@ fn main() {
                                 let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
                                 let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
                                 // Kenney model actual dimensions (measured from GLB bounds):
-                                // 0=commercial: 0.884×1.293×0.940 m
-                                // 1=industrial: 2.084×1.470×1.242 m
-                                // 2=residential: 1.300×0.834×1.028 m
-                                // 3=skyscraper: 1.360×2.880×1.360 m
-                                let model_idx_for_scale = building_model_idx(type_str);
-                                let (mw, mh, md) = match model_idx_for_scale {
+                                // category 0 commercial: 0.884×1.293×0.940 m
+                                // category 1 industrial: 2.084×1.470×1.242 m
+                                // category 2 residential: 1.300×0.834×1.028 m
+                                // category 3 skyscraper: 1.360×2.880×1.360 m
+                                let cat = building_model_category(type_str);
+                                let (mw, mh, md) = match cat {
                                     0 => (0.884_f32, 1.293_f32, 0.940_f32),
                                     1 => (2.084_f32, 1.470_f32, 1.242_f32),
                                     2 => (1.300_f32, 0.834_f32, 1.028_f32),
                                     3 => (1.360_f32, 2.880_f32, 1.360_f32),
-                                    _ => (1.0_f32, 1.0_f32, 1.0_f32),
+                                    _ => (0.884_f32, 1.293_f32, 0.940_f32),
                                 };
                                 let sx = w / mw;
                                 let sy = h / mh;
@@ -2990,7 +3001,7 @@ fn main() {
                                     * glam::Mat4::from_rotation_y(rotation_y)
                                     * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, sz));
 
-                                let model_idx = building_model_idx(type_str);
+                                let model_idx = building_model_idx(type_str, cx, cz);
                                 if building_glb_models[model_idx].as_ref().map(|m| m.has_real_texture).unwrap_or(false) {
                                     let (_, bind_group) = pipeline.create_model_bind_group(&context.device, &transform);
                                     building_instances.push((model_idx, bind_group));
@@ -3564,12 +3575,24 @@ fn building_color(type_str: &str) -> Vec3 {
     }
 }
 
-fn building_model_idx(type_str: &str) -> usize {
+/// Returns the base index into building_glb_models for this building category.
+/// Each category occupies GLB_VARIANTS (5) consecutive slots.
+fn building_model_category(type_str: &str) -> usize {
     if type_str.contains("commercial") || type_str.contains("retail") { 0 }
     else if type_str.contains("industrial") || type_str.contains("warehouse") { 1 }
     else if type_str.contains("residential") || type_str.contains("house") || type_str.contains("suburb") { 2 }
     else if type_str.contains("skyscraper") || type_str.contains("highrise") || type_str.contains("tower") { 3 }
     else { 4 }
+}
+
+/// Pick the GLB model index for a building: category base + position-derived variant.
+fn building_model_idx(type_str: &str, cx: f32, cz: f32) -> usize {
+    const GLB_VARIANTS: usize = 5;
+    let cat = building_model_category(type_str);
+    let hash = ((cx * 100.0) as i32)
+        .wrapping_mul(2246822519u32 as i32)
+        .wrapping_add(((cz * 100.0) as i32).wrapping_mul(3266489917u32 as i32));
+    cat * GLB_VARIANTS + (hash.unsigned_abs() as usize % GLB_VARIANTS)
 }
 
 /// Build a road surface mesh from road segment data stored in placed objects.
