@@ -814,8 +814,6 @@ fn extract_elevation_hgt(hgt_path: &PathBuf, gps: &GPS) -> Result<Elevation, Ele
 pub struct P2PElevationSource {
     fetcher: std::sync::Arc<crate::multiplayer::TileFetcher>,
     cache_dir: PathBuf,
-    /// Tiles where P2P fetch failed — skip P2P for these and fall through to direct download.
-    failed_tiles: std::sync::Mutex<std::collections::HashSet<(i32, i32)>>,
 }
 
 impl P2PElevationSource {
@@ -823,7 +821,7 @@ impl P2PElevationSource {
         fetcher: std::sync::Arc<crate::multiplayer::TileFetcher>,
         cache_dir: PathBuf,
     ) -> Self {
-        Self { fetcher, cache_dir, failed_tiles: std::sync::Mutex::new(std::collections::HashSet::new()) }
+        Self { fetcher, cache_dir }
     }
 }
 
@@ -843,24 +841,14 @@ impl ElevationSource for P2PElevationSource {
                 lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs()));
 
         if !tile_path.exists() {
-            // Skip P2P if we already know this tile isn't available on peers
-            let already_failed = self.failed_tiles.lock().map(|s| s.contains(&(lat, lon))).unwrap_or(false);
-            if !already_failed {
-                // Fetch raw GeoTIFF bytes from a peer
-                if let Some(bytes) = self.fetcher.fetch_elevation(lat, lon) {
-                    if let Some(parent) = tile_path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    if std::fs::write(&tile_path, &bytes).is_ok() {
-                        // Announce to DHT — we now have this tile
-                        self.fetcher.announce_elevation(lat, lon);
-                    }
-                } else {
-                    // Peer didn't have it — mark failed so we don't hammer peers repeatedly.
-                    // The next elevation source (OpenTopography/Copernicus/Skadi) will download it.
-                    if let Ok(mut set) = self.failed_tiles.lock() {
-                        set.insert((lat, lon));
-                    }
+            // TileFetcher tracks failed tiles across all instances; skip if already tried
+            if let Some(bytes) = self.fetcher.fetch_elevation(lat, lon) {
+                if let Some(parent) = tile_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if std::fs::write(&tile_path, &bytes).is_ok() {
+                    // Announce to DHT — we now have this tile (also clears failed set)
+                    self.fetcher.announce_elevation(lat, lon);
                 }
             }
         }

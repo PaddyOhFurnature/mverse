@@ -81,12 +81,23 @@ pub struct TileFetcher {
     tile_peers: Arc<std::sync::Mutex<Vec<PeerId>>>,
     /// Tiles to fetch in the background when no peer has them.
     idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
+    /// Elevation tiles confirmed absent on ALL peers — skip P2P until they're announced.
+    /// Shared across all TileFetcher clones (and P2PElevationSource instances).
+    failed_elev: Arc<std::sync::Mutex<std::collections::HashSet<(i32, i32)>>>,
+    /// OSM tiles confirmed absent on ALL peers (encoded as (s*1000, w*1000) fixed-point).
+    failed_osm: Arc<std::sync::Mutex<std::collections::HashSet<(i64, i64)>>>,
 }
 
 impl TileFetcher {
     /// Try to fetch an OSM tile from a known peer. Tries ALL known peers in order (3s per peer).
     /// Returns raw bincode bytes on success, None on failure.
     pub fn fetch_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
+        // Skip if all peers previously said they don't have this tile
+        let osm_key = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
+        if self.failed_osm.lock().ok()?.contains(&osm_key) {
+            return None;
+        }
+
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
         if peers.is_empty() { return None; }
         println!("📡 [P2P] Requesting OSM tile s={s:.2} w={w:.2} n={n:.2} e={e:.2} from {} peer(s)", peers.len());
@@ -105,8 +116,11 @@ impl TileFetcher {
                 _ => continue,
             }
         }
-        println!("⚠️ [P2P] OSM tile s={s:.2} w={w:.2} not found on any peer");
-        // No peer had it — queue for background download
+        println!("⚠️ [P2P] OSM tile s={s:.2} w={w:.2} not found on any peer — skipping P2P for this tile");
+        if let Ok(mut set) = self.failed_osm.lock() {
+            set.insert(osm_key);
+        }
+        // Queue for background download by idle worker
         if let Ok(mut q) = self.idle_queue.lock() {
             if q.len() < 256 {
                 q.push_back(crate::tile_protocol::TileRequest::OsmTile { s, w, n, e });
@@ -116,8 +130,11 @@ impl TileFetcher {
     }
 
     /// Announce to the DHT that this node now has an OSM tile cached.
+    /// Also clears the failed-tile record so P2P will try again if peers request it.
     /// Non-blocking — fire and forget.
     pub fn announce_osm(&self, s: f64, w: f64, n: f64, e: f64) {
+        let osm_key = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
+        if let Ok(mut set) = self.failed_osm.lock() { set.remove(&osm_key); }
         let key = crate::osm::osm_dht_key(s, w, n, e);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -125,6 +142,11 @@ impl TileFetcher {
     /// Try to fetch an elevation tile (1°×1° SRTM) from a known peer. Blocks up to 9s.
     /// Returns raw GeoTIFF bytes on success, None on failure.
     pub fn fetch_elevation(&self, lat: i32, lon: i32) -> Option<Vec<u8>> {
+        // Skip if all peers previously said they don't have this tile
+        if self.failed_elev.lock().ok()?.contains(&(lat, lon)) {
+            return None;
+        }
+
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
         if peers.is_empty() { return None; }
         println!("📡 [P2P] Requesting SRTM tile lat={lat} lon={lon} from {} peer(s)", peers.len());
@@ -143,8 +165,11 @@ impl TileFetcher {
                 _ => continue,
             }
         }
-        println!("⚠️ [P2P] SRTM tile lat={lat} lon={lon} not found on any peer");
-        // No peer had it — queue for background download
+        println!("⚠️ [P2P] SRTM tile lat={lat} lon={lon} not found on any peer — skipping P2P for this tile");
+        if let Ok(mut set) = self.failed_elev.lock() {
+            set.insert((lat, lon));
+        }
+        // Queue for background download by idle worker
         if let Ok(mut q) = self.idle_queue.lock() {
             if q.len() < 256 {
                 q.push_back(crate::tile_protocol::TileRequest::ElevationTile { lat, lon });
@@ -154,7 +179,9 @@ impl TileFetcher {
     }
 
     /// Announce to the DHT that this node now has an elevation tile cached.
+    /// Also clears the failed-tile record so peers can request it from us.
     pub fn announce_elevation(&self, lat: i32, lon: i32) {
+        if let Ok(mut set) = self.failed_elev.lock() { set.remove(&(lat, lon)); }
         let key = crate::elevation::elevation_dht_key(lat, lon);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -348,6 +375,11 @@ pub struct MultiplayerSystem {
     /// Tiles queued for background download.
     idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
 
+    /// Elevation tiles confirmed absent on all current peers (shared with all TileFetcher clones).
+    failed_elev: Arc<std::sync::Mutex<std::collections::HashSet<(i32, i32)>>>,
+    /// OSM tiles confirmed absent on all current peers (shared with all TileFetcher clones).
+    failed_osm: Arc<std::sync::Mutex<std::collections::HashSet<(i64, i64)>>>,
+
     /// Root directory for world data (osm/, elevation_cache/, chunks/).
     world_data_dir: std::path::PathBuf,
 }
@@ -455,6 +487,8 @@ impl MultiplayerSystem {
             stats: MultiplayerStats::default(),
             tile_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
             idle_queue,
+            failed_elev: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            failed_osm: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             world_data_dir,
         };
         // Spawn idle tile downloader — drains the idle_queue, fetches from internet, announces
@@ -881,6 +915,10 @@ impl MultiplayerSystem {
                 if let Ok(mut peers) = self.tile_peers.lock() {
                     if !peers.contains(&peer_id) {
                         peers.push(peer_id);
+                        // New peer may have tiles previous peers didn't — clear failed sets
+                        // so terrain workers will re-try P2P for any tile that failed before.
+                        if let Ok(mut f) = self.failed_elev.lock() { f.clear(); }
+                        if let Ok(mut f) = self.failed_osm.lock() { f.clear(); }
                     }
                 }
                 if !self.state_requested_from.contains(&peer_id) {
@@ -1684,6 +1722,8 @@ impl MultiplayerSystem {
             cmd_tx: self.cmd_tx.clone(),
             tile_peers: Arc::clone(&self.tile_peers),
             idle_queue: Arc::clone(&self.idle_queue),
+            failed_elev: Arc::clone(&self.failed_elev),
+            failed_osm: Arc::clone(&self.failed_osm),
         }
     }
 
