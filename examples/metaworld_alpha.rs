@@ -1134,7 +1134,7 @@ fn main() {
         format!("{}/kenney_city-kit-industrial_1.0/Models/GLB format/building-a.glb", assets_base),
         format!("{}/kenney_city-kit-suburban_20/Models/GLB format/building-type-a.glb", assets_base),
         format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-skyscraper-a.glb", assets_base),
-        format!("{}/kenney_building-kit/Models/GLB format/building-a.glb", assets_base),
+        format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-b.glb", assets_base),
     ];
     let building_glb_models: Vec<Option<GlbModel>> = building_glb_paths.iter().map(|p| {
         let model = textured_pipeline.load_glb(&context.device, &context.queue, p);
