@@ -313,6 +313,76 @@ impl TexturedPipeline {
         render_pass.set_bind_group(2, &model.texture_bind_group, &[]);
         model.draw(render_pass);
     }
+
+    /// Build a `GlbModel` from raw geometry + an RGBA8 texture.
+    ///
+    /// Used for road surfaces, terrain overlays, and any other geometry
+    /// that doesn't come from a GLB file but needs the textured pipeline.
+    pub fn build_textured_mesh(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertices: &[TexturedVertex],
+        indices: &[u32],
+        rgba_pixels: &[u8],
+        tex_w: u32,
+        tex_h: u32,
+    ) -> Option<GlbModel> {
+        if vertices.is_empty() || indices.is_empty() {
+            return None;
+        }
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Textured Mesh VB"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Textured Mesh IB"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let texture = device.create_texture_with_data(
+            queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Textured Mesh Tex"),
+                size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            rgba_pixels,
+        );
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Textured Mesh Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Textured Mesh BG"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+            ],
+        });
+        Some(GlbModel {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            texture_bind_group,
+            has_real_texture: true,
+        })
+    }
 }
 
 /// Convert any gltf image format to a tightly-packed RGBA8 buffer.

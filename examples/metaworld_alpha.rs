@@ -1159,6 +1159,20 @@ fn main() {
     let glb_models_loaded = building_glb_models.iter().any(|m| m.is_some());
     println!("🏢 GLB building models loaded: {}/{}", building_glb_models.iter().filter(|m| m.is_some()).count(), building_glb_models.len());
 
+    // Road surface texture — load RGBA bytes at startup, upload to GPU on each road rebuild.
+    // Tile the asphalt texture along each road segment (U tiles along length, V across width).
+    let road_texture_rgba: Option<(Vec<u8>, u32, u32)> = {
+        let tex_path = "assets/textures/road_asphalt.png";
+        image::open(tex_path).ok()
+            .map(|img| img.to_rgba8())
+            .map(|rgba| { let (w, h) = (rgba.width(), rgba.height()); (rgba.into_raw(), w, h) })
+    };
+    if road_texture_rgba.is_some() {
+        println!("🛣️  Road texture loaded");
+    } else {
+        println!("⚠️  Road texture not found at assets/textures/road_asphalt.png — using flat colour");
+    }
+
     // Billboard pipeline — renders textured quads on Construct module room walls
     let billboard_pipeline = BillboardPipeline::new(&context);
     let mut module_billboards: [Option<ModuleBillboards>; 6] = Default::default();
@@ -1169,6 +1183,8 @@ fn main() {
     // OSM-inferred geometry buffers (buildings, roads, water)
     let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
     let mut roads_mesh_buffer: Option<MeshBuffer> = None;
+    // Textured road mesh (GlbModel with road_asphalt.png) — used when road_texture_model is Some.
+    let mut textured_roads: Option<metaverse_core::renderer::GlbModel> = None;
     let mut water_mesh_buffer: Option<MeshBuffer> = None;
     // GLB building instances for textured rendering: (model_category_idx, model_bind_group)
     // model_category_idx: 0=commercial, 1=industrial, 2=residential, 3=skyscraper, 4=default
@@ -3022,6 +3038,12 @@ fn main() {
                         let rd_mesh = build_roads_mesh(&road_segments);
                         roads_mesh_buffer = if rd_mesh.vertices.is_empty() { None }
                             else { Some(MeshBuffer::from_mesh(&context.device, &rd_mesh)) };
+                        // Textured road overlay: UV-mapped quads using the asphalt tile texture.
+                        textured_roads = if let Some((ref rgba, tw, th)) = road_texture_rgba {
+                            let (verts, idxs) = build_roads_textured_mesh(&road_segments);
+                            if verts.is_empty() { None }
+                            else { textured_pipeline.build_textured_mesh(&context.device, &context.queue, &verts, &idxs, rgba, tw, th) }
+                        } else { None };
                         // Water is now voxel-based (WATER/GRAVEL/SAND in terrain.rs).
                         // The OSM polygon overlay is disabled — terrain voxels handle the
                         // river surface following the actual slope per column.
@@ -3178,7 +3200,14 @@ fn main() {
                                         }
                                     }
                                     // Render OSM road surfaces below buildings
-                                    if let Some(buf) = &roads_mesh_buffer {
+                                    if let Some(road_model) = &textured_roads {
+                                        // Textured roads — switch to textured pipeline with identity model transform
+                                        textured_pipeline.set_pipeline(&mut render_pass, pipeline.camera_bind_group());
+                                        TexturedPipeline::draw_model(&mut render_pass, road_model, &pipeline.model_bind_group);
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                    } else if let Some(buf) = &roads_mesh_buffer {
                                         buf.render(&mut render_pass);
                                     }
                                     // Render OSM building boxes (flat-colour fallback)
@@ -3629,7 +3658,39 @@ fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::Road
     mesh
 }
 
-/// Build a water surface mesh from OSM water polygons.
+/// Build UV-mapped road surface quads using TexturedVertex.
+///
+/// U coordinate tiles along the road length (one texture repeat per `width` metres).
+/// V coordinate goes 0→1 across the road width.
+/// Returns (vertices, indices) for use with TexturedPipeline + road asphalt texture.
+fn build_roads_textured_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::RoadType)]) -> (Vec<metaverse_core::renderer::TexturedVertex>, Vec<u32>) {
+    use metaverse_core::renderer::TexturedVertex;
+    let mut verts: Vec<TexturedVertex> = Vec::new();
+    let mut idxs: Vec<u32> = Vec::new();
+
+    for (a, b, width, _) in road_segments {
+        let dir = (*b - *a).normalize();
+        let perp = Vec3::new(-dir.z, 0.0, dir.x) * (width * 0.5);
+        let len = (*b - *a).length();
+        let u_tiles = (len / width).max(0.1); // tile texture along length
+
+        let v0 = *a - perp;
+        let v1 = *a + perp;
+        let v2 = *b + perp;
+        let v3 = *b - perp;
+
+        let base = verts.len() as u32;
+        verts.push(TexturedVertex { position: v0.into(), normal: [0.0, 1.0, 0.0], uv: [0.0,     1.0] });
+        verts.push(TexturedVertex { position: v1.into(), normal: [0.0, 1.0, 0.0], uv: [0.0,     0.0] });
+        verts.push(TexturedVertex { position: v2.into(), normal: [0.0, 1.0, 0.0], uv: [u_tiles, 0.0] });
+        verts.push(TexturedVertex { position: v3.into(), normal: [0.0, 1.0, 0.0], uv: [u_tiles, 1.0] });
+        // CCW from above
+        idxs.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+    }
+    (verts, idxs)
+}
+
+
 ///
 /// Each polygon is triangulated as a fan from its centroid.
 /// Vertex Y values are per-vertex SRTM elevations so the surface
