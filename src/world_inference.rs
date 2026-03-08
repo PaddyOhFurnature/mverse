@@ -560,3 +560,110 @@ pub fn infer_road_segments(ctx: &ChunkContext) -> Vec<RoadSegmentGps> {
 pub fn inference_status_key(chunk_id: &ChunkId) -> Vec<u8> {
     format!("world/inferred/{}/{}/{}", chunk_id.x, chunk_id.y, chunk_id.z).into_bytes()
 }
+
+// ── Railway segments ──────────────────────────────────────────────────────────
+
+/// A railway segment for rendering (dual rails + sleepers).
+pub struct RailwaySegmentGps {
+    pub a_lat: f64,
+    pub a_lon: f64,
+    pub b_lat: f64,
+    pub b_lon: f64,
+    pub railway_type: String,
+    pub is_bridge: bool,
+    pub is_tunnel: bool,
+    pub layer: i8,
+}
+
+/// Extract railway segments from OSM data for a chunk.
+pub fn infer_railway_segments(ctx: &ChunkContext) -> Vec<RailwaySegmentGps> {
+    let osm = match &ctx.osm { Some(o) => o, None => return vec![] };
+    let mut out = Vec::new();
+    for rail in &osm.railways {
+        if rail.railway_type == "disused" || rail.railway_type == "razed" { continue; }
+        for pair in rail.nodes.windows(2) {
+            out.push(RailwaySegmentGps {
+                a_lat: pair[0].lat, a_lon: pair[0].lon,
+                b_lat: pair[1].lat, b_lon: pair[1].lon,
+                railway_type: rail.railway_type.clone(),
+                is_bridge: rail.is_bridge,
+                is_tunnel: rail.is_tunnel,
+                layer: rail.layer,
+            });
+        }
+    }
+    out
+}
+
+// ── Waterway segments (for rendering centrelines) ─────────────────────────────
+
+/// A waterway centreline segment with type info for rendering.
+pub struct WaterwaySegmentGps {
+    pub a_lat: f64,
+    pub a_lon: f64,
+    pub b_lat: f64,
+    pub b_lon: f64,
+    pub waterway_type: String,
+    pub width_m: f32,
+    pub name: Option<String>,
+}
+
+/// Extract waterway centreline segments for rendering as water surface overlays.
+pub fn infer_waterway_segments(ctx: &ChunkContext) -> Vec<WaterwaySegmentGps> {
+    let osm = match &ctx.osm { Some(o) => o, None => return vec![] };
+    let mut out = Vec::new();
+    for wl in &osm.waterway_lines {
+        let width_m = (wl.half_width_m() * 2.0) as f32;
+        for pair in wl.nodes.windows(2) {
+            out.push(WaterwaySegmentGps {
+                a_lat: pair[0].lat, a_lon: pair[0].lon,
+                b_lat: pair[1].lat, b_lon: pair[1].lon,
+                waterway_type: wl.waterway_type.clone(),
+                width_m,
+                name: wl.name.clone(),
+            });
+        }
+    }
+    out
+}
+
+// ── Park and land area polygons ───────────────────────────────────────────────
+
+/// A park or land-area polygon for rendering as a coloured surface overlay.
+pub struct LandPolygonGps {
+    pub polygon: Vec<crate::coordinates::GPS>,
+    pub area_type: String,  // "park", "forest", "wood", "farmland", "grass", "meadow", etc.
+    pub category: String,   // "leisure", "landuse", "natural"
+    pub name: Option<String>,
+}
+
+/// Collect park and land-area polygons for the chunk.
+pub fn infer_land_polygons(ctx: &ChunkContext) -> Vec<LandPolygonGps> {
+    let osm = match &ctx.osm { Some(o) => o, None => return vec![] };
+    let mut out = Vec::new();
+
+    // Explicit parks
+    for p in &osm.parks {
+        if p.polygon.len() < 3 { continue; }
+        out.push(LandPolygonGps {
+            polygon: p.polygon.clone(),
+            area_type: "park".into(),
+            category: "leisure".into(),
+            name: p.name.clone(),
+        });
+    }
+
+    // Land use / natural areas (avoid duplicating parks already above)
+    for la in &osm.land_areas {
+        if la.polygon.len() < 3 { continue; }
+        if la.area_type == "park" { continue; } // already added from parks vec
+        out.push(LandPolygonGps {
+            polygon: la.polygon.clone(),
+            area_type: la.area_type.clone(),
+            category: la.category.clone(),
+            name: la.name.clone(),
+        });
+    }
+
+    out
+}

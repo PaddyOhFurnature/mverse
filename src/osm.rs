@@ -131,6 +131,39 @@ pub struct OsmWater {
     pub water_type: String, // "lake", "river", "ocean", "reservoir", etc.
 }
 
+/// An open waterway centreline (river, canal, stream, drain, ditch).
+/// Used for both water-column detection and channel carving in terrain generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaterwayLine {
+    pub nodes: Vec<GPS>,
+    /// OSM `waterway` tag value: "river", "canal", "stream", "drain", "ditch"
+    pub waterway_type: String,
+    pub name: Option<String>,
+}
+
+impl WaterwayLine {
+    /// Half-width of the waterway in metres, based on OSM type.
+    pub fn half_width_m(&self) -> f64 {
+        match self.waterway_type.as_str() {
+            "river"  => 12.0,
+            "canal"  => 6.0,
+            "stream" => 3.0,
+            "drain"  => 2.0,
+            _        => 1.5,
+        }
+    }
+    /// Channel depth in voxels.
+    pub fn channel_depth_vox(&self) -> i64 {
+        match self.waterway_type.as_str() {
+            "river"  => 5,
+            "canal"  => 4,
+            "stream" => 3,
+            "drain"  => 2,
+            _        => 2,
+        }
+    }
+}
+
 /// A park or leisure area from OSM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsmPark {
@@ -211,12 +244,11 @@ pub struct OsmData {
     #[serde(default)]
     pub railways: Vec<OsmRailway>,
     pub water: Vec<OsmWater>,
-    /// Open (non-closed) waterway centrelines — river/canal/etc. ways that are
-    /// mapped as lines rather than area polygons.  Used as a fallback water
-    /// detector when no polygon covers a column: a column within
-    /// `WATERWAY_HALF_WIDTH_DEG` of any centreline segment is treated as water.
+    /// Open (non-closed) waterway centrelines — river/canal/stream/drain ways
+    /// mapped as lines rather than area polygons.  Used for both water-column
+    /// fallback detection and V-channel terrain carving.
     #[serde(default)]
-    pub waterway_lines: Vec<Vec<GPS>>,
+    pub waterway_lines: Vec<WaterwayLine>,
     pub parks: Vec<OsmPark>,
     #[serde(default)]
     pub land_areas: Vec<OsmLandArea>,
@@ -463,8 +495,12 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                                 .to_string(),
                         });
                     } else {
-                        // Open waterway centreline — kept as a buffer fallback
-                        data.waterway_lines.push(nodes);
+                        // Open waterway centreline — used for channel carving and water detection
+                        let wtype = tags["waterway"].as_str().unwrap_or("stream").to_string();
+                        let wname = tags["name"].as_str().map(|s| s.to_string());
+                        data.waterway_lines.push(WaterwayLine {
+                            nodes, waterway_type: wtype, name: wname,
+                        });
                     }
                 } else if tags["leisure"].as_str() == Some("park") {
                     data.parks.push(OsmPark {
@@ -602,7 +638,7 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-const OSM_CACHE_VERSION: u32 = 7;
+const OSM_CACHE_VERSION: u32 = 8;
 
 /// Cache OSM tile data on disk in binary (bincode) format.
 /// Key is derived from the bounding box rounded to 4 decimal places.
@@ -795,7 +831,7 @@ pub fn fetch_osm_for_chunk(
                 }
             }
             for line in nb_tile.waterway_lines {
-                if poly_intersects(&line) {
+                if poly_intersects(&line.nodes) {
                     result.waterway_lines.push(line);
                 }
             }
@@ -820,7 +856,7 @@ pub fn fetch_osm_for_chunk(
 pub fn find_gap_bridge_polygon(
     chunk_lat_min: f64, chunk_lat_max: f64,
     chunk_lon_min: f64, chunk_lon_max: f64,
-    waterway_lines: &[Vec<GPS>],
+    waterway_lines: &[WaterwayLine],
     cache_dir: &std::path::Path,
 ) -> Option<Vec<GPS>> {
     if waterway_lines.is_empty() { return None; }
@@ -830,7 +866,7 @@ pub fn find_gap_bridge_polygon(
     let chunk_lon_centre = (chunk_lon_min + chunk_lon_max) * 0.5;
 
     // Find dominant river direction from all centreline points (first→last overall vector)
-    let all_pts: Vec<GPS> = waterway_lines.iter().flat_map(|l| l.iter().cloned()).collect();
+    let all_pts: Vec<GPS> = waterway_lines.iter().flat_map(|l| l.nodes.iter().cloned()).collect();
     if all_pts.len() < 2 { return None; }
     let first = &all_pts[0];
     let last  = &all_pts[all_pts.len() - 1];
@@ -1021,8 +1057,8 @@ fn clip_osm_to_bounds(
         }).collect(),
 
         // Waterway centrelines: keep any that have at least one node near the chunk.
-        waterway_lines: data.waterway_lines.into_iter().filter(|pts| {
-            poly_intersects(pts)
+        waterway_lines: data.waterway_lines.into_iter().filter(|wl| {
+            poly_intersects(&wl.nodes)
         }).collect(),
 
         parks: data.parks.into_iter().filter(|p| {
@@ -1320,8 +1356,13 @@ fn import_pbf_to_cache_inner(
                                 });
                             }
                         } else {
+                            let wname = w.tags.get("name").map(|s| s.to_string());
                             for tk in tks {
-                                tiles.entry(tk).or_default().waterway_lines.push(gps.clone());
+                                tiles.entry(tk).or_default().waterway_lines.push(WaterwayLine {
+                                    nodes: gps.clone(),
+                                    waterway_type: wval.to_string(),
+                                    name: wname.clone(),
+                                });
                             }
                         }
                     } else if let Some(leisure) = w.tags.get("leisure") {

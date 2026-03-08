@@ -1197,6 +1197,16 @@ fn main() {
     let mut water_polygons: Vec<Vec<Vec3>> = Vec::new();
     // Deduplication: track first-vertex GPS (as ordered pair) to avoid adding same polygon twice
     let mut water_poly_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+    // Railway segments: (a, b, rail_type, is_bridge, layer)
+    let mut railway_segments: Vec<(Vec3, Vec3, String, bool, i8)> = Vec::new();
+    let mut railway_mesh_buffer: Option<MeshBuffer> = None;
+    // Waterway centreline overlay segments: (a, b, width_m, type)
+    let mut waterway_segments: Vec<(Vec3, Vec3, f32, String)> = Vec::new();
+    let mut waterway_overlay_buffer: Option<MeshBuffer> = None;
+    // Land area / park polygons: (verts, area_type)
+    let mut land_polygons: Vec<(Vec<Vec3>, String)> = Vec::new();
+    let mut land_poly_seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut land_mesh_buffer: Option<MeshBuffer> = None;
     // Set to true whenever new objects are registered, triggering a mesh rebuild
     let mut osm_geom_dirty = false;
     // Debug: press O to toggle bright-yellow OSM water polygon outlines
@@ -2026,7 +2036,9 @@ fn main() {
                         // OSM inference for newly loaded chunks
                         {
                             use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  infer_road_segments, to_placed_object};
+                                                                  infer_road_segments, infer_railway_segments,
+                                                                  infer_waterway_segments, infer_land_polygons,
+                                                                  to_placed_object};
                             for &chunk_id in &new_chunks {
                                 let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
                                 let osm = metaverse_core::osm::fetch_osm_for_chunk(
@@ -2056,13 +2068,13 @@ fn main() {
                                     for seg in &segs {
                                         let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
                                         let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + 0.05, la.z);
-                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + 0.05, lb.z);
+                                        let bridge_off = if seg.is_bridge { 4.0_f32 } else { 0.05 };
+                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + bridge_off, la.z);
+                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + bridge_off, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -2073,9 +2085,43 @@ fn main() {
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                // Water polygons — flat at minimum sampled vertex elevation.
-                                // Use min elevation (not centroid) since river polygon centroids
-                                // often fall on land far from the chunk, giving wrong Y.
+                                // Railways
+                                for seg in infer_railway_segments(&ctx) {
+                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
+                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                    let elev_off = if seg.is_bridge { seg.layer as f32 * 4.0 + 0.5 } else { 0.1 };
+                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + elev_off, la.z);
+                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + elev_off, lb.z);
+                                    railway_segments.push((pa, pb, seg.railway_type, seg.is_bridge, seg.layer));
+                                    osm_geom_dirty = true;
+                                }
+                                // Waterway centreline overlays
+                                for seg in infer_waterway_segments(&ctx) {
+                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
+                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 - 0.1, la.z);
+                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 - 0.1, lb.z);
+                                    waterway_segments.push((pa, pb, seg.width_m, seg.waterway_type));
+                                    osm_geom_dirty = true;
+                                }
+                                // Land area / park polygons
+                                for lp in infer_land_polygons(&ctx) {
+                                    if lp.polygon.len() < 3 { continue; }
+                                    let key = lp.polygon[0].lat.to_bits() ^ lp.polygon[0].lon.to_bits().wrapping_add(lp.area_type.len() as u64);
+                                    if !land_poly_seen.insert(key) { continue; }
+                                    let verts: Vec<Vec3> = lp.polygon.iter().map(|gps| {
+                                        let h = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                        let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), origin_gps.alt);
+                                        Vec3::new(h.x, (elev - origin_gps.alt) as f32 + 0.02, h.z)
+                                    }).collect();
+                                    land_polygons.push((verts, lp.area_type.clone()));
+                                    osm_geom_dirty = true;
+                                }
+                                // Water polygons
                                 if let Some(ref osm_data) = ctx.osm {
                                     if !osm_data.water.is_empty() {
                                         for w in &osm_data.water {
@@ -2083,12 +2129,6 @@ fn main() {
                                             let key = ((w.polygon[0].lat * 1e6) as i64,
                                                        (w.polygon[0].lon * 1e6) as i64);
                                             if !water_poly_seen.insert(key) { continue; }
-                                            // Per-vertex elevation: each vertex gets its own Y from SRTM.
-                                            // The river flows downhill — 15m at upstream end, 5m at CBD,
-                                            // 0m at Moreton Bay over 345km. Forcing all vertices to the
-                                            // same Y creates a second floating plane where the polygon
-                                            // is above or below the terrain at the wrong elevation.
-                                            // With per-vertex Y the water surface drapes along the slope.
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let h = physics.ecef_to_local(
                                                     &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
@@ -2737,7 +2777,9 @@ fn main() {
                         // OSM inference for newly loaded chunks (game phase)
                         {
                             use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  infer_road_segments, to_placed_object};
+                                                                  infer_road_segments, infer_railway_segments,
+                                                                  infer_waterway_segments, infer_land_polygons,
+                                                                  to_placed_object};
                             const OSM_PER_FRAME: usize = 3;
                             let batch_end = pending_game_osm_queue.len().min(OSM_PER_FRAME);
                             let new_ids: Vec<_> = pending_game_osm_queue.drain(..batch_end).collect();
@@ -2768,13 +2810,13 @@ fn main() {
                                     for seg in &segs {
                                         let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
                                         let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                        // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
                                         let lb = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + 0.05, la.z);
-                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + 0.05, lb.z);
+                                        let bridge_off = if seg.is_bridge { 4.0_f32 } else { 0.05 };
+                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + bridge_off, la.z);
+                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + bridge_off, lb.z);
                                         road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
                                         if let Some(ref name) = seg.name {
                                             let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
@@ -2783,6 +2825,42 @@ fn main() {
                                             }
                                         }
                                     }
+                                    osm_geom_dirty = true;
+                                }
+                                // Railways
+                                for seg in infer_railway_segments(&ctx) {
+                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
+                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                    let elev_off = if seg.is_bridge { seg.layer as f32 * 4.0 + 0.5 } else { 0.1 };
+                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + elev_off, la.z);
+                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + elev_off, lb.z);
+                                    railway_segments.push((pa, pb, seg.railway_type, seg.is_bridge, seg.layer));
+                                    osm_geom_dirty = true;
+                                }
+                                // Waterway centreline overlays
+                                for seg in infer_waterway_segments(&ctx) {
+                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
+                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
+                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
+                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 - 0.1, la.z);
+                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 - 0.1, lb.z);
+                                    waterway_segments.push((pa, pb, seg.width_m, seg.waterway_type));
+                                    osm_geom_dirty = true;
+                                }
+                                // Land area / park polygons
+                                for lp in infer_land_polygons(&ctx) {
+                                    if lp.polygon.len() < 3 { continue; }
+                                    let key = lp.polygon[0].lat.to_bits() ^ lp.polygon[0].lon.to_bits().wrapping_add(lp.area_type.len() as u64);
+                                    if !land_poly_seen.insert(key) { continue; }
+                                    let verts: Vec<Vec3> = lp.polygon.iter().map(|gps| {
+                                        let h = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                        let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), origin_gps.alt);
+                                        Vec3::new(h.x, (elev - origin_gps.alt) as f32 + 0.02, h.z)
+                                    }).collect();
+                                    land_polygons.push((verts, lp.area_type.clone()));
                                     osm_geom_dirty = true;
                                 }
                                 // Water polygons — reuse already-fetched ctx.osm (no second fetch)
@@ -3065,6 +3143,18 @@ fn main() {
                             if verts.is_empty() { None }
                             else { textured_pipeline.build_textured_mesh(&context.device, &context.queue, &verts, &idxs, rgba, tw, th) }
                         } else { None };
+                        // Railway tracks
+                        let rail_mesh = build_railways_mesh(&railway_segments);
+                        railway_mesh_buffer = if rail_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &rail_mesh)) };
+                        // Waterway centreline overlays (for streams/canals without OSM polygon)
+                        let ww_mesh = build_waterway_overlay_mesh(&waterway_segments);
+                        waterway_overlay_buffer = if ww_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &ww_mesh)) };
+                        // Land areas (parks, forests, farmland, etc.)
+                        let land_mesh = build_land_mesh(&land_polygons);
+                        land_mesh_buffer = if land_mesh.vertices.is_empty() { None }
+                            else { Some(MeshBuffer::from_mesh(&context.device, &land_mesh)) };
                         // Water is now voxel-based (WATER/GRAVEL/SAND in terrain.rs).
                         // The OSM polygon overlay is disabled — terrain voxels handle the
                         // river surface following the actual slope per column.
@@ -3249,6 +3339,30 @@ fn main() {
                                     }
                                     // Restore main pipeline for anything that follows
                                     pipeline.set_pipeline(&mut render_pass);
+                                    // Land areas (parks, forests, farmland) — render below roads
+                                    if let Some(buf) = &land_mesh_buffer {
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                        buf.render(&mut render_pass);
+                                        pipeline.set_pipeline(&mut render_pass);
+                                    }
+                                    // Waterway centreline overlays
+                                    if let Some(buf) = &waterway_overlay_buffer {
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                        buf.render(&mut render_pass);
+                                        pipeline.set_pipeline(&mut render_pass);
+                                    }
+                                    // Railway tracks (on top of terrain, below buildings)
+                                    if let Some(buf) = &railway_mesh_buffer {
+                                        osm_pipeline.set_pipeline(&mut render_pass);
+                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
+                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
+                                        buf.render(&mut render_pass);
+                                        pipeline.set_pipeline(&mut render_pass);
+                                    }
                                     // Debug: OSM water polygon outlines (press O to toggle)
                                     if let Some(buf) = &osm_debug_buffer {
                                         osm_pipeline.set_pipeline(&mut render_pass);
@@ -3761,5 +3875,163 @@ fn build_osm_debug_outlines(water_polygons: &[Vec<Vec3>]) -> Mesh {
             mesh.add_line(va, vb);
         }
     }
+    mesh
+}
+
+/// Build railway track mesh: two parallel rails + sleeper ties.
+/// Rail colour: dark steel grey. Tram/light rail: lighter grey.
+/// Each segment = 2 rails offset ±0.717m (standard gauge half-width) + ties every 2m.
+fn build_railways_mesh(
+    railway_segments: &[(Vec3, Vec3, String, bool, i8)],
+) -> Mesh {
+    let mut mesh = Mesh::new();
+
+    for (pa, pb, rtype, _is_bridge, _layer) in railway_segments {
+        let rail_col = if rtype == "tram" || rtype == "light_rail" {
+            Vec3::new(0.55, 0.55, 0.55)
+        } else {
+            Vec3::new(0.28, 0.28, 0.28)
+        };
+        let tie_col = Vec3::new(0.35, 0.25, 0.18); // creosote-treated timber
+
+        let dir = (*pb - *pa).normalize_or_zero();
+        let len = (*pb - *pa).length();
+        if len < 0.01 { continue; }
+
+        // Right-hand perpendicular (XZ plane)
+        let right = Vec3::new(dir.z, 0.0, -dir.x);
+
+        let gauge_half = 0.717_f32; // half of 1.435m standard gauge
+        let rail_half_w = 0.035_f32; // rail head width / 2
+        let rail_height = 0.10_f32;
+
+        // Two rails
+        for side in [-gauge_half, gauge_half] {
+            let offset = right * side;
+            let a = *pa + offset;
+            let b = *pb + offset;
+            // Thin elevated quad for each rail
+            let v0 = a + right * (-rail_half_w) + Vec3::new(0.0, rail_height, 0.0);
+            let v1 = a + right * (rail_half_w)  + Vec3::new(0.0, rail_height, 0.0);
+            let v2 = b + right * (rail_half_w)  + Vec3::new(0.0, rail_height, 0.0);
+            let v3 = b + right * (-rail_half_w) + Vec3::new(0.0, rail_height, 0.0);
+            let base = mesh.add_vertex(Vertex::new(v0, rail_col));
+            let i1   = mesh.add_vertex(Vertex::new(v1, rail_col));
+            let i2   = mesh.add_vertex(Vertex::new(v2, rail_col));
+            let i3   = mesh.add_vertex(Vertex::new(v3, rail_col));
+            mesh.add_triangle(Triangle::new(base, i1, i2));
+            mesh.add_triangle(Triangle::new(base, i2, i3));
+        }
+
+        // Sleeper ties every 0.6m
+        let tie_spacing = 0.6_f32;
+        let tie_half_w = gauge_half + 0.12;
+        let tie_half_t = 0.07_f32;
+        let tie_half_d = 0.12_f32;
+        let steps = ((len / tie_spacing) as usize).max(1);
+        for i in 0..=steps {
+            let t = (i as f32 * tie_spacing).min(len);
+            let centre = *pa + dir * t;
+            let a = centre - right * tie_half_w;
+            let b = centre + right * tie_half_w;
+            // flat tie quad on the ground
+            let v0 = a - dir * tie_half_d;
+            let v1 = a + dir * tie_half_d;
+            let v2 = b + dir * tie_half_d;
+            let v3 = b - dir * tie_half_d;
+            let _ = tie_half_t; // used for 3D ties if needed later
+            let base = mesh.add_vertex(Vertex::new(v0, tie_col));
+            let i1   = mesh.add_vertex(Vertex::new(v1, tie_col));
+            let i2   = mesh.add_vertex(Vertex::new(v2, tie_col));
+            let i3   = mesh.add_vertex(Vertex::new(v3, tie_col));
+            mesh.add_triangle(Triangle::new(base, i1, i2));
+            mesh.add_triangle(Triangle::new(base, i2, i3));
+        }
+    }
+
+    mesh
+}
+
+/// Build waterway centreline overlay quads (rivers/streams without OSM polygon).
+/// Water blue, width from segment type, slightly below terrain Y to fill carved channel.
+fn build_waterway_overlay_mesh(
+    waterway_segments: &[(Vec3, Vec3, f32, String)],
+) -> Mesh {
+    let mut mesh = Mesh::new();
+    let water_col = Vec3::new(0.18, 0.42, 0.72);
+
+    for (pa, pb, width_m, _wtype) in waterway_segments {
+        let hw = width_m * 0.5;
+        let dir = (*pb - *pa).normalize_or_zero();
+        let len = (*pb - *pa).length();
+        if len < 0.01 { continue; }
+        let right = Vec3::new(dir.z, 0.0, -dir.x);
+
+        let v0 = *pa - right * hw;
+        let v1 = *pa + right * hw;
+        let v2 = *pb + right * hw;
+        let v3 = *pb - right * hw;
+
+        let base = mesh.add_vertex(Vertex::new(v0, water_col));
+        let i1   = mesh.add_vertex(Vertex::new(v1, water_col));
+        let i2   = mesh.add_vertex(Vertex::new(v2, water_col));
+        let i3   = mesh.add_vertex(Vertex::new(v3, water_col));
+        mesh.add_triangle(Triangle::new(base, i1, i2));
+        mesh.add_triangle(Triangle::new(base, i2, i3));
+        // Back face so it's visible from below water level
+        mesh.add_triangle(Triangle::new(base, i2, i1));
+        mesh.add_triangle(Triangle::new(base, i3, i2));
+    }
+
+    mesh
+}
+
+/// Build land area / park polygon mesh using centroid-fan triangulation.
+/// Colours by area_type: park=green, forest=dark-green, farmland=tan, beach=sand, etc.
+/// Rendered at Y+0.02 above terrain (set per vertex during processing).
+fn build_land_mesh(land_polygons: &[(Vec<Vec3>, String)]) -> Mesh {
+    let mut mesh = Mesh::new();
+
+    for (poly, area_type) in land_polygons {
+        if poly.len() < 3 { continue; }
+
+        let color = match area_type.as_str() {
+            "park" | "playground" | "recreation_ground" =>
+                Vec3::new(0.13, 0.55, 0.13),
+            "forest" | "wood" =>
+                Vec3::new(0.06, 0.35, 0.06),
+            "farmland" | "farm" | "orchard" | "vineyard" =>
+                Vec3::new(0.76, 0.69, 0.36),
+            "grass" | "meadow" | "village_green" | "allotments" =>
+                Vec3::new(0.45, 0.70, 0.30),
+            "beach" | "sand" =>
+                Vec3::new(0.93, 0.84, 0.69),
+            "cemetery" | "grave_yard" =>
+                Vec3::new(0.50, 0.60, 0.50),
+            "wetland" | "marsh" =>
+                Vec3::new(0.40, 0.62, 0.45),
+            "scrub" | "heath" =>
+                Vec3::new(0.60, 0.65, 0.30),
+            "industrial" | "commercial" | "retail" =>
+                Vec3::new(0.72, 0.68, 0.62),
+            "residential" =>
+                Vec3::new(0.85, 0.80, 0.75),
+            _ => Vec3::new(0.50, 0.68, 0.40), // default: light green
+        };
+
+        let sum = poly.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
+        let centroid = sum / poly.len() as f32;
+        let n = poly.len();
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let ci = mesh.add_vertex(Vertex::new(centroid, color));
+            let ai = mesh.add_vertex(Vertex::new(poly[i], color));
+            let bi = mesh.add_vertex(Vertex::new(poly[next], color));
+            mesh.add_triangle(Triangle::new(ci, ai, bi));
+            // Back face so land areas are visible from above and below
+            mesh.add_triangle(Triangle::new(ci, bi, ai));
+        }
+    }
+
     mesh
 }

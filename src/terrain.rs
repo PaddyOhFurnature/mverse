@@ -469,6 +469,77 @@ impl TerrainGenerator {
             }
         }
 
+        // --- Waterway channel carving pass ---
+        // Carve V-shaped river/stream channels into terrain for open waterway lines
+        // that aren't already covered by a polygon water area.
+        // Channel width and depth are derived from the OSM waterway type.
+        if !chunk_waterway_lines.is_empty() {
+            let ww_col_lookup: std::collections::HashMap<(i64, i64), usize> =
+                columns.iter().enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
+
+            for wl in &chunk_waterway_lines {
+                let half_w_m  = wl.half_width_m();
+                let depth     = wl.channel_depth_vox();
+                // Voxel radius: 1 voxel ≈ 1m at equator
+                let half_w_vox = (half_w_m.ceil() as i64 + 1).max(2);
+
+                for pair in wl.nodes.windows(2) {
+                    let ga = &pair[0];
+                    let gb = &pair[1];
+                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
+                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
+                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+
+                    let dx = vbx - vax;
+                    let dz = vbz - vaz;
+                    let steps = dx.abs().max(dz.abs());
+                    if steps == 0 { continue; }
+
+                    for step in 0..=steps {
+                        let t = step as f32 / steps as f32;
+                        let cx = vax + (dx as f32 * t).round() as i64;
+                        let cz = vaz + (dz as f32 * t).round() as i64;
+
+                        // Retrieve the centreline elevation at this step
+                        let centre_y = ww_col_lookup.get(&(cx, cz))
+                            .map(|&i| columns[i].surface_voxel_y)
+                            .unwrap_or_else(|| {
+                                let lat = ga.lat * (1.0 - t as f64) + gb.lat * t as f64;
+                                let lon = ga.lon * (1.0 - t as f64) + gb.lon * t as f64;
+                                elevation.lock().unwrap()
+                                    .query(&crate::coordinates::GPS::new(lat, lon, 0.0))
+                                    .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                    .unwrap_or(self.origin_voxel.y)
+                            });
+
+                        // Carve a flat-bottomed V channel: full depth at centre,
+                        // tapering to 0 at the banks.
+                        for ox in -half_w_vox..=half_w_vox {
+                            for oz in -half_w_vox..=half_w_vox {
+                                let dist_sq = ox * ox + oz * oz;
+                                if dist_sq > half_w_vox * half_w_vox { continue; }
+                                if let Some(&idx) = ww_col_lookup.get(&(cx + ox, cz + oz)) {
+                                    // Skip if already a polygon water area
+                                    if columns[idx].in_water { continue; }
+                                    // Taper depth towards banks using Euclidean distance
+                                    let dist = (dist_sq as f64).sqrt();
+                                    let taper = (1.0 - dist / half_w_vox as f64).max(0.0);
+                                    let col_depth = (depth as f64 * taper).round() as i64;
+                                    if col_depth > 0 {
+                                        columns[idx].surface_voxel_y = centre_y - (depth - col_depth);
+                                        columns[idx].in_water = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- Pass 2 ---
         const BEDROCK_DEPTH: i64 = 200;
         const SKY_HEIGHT:    i64 = 100;
