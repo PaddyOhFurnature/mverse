@@ -354,6 +354,8 @@ struct AppState {
     >,
     /// Channel to the on-demand SRTM downloader — send (lat,lon) to prioritise a tile.
     srtm_priority_tx: Option<tokio::sync::mpsc::Sender<(i32, i32)>>,
+    /// Channel to the on-demand OSM tile downloader — send (s,w,n,e) to fetch on first request.
+    osm_priority_tx: Option<tokio::sync::mpsc::Sender<(f64, f64, f64, f64)>>,
 }
 
 impl AppState {
@@ -390,6 +392,7 @@ impl AppState {
             pending_dht_provide: Vec::new(),
             pending_tile_requests: std::collections::HashMap::new(),
             srtm_priority_tx: None,
+            osm_priority_tx: None,
             shed_cooldown: HashMap::new(),
             last_shed_at: Instant::now() - Duration::from_secs(3600),
         }
@@ -1508,6 +1511,11 @@ fn handle_swarm_event(
                                 let _ = tx.try_send((*lat + dlat, *lon + dlon));
                             }
                         }
+                    }
+                }
+                if let TileRequest::OsmTile { s, w, n, e } = &request {
+                    if let Some(ref tx) = state.osm_priority_tx {
+                        let _ = tx.try_send((*s, *w, *n, *e));
                     }
                 }
             }
@@ -3101,6 +3109,63 @@ async fn web_api_logs(State(s): State<WebState>) -> impl IntoResponse {
     Json(logs)
 }
 
+/// GET /api/diag/osm[?s=<lat>&w=<lon>]
+/// Without query params: returns total tile counts (v8-ready vs total .bin).
+/// With s= and w= params: checks if a specific tile (0.01° tile containing that point) is cached.
+async fn web_api_diag_osm(
+    State(s): State<WebState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let world_dir = s.read().unwrap().world_dir.clone();
+    let osm_dir = std::path::PathBuf::from(&world_dir).join("osm");
+    let result = tokio::task::spawn_blocking(move || {
+        let mut total = 0usize;
+        let mut v8_ready = 0usize;
+        let tile_check = if let (Some(sp), Some(wp)) = (params.get("s"), params.get("w")) {
+            if let (Ok(sv), Ok(wv)) = (sp.parse::<f64>(), wp.parse::<f64>()) {
+                let ts = (sv / 0.01).floor() * 0.01;
+                let tw = (wv / 0.01).floor() * 0.01;
+                Some((ts, tw, ts + 0.01, tw + 0.01))
+            } else { None }
+        } else { None };
+        if let Ok(entries) = std::fs::read_dir(&osm_dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("bin") { continue; }
+                total += 1;
+                let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
+                // Extract coords from filename: osm_S.WWWW_W.WWWW_N.NNNN_E.EEEE.bin
+                let name = p.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+                let parts: Vec<&str> = name.split('_').collect();
+                if parts.len() >= 5 {
+                    if let (Ok(s), Ok(w), Ok(n), Ok(e)) = (
+                        parts[1].parse::<f64>(), parts[2].parse::<f64>(),
+                        parts[3].parse::<f64>(), parts[4].parse::<f64>(),
+                    ) {
+                        if cache.load(s, w, n, e).is_some() { v8_ready += 1; }
+                    }
+                }
+            }
+        }
+        let specific = tile_check.map(|(s, w, n, e)| {
+            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
+            let path = osm_dir.join(format!("osm_{:.4}_{:.4}_{:.4}_{:.4}.bin", s, w, n, e));
+            serde_json::json!({
+                "tile": format!("s={:.4} w={:.4} n={:.4} e={:.4}", s, w, n, e),
+                "file_exists": path.exists(),
+                "v8_ready": cache.load(s, w, n, e).is_some(),
+            })
+        });
+        serde_json::json!({
+            "total_bin_files": total,
+            "v8_ready": v8_ready,
+            "stale_v7": total.saturating_sub(v8_ready),
+            "specific_tile": specific,
+        })
+    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+    Json(result)
+}
+
 /// GET /api/keys[?type=<key_type>]  — list all key records (or filter by type)
 async fn web_api_keys(
     State(s): State<WebState>,
@@ -3860,6 +3925,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/world/objects/:id", axum::routing::delete(api_v1_world_objects_delete))
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
+                .route("/api/diag/osm", get(web_api_diag_osm))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);
@@ -4010,6 +4076,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app_state.srtm_priority_tx = Some(srtm_prio_tx);
         tokio::spawn(async move {
             download_srtm_on_demand_task(world_dir_srtm, api_key, srtm_prio_rx, swarm_tx_srtm, task_log_srtm).await;
+        });
+    }
+
+    // On-demand OSM tile downloader — fetches from Overpass when a peer requests a tile
+    // the server doesn't have (missing or stale version).  Always active.
+    {
+        let world_dir_osm = std::path::PathBuf::from(
+            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        );
+        let swarm_tx_osm2 = shared.read().unwrap().swarm_tx.clone();
+        let task_log_osm2 = Arc::clone(&shared.read().unwrap().task_log);
+        let (osm_prio_tx, osm_prio_rx) = tokio::sync::mpsc::channel::<(f64, f64, f64, f64)>(512);
+        app_state.osm_priority_tx = Some(osm_prio_tx);
+        tokio::spawn(async move {
+            download_osm_on_demand_task(world_dir_osm, osm_prio_rx, swarm_tx_osm2, task_log_osm2).await;
         });
     }
 
@@ -5108,4 +5189,65 @@ async fn bulk_download_task(
         }
     }
     println!("✅ [Download] Bulk download complete");
+}
+
+/// On-demand OSM tile downloader for the server.
+/// When a client requests a tile that the server doesn't have (missing or stale version),
+/// this task fetches it from Overpass, caches it, and announces to DHT.
+/// Runs continuously — only exits when the channel is closed.
+async fn download_osm_on_demand_task(
+    world_dir: std::path::PathBuf,
+    mut rx: tokio::sync::mpsc::Receiver<(f64, f64, f64, f64)>,
+    swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+    task_log: Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    macro_rules! tlog {
+        ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
+    }
+    let osm_dir = world_dir.join("osm");
+    std::fs::create_dir_all(&osm_dir).ok();
+    let mut seen = std::collections::HashSet::<(i64, i64)>::new();
+
+    while let Some((s, w, n, e)) = rx.recv().await {
+        let key_i = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
+        if !seen.insert(key_i) { continue; } // already in-flight
+
+        // If we now have a valid (v8) tile, skip
+        let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
+        if cache.load(s, w, n, e).is_some() { seen.remove(&key_i); continue; }
+
+        tlog!("📥 [OSM] On-demand fetch: s={:.4} w={:.4}", s, w);
+        let osm_dir_c = osm_dir.clone();
+        let endpoints: Vec<String> = metaverse_core::osm::OVERPASS_ENDPOINTS
+            .iter().map(|x| x.to_string()).collect();
+
+        let result = tokio::task::spawn_blocking(move || {
+            metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir_c, &endpoints)
+        }).await;
+
+        match result {
+            Ok(Ok(ref data)) if !data.is_empty() => {
+                tlog!("✅ [OSM] On-demand cached: s={:.4} w={:.4} (b:{} r:{})", s, w,
+                    data.buildings.len(), data.roads.len());
+                if let Some(ref tx) = swarm_tx {
+                    let key = metaverse_core::osm::osm_dht_key(s, w, n, e);
+                    let _ = tx.send(SwarmAction::StartProviding(key)).await;
+                }
+                seen.remove(&key_i); // allow re-queuing if needed later
+            }
+            Ok(Ok(_)) => {
+                tlog!("⚠️ [OSM] On-demand returned empty: s={:.4} w={:.4}", s, w);
+            }
+            Ok(Err(e)) => {
+                tlog!("❌ [OSM] On-demand failed s={:.4} w={:.4}: {}", s, w, e);
+                seen.remove(&key_i);
+            }
+            Err(e) => {
+                tlog!("❌ [OSM] On-demand task panic s={:.4} w={:.4}: {}", s, w, e);
+                seen.remove(&key_i);
+            }
+        }
+        // Brief pause between Overpass requests — respect rate limits
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
 }
