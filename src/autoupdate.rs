@@ -122,6 +122,17 @@ pub async fn apply_update(
 
     eprintln!("[AutoUpdate] Downloaded {} bytes", bytes.len());
 
+    // Guard: if the downloaded binary is byte-for-byte identical to the
+    // currently-running one, the release was built with the wrong version
+    // baked in (built before Cargo.toml was bumped).  Replacing would just
+    // cause an infinite update loop — skip silently and retry next interval.
+    if let Ok(current) = std::fs::read(&exe_path) {
+        if current == bytes.as_ref() {
+            eprintln!("[AutoUpdate] Downloaded binary is identical to current executable — skipping (release built with wrong version baked in)");
+            return Ok(());
+        }
+    }
+
     // ── Write + chmod ─────────────────────────────────────────────────────────
     std::fs::write(&tmp_path, &bytes)?;
 

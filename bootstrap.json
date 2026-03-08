@@ -1,43 +1,22 @@
 {
-  "schema_version": "1.0",
+  "_comment": "EXAMPLE ONLY — not fetched by clients. The canonical bootstrap source is the Gist in BOOTSTRAP_URLS (src/bootstrap.rs). Edit the Gist to add/update servers.",
+  "schema_version": "2.0",
   "network": "mainnet",
-  "updated_at": "2026-03-08T03:43:00Z",
-  "min_client_version": "0.1.0",
+  "updated_at": "2026-03-08T03:51:00Z",
   "ttl_seconds": 3600,
 
   "bootstrap_nodes": [
     {
-      "id": "server1-tcp",
-      "name": "AU Server 1 - TCP",
-      "description": "Primary world server + relay - TCP transport",
-      "multiaddr": "/dns4/meta.theworkpc.com/tcp/4001/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
-      "capabilities": ["relay", "bootstrap", "dht", "world-authority"],
+      "id": "au1-tcp-ws",
+      "name": "AU Server 1",
+      "host": "meta.theworkpc.com",
+      "tcp_port": 4001,
+      "ws_port": 9001,
+      "peer_id": "12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "capabilities": ["relay", "bootstrap", "world-authority"],
       "region": "AU",
       "priority": 100,
-      "verified": true
-    },
-    {
-      "id": "server1-ws",
-      "name": "AU Server 1 - WebSocket",
-      "description": "Primary world server + relay - WebSocket (works through VPN/CGNAT/Starlink)",
-      "multiaddr": "/dns4/meta.theworkpc.com/tcp/9001/ws/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
-      "capabilities": ["relay", "bootstrap", "dht", "world-authority"],
-      "region": "AU",
-      "priority": 95,
-      "verified": true
+      "expires_at": null
     }
-  ],
-
-  "fallback_discovery": {
-    "dns_seeds": [],
-    "http_rendezvous": [
-      "https://gist.githubusercontent.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17/raw/bootstrap.json"
-    ],
-    "ipfs_gateways": []
-  },
-
-  "metadata": {
-    "maintainer": "Metaverse Core Team",
-    "note": "WebSocket transport works through VPN, Starlink, 4G/CGNAT - clients connect OUTBOUND"
-  }
+  ]
 }

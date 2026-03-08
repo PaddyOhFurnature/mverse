@@ -4050,6 +4050,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let osm_dir = std::path::PathBuf::from(
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         ).join("osm");
+
+        // Count already-ready v7 tiles before triggering any conversion.
+        let ready_tiles = std::fs::read_dir(&osm_dir).ok()
+            .map(|entries| entries.flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("bin"))
+                .count())
+            .unwrap_or(0);
+        app_state.log(format!("🗺  [OSM] {} tile(s) ready in cache", ready_tiles));
+
         let mut pbfs_to_convert: Vec<(u64, std::path::PathBuf)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&osm_dir) {
             for entry in entries.flatten() {
@@ -4068,19 +4077,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             pbfs_to_convert.sort_by_key(|(sz, _)| *sz);
             let task_log_c = Arc::clone(&shared.read().unwrap().task_log);
             let lock_c = Arc::clone(&conv_lock);
+            let n_pbfs = pbfs_to_convert.len();
+            app_state.log(format!("🔄 [OSM] {} PBF file(s) queued for tile conversion (runs in background)", n_pbfs));
             for (_, path) in pbfs_to_convert {
-                app_state.log(format!("📥 Converting existing PBF: {}", path.file_name().unwrap_or_default().to_string_lossy()));
                 let task_log_cc = Arc::clone(&task_log_c);
                 let osm_dir_c = osm_dir.clone();
                 let lock_cc = Arc::clone(&lock_c);
+                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 tokio::task::spawn_blocking(move || {
+                    { if let Ok(mut b) = task_log_cc.lock() { b.push(format!("🔄 [OSM] {} — starting tile conversion…", fname)); } }
                     let _guard = lock_cc.lock().unwrap(); // serialise: only one conversion at a time
                     match metaverse_core::osm::import_pbf_with_log(&path, &osm_dir_c, Arc::clone(&task_log_cc)) {
-                        Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} → {} tiles", path.file_name().unwrap_or_default().to_string_lossy(), n)); } }
-                        Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] conversion failed: {}", e)); } }
+                        Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} — {} new tile(s) written", fname, n)); } }
+                        Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] {} conversion failed: {}", fname, e)); } }
                     }
                 });
             }
+        } else {
+            app_state.log("🗺  [OSM] No PBF files found — tiles served from cache only".to_string());
         }
     }
 

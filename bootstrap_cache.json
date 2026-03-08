@@ -1,1 +1,25 @@
-"{\n  \"schema_version\": \"1.0\",\n  \"network\": \"mainnet\",\n  \"updated_at\": \"2026-02-22T11:00:00Z\",\n  \"min_client_version\": \"0.1.0\",\n  \"ttl_seconds\": 3600,\n\n  \"bootstrap_nodes\": [\n    {\n      \"id\": \"server1-tcp\",\n      \"name\": \"AU Server 1 - TCP\",\n      \"description\": \"Primary world server + relay - TCP transport\",\n      \"multiaddr\": \"/ip4/144.6.111.191/tcp/4001/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo\",\n      \"capabilities\": [\"relay\", \"bootstrap\", \"dht\", \"world-authority\"],\n      \"region\": \"AU\",\n      \"priority\": 100,\n      \"verified\": true\n    },\n    {\n      \"id\": \"server1-ws\",\n      \"name\": \"AU Server 1 - WebSocket\",\n      \"description\": \"Primary world server + relay - WebSocket (works through VPN/CGNAT/Starlink)\",\n      \"multiaddr\": \"/ip4/144.6.111.191/tcp/9001/ws/p2p/12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo\",\n      \"capabilities\": [\"relay\", \"bootstrap\", \"dht\", \"world-authority\"],\n      \"region\": \"AU\",\n      \"priority\": 95,\n      \"verified\": true\n    }\n  ],\n\n  \"fallback_discovery\": {\n    \"dns_seeds\": [],\n    \"http_rendezvous\": [],\n    \"ipfs_gateways\": []\n  },\n\n  \"metadata\": {\n    \"maintainer\": \"Metaverse Core Team\",\n    \"note\": \"WebSocket transport works through VPN, Starlink, 4G/CGNAT - clients connect OUTBOUND\"\n  }\n}\n"
+{
+  "schema_version": "2.0",
+  "network": "mainnet",
+  "updated_at": "",
+  "ttl_seconds": 3600,
+  "bootstrap_nodes": [
+    {
+      "id": "au1",
+      "name": "AU Server 1",
+      "host": "meta.theworkpc.com",
+      "tcp_port": 4001,
+      "ws_port": 9001,
+      "peer_id": "12D3KooWJbDoH6dVNwP7SGoP58PKq3yJFP79j3bfKw4hvryMwNxo",
+      "multiaddr": null,
+      "capabilities": [
+        "relay",
+        "bootstrap",
+        "world-authority"
+      ],
+      "region": "AU",
+      "priority": 100,
+      "expires_at": null
+    }
+  ]
+}

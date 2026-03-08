@@ -1535,38 +1535,15 @@ fn main() {
     // Determine which chunk the player is actually standing in and prioritise it
     // so it is dispatched to a worker thread before any surrounding chunks.
     // Only relevant in OpenWorld mode — in Construct we don't need terrain chunks.
-    let player_chunk = ChunkId::from_ecef(&player.position);
+    // mut: updated at portal transition to track the current open-world spawn chunk.
+    let mut player_chunk = ChunkId::from_ecef(&player.position);
 
-    // ── Synchronously generate spawn chunk (OpenWorld only) ───────────────────
-    // In Construct mode the flat collision plane is sufficient — no terrain needed.
-    // On portal transition this same pattern runs inside the event loop instead.
+    // ── Queue spawn chunk with priority (OpenWorld only) ─────────────────────
+    // Async: the loading phase builds mesh + collider once the worker finishes.
+    // (Previously this was synchronous, but that blocks the event loop for seconds.)
     if game_mode == GameMode::OpenWorld {
         chunk_streamer.queue_priority(player_chunk);
         println!("   Player chunk: {} — queued with priority", player_chunk);
-
-        let generator = generator_arc.lock().unwrap();
-        match generator.generate_chunk(&player_chunk) {
-            Ok(octree) => {
-                let min_v = player_chunk.min_voxel();
-                let max_v = player_chunk.max_voxel();
-                let (mut mesh, chunk_center) = extract_chunk_mesh(&octree, &min_v, &max_v);
-                if !mesh.vertices.is_empty() {
-                    let offset = Vec3::new(
-                        (chunk_center.x - origin_voxel.x) as f32,
-                        (chunk_center.y - origin_voxel.y) as f32,
-                        (chunk_center.z - origin_voxel.z) as f32,
-                    );
-                    for v in &mut mesh.vertices { v.position += offset; }
-                    let collider = metaverse_core::physics::create_collision_from_mesh(
-                        &mut physics, &mesh, &origin_voxel, None);
-                    chunk_streamer.preload_chunk(player_chunk, octree, Some(collider));
-                    println!("✅ Spawn floor ready — terrain is live");
-                } else {
-                    println!("⚠️  Spawn chunk generated but has no mesh (ocean/void?)");
-                }
-            }
-            Err(e) => eprintln!("⚠️  Could not generate spawn chunk synchronously: {}", e),
-        }
     }
 
     let player_local = physics.ecef_to_local(&player.position);
@@ -1637,7 +1614,15 @@ fn main() {
     // In Construct mode we skip terrain loading entirely — floor is ready from frame 1.
     const LOADING_TARGET: usize = 30;
     let mut game_loading = game_mode != GameMode::Construct;
-    let mut loading_frames: u32 = 0;  // minimum frames before we allow exit
+    let mut loading_frames: u32 = 0;
+    let mut loading_start = Instant::now(); // wall-clock timeout (independent of frame rate)
+    let mut loading_last_log = Instant::now(); // wall-clock for progress messages
+    // Rate-limited mesh-build queue: chunks finish loading faster than we can build
+    // meshes in one frame (15+ chunks × mesh+physics ≈ seconds on a single frame).
+    // We drain newly_loaded_chunks into this buffer and process at most N per frame.
+    let mut pending_mesh_queue: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
+    // Same idea for game-phase OSM inference (objects, roads, water per chunk).
+    let mut pending_game_osm_queue: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
 
     println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
     println!("   Target: {} chunks, spawn chunk must have collider", LOADING_TARGET);
@@ -1996,10 +1981,21 @@ fn main() {
                     if game_loading {
                         // Keep streaming chunks and building meshes each frame
                         chunk_streamer.update(player.position);
-                        chunk_streamer.process_queues(80.0);
+                        chunk_streamer.process_queues(20.0);
 
-                        // Build mesh + collider for any chunks that finished loading
-                        let new_chunks: Vec<_> = chunk_streamer.newly_loaded_chunks.drain(..).collect();
+                        // Build mesh + collider for any chunks that finished loading.
+                        // Prioritise the player chunk: if it's in the queue, move it to front
+                        // so it always gets a collider in the very next frame. This unblocks
+                        // the game-start condition without waiting for all 85 chunks.
+                        pending_mesh_queue.extend(chunk_streamer.newly_loaded_chunks.drain(..));
+                        if let Some(pos) = pending_mesh_queue.iter().position(|id| *id == player_chunk) {
+                            pending_mesh_queue.swap(0, pos);
+                        }
+                        // Rate-limited to 3 per frame: building mesh+physics for 15 chunks
+                        // simultaneously blocks the render thread for multiple seconds.
+                        const MESH_PER_FRAME: usize = 3;
+                        let batch_end = pending_mesh_queue.len().min(MESH_PER_FRAME);
+                        let new_chunks: Vec<_> = pending_mesh_queue.drain(..batch_end).collect();
                         for chunk_id in &new_chunks {
                             if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
@@ -2045,10 +2041,7 @@ fn main() {
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
+                                        let srtm = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0), origin_gps.alt);
                                         // X/Z: sea-level ECEF horizontal (matches terrain column coords).
                                         // Y:   geographic altitude diff from origin (matches terrain voxel Y).
                                         let horiz = physics.ecef_to_local(
@@ -2061,14 +2054,8 @@ fn main() {
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
                                     for seg in &segs {
-                                        let sa = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
-                                        let sb = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
+                                        let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                        let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
                                         // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
@@ -2105,10 +2092,7 @@ fn main() {
                                             let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
                                                 let h = physics.ecef_to_local(
                                                     &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                                let elev = osm_elev_pipeline.query(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
-                                                    .map(|e| e.meters)
-                                                    .unwrap_or(2.0);
+                                                let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), 2.0);
                                                 let vy = (elev - origin_gps.alt) as f32 + 0.05;
                                                 Vec3::new(h.x, vy, h.z)
                                             }).collect();
@@ -2126,15 +2110,17 @@ fn main() {
                         let generating = chunk_streamer.stats.chunks_loading;
                         let queued    = chunk_streamer.stats.chunks_queued;
 
-                        // Progress feedback every second (~60 frames) so the user
-                        // can see the black loading window is actually doing work.
-                        if loading_frames % 60 == 1 {
+                        // Progress feedback every ~1 second of wall-clock time.
+                        // Frame-count based (% 60) breaks at low frame rates during
+                        // heavy mesh/collider building (1.5s+ per frame → 90s between logs).
+                        if loading_last_log.elapsed().as_secs_f32() >= 1.0 {
+                            loading_last_log = Instant::now();
                             let player_status = if chunk_streamer
                                 .get_chunk(&player_chunk)
                                 .map(|c| c.collider.is_some())
                                 .unwrap_or(false) { "ready" } else { "waiting" };
-                            println!("⏳ Loading chunks: {}/{} | generating: {} | queued: {} | player chunk: {}",
-                                loaded, LOADING_TARGET, generating, queued, player_status);
+                            println!("⏳ Loading chunks: {}/{} | generating: {} | queued: {} | mesh pending: {} | player chunk: {}",
+                                loaded, LOADING_TARGET, generating, queued, pending_mesh_queue.len(), player_status);
                             let _ = window.set_title(&format!(
                                 "Metaverse — Loading {}/{} chunks (player: {})",
                                 loaded, LOADING_TARGET, player_status));
@@ -2145,6 +2131,9 @@ fn main() {
                         //  2. The chunk the player is ACTUALLY standing in has a collider
                         //     (prevents falling through terrain on first physics step)
                         //  3. Enough surrounding chunks are also ready (or queue drained)
+                        // Player chunk is "ready" when it has data loaded AND a physics collider.
+                        // Because we prioritise the player chunk in pending_mesh_queue above,
+                        // it will get a collider within 1-2 frames of its data arriving.
                         let player_chunk_ready = chunk_streamer
                             .get_chunk(&player_chunk)
                             .map(|c| c.collider.is_some())
@@ -2152,9 +2141,10 @@ fn main() {
                         let enough_chunks = loaded >= LOADING_TARGET;
                         let queue_drained = chunk_streamer.stats.chunks_loading == 0
                             && chunk_streamer.stats.chunks_queued == 0
+                            && pending_mesh_queue.is_empty()
                             && loaded > 0;
 
-                        if loading_frames >= 20 && player_chunk_ready && (enough_chunks || queue_drained) {
+                        if loading_start.elapsed().as_secs() >= 2 && player_chunk_ready && (enough_chunks || queue_drained) {
                             println!("✅ Spawn area loaded ({} chunks), player chunk ready — starting game", loaded);
                             let _ = window.set_title("Metaverse");
 
@@ -2169,8 +2159,10 @@ fn main() {
                             }
                             println!("🎮 Game started!");
                             game_loading = false;
-                        } else if loading_frames >= 600 {
-                            // Safety timeout (~10s at 60fps) — start anyway if stuck
+                        } else if loading_start.elapsed().as_secs() >= 60 {
+                            // Wall-clock timeout: start anyway after 60s regardless of frame count.
+                            // Collider builds can make individual frames very slow, so frame-count
+                            // timeouts are unreliable.
                             println!("⚠️  Loading timeout — starting with {} chunks (generating: {}, player chunk: {})",
                                 loaded, generating, player_chunk_ready);
                             let _ = window.set_title("Metaverse");
@@ -2703,35 +2695,18 @@ fn main() {
                             body.set_linvel(vector![0.0, 0.0, 0.0], true);
                         }
 
-                        // 3. Synchronously generate spawn chunk so player lands on ground.
+                        // 3. Queue spawn chunk as highest priority — loading phase will build it.
                         let spawn_chunk = ChunkId::from_ecef(&player.position);
                         chunk_streamer.queue_priority(spawn_chunk);
-                        {
-                            let generator = generator_arc.lock().unwrap();
-                            if let Ok(octree) = generator.generate_chunk(&spawn_chunk) {
-                                let min_v = spawn_chunk.min_voxel();
-                                let max_v = spawn_chunk.max_voxel();
-                                let (mut mesh, chunk_center) = extract_chunk_mesh(&octree, &min_v, &max_v);
-                                if !mesh.vertices.is_empty() {
-                                    let offset = Vec3::new(
-                                        (chunk_center.x - origin_voxel.x) as f32,
-                                        (chunk_center.y - origin_voxel.y) as f32,
-                                        (chunk_center.z - origin_voxel.z) as f32,
-                                    );
-                                    for v in &mut mesh.vertices { v.position += offset; }
-                                    let collider = metaverse_core::physics::create_collision_from_mesh(
-                                        &mut physics, &mesh, &origin_voxel, None);
-                                    chunk_streamer.preload_chunk(spawn_chunk, octree, Some(collider));
-                                    println!("✅ World spawn chunk ready — ground is live");
-                                } else {
-                                    println!("⚠️  Spawn chunk is empty (ocean/void?) — player may fall");
-                                }
-                            }
-                        }
+                        // Update player_chunk so the loading-phase collider check tracks the
+                        // correct open-world chunk (not the old Construct spawn chunk).
+                        player_chunk = spawn_chunk;
 
                         // 4. Re-enter loading phase so terrain streams in before gameplay.
                         game_loading = true;
                         loading_frames = 0;
+                        loading_start = Instant::now();
+                        loading_last_log = Instant::now();
                         // Reset DHT fallback so it re-evaluates after terrain loads
                         dht_fallback_at = None;
                         dht_fallback_done = false;
@@ -2754,12 +2729,18 @@ fn main() {
                     // Broadcast newly loaded chunk manifests to connected peers.
                     // This lets peers replace their independently-generated terrain with ours
                     // if they haven't loaded this chunk yet (or ours is newer due to user edits).
-                    if !chunk_streamer.newly_loaded_chunks.is_empty() {
+                    // Drain new chunks into the pending queue; keep a snapshot for AOI+manifest.
+                    let new_this_frame: Vec<_> = chunk_streamer.newly_loaded_chunks.drain(..).collect();
+                    if !new_this_frame.is_empty() || !pending_game_osm_queue.is_empty() {
+                        // Add this frame's new chunks to the rate-limited processing queue.
+                        pending_game_osm_queue.extend(new_this_frame.iter().copied());
                         // OSM inference for newly loaded chunks (game phase)
                         {
                             use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
                                                                   infer_road_segments, to_placed_object};
-                            let new_ids: Vec<_> = chunk_streamer.newly_loaded_chunks.iter().copied().collect();
+                            const OSM_PER_FRAME: usize = 3;
+                            let batch_end = pending_game_osm_queue.len().min(OSM_PER_FRAME);
+                            let new_ids: Vec<_> = pending_game_osm_queue.drain(..batch_end).collect();
                             for chunk_id in new_ids {
                                 let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
                                 let osm = metaverse_core::osm::fetch_osm_for_chunk(
@@ -2772,10 +2753,7 @@ fn main() {
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
+                                        let srtm = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0), origin_gps.alt);
                                         // X/Z: sea-level ECEF horizontal (matches terrain column coords).
                                         // Y:   geographic altitude diff from origin (matches terrain voxel Y).
                                         let horiz = physics.ecef_to_local(
@@ -2788,14 +2766,8 @@ fn main() {
                                 let segs = infer_road_segments(&ctx);
                                 if !segs.is_empty() {
                                     for seg in &segs {
-                                        let sa = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
-                                        let sb = osm_elev_pipeline.query(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0))
-                                            .map(|e| e.meters)
-                                            .unwrap_or(origin_gps.alt);
+                                        let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
+                                        let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
                                         // X/Z from sea-level ECEF; Y = altitude diff from origin.
                                         let la = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
@@ -2813,51 +2785,47 @@ fn main() {
                                     }
                                     osm_geom_dirty = true;
                                 }
-                            }
-                            // Water polygons from newly loaded game-phase chunks
-                            let new_ids_water: Vec<_> = chunk_streamer.newly_loaded_chunks.iter().copied().collect();
-                            for chunk_id in new_ids_water {
-                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
-                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
-                                if !osm.water.is_empty() {
-                                    for w in &osm.water {
-                                        if w.polygon.len() < 3 { continue; }
-                                        let key = ((w.polygon[0].lat * 1e6) as i64,
-                                                   (w.polygon[0].lon * 1e6) as i64);
-                                        if !water_poly_seen.insert(key) { continue; }
-                                        // Per-vertex elevation — see first water block above.
-                                        let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
-                                            let h = physics.ecef_to_local(
-                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                            let elev = osm_elev_pipeline.query(
-                                                &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0))
-                                                .map(|e| e.meters)
-                                                .unwrap_or(2.0);
-                                            let vy = (elev - origin_gps.alt) as f32 + 0.05;
-                                            Vec3::new(h.x, vy, h.z)
-                                        }).collect();
-                                        water_polygons.push(verts);
+                                // Water polygons — reuse already-fetched ctx.osm (no second fetch)
+                                if let Some(ref osm_data) = ctx.osm {
+                                    if !osm_data.water.is_empty() {
+                                        for w in &osm_data.water {
+                                            if w.polygon.len() < 3 { continue; }
+                                            let key = ((w.polygon[0].lat * 1e6) as i64,
+                                                       (w.polygon[0].lon * 1e6) as i64);
+                                            if !water_poly_seen.insert(key) { continue; }
+                                            let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
+                                                let h = physics.ecef_to_local(
+                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
+                                                let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), 2.0);
+                                                let vy = (elev - origin_gps.alt) as f32 + 0.05;
+                                                Vec3::new(h.x, vy, h.z)
+                                            }).collect();
+                                            water_polygons.push(verts);
+                                        }
+                                        osm_geom_dirty = true;
                                     }
-                                    osm_geom_dirty = true;
                                 }
                             }
                         }
 
-                        // Always update AOI subscriptions when loaded chunks change —
-                        // do NOT gate on peer_count because we need to be subscribed
-                        // before the first peer connects, not after.
-                        let loaded_set: std::collections::HashSet<metaverse_core::chunk::ChunkId> =
-                            chunk_streamer.loaded_chunk_ids().iter().copied().collect();
-                        let _ = multiplayer.update_subscribed_chunks(&loaded_set);
+                        // AOI subscriptions and manifest broadcast fire for each newly arrived
+                        // chunk (cheap operations, no rate-limiting needed).
+                        if !new_this_frame.is_empty() {
+                            // Always update AOI subscriptions when loaded chunks change —
+                            // do NOT gate on peer_count because we need to be subscribed
+                            // before the first peer connects, not after.
+                            let loaded_set: std::collections::HashSet<metaverse_core::chunk::ChunkId> =
+                                chunk_streamer.loaded_chunk_ids().iter().copied().collect();
+                            let _ = multiplayer.update_subscribed_chunks(&loaded_set);
 
-                        // Manifest broadcast only makes sense when peers are present
-                        if multiplayer.peer_count() > 0 {
-                            let new_entries: Vec<_> = chunk_streamer.newly_loaded_chunks.iter()
-                                .filter_map(|id| chunk_streamer.get_chunk(id).map(|c| (*id, c.last_modified)))
-                                .collect();
-                            if !new_entries.is_empty() {
-                                let _ = multiplayer.broadcast_chunk_manifest(new_entries);
+                            // Manifest broadcast only makes sense when peers are present
+                            if multiplayer.peer_count() > 0 {
+                                let new_entries: Vec<_> = new_this_frame.iter()
+                                    .filter_map(|id| chunk_streamer.get_chunk(id).map(|c| (*id, c.last_modified)))
+                                    .collect();
+                                if !new_entries.is_empty() {
+                                    let _ = multiplayer.broadcast_chunk_manifest(new_entries);
+                                }
                             }
                         }
                     }
@@ -2923,9 +2891,22 @@ fn main() {
                         println!("📊 Remote players to render: {}", remote_count);
                     }
                     
-                    // Regenerate dirty chunks (per-chunk, not global)
+                    // Regenerate dirty chunks (per-chunk, not global), rate-limited to
+                    // avoid multi-second frame stalls. The slow part is building the rapier
+                    // trimesh BVH collider (~300-500ms each). Strategy:
+                    //   - Build render mesh for ALL dirty chunks (fast, ~5ms each) — no rate limit
+                    //   - Build collider only for chunks close to the player (< 90m) — rate limited
+                    // Far chunks get render mesh but no collider; collider added lazily on approach.
+                    // If collider already exists (voxel-op rebuild), always rebuild it.
+                    const COLLIDER_RANGE_M: f32 = 90.0;  // ~3 chunk widths
+                    const COLLIDER_PER_FRAME: usize = 1;
+                    const DIRTY_PER_FRAME: usize = 1;  // extract_chunk_mesh ~80ms each — 1/frame = 12fps catch-up
+                    let mut colliders_built = 0;
+                    let mut dirty_done = 0;
+                    let player_local_pos = physics.ecef_to_local(&player.position);
                     for chunk_data in chunk_streamer.loaded_chunks_mut() {
-                        if chunk_data.dirty {
+                        if !chunk_data.dirty { continue; }
+                        if dirty_done >= DIRTY_PER_FRAME { break; }
                             let min_voxel = chunk_data.id.min_voxel();
                             let max_voxel = chunk_data.id.max_voxel();
                             let (mut new_mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
@@ -2945,16 +2926,26 @@ fn main() {
                                 
                                 chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &new_mesh));
                                 
-                                let new_collider = metaverse_core::physics::create_collision_from_mesh(
-                                    &mut physics,
-                                    &new_mesh,
-                                    &origin_voxel,
-                                    chunk_data.collider,
-                                );
-                                chunk_data.collider = Some(new_collider);
+                                // Only build the expensive trimesh collider for nearby chunks or
+                                // when replacing an existing collider (after a voxel op).
+                                let is_rebuild = chunk_data.collider.is_some();
+                                let chunk_dist = (player_local_pos - offset).length();
+                                if (chunk_dist < COLLIDER_RANGE_M || is_rebuild) && colliders_built < COLLIDER_PER_FRAME {
+                                    let new_collider = metaverse_core::physics::create_collision_from_mesh(
+                                        &mut physics,
+                                        &new_mesh,
+                                        &origin_voxel,
+                                        chunk_data.collider,
+                                    );
+                                    chunk_data.collider = Some(new_collider);
+                                    colliders_built += 1;
+                                }
                             } else {
                                 chunk_data.mesh_buffer = None;
-                                chunk_data.collider = None;
+                                // Voxels removed → clear collider too
+                                if let Some(handle) = chunk_data.collider.take() {
+                                    physics.colliders.remove(handle, &mut physics.islands, &mut physics.bodies, false);
+                                }
                             }
                             // Rebuild water surface mesh
                             let mut new_water = extract_water_surface_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
@@ -2968,7 +2959,37 @@ fn main() {
                             } else {
                                 chunk_data.water_mesh_buffer = None;
                             }
-                            chunk_data.dirty = false;
+                             chunk_data.dirty = false;
+                             dirty_done += 1;
+                    }
+                    // Lazy collider build: chunks close to player that have a mesh but no collider
+                    // (were meshed while player was far, now player has approached).
+                    if colliders_built < COLLIDER_PER_FRAME {
+                        for chunk_data in chunk_streamer.loaded_chunks_mut() {
+                            if chunk_data.collider.is_some() || chunk_data.mesh_buffer.is_none() { continue; }
+                            let min_voxel = chunk_data.id.min_voxel();
+                            let (_, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &chunk_data.id.max_voxel());
+                            let offset = Vec3::new(
+                                (chunk_center.x - origin_voxel.x) as f32,
+                                (chunk_center.y - origin_voxel.y) as f32,
+                                (chunk_center.z - origin_voxel.z) as f32,
+                            );
+                            let chunk_dist = (player_local_pos - offset).length();
+                            if chunk_dist < COLLIDER_RANGE_M {
+                                let max_voxel = chunk_data.id.max_voxel();
+                                let (mut mesh, _) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
+                                for v in &mut mesh.vertices {
+                                    v.position[0] += offset.x;
+                                    v.position[1] += offset.y;
+                                    v.position[2] += offset.z;
+                                }
+                                if !mesh.vertices.is_empty() {
+                                    let col = metaverse_core::physics::create_collision_from_mesh(
+                                        &mut physics, &mesh, &origin_voxel, None);
+                                    chunk_data.collider = Some(col);
+                                }
+                                break; // one collider per frame max
+                            }
                         }
                     }
                     

@@ -10,6 +10,8 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use crate::coordinates::GPS;
 
 /// Elevation query result
@@ -23,13 +25,19 @@ pub struct Elevation {
 /// IMPORTANT: Implementations must be Send + Sync for parallel terrain generation.
 /// Use interior mutability (Arc<Mutex<>>) for any mutable state.
 pub trait ElevationSource: Send + Sync {
-    /// Query elevation at GPS coordinate
-    /// Returns None if data unavailable for this location
-    /// 
-    /// Uses &self instead of &mut self to enable parallel queries.
-    /// Implementations use Arc<Mutex<>> for thread-safe interior mutability.
+    /// Query elevation at GPS coordinate.
+    /// Returns None if data unavailable for this location.
+    /// MAY block to download missing tiles — only call from background threads.
     fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError>;
-    
+
+    /// Non-blocking query: return elevation only if the tile is already on local disk.
+    /// Never makes network requests. Returns None immediately if not cached.
+    /// Safe to call from the render thread.
+    fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let _ = gps;
+        Ok(None)
+    }
+
     /// Source name for logging
     fn name(&self) -> &str;
 }
@@ -433,6 +441,22 @@ impl ElevationSource for CopernicusElevationSource {
         };
         Ok(Some(extract_elevation(&tile_file, gps)?))
     }
+    fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let lat_tile = gps.lat.floor() as i32;
+        let lon_tile = gps.lon.floor() as i32;
+        let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
+        let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", la) };
+        let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lo) };
+        let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
+            if lat_tile >= 0 { 'n' } else { 's' }, la,
+            if lon_tile >= 0 { 'e' } else { 'w' }, lo);
+        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
+        if tile_path.exists() && tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            Ok(Some(extract_elevation(&tile_path, gps)?))
+        } else {
+            Ok(None)
+        }
+    }
     fn name(&self) -> &str { "Copernicus DEM (AWS)" }
 }
 
@@ -496,6 +520,22 @@ impl ElevationSource for SkadiElevationSource {
             self.fetch_tile(lat_tile, lon_tile)?
         };
         Ok(Some(extract_elevation(&tile_file, gps)?))
+    }
+    fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        let lat_tile = gps.lat.floor() as i32;
+        let lon_tile = gps.lon.floor() as i32;
+        let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
+        let ns = if lat_tile >= 0 { "N" } else { "S" };
+        let ew = if lon_tile >= 0 { "E" } else { "W" };
+        let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", la) };
+        let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lo) };
+        let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, la, ew, lo);
+        let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+        if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            Ok(Some(extract_elevation(&hgt_path, gps)?))
+        } else {
+            Ok(None)
+        }
     }
     fn name(&self) -> &str { "AWS Terrain Tiles (Skadi)" }
 }
@@ -565,6 +605,39 @@ fn is_srtm_void(v: i16) -> bool {
     v == i16::MIN || v == -9999
 }
 
+/// In-memory cache of decoded TIFF tile data.
+/// Reading a 26MB TIFF file on every elevation query (e.g. per road segment endpoint)
+/// is 300-500ms per query. Cache the decoded pixels to make subsequent queries instant.
+struct CachedTiffData {
+    width:    u32,
+    height:   u32,
+    tile_lat: i32,
+    tile_lon: i32,
+    /// Normalized elevation values as f32 (handles all TIFF sample types: i16, u16, f32, f64, i32)
+    pixels: Vec<f32>,
+}
+
+thread_local! {
+    static TIFF_CACHE: RefCell<HashMap<PathBuf, Arc<CachedTiffData>>> = RefCell::new(HashMap::new());
+    static HGT_CACHE:  RefCell<HashMap<PathBuf, Arc<Vec<u8>>>>        = RefCell::new(HashMap::new());
+}
+
+fn cached_tiff_get(path: &PathBuf) -> Option<Arc<CachedTiffData>> {
+    TIFF_CACHE.with(|c| c.borrow().get(path).cloned())
+}
+
+fn cached_tiff_insert(path: PathBuf, data: Arc<CachedTiffData>) {
+    TIFF_CACHE.with(|c| { c.borrow_mut().insert(path, data); });
+}
+
+fn cached_hgt_get(path: &PathBuf) -> Option<Arc<Vec<u8>>> {
+    HGT_CACHE.with(|c| c.borrow().get(path).cloned())
+}
+
+fn cached_hgt_insert(path: PathBuf, data: Arc<Vec<u8>>) {
+    HGT_CACHE.with(|c| { c.borrow_mut().insert(path, data); });
+}
+
 /// Extract elevation from a GeoTIFF or HGT file at the given GPS coordinate.
 ///
 /// Uses the pure-Rust `tiff` crate (no GDAL required). The geo-transform is
@@ -573,23 +646,49 @@ fn is_srtm_void(v: i16) -> bool {
 ///
 /// Handles SRTM void pixels (-32768 / -9999) by expanding the search window
 /// up to FALLBACK_RADIUS pixels outward and averaging valid neighbours.
+///
+/// TIFF data is cached in thread-local memory after the first read so subsequent
+/// queries for the same tile are essentially instant (no disk I/O).
 fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
     let ext = tiff_path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if ext == "hgt" {
         return extract_elevation_hgt(tiff_path, gps);
     }
 
-    // Parse tile lat/lon from filename (e.g. srtm_s28_e153.tif → -28, 153)
-    let (tile_lat, tile_lon) = parse_tile_coords_from_path(tiff_path)?;
+    // Check the thread-local TIFF cache first — avoid re-reading the 26MB file on each query.
+    let cached = cached_tiff_get(tiff_path);
+    let tile_data: Arc<CachedTiffData> = if let Some(d) = cached {
+        d
+    } else {
+        // Cache miss: read and decode the TIFF file once, then store it.
+        let (tile_lat, tile_lon) = parse_tile_coords_from_path(tiff_path)?;
+        let file = std::fs::File::open(tiff_path)
+            .map_err(|e| ElevationError::FileNotFound(format!("Cannot open {}: {}", tiff_path.display(), e)))?;
+        let reader = std::io::BufReader::new(file);
+        let mut decoder = tiff::decoder::Decoder::new(reader)
+            .map_err(|e| ElevationError::ParseError(format!("TIFF init error: {}", e)))?;
+        let (width, height) = decoder.dimensions()
+            .map_err(|e| ElevationError::ParseError(format!("TIFF dimensions error: {}", e)))?;
+        let image = decoder.read_image()
+            .map_err(|e| ElevationError::ParseError(format!("TIFF read error: {}", e)))?;
+        let n = (width as usize) * (height as usize);
+        let pixels: Vec<f32> = match &image {
+            tiff::decoder::DecodingResult::I16(d) => d.iter().map(|&v| v as f32).collect(),
+            tiff::decoder::DecodingResult::U16(d) => d.iter().map(|&v| v as f32).collect(),
+            tiff::decoder::DecodingResult::F32(d) => d.clone(),
+            tiff::decoder::DecodingResult::F64(d) => d.iter().map(|&v| v as f32).collect(),
+            tiff::decoder::DecodingResult::I32(d) => d.iter().map(|&v| v as f32).collect(),
+            _ => vec![0.0; n],
+        };
+        let d = Arc::new(CachedTiffData { width, height, tile_lat, tile_lon, pixels });
+        cached_tiff_insert(tiff_path.clone(), d.clone());
+        d
+    };
 
-    let file = std::fs::File::open(tiff_path)
-        .map_err(|e| ElevationError::FileNotFound(format!("Cannot open {}: {}", tiff_path.display(), e)))?;
-    let reader = std::io::BufReader::new(file);
-    let mut decoder = tiff::decoder::Decoder::new(reader)
-        .map_err(|e| ElevationError::ParseError(format!("TIFF init error: {}", e)))?;
-
-    let (width, height) = decoder.dimensions()
-        .map_err(|e| ElevationError::ParseError(format!("TIFF dimensions error: {}", e)))?;
+    let width    = tile_data.width;
+    let height   = tile_data.height;
+    let tile_lat = tile_data.tile_lat;
+    let tile_lon = tile_data.tile_lon;
 
     // Geo-transform derived from filename: tile covers [tile_lat, tile_lat+1] × [tile_lon, tile_lon+1]
     // Top-left corner is (tile_lon, tile_lat+1). Pixels map with (width-1) steps across 1 degree.
@@ -605,35 +704,24 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     let pixel_col = pixel_col.max(0).min(width as isize - 2);
     let pixel_row = pixel_row.max(0).min(height as isize - 2);
 
-    // Read all pixel data (SRTM 1s tile: 3601×3601 × 2B ≈ 26MB uncompressed, usually compressed)
-    let image = decoder.read_image()
-        .map_err(|e| ElevationError::ParseError(format!("TIFF read error: {}", e)))?;
-
     let w = width as usize;
     let col = pixel_col as usize;
     let row = pixel_row as usize;
 
-    let get_i16 = |r: usize, c: usize| -> i16 {
-        let idx = r * w + c;
-        match &image {
-            tiff::decoder::DecodingResult::I16(data) => *data.get(idx).unwrap_or(&0),
-            tiff::decoder::DecodingResult::F32(data) => *data.get(idx).unwrap_or(&0.0) as i16,
-            tiff::decoder::DecodingResult::U16(data) => *data.get(idx).unwrap_or(&0) as i16,
-            tiff::decoder::DecodingResult::I32(data) => *data.get(idx).unwrap_or(&0) as i16,
-            tiff::decoder::DecodingResult::F64(data) => *data.get(idx).unwrap_or(&0.0) as i16,
-            _ => 0,
-        }
+    let get_px = |r: usize, c: usize| -> f32 {
+        *tile_data.pixels.get(r * w + c).unwrap_or(&0.0)
     };
+    let is_void = |v: f32| -> bool { (v as i16) == i16::MIN || (v as i32) == -9999 };
 
     let data2 = [
-        get_i16(row,     col),
-        get_i16(row,     col + 1),
-        get_i16(row + 1, col),
-        get_i16(row + 1, col + 1),
+        get_px(row,     col),
+        get_px(row,     col + 1),
+        get_px(row + 1, col),
+        get_px(row + 1, col + 1),
     ];
 
     let valid2: Vec<f64> = data2.iter()
-        .filter(|&&v| !is_srtm_void(v))
+        .filter(|&&v| !is_void(v))
         .map(|&v| v as f64)
         .collect();
 
@@ -679,8 +767,8 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
     let mut valid_far: Vec<f64> = Vec::new();
     for r in r0..r1 {
         for c in c0..c1 {
-            let v = get_i16(r, c);
-            if !is_srtm_void(v) {
+            let v = get_px(r, c);
+            if !is_void(v) {
                 valid_far.push(v as f64);
             }
         }
@@ -761,8 +849,14 @@ fn extract_elevation_hgt(hgt_path: &PathBuf, gps: &GPS) -> Result<Elevation, Ele
         ElevationError::ParseError(format!("Cannot parse HGT filename: {}", hgt_path.display()))
     })?;
 
-    let bytes = std::fs::read(hgt_path)
-        .map_err(|e| ElevationError::FileNotFound(format!("Cannot read HGT: {}", e)))?;
+    let bytes: Arc<Vec<u8>> = if let Some(b) = cached_hgt_get(hgt_path) {
+        b
+    } else {
+        let b = Arc::new(std::fs::read(hgt_path)
+            .map_err(|e| ElevationError::FileNotFound(format!("Cannot read HGT: {}", e)))?);
+        cached_hgt_insert(hgt_path.clone(), b.clone());
+        b
+    };
 
     // Determine resolution: 1201×1201 = SRTM3 (3 arc-sec), 3601×3601 = SRTM1 (1 arc-sec)
     let n_samples = ((bytes.len() / 2) as f64).sqrt().round() as usize;
@@ -864,6 +958,30 @@ impl ElevationSource for P2PElevationSource {
     }
 
     fn name(&self) -> &str { "P2P elevation (libp2p)" }
+
+    fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
+        // P2P source is already non-blocking (fetch_elevation only reads from TileFetcher cache).
+        // query_cached just skips the P2P request entirely and checks the file directly.
+        let lat = gps.lat.floor() as i32;
+        let lon = gps.lon.floor() as i32;
+        let lat_prefix = if lat >= 0 { 'n' } else { 's' };
+        let lon_prefix = if lon >= 0 { 'e' } else { 'w' };
+        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+        let tile_path = self.cache_dir
+            .join(&lat_dir)
+            .join(&lon_dir)
+            .join(format!("srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs()));
+        if tile_path.exists() {
+            match extract_elevation(&tile_path, gps) {
+                Ok(elev) => Ok(Some(elev)),
+                Err(e) => Err(e),
+            }
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Multi-source elevation pipeline
@@ -905,22 +1023,35 @@ impl ElevationPipeline {
         self.sources.push(source);
     }
     
-    /// Query elevation, trying sources in order until one succeeds
+    /// Query elevation, trying sources in order until one succeeds.
+    /// MAY block to download missing tiles — only call from background threads.
     pub fn query(&self, gps: &GPS) -> Result<Elevation, ElevationError> {
         for source in &self.sources {
             match source.query(gps) {
                 Ok(Some(elevation)) => return Ok(elevation),
-                Ok(None) => continue, // Try next source
+                Ok(None) => continue,
                 Err(e) => {
                     eprintln!("Source {} failed: {}", source.name(), e);
                     continue;
                 }
             }
         }
-        
         Err(ElevationError::FileNotFound(
             "No sources could provide elevation data".to_string()
         ))
+    }
+
+    /// Non-blocking query: returns elevation only if the tile is already on local disk.
+    /// Never makes network requests or P2P fetches. Safe to call from the render thread.
+    /// Returns the default value if no cached tile is available.
+    pub fn query_nonblocking(&self, gps: &GPS, default_m: f64) -> f64 {
+        for source in &self.sources {
+            match source.query_cached(gps) {
+                Ok(Some(elev)) => return elev.meters,
+                _ => continue,
+            }
+        }
+        default_m
     }
 }
 
