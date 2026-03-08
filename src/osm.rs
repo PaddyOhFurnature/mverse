@@ -297,7 +297,8 @@ fn wait_global_cooldown() {
 }
 
 /// Overpass API mirror endpoints — tried in order on failure.
-const OVERPASS_ENDPOINTS: &[&str] = &[
+/// Exposed as pub so the idle downloader thread can pass them without hardcoding.
+pub const OVERPASS_ENDPOINTS: &[&str] = &[
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
@@ -723,15 +724,28 @@ pub fn fetch_osm_for_bounds(
         return Ok(cached);
     }
 
-    // No local tile — only hit Overpass if explicitly enabled.
+    // No local tile — only hit Overpass if explicitly enabled OR caller supplies endpoints.
     // Without this guard the game thread blocks 30s per chunk on a timeout.
-    if std::env::var("METAVERSE_OVERPASS").as_deref() != Ok("1") {
+    // Supplying a non-empty endpoint list counts as explicit opt-in (used by the idle
+    // downloader background thread, which is allowed to block on network I/O).
+    let use_overpass = !overpass_endpoints.is_empty()
+        || std::env::var("METAVERSE_OVERPASS").as_deref() == Ok("1");
+    if !use_overpass {
         return Err("no local tile (place PBF at world_data/map.osm.pbf)".into());
     }
 
-    // Overpass path (opt-in only)
+    // Resolve endpoints: use caller's list if provided, else fall back to public mirrors.
+    let resolved: Vec<String>;
+    let endpoints: &[String] = if overpass_endpoints.is_empty() {
+        resolved = OVERPASS_ENDPOINTS.iter().map(|s| s.to_string()).collect();
+        &resolved
+    } else {
+        overpass_endpoints
+    };
+
+    // Overpass path — runs on background threads only (game thread passes empty endpoints)
     println!("🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
-    let json = query_overpass(south, west, north, east, overpass_endpoints)?;
+    let json = query_overpass(south, west, north, east, endpoints)?;
     let data = parse_overpass_json(&json)?;
     if !data.is_empty() {
         println!("   b:{} r:{} a:{}", data.buildings.len(), data.roads.len(), data.amenities.len());

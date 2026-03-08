@@ -2478,10 +2478,22 @@ fn idle_downloader_thread(
                 std::fs::create_dir_all(&osm_dir).ok();
                 let cache = crate::osm::OsmDiskCache::new(&osm_dir);
                 if cache.load(s, w, n, e).is_none() {
-                    if crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir, &[]).is_ok() {
-                        let key = crate::osm::osm_dht_key(s, w, n, e);
-                        let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
-                        println!("📥 [Idle] OSM tile cached and announced: {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                    // Pass the public Overpass mirror list — this is a background thread
+                    // so network blocking is fine. Tries all mirrors in order.
+                    let endpoints: Vec<String> = crate::osm::OVERPASS_ENDPOINTS
+                        .iter().map(|s| s.to_string()).collect();
+                    match crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir, &endpoints) {
+                        Ok(data) if !data.is_empty() => {
+                            let key = crate::osm::osm_dht_key(s, w, n, e);
+                            let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
+                            println!("📥 [Idle] OSM tile downloaded and announced: {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                        }
+                        Ok(_) => {
+                            println!("⚠️ [Idle] OSM tile returned empty data for {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                        }
+                        Err(e) => {
+                            println!("❌ [Idle] OSM tile fetch failed {:.4},{:.4}→{:.4},{:.4}: {}", s, w, n, e, e);
+                        }
                     }
                 }
             }

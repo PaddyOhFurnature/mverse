@@ -2041,8 +2041,23 @@ fn main() {
                                                                   to_placed_object};
                             for &chunk_id in &new_chunks {
                                 let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
+                                let mut osm = metaverse_core::osm::fetch_osm_for_chunk(
                                     lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                // On disk miss, try P2P — same fallback as terrain generator.
+                                // If P2P also misses, tile is queued for idle Overpass download.
+                                if osm.is_empty() {
+                                    let tile_size = 0.01_f64;
+                                    let ts = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
+                                    let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
+                                    if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
+                                        if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
+                                            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_cache_dir);
+                                            cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
+                                            tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
+                                            osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                        }
+                                    }
+                                }
                                 let ctx = if osm.is_empty() {
                                     ChunkContext::from_chunk(chunk_id)
                                 } else {
@@ -2785,8 +2800,22 @@ fn main() {
                             let new_ids: Vec<_> = pending_game_osm_queue.drain(..batch_end).collect();
                             for chunk_id in new_ids {
                                 let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-                                let osm = metaverse_core::osm::fetch_osm_for_chunk(
+                                let mut osm = metaverse_core::osm::fetch_osm_for_chunk(
                                     lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                // P2P fallback on disk miss (same as terrain generator + loading phase)
+                                if osm.is_empty() {
+                                    let tile_size = 0.01_f64;
+                                    let ts = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
+                                    let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
+                                    if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
+                                        if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
+                                            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_cache_dir);
+                                            cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
+                                            tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
+                                            osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
+                                        }
+                                    }
+                                }
                                 let ctx = if osm.is_empty() {
                                     ChunkContext::from_chunk(chunk_id)
                                 } else {
