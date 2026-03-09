@@ -1564,21 +1564,9 @@ fn serve_tile_request(
     use std::path::PathBuf;
     match request {
         OsmTile { s, w, n, e } => {
-            // Fast path: check TileStore first
             if let Some(ts) = tile_store {
                 if let Some(bytes) = ts.get_osm(*s, *w, *n, *e) {
                     return TileResponse::Found(bytes);
-                }
-            } else {
-                // Fallback: legacy OsmDiskCache (will use TileStore internally)
-                let cache_dir = PathBuf::from(world_dir).join("osm");
-                let cache = metaverse_core::osm::OsmDiskCache::new(&cache_dir);
-                match cache.load(*s, *w, *n, *e) {
-                    Some(data) => match bincode::serialize(&data) {
-                        Ok(bytes) => return TileResponse::Found(bytes),
-                        Err(_) => {}
-                    },
-                    None => {}
                 }
             }
             TileResponse::NotFound
@@ -3143,10 +3131,7 @@ async fn web_api_diag_osm(
     let world_dir = s.read().unwrap().world_dir.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        let db_path = std::path::PathBuf::from(&world_dir).join("tiles.db");
-        let ts = tile_store.or_else(|| {
-            metaverse_core::tile_store::TileStore::open(&db_path).ok().map(std::sync::Arc::new)
-        });
+        let ts = tile_store;
 
         let (osm_count, srtm_count) = ts.as_ref().map(|t| (t.osm_count(), t.srtm_count()))
             .unwrap_or((0, 0));
@@ -3169,7 +3154,7 @@ async fn web_api_diag_osm(
         serde_json::json!({
             "osm_tiles": osm_count,
             "srtm_tiles": srtm_count,
-            "db_path": db_path.display().to_string(),
+            "db_path": std::path::PathBuf::from(&world_dir).join("tiles.db").display().to_string(),
             "specific_tile": specific,
         })
     }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
@@ -3181,10 +3166,6 @@ async fn admin_tiles_stats(State(s): State<WebState>) -> impl IntoResponse {
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let ts = ts.or_else(|| {
-            let p = std::path::PathBuf::from(&world_dir).join("tiles.db");
-            metaverse_core::tile_store::TileStore::open(&p).ok().map(std::sync::Arc::new)
-        });
         match ts {
             Some(t) => serde_json::json!({
                 "osm":     t.osm_count(),
@@ -3202,10 +3183,6 @@ async fn admin_tiles_verify(State(s): State<WebState>) -> impl IntoResponse {
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let ts = ts.or_else(|| {
-            let p = std::path::PathBuf::from(&world_dir).join("tiles.db");
-            metaverse_core::tile_store::TileStore::open(&p).ok().map(std::sync::Arc::new)
-        });
         match ts {
             Some(t) => {
                 let (osm_ok, osm_corrupt) = t.verify_cf("osm");
@@ -3233,10 +3210,6 @@ async fn admin_tiles_purge_cf(
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let ts = ts.or_else(|| {
-            let p = std::path::PathBuf::from(&world_dir).join("tiles.db");
-            metaverse_core::tile_store::TileStore::open(&p).ok().map(std::sync::Arc::new)
-        });
         match ts {
             Some(t) => {
                 let _ = t.purge_cf(&cf);
@@ -3265,10 +3238,6 @@ async fn admin_tiles_delete_osm(
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let ts = ts.or_else(|| {
-            let p = std::path::PathBuf::from(&world_dir).join("tiles.db");
-            metaverse_core::tile_store::TileStore::open(&p).ok().map(std::sync::Arc::new)
-        });
         match ts {
             Some(t) => { t.delete_osm(sv, wv, nv, ev); serde_json::json!({"deleted": true}) }
             None => serde_json::json!({"error": "tile store not available"}),
@@ -4267,8 +4236,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let endpoints = app_state.config.data.overpass_endpoints.clone();
         let elev_api_key = app_state.config.data.opentopography_api_key.clone();
         let prefetch_swarm_tx = shared.read().unwrap().swarm_tx.clone();
+        let ts_bulk = shared.read().unwrap().tile_store.clone();
         tokio::spawn(async move {
-            bulk_download_task(bboxes, world_dir_pb, endpoints, elev_api_key, prefetch_swarm_tx).await;
+            bulk_download_task(bboxes, world_dir_pb, endpoints, elev_api_key, prefetch_swarm_tx, ts_bulk).await;
         });
         app_state.log(format!("📥 Bulk download: {} bbox(es) queued", app_state.config.download_on_start.len()));
     }
@@ -4328,9 +4298,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.config.world_dir.as_deref().unwrap_or("world_data")
         );
         let task_log_pbf = Arc::clone(&shared.read().unwrap().task_log);
+        let ts_pbf = shared.read().unwrap().tile_store.clone();
         app_state.log(format!("📥 PBF import: {}", pbf.display()));
         tokio::spawn(async move {
-            import_pbf_task(pbf, world_dir_pbf, task_log_pbf).await;
+            import_pbf_task(pbf, world_dir_pbf, task_log_pbf, ts_pbf).await;
         });
     }
 
@@ -4368,6 +4339,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Sort smallest-first so quick ones finish and release memory before big ones start.
             pbfs_to_convert.sort_by_key(|(sz, _)| *sz);
             let task_log_c = Arc::clone(&shared.read().unwrap().task_log);
+            let ts_conv = shared.read().unwrap().tile_store.clone();
             let lock_c = Arc::clone(&conv_lock);
             let n_pbfs = pbfs_to_convert.len();
             app_state.log(format!("🔄 [OSM] {} PBF file(s) queued for tile conversion (runs in background)", n_pbfs));
@@ -4375,11 +4347,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let task_log_cc = Arc::clone(&task_log_c);
                 let osm_dir_c = osm_dir.clone();
                 let lock_cc = Arc::clone(&lock_c);
+                let ts_c = ts_conv.clone();
                 let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 tokio::task::spawn_blocking(move || {
                     { if let Ok(mut b) = task_log_cc.lock() { b.push(format!("🔄 [OSM] {} — starting tile conversion…", fname)); } }
                     let _guard = lock_cc.lock().unwrap(); // serialise: only one conversion at a time
-                    match metaverse_core::osm::import_pbf_with_log(&path, &osm_dir_c, Arc::clone(&task_log_cc)) {
+                    let result = if let Some(ts) = ts_c {
+                        metaverse_core::osm::import_pbf_with_store(&path, ts, Some(Arc::clone(&task_log_cc)))
+                    } else {
+                        metaverse_core::osm::import_pbf_with_log(&path, &osm_dir_c, Arc::clone(&task_log_cc))
+                    };
+                    match result {
                         Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} — {} new tile(s) written", fname, n)); } }
                         Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] {} conversion failed: {}", fname, e)); } }
                     }
@@ -4410,10 +4388,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             );
             let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
             let swarm_tx_osm = shared.read().unwrap().swarm_tx.clone();
+            let ts_osm = shared.read().unwrap().tile_store.clone();
             app_state.log(format!("📥 Geofabrik OSM download started for {} region(s)", regions.len()));
             let lock_osm = Arc::clone(&conv_lock);
             tokio::spawn(async move {
-                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm, lock_osm).await;
+                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm, lock_osm, ts_osm).await;
             });
         }
     }
@@ -5150,6 +5129,7 @@ async fn import_pbf_task(
     pbf_path: std::path::PathBuf,
     world_dir: std::path::PathBuf,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
+    tile_store: Option<Arc<metaverse_core::tile_store::TileStore>>,
 ) {
     macro_rules! tlog {
         ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
@@ -5159,7 +5139,11 @@ async fn import_pbf_task(
     tlog!("📥 [PBF] Starting import of {}", pbf_path.display());
     let log_c = Arc::clone(&task_log);
     let result = tokio::task::spawn_blocking(move || {
-        metaverse_core::osm::import_pbf_with_log(&pbf_path, &osm_dir, log_c)
+        if let Some(ts) = tile_store {
+            metaverse_core::osm::import_pbf_with_store(&pbf_path, ts, Some(log_c))
+        } else {
+            metaverse_core::osm::import_pbf_with_log(&pbf_path, &osm_dir, log_c)
+        }
     }).await;
     match result {
         Ok(Ok(n)) => tlog!("✅ [PBF] Import complete: {} OSM tiles written", n),
@@ -5178,6 +5162,7 @@ async fn download_osm_regions_task(
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
     conv_lock: Arc<std::sync::Mutex<()>>,
+    tile_store: Option<Arc<metaverse_core::tile_store::TileStore>>,
 ) {
     macro_rules! tlog {
         ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
@@ -5239,10 +5224,16 @@ async fn download_osm_regions_task(
                     let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
                     let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
                     let lock_c = Arc::clone(&conv_lock);
+                    let ts_c = tile_store.clone();
                     tokio::task::spawn_blocking(move || {
                         let _guard = lock_c.lock().unwrap();
                         macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
-                        match metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c)) {
+                        let result = if let Some(ts) = ts_c {
+                            metaverse_core::osm::import_pbf_with_store(&dest_c, ts, Some(Arc::clone(&task_log_c)))
+                        } else {
+                            metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c))
+                        };
+                        match result {
                             Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
                                 if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
                             Err(e) => tlog2!("❌ [OSM] conversion failed: {}", e),
@@ -5303,10 +5294,16 @@ async fn download_osm_regions_task(
                         let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
                         let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
                         let lock_c = Arc::clone(&conv_lock);
+                        let ts_c = tile_store.clone();
                         tokio::task::spawn_blocking(move || {
                             let _guard = lock_c.lock().unwrap();
                             macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
-                            match metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c)) {
+                            let result = if let Some(ts) = ts_c {
+                                metaverse_core::osm::import_pbf_with_store(&dest_c, ts, Some(Arc::clone(&task_log_c)))
+                            } else {
+                                metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c))
+                            };
+                            match result {
                                 Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
                                     if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
                                 Err(e) => tlog2!("❌ [OSM] {} conversion failed: {}", dest_c.file_name().unwrap_or_default().to_string_lossy(), e),
@@ -5331,6 +5328,7 @@ async fn bulk_download_task(
     overpass_endpoints: Vec<String>,
     opentopo_api_key: String,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
+    tile_store: Option<Arc<metaverse_core::tile_store::TileStore>>,
 ) {
     use metaverse_core::elevation::ElevationSource as _;
 
@@ -5338,6 +5336,13 @@ async fn bulk_download_task(
     let elev_dir = world_dir.join("elevation_cache");
     std::fs::create_dir_all(&osm_dir).ok();
     std::fs::create_dir_all(&elev_dir).ok();
+
+    // Open one OsmDiskCache for the entire bulk task — avoids repeated DB opens
+    let osm_cache = if let Some(ref ts) = tile_store {
+        metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(ts))
+    } else {
+        metaverse_core::osm::OsmDiskCache::new(&osm_dir)
+    };
 
     for bbox in &bboxes {
         // ── OSM: 0.01° tiles ──────────────────────────────────────────────
@@ -5347,12 +5352,13 @@ async fn bulk_download_task(
             let mut lon = (bbox.west / tile).floor() * tile;
             while lon < bbox.east {
                 let (s, w, n, e) = (lat, lon, lat + tile, lon + tile);
-                let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
-                if cache.load(s, w, n, e).is_none() {
-                    let osm_dir2 = osm_dir.clone();
+                if !osm_cache.exists(s, w, n, e) {
                     let ep = overpass_endpoints.clone();
+                    let cache_ref = metaverse_core::osm::OsmDiskCache::from_arc(
+                        osm_cache.tile_store_arc()
+                    );
                     let _ = tokio::task::spawn_blocking(move || {
-                        metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir2, &ep)
+                        metaverse_core::osm::fetch_osm_with_cache(s, w, n, e, &cache_ref, &ep)
                     }).await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 }
@@ -5420,36 +5426,27 @@ async fn download_osm_on_demand_task(
     std::fs::create_dir_all(&osm_dir).ok();
     let mut seen = std::collections::HashSet::<(i64, i64)>::new();
 
+    // Build one OsmDiskCache for the lifetime of this task — no repeated DB opens
+    let osm_cache = if let Some(ref ts) = tile_store {
+        metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(ts))
+    } else {
+        metaverse_core::osm::OsmDiskCache::new(&osm_dir)
+    };
+
     while let Some((s, w, n, e)) = rx.recv().await {
         let key_i = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
         if !seen.insert(key_i) { continue; } // already in-flight
 
-        // Fast check: skip if TileStore already has a valid tile
-        if let Some(ref ts) = tile_store {
-            if ts.has_osm(s, w, n, e) { seen.remove(&key_i); continue; }
-        } else {
-            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_dir);
-            if cache.load(s, w, n, e).is_some() { seen.remove(&key_i); continue; }
-        }
+        // Fast check: skip if already cached
+        if osm_cache.exists(s, w, n, e) { seen.remove(&key_i); continue; }
 
         tlog!("📥 [OSM] On-demand fetch: s={:.4} w={:.4}", s, w);
-        let osm_dir_c = osm_dir.clone();
         let endpoints: Vec<String> = metaverse_core::osm::OVERPASS_ENDPOINTS
             .iter().map(|x| x.to_string()).collect();
-        let ts_clone = tile_store.clone();
+        let cache_ref = metaverse_core::osm::OsmDiskCache::from_arc(osm_cache.tile_store_arc());
 
         let result = tokio::task::spawn_blocking(move || {
-            // fetch_osm_for_bounds checks TileStore (via OsmDiskCache) then downloads
-            let r = metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir_c, &endpoints);
-            // If TileStore available, also put directly (OsmDiskCache::new opens same DB)
-            if let (Ok(data), Some(ts)) = (&r, &ts_clone) {
-                if !data.is_empty() {
-                    if let Ok(bytes) = bincode::serialize(data) {
-                        ts.put_osm(s, w, n, e, &bytes);
-                    }
-                }
-            }
-            r
+            metaverse_core::osm::fetch_osm_with_cache(s, w, n, e, &cache_ref, &endpoints)
         }).await;
 
         match result {

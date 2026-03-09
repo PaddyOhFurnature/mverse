@@ -644,7 +644,7 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 /// file storage — pass the `world_data/osm` path as before; the TileStore is
 /// opened at `world_data/tiles.db` (one level up).
 pub struct OsmDiskCache {
-    store: crate::tile_store::TileStore,
+    store: std::sync::Arc<crate::tile_store::TileStore>,
 }
 
 impl OsmDiskCache {
@@ -655,7 +655,13 @@ impl OsmDiskCache {
             .unwrap_or_else(|e| panic!("OsmDiskCache: failed to open TileStore at {db_path:?}: {e}"));
         // Trigger cleanup of any old flat .bin files in the osm dir
         crate::tile_store::cleanup_old_tile_dir(dir);
-        Self { store }
+        Self { store: std::sync::Arc::new(store) }
+    }
+
+    /// Construct from an already-open TileStore — no second DB open, no LOCK conflict.
+    /// Used by the server which keeps the TileStore alive in SharedState.
+    pub fn from_arc(ts: std::sync::Arc<crate::tile_store::TileStore>) -> Self {
+        Self { store: ts }
     }
 
     pub fn exists(&self, s: f64, w: f64, n: f64, e: f64) -> bool {
@@ -680,6 +686,11 @@ impl OsmDiskCache {
     /// Expose the underlying TileStore for callers that need direct access.
     pub fn tile_store(&self) -> &crate::tile_store::TileStore {
         &self.store
+    }
+
+    /// Expose the underlying TileStore as Arc.
+    pub fn tile_store_arc(&self) -> std::sync::Arc<crate::tile_store::TileStore> {
+        std::sync::Arc::clone(&self.store)
     }
 }
 
@@ -712,23 +723,27 @@ pub fn fetch_osm_for_bounds(
     overpass_endpoints: &[String],
 ) -> Result<OsmData, String> {
     let cache = OsmDiskCache::new(cache_dir);
+    fetch_osm_with_cache(south, west, north, east, &cache, overpass_endpoints)
+}
 
+/// Same as `fetch_osm_for_bounds` but uses a pre-opened OsmDiskCache.
+/// Use this in contexts where the TileStore is already open (avoids LOCK conflict).
+pub fn fetch_osm_with_cache(
+    south: f64, west: f64, north: f64, east: f64,
+    cache: &OsmDiskCache,
+    overpass_endpoints: &[String],
+) -> Result<OsmData, String> {
     // Cache hit — instant
     if let Some(cached) = cache.load(south, west, north, east) {
         return Ok(cached);
     }
 
-    // No local tile — only hit Overpass if explicitly enabled OR caller supplies endpoints.
-    // Without this guard the game thread blocks 30s per chunk on a timeout.
-    // Supplying a non-empty endpoint list counts as explicit opt-in (used by the idle
-    // downloader background thread, which is allowed to block on network I/O).
     let use_overpass = !overpass_endpoints.is_empty()
         || std::env::var("METAVERSE_OVERPASS").as_deref() == Ok("1");
     if !use_overpass {
         return Err("no local tile (place PBF at world_data/map.osm.pbf)".into());
     }
 
-    // Resolve endpoints: use caller's list if provided, else fall back to public mirrors.
     let resolved: Vec<String>;
     let endpoints: &[String] = if overpass_endpoints.is_empty() {
         resolved = OVERPASS_ENDPOINTS.iter().map(|s| s.to_string()).collect();
@@ -737,7 +752,6 @@ pub fn fetch_osm_for_bounds(
         overpass_endpoints
     };
 
-    // Overpass path — runs on background threads only (game thread passes empty endpoints)
     println!("🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
     let json = query_overpass(south, west, north, east, endpoints)?;
     let data = parse_overpass_json(&json)?;
@@ -1108,7 +1122,8 @@ pub fn import_pbf_to_cache(
     pbf_path: &std::path::Path,
     cache_dir: &std::path::Path,
 ) -> Result<usize, String> {
-    import_pbf_to_cache_inner(pbf_path, cache_dir, None)
+    let cache = OsmDiskCache::new(cache_dir);
+    import_pbf_with_cache(pbf_path, &cache, None)
 }
 
 /// Same as `import_pbf_to_cache` but with a progress log sink for dashboard visibility.
@@ -1117,12 +1132,31 @@ pub fn import_pbf_with_log(
     cache_dir: &std::path::Path,
     log: Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<usize, String> {
-    import_pbf_to_cache_inner(pbf_path, cache_dir, Some(log))
+    let cache = OsmDiskCache::new(cache_dir);
+    import_pbf_with_cache(pbf_path, &cache, Some(log))
+}
+
+/// Import PBF using a pre-opened TileStore — avoids LOCK conflict in the server.
+pub fn import_pbf_with_store(
+    pbf_path: &std::path::Path,
+    ts: std::sync::Arc<crate::tile_store::TileStore>,
+    log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<usize, String> {
+    let cache = OsmDiskCache::from_arc(ts);
+    import_pbf_with_cache(pbf_path, &cache, log)
+}
+
+fn import_pbf_with_cache(
+    pbf_path: &std::path::Path,
+    cache: &OsmDiskCache,
+    progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+) -> Result<usize, String> {
+    import_pbf_to_cache_inner(pbf_path, cache, progress_log)
 }
 
 fn import_pbf_to_cache_inner(
     pbf_path: &std::path::Path,
-    cache_dir: &std::path::Path,
+    cache: &OsmDiskCache,
     progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Result<usize, String> {
     use std::collections::HashMap;
@@ -1161,8 +1195,6 @@ fn import_pbf_to_cache_inner(
     fn to_gps(coords: &[(f64, f64)]) -> Vec<crate::coordinates::GPS> {
         coords.iter().map(|&(lat, lon)| crate::coordinates::GPS::new(lat, lon, 0.0)).collect()
     }
-
-    let cache = OsmDiskCache::new(cache_dir);
 
     let fname = pbf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
     let file_mb = std::fs::metadata(pbf_path).map(|m| m.len() / 1_048_576).unwrap_or(0);
