@@ -1,5 +1,5 @@
 /// Bump this when terrain generation logic changes — invalidates all cached chunks.
-const TERRAIN_CACHE_VERSION: u32 = 12;
+const TERRAIN_CACHE_VERSION: u32 = 13; // v0.1.62: density field requires fresh fractional surface heights
 
 /// Asynchronous chunk loading subsystem
 ///

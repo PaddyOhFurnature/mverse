@@ -3882,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "metaverse_core"
-version = "0.1.61"
+version = "0.1.62"
 dependencies = [
  "async-trait",
  "axum",
