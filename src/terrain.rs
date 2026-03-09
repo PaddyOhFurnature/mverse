@@ -18,7 +18,7 @@ use crate::elevation::ElevationPipeline;
 use crate::materials::MaterialId;
 use crate::voxel::{Octree, VoxelCoord};
 use crate::chunk::ChunkId;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Per-column fractional surface height used by the smooth marching cubes pass.
 /// Maps (voxel_x, voxel_z) → sub-voxel surface Y (f32).
@@ -27,7 +27,7 @@ pub type SurfaceCache = std::collections::HashMap<(i64, i64), f32>;
 
 /// Generate terrain voxels from elevation data
 pub struct TerrainGenerator {
-    elevation: Arc<Mutex<ElevationPipeline>>,
+    elevation: Arc<RwLock<ElevationPipeline>>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
     osm_cache_dir: Option<std::path::PathBuf>,
@@ -47,7 +47,7 @@ impl TerrainGenerator {
     /// * `origin_voxel` - Voxel coordinate of origin (for ECEF conversion)
     pub fn new(elevation: ElevationPipeline, origin_gps: GPS, origin_voxel: VoxelCoord) -> Self {
         Self { 
-            elevation: Arc::new(Mutex::new(elevation)),
+            elevation: Arc::new(RwLock::new(elevation)),
             origin_gps,
             origin_voxel,
             osm_cache_dir: None,
@@ -58,7 +58,7 @@ impl TerrainGenerator {
     
     /// Create with shared elevation pipeline (for parallel chunk generation)
     pub fn with_shared_elevation(
-        elevation: Arc<Mutex<ElevationPipeline>>,
+        elevation: Arc<RwLock<ElevationPipeline>>,
         origin_gps: GPS,
         origin_voxel: VoxelCoord
     ) -> Self {
@@ -85,7 +85,7 @@ impl TerrainGenerator {
     }
     
     /// Get shared elevation pipeline (for cloning generator)
-    pub fn elevation_pipeline(&self) -> Arc<Mutex<ElevationPipeline>> {
+    pub fn elevation_pipeline(&self) -> Arc<RwLock<ElevationPipeline>> {
         Arc::clone(&self.elevation)
     }
     
@@ -107,7 +107,7 @@ impl TerrainGenerator {
         println!("Generating {}m × {}m terrain region...", size_meters, size_meters);
         
         // Lock elevation pipeline
-        let elevation = self.elevation.lock()
+        let elevation = self.elevation.read()
             .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // Calculate GPS coordinates for corner points
@@ -361,7 +361,7 @@ impl TerrainGenerator {
                 let sample_gps =
                     crate::coordinates::ECEF::new(ecef_x, ecef_y, ecef_z).to_gps();
 
-                let surface_elevation = elevation.lock().unwrap().query(&sample_gps)
+                let surface_elevation = elevation.read().unwrap().query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
                 // SRTM/Copernicus = orthometric (EGM96). origin_gps.alt = WGS-84 ellipsoidal.
@@ -469,7 +469,7 @@ impl TerrainGenerator {
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
                             let n = crate::elevation::egm96_undulation(ga.lat, ga.lon);
-                            elev_arc.lock().unwrap()
+                            elev_arc.read().unwrap()
                                 .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
                                 .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
@@ -478,7 +478,7 @@ impl TerrainGenerator {
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
                             let n = crate::elevation::egm96_undulation(gb.lat, gb.lon);
-                            elev_arc.lock().unwrap()
+                            elev_arc.read().unwrap()
                                 .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
                                 .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
@@ -568,7 +568,7 @@ impl TerrainGenerator {
                                 let lat = ga.lat * (1.0 - t as f64) + gb.lat * t as f64;
                                 let lon = ga.lon * (1.0 - t as f64) + gb.lon * t as f64;
                                 let n_ww = crate::elevation::egm96_undulation(lat, lon);
-                                elevation.lock().unwrap()
+                                elevation.read().unwrap()
                                     .query(&crate::coordinates::GPS::new(lat, lon, 0.0))
                                     .map(|e| self.origin_voxel.y + (e.meters + n_ww - self.origin_gps.alt) as i64)
                                     .unwrap_or(self.origin_voxel.y)
@@ -636,7 +636,7 @@ impl TerrainGenerator {
                     let ya = aero_col_lookup.get(&(vax, vaz))
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
-                            elev_arc2.lock().unwrap()
+                            elev_arc2.read().unwrap()
                                 .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
                                 .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
@@ -644,7 +644,7 @@ impl TerrainGenerator {
                     let yb = aero_col_lookup.get(&(vbx, vbz))
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
-                            elev_arc2.lock().unwrap()
+                            elev_arc2.read().unwrap()
                                 .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
                                 .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
@@ -839,7 +839,7 @@ impl TerrainGenerator {
     /// - AIR above surface
     pub fn generate_column(&self, octree: &mut Octree, gps: &GPS) -> Result<(), String> {
         // Lock elevation pipeline
-        let elevation = self.elevation.lock()
+        let elevation = self.elevation.read()
             .map_err(|e| format!("Failed to lock elevation pipeline: {}", e))?;
         
         // Query elevation at this lat/lon

@@ -760,7 +760,15 @@ struct CachedTiffData {
 
 thread_local! {
     static TIFF_CACHE: RefCell<HashMap<PathBuf, Arc<CachedTiffData>>> = RefCell::new(HashMap::new());
-    static HGT_CACHE:  RefCell<HashMap<PathBuf, Arc<Vec<u8>>>>        = RefCell::new(HashMap::new());
+}
+
+// HGT tiles are large (up to 25 MB each) — use a global cache shared across all
+// threads so each tile is only read from disk once regardless of how many Rayon
+// workers are running.
+use std::sync::OnceLock;
+fn global_hgt_cache() -> &'static std::sync::RwLock<HashMap<PathBuf, Arc<Vec<u8>>>> {
+    static CACHE: OnceLock<std::sync::RwLock<HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
 }
 
 fn cached_tiff_get(path: &PathBuf) -> Option<Arc<CachedTiffData>> {
@@ -772,11 +780,13 @@ fn cached_tiff_insert(path: PathBuf, data: Arc<CachedTiffData>) {
 }
 
 fn cached_hgt_get(path: &PathBuf) -> Option<Arc<Vec<u8>>> {
-    HGT_CACHE.with(|c| c.borrow().get(path).cloned())
+    global_hgt_cache().read().ok()?.get(path).cloned()
 }
 
 fn cached_hgt_insert(path: PathBuf, data: Arc<Vec<u8>>) {
-    HGT_CACHE.with(|c| { c.borrow_mut().insert(path, data); });
+    if let Ok(mut w) = global_hgt_cache().write() {
+        w.insert(path, data);
+    }
 }
 
 /// Extract elevation from a GeoTIFF or HGT file at the given GPS coordinate.

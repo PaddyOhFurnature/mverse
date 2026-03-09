@@ -62,7 +62,7 @@ pub fn generate_chunk_terrain(
     generator: &TerrainGenerator,
     chunk_id: &ChunkId
 ) -> Result<Octree, String> {
-    // TerrainGenerator is already thread-safe with Arc<Mutex<ElevationPipeline>>
+    // TerrainGenerator is thread-safe with Arc<RwLock<ElevationPipeline>> —
     generator.generate_chunk(chunk_id).map(|(octree, _)| octree)
 }
 
