@@ -1040,6 +1040,7 @@ fn main() {
     // Detect first run before creating/loading the identity.
     // --temp-identity flag skips signup (used for multi-instance testing).
     let is_temp = std::env::args().any(|arg| arg == "--temp-identity");
+    let skip_construct = std::env::args().any(|arg| arg == "--noconstruct");
     // --server http://192.168.1.x:8080  — server base URL for world object API
     let server_url: String = std::env::args()
         .skip_while(|a| a != "--server")
@@ -1239,7 +1240,8 @@ fn main() {
     let mut placement: Option<PlacementScreen> = None;
 
     // Always start in the Construct; player enters Open World through the portal.
-    let mut game_mode = GameMode::Construct;
+    // Pass --noconstruct to skip straight to Open World for testing.
+    let mut game_mode = if skip_construct { GameMode::OpenWorld } else { GameMode::Construct };
     
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
@@ -1554,14 +1556,15 @@ fn main() {
     player.camera_yaw = player_state.yaw;
     player.camera_pitch = player_state.pitch;
     
-    // In Construct mode (always on startup), override position to Construct spawn.
-    // Ignore any saved open-world position — Construct has its own floor at local Y=0.
-    // Spawn 2.5 m above floor so the capsule (bottom = spawn_y - 0.9) has clear air.
-    let spawn_local = metaverse_core::construct::SPAWN_POINT + glam::Vec3::new(0.0, 2.5, 0.0);
-    let spawn_ecef = physics.local_to_ecef(spawn_local);
-    player.position = spawn_ecef;
-    if let Some(body) = physics.bodies.get_mut(player.body_handle) {
-        body.set_translation(vector![spawn_local.x, spawn_local.y, spawn_local.z], true);
+    // In Construct mode, override position to Construct spawn (its own floor at Y=0).
+    // In OpenWorld (--noconstruct or after portal entry), keep the saved position.
+    if matches!(game_mode, GameMode::Construct) {
+        let spawn_local = metaverse_core::construct::SPAWN_POINT + glam::Vec3::new(0.0, 2.5, 0.0);
+        let spawn_ecef = physics.local_to_ecef(spawn_local);
+        player.position = spawn_ecef;
+        if let Some(body) = physics.bodies.get_mut(player.body_handle) {
+            body.set_translation(vector![spawn_local.x, spawn_local.y, spawn_local.z], true);
+        }
     }
 
     // Determine which chunk the player is actually standing in and prioritise it
@@ -2023,9 +2026,15 @@ fn main() {
                         if let Some(pos) = pending_mesh_queue.iter().position(|id| *id == player_chunk) {
                             pending_mesh_queue.swap(0, pos);
                         }
-                        // Rate-limited to 3 per frame: building mesh+physics for 15 chunks
-                        // simultaneously blocks the render thread for multiple seconds.
+                        // Rate-limited to 3 mesh builds per frame; collider is expensive
+                        // (~300-500ms/chunk) so only build it for the player chunk + nearby
+                        // chunks (< 90m). Far chunks get a render mesh only — collider built
+                        // lazily in the approach section below when the player gets close.
                         const MESH_PER_FRAME: usize = 3;
+                        const INITIAL_COLLIDER_RANGE_M: f32 = 90.0;
+                        const INITIAL_COLLIDER_PER_FRAME: usize = 1;
+                        let mut initial_colliders_built = 0;
+                        let player_local_pos_init = physics.ecef_to_local(&player.position);
                         let batch_end = pending_mesh_queue.len().min(MESH_PER_FRAME);
                         let new_chunks: Vec<_> = pending_mesh_queue.drain(..batch_end).collect();
                         for chunk_id in &new_chunks {
@@ -2041,9 +2050,16 @@ fn main() {
                                 if !mesh.vertices.is_empty() {
                                     for v in &mut mesh.vertices { v.position += offset; }
                                     chunk_data.mesh_buffer = Some(MeshBuffer::from_mesh(&context.device, &mesh));
-                                    let collider = metaverse_core::physics::create_collision_from_mesh(
-                                        &mut physics, &mesh, &origin_voxel, None);
-                                    chunk_data.collider = Some(collider);
+                                    let chunk_dist = (player_local_pos_init - offset).length();
+                                    let is_player_chunk = *chunk_id == player_chunk;
+                                    if (is_player_chunk || chunk_dist < INITIAL_COLLIDER_RANGE_M)
+                                        && initial_colliders_built < INITIAL_COLLIDER_PER_FRAME
+                                    {
+                                        let collider = metaverse_core::physics::create_collision_from_mesh(
+                                            &mut physics, &mesh, &origin_voxel, None);
+                                        chunk_data.collider = Some(collider);
+                                        initial_colliders_built += 1;
+                                    }
                                 }
                                 // Water surface mesh (flat quads on top of WATER voxels)
                                 let mut water_mesh = extract_water_surface_mesh(&chunk_data.octree, &min_v, &max_v);
