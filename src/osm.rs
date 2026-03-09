@@ -639,53 +639,47 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
 
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
-const OSM_CACHE_VERSION: u32 = 8;
-
-/// Cache OSM tile data on disk in binary (bincode) format.
-/// Key is derived from the bounding box rounded to 4 decimal places.
+/// Cache OSM tile data backed by RocksDB TileStore.
+/// The `dir` parameter is kept for API compatibility but is no longer used for
+/// file storage — pass the `world_data/osm` path as before; the TileStore is
+/// opened at `world_data/tiles.db` (one level up).
 pub struct OsmDiskCache {
-    dir: PathBuf,
+    store: crate::tile_store::TileStore,
 }
 
 impl OsmDiskCache {
     pub fn new(dir: &Path) -> Self {
-        let _ = fs::create_dir_all(dir);
-        Self { dir: dir.to_owned() }
+        // Derive tiles.db path from the osm subdir: world_data/osm → world_data/tiles.db
+        let db_path = dir.parent().unwrap_or(dir).join("tiles.db");
+        let store = crate::tile_store::TileStore::open(&db_path)
+            .unwrap_or_else(|e| panic!("OsmDiskCache: failed to open TileStore at {db_path:?}: {e}"));
+        // Trigger cleanup of any old flat .bin files in the osm dir
+        crate::tile_store::cleanup_old_tile_dir(dir);
+        Self { store }
     }
 
-    fn path(&self, s: f64, w: f64, n: f64, e: f64) -> PathBuf {
-        let name = format!("osm_{:.4}_{:.4}_{:.4}_{:.4}.bin", s, w, n, e);
-        self.dir.join(name)
-    }
-
-    /// Returns true only if the tile file exists AND has the current cache version.
-    /// Tiles written by older code versions are treated as absent and will be re-converted.
     pub fn exists(&self, s: f64, w: f64, n: f64, e: f64) -> bool {
-        let p = self.path(s, w, n, e);
-        if let Ok(mut f) = std::fs::File::open(&p) {
-            use std::io::Read;
-            let mut buf = [0u8; 4];
-            if f.read_exact(&mut buf).is_ok() {
-                return u32::from_le_bytes(buf) == OSM_CACHE_VERSION;
-            }
-        }
-        false
+        self.store.has_osm(s, w, n, e)
     }
 
     pub fn load(&self, s: f64, w: f64, n: f64, e: f64) -> Option<OsmData> {
-        let bytes = fs::read(self.path(s, w, n, e)).ok()?;
-        if bytes.len() < 4 { return None; }
-        let version = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        if version != OSM_CACHE_VERSION { return None; }
-        bincode::deserialize(&bytes[4..]).ok()
+        let bytes = self.store.get_osm(s, w, n, e)?;
+        bincode::deserialize(&bytes).ok()
     }
 
     pub fn save(&self, s: f64, w: f64, n: f64, e: f64, data: &OsmData) {
+        // Validate before storing — never checksum corrupt data
         if let Ok(payload) = bincode::serialize(data) {
-            let mut bytes = OSM_CACHE_VERSION.to_le_bytes().to_vec();
-            bytes.extend_from_slice(&payload);
-            let _ = fs::write(self.path(s, w, n, e), bytes);
+            // Verify round-trip before committing
+            if bincode::deserialize::<OsmData>(&payload).is_ok() {
+                self.store.put_osm(s, w, n, e, &payload);
+            }
         }
+    }
+
+    /// Expose the underlying TileStore for callers that need direct access.
+    pub fn tile_store(&self) -> &crate::tile_store::TileStore {
+        &self.store
     }
 }
 
