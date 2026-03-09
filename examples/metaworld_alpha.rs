@@ -1299,6 +1299,8 @@ fn main() {
     osm_elev_pipeline.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
     osm_elev_pipeline.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
     let osm_cache_dir = data_dir.join("osm");
+    // Trigger cleanup of old flat-file elevation cache tiles in the background
+    metaverse_core::tile_store::cleanup_old_tile_dir(&elev_cache);
     
     // User content layer - separates edits from base terrain
     let user_content = Arc::new(Mutex::new(UserContentLayer::new()));
@@ -1323,8 +1325,20 @@ fn main() {
         println!("📁 Created world data directory: {:?}", world_dir);
     }
 
-    // Load persisted voxel ops from disk into user_content so chunk_manager
-    // can include them in state sync with reconnecting peers.
+    // Open RocksDB world store (migrates any existing flat-file ops on first open)
+    let world_store_arc = metaverse_core::world_store::WorldStore::open(
+        &world_dir.join("world.db"),
+        &world_dir,
+    ).ok().map(std::sync::Arc::new);
+    if let Some(ref ws) = world_store_arc {
+        user_content.lock().unwrap().set_world_store(std::sync::Arc::clone(ws));
+        println!("💾 WorldStore opened: {} ops", ws.op_count());
+    } else {
+        eprintln!("⚠️  WorldStore unavailable — falling back to flat-file ops");
+    }
+
+    // Load persisted voxel ops into user_content.
+    // When WorldStore is set, load_chunk reads from RocksDB; otherwise falls back to flat files.
     {
         let mut uc = user_content.lock().unwrap();
         let chunks_dir = world_dir.join("chunks");

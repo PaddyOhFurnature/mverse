@@ -22,6 +22,7 @@ use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Parcel ownership bounds
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,6 +68,9 @@ pub struct UserContentLayer {
     /// Derived from user's Ed25519 signing key via SHA-256.
     /// When set, chunk files are encrypted on save and decrypted on load.
     encryption_key: Option<[u8; 32]>,
+
+    /// RocksDB world state — when set, ops are persisted here instead of flat files.
+    world_store: Option<Arc<crate::world_store::WorldStore>>,
 }
 
 impl UserContentLayer {
@@ -84,6 +88,7 @@ impl UserContentLayer {
             access_grants: HashMap::new(),
             config,
             encryption_key: None,
+            world_store: None,
         }
     }
     
@@ -237,6 +242,12 @@ impl UserContentLayer {
         self.encryption_key = Some(key);
     }
 
+    /// Attach a WorldStore for persistent voxel op storage.
+    /// Once set, save_chunks/load_chunk will use RocksDB instead of flat files.
+    pub fn set_world_store(&mut self, ws: Arc<crate::world_store::WorldStore>) {
+        self.world_store = Some(ws);
+    }
+
     /// Derive an encryption key from an Ed25519 signing key.
     ///
     /// Returns 32 bytes suitable for ChaCha20-Poly1305.
@@ -344,16 +355,13 @@ impl UserContentLayer {
     /// # Returns
     /// HashMap mapping chunk ID to number of operations saved
     pub fn save_chunks<P: AsRef<Path>>(&self, base_dir: P) -> std::io::Result<HashMap<ChunkId, usize>> {
-        let chunks_dir = base_dir.as_ref().join("chunks");
-
-        // Group operations by ALL affected chunks, deduplicating by signature
-        // to guard against any duplicate accumulation in the op_log.
+        // Group operations by ALL affected chunks, deduplicating by signature.
         let mut ops_by_chunk: HashMap<ChunkId, Vec<&SignedOperation>> = HashMap::new();
         let mut seen_sigs: std::collections::HashSet<[u8; 64]> = std::collections::HashSet::new();
 
         for op in &self.op_log {
             if !seen_sigs.insert(op.signature) {
-                continue; // skip duplicates
+                continue;
             }
             for chunk_id in op.affecting_chunks() {
                 ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
@@ -362,27 +370,46 @@ impl UserContentLayer {
         
         let mut result = HashMap::new();
         
-        // Save each chunk's operations to its own file (binary format)
-        for (chunk_id, ops) in ops_by_chunk {
-            let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
-            std::fs::create_dir_all(&chunk_dir)?;
-            
-            // Sort in causal replay order
-            let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
-            ops_owned.sort_by(|a, b| a.replay_cmp(b));
-            
-            let ops_file = chunk_dir.join("operations.bin");
-            let bytes = bincode::serialize(&ops_owned)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            let out_bytes = if let Some(key) = &self.encryption_key {
-                encrypt_chunk_bytes(&bytes, key, &chunk_id)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
-            } else {
-                bytes
-            };
-            std::fs::write(&ops_file, out_bytes)?;
-            
-            result.insert(chunk_id, ops_owned.len());
+        if let Some(ws) = &self.world_store {
+            // WorldStore path: persist via RocksDB
+            for (chunk_id, ops) in ops_by_chunk {
+                let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
+                ops_owned.sort_by(|a, b| a.replay_cmp(b));
+                let cx = chunk_id.x as i32;
+                let cy = chunk_id.y as i32;
+                let cz = chunk_id.z as i32;
+                for op in &ops_owned {
+                    if let Ok(bytes) = bincode::serialize(op) {
+                        ws.queue_op(cx, cy, cz, op.lamport, &op.signature, &bytes);
+                    }
+                }
+                ws.flush_pending();
+                let count = ops_owned.len();
+                result.insert(chunk_id, count);
+            }
+        } else {
+            // Flat-file fallback
+            let chunks_dir = base_dir.as_ref().join("chunks");
+            for (chunk_id, ops) in ops_by_chunk {
+                let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
+                std::fs::create_dir_all(&chunk_dir)?;
+                
+                let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
+                ops_owned.sort_by(|a, b| a.replay_cmp(b));
+                
+                let ops_file = chunk_dir.join("operations.bin");
+                let bytes = bincode::serialize(&ops_owned)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                let out_bytes = if let Some(key) = &self.encryption_key {
+                    encrypt_chunk_bytes(&bytes, key, &chunk_id)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+                } else {
+                    bytes
+                };
+                std::fs::write(&ops_file, out_bytes)?;
+                
+                result.insert(chunk_id, ops_owned.len());
+            }
         }
         
         Ok(result)
@@ -397,19 +424,36 @@ impl UserContentLayer {
     /// # Returns
     /// Number of operations loaded
     pub fn load_chunk<P: AsRef<Path>>(&mut self, base_dir: P, chunk_id: &ChunkId) -> std::io::Result<usize> {
+        if let Some(ws) = self.world_store.clone() {
+            // WorldStore path: read from RocksDB
+            let cx = chunk_id.x as i32;
+            let cy = chunk_id.y as i32;
+            let cz = chunk_id.z as i32;
+            let ops_bytes = ws.ops_for_chunk(cx, cy, cz);
+            let mut count = 0;
+            for (_lamport, bytes) in ops_bytes {
+                if let Ok(op) = bincode::deserialize::<SignedOperation>(&bytes) {
+                    if self.seen_sigs.insert(op.signature) {
+                        self.op_log.push(op);
+                        count += 1;
+                    }
+                }
+            }
+            return Ok(count);
+        }
+
+        // Flat-file fallback
         let ops_file = base_dir.as_ref()
             .join("chunks")
             .join(chunk_id.to_path_string())
             .join("operations.bin");
         
-        // If file doesn't exist, that's OK (chunk has no edits)
         if !ops_file.exists() {
             return Ok(0);
         }
         
         let raw = std::fs::read(ops_file)?;
 
-        // Decrypt if file is encrypted (magic header 0xCC 0x01)
         let bytes = if raw.starts_with(&[0xCC, 0x01]) {
             if let Some(key) = &self.encryption_key {
                 decrypt_chunk_bytes(&raw, key, chunk_id)
@@ -424,7 +468,6 @@ impl UserContentLayer {
             raw
         };
 
-        // Try new SignedOperation format first
         if let Ok(ops) = bincode::deserialize::<Vec<SignedOperation>>(&bytes) {
             let mut count = 0;
             for op in ops {
@@ -435,7 +478,6 @@ impl UserContentLayer {
             }
             return Ok(count);
         }
-        // Fall back: legacy VoxelOperation format (auto-migrate)
         #[allow(deprecated)]
         if let Ok(legacy_ops) = bincode::deserialize::<Vec<VoxelOperation>>(&bytes) {
             let mut count = 0;

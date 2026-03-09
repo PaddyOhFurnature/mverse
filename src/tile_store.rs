@@ -316,6 +316,26 @@ impl TileStore {
     pub fn srtm_count(&self)    -> u64 { self.tile_count(CF_SRTM) }
     pub fn terrain_count(&self) -> u64 { self.tile_count(CF_TERRAIN) }
 
+    /// Iterate all stored OSM tile coordinates.
+    /// Decodes each 16-byte key back to (s, w, n, e) float pairs.
+    /// Used for DHT announce-all at startup.
+    pub fn iter_osm_coords(&self) -> Vec<(f64, f64, f64, f64)> {
+        let Some(cf) = self.db.cf_handle(CF_OSM) else { return vec![] };
+        let mut result = Vec::new();
+        for item in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            if let Ok((key, _)) = item {
+                if key.len() == 16 {
+                    let s = i32::from_be_bytes(key[0..4].try_into().unwrap()) as f64 / 10000.0;
+                    let w = i32::from_be_bytes(key[4..8].try_into().unwrap()) as f64 / 10000.0;
+                    let n = i32::from_be_bytes(key[8..12].try_into().unwrap()) as f64 / 10000.0;
+                    let e = i32::from_be_bytes(key[12..16].try_into().unwrap()) as f64 / 10000.0;
+                    result.push((s, w, n, e));
+                }
+            }
+        }
+        result
+    }
+
     /// Scan all tiles in a CF and verify checksums.
     /// Returns `(total, corrupt)` — corrupt entries are deleted automatically.
     pub fn verify_cf(&self, cf_name: &str) -> (u64, u64) {

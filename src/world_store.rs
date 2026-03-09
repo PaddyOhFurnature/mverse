@@ -129,6 +129,12 @@ pub struct WorldStore {
     pending: Arc<Mutex<Vec<PendingOp>>>,
 }
 
+impl std::fmt::Debug for WorldStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorldStore").finish_non_exhaustive()
+    }
+}
+
 impl WorldStore {
     /// Open (or create) the world database at `path`.
     /// Runs one-time migration from flat `operations.bin` files if needed.

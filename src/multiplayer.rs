@@ -1736,19 +1736,11 @@ impl MultiplayerSystem {
     /// Scan a local OSM cache directory and announce every tile already on disk.
     /// Call once on startup so peers can find tiles this node caches.
     pub fn announce_cached_osm_tiles(&self, cache_dir: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(cache_dir) else { return };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            // filenames: osm_S_W_N_E.bin  e.g. osm_-27.4600_153.0300_-27.4500_153.0400.bin
-            if !name.starts_with("osm_") || !name.ends_with(".bin") { continue; }
-            let inner = &name[4..name.len()-4]; // strip "osm_" prefix and ".bin"
-            let parts: Vec<&str> = inner.split('_').collect();
-            // parts may be like ["", "27.4600", "153.0300", "", "27.4500", "153.0400"]
-            // because negative numbers produce extra '_' splits; re-join carefully
-            if let Some((s, w, n, e)) = parse_osm_filename_coords(inner) {
-                self.announce_osm_tile(s, w, n, e);
-            }
+        // OsmDiskCache::new opens the TileStore and triggers old-file cleanup.
+        // We then iterate all stored tile keys and announce each to the DHT.
+        let cache = crate::osm::OsmDiskCache::new(cache_dir);
+        for (s, w, n, e) in cache.tile_store().iter_osm_coords() {
+            self.announce_osm_tile(s, w, n, e);
         }
     }
 
@@ -2135,34 +2127,6 @@ fn peer_id_to_token(peer_id: &PeerId) -> u16 {
     token
 }
 
-/// Parse `s, w, n, e` from the inner part of an OSM cache filename.
-/// Input: the part between "osm_" and ".bin", e.g. "-27.4600_153.0300_-27.4500_153.0400".
-/// Returns None if parsing fails.
-fn parse_osm_filename_coords(inner: &str) -> Option<(f64, f64, f64, f64)> {
-    // The format is S_W_N_E where each value may start with '-'.
-    // We split on '_' but negative values mean the first char after a separator is '-'.
-    // Strategy: find the four numbers by splitting on '_' while allowing '-' after '_'.
-    let mut nums = Vec::with_capacity(4);
-    let mut current = String::new();
-    let mut chars = inner.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '_' {
-            if let Ok(v) = current.parse::<f64>() { nums.push(v); }
-            current.clear();
-            // If next char is '-', consume it as part of the next number
-            if chars.peek() == Some(&'-') {
-                current.push(chars.next().unwrap());
-            }
-        } else {
-            current.push(c);
-        }
-    }
-    if !current.is_empty() {
-        if let Ok(v) = current.parse::<f64>() { nums.push(v); }
-    }
-    if nums.len() == 4 { Some((nums[0], nums[1], nums[2], nums[3])) } else { None }
-}
-
 /// Background network thread runner
 ///
 /// Runs in a dedicated thread with tokio runtime.
@@ -2453,13 +2417,17 @@ pub fn chunk_voxel_topic(id: &ChunkId) -> String {
 }
 
 /// Background thread that fetches tiles queued in the idle queue.
-/// Runs until the process exits. Fetches one tile at a time, saves to disk, announces via DHT.
+/// Runs until the process exits. Fetches one tile at a time, saves to DB, announces via DHT.
 fn idle_downloader_thread(
     queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
     data_dir: std::path::PathBuf,
     cmd_tx: crossbeam::channel::Sender<NetworkCommand>,
 ) {
     use crate::tile_protocol::TileRequest;
+    // Open TileStore once at thread start — OsmDiskCache triggers old-file cleanup
+    let osm_dir = data_dir.join("osm");
+    std::fs::create_dir_all(&osm_dir).ok();
+    let osm_cache = crate::osm::OsmDiskCache::new(&osm_dir);
     loop {
         let task = {
             let mut q = match queue.lock() {
@@ -2474,12 +2442,8 @@ fn idle_downloader_thread(
         };
         match task {
             TileRequest::OsmTile { s, w, n, e } => {
-                let osm_dir = data_dir.join("osm");
-                std::fs::create_dir_all(&osm_dir).ok();
-                let cache = crate::osm::OsmDiskCache::new(&osm_dir);
-                if cache.load(s, w, n, e).is_none() {
-                    // Pass the public Overpass mirror list — this is a background thread
-                    // so network blocking is fine. Tries all mirrors in order.
+                if osm_cache.load(s, w, n, e).is_none() {
+                    // Not in DB — fetch from Overpass, save via OsmDiskCache → TileStore
                     let endpoints: Vec<String> = crate::osm::OVERPASS_ENDPOINTS
                         .iter().map(|s| s.to_string()).collect();
                     match crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir, &endpoints) {
