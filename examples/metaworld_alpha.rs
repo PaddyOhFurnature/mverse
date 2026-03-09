@@ -1301,6 +1301,7 @@ fn main() {
     let osm_cache_dir = data_dir.join("osm");
     // Trigger cleanup of old flat-file elevation cache tiles in the background
     metaverse_core::tile_store::cleanup_old_tile_dir(&elev_cache);
+    metaverse_core::tile_store::cleanup_old_srtm_dir(&elev_cache);
     
     // User content layer - separates edits from base terrain
     let user_content = Arc::new(Mutex::new(UserContentLayer::new()));

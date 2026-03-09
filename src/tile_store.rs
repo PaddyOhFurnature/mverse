@@ -491,3 +491,77 @@ pub fn cleanup_old_tile_dir(dir: &Path) {
         }
     });
 }
+
+/// Background deletion of old flat `.hgt`/`.tif` elevation files after TileStore migration.
+///
+/// Same strategy as `cleanup_old_tile_dir`: rename the dir atomically, recreate an empty
+/// one, then delete the renamed tree from a background thread at idle I/O priority.
+pub fn cleanup_old_srtm_dir(dir: &Path) {
+    let has_elevation_files = std::fs::read_dir(dir)
+        .ok()
+        .and_then(|mut rd| {
+            for _ in 0..5 {
+                if let Some(Ok(e)) = rd.next() {
+                    let ext = e.path().extension()
+                        .and_then(|x| x.to_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    if ext == "hgt" || ext == "tif" || ext == "tiff" {
+                        return Some(true);
+                    }
+                }
+            }
+            None
+        })
+        .unwrap_or(false);
+
+    if !has_elevation_files {
+        return;
+    }
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let dir_name = dir.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("elevation_cache");
+    let parent = dir.parent().unwrap_or(dir);
+    let old_path = parent.join(format!("{}_deleting_{}", dir_name, ts));
+
+    if let Err(e) = std::fs::rename(dir, &old_path) {
+        eprintln!("cleanup_old_srtm_dir: rename failed: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("cleanup_old_srtm_dir: mkdir failed: {e}");
+        return;
+    }
+
+    let old_path_owned = old_path.clone();
+    eprintln!("🗑  Old SRTM dir detected → renamed to {:?}, deleting in background…", old_path_owned);
+
+    std::thread::spawn(move || {
+        let status = std::process::Command::new("ionice")
+            .args(["-c3", "find"])
+            .arg(&old_path_owned)
+            .args(["-type", "f", "-delete"])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                let _ = std::fs::remove_dir_all(&old_path_owned);
+                eprintln!("🗑  Old SRTM dir deleted: {:?}", old_path_owned);
+            }
+            _ => {
+                let _ = std::process::Command::new("find")
+                    .arg(&old_path_owned)
+                    .args(["-type", "f", "-delete"])
+                    .status();
+                let _ = std::fs::remove_dir_all(&old_path_owned);
+                eprintln!("🗑  Old SRTM dir deleted (no ionice): {:?}", old_path_owned);
+            }
+        }
+    });
+}

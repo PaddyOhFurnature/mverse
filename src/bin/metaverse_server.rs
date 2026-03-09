@@ -364,6 +364,14 @@ struct AppState {
     srtm_priority_tx: Option<tokio::sync::mpsc::Sender<(i32, i32)>>,
     /// Channel to the on-demand OSM tile downloader — send (s,w,n,e) to fetch on first request.
     osm_priority_tx: Option<tokio::sync::mpsc::Sender<(f64, f64, f64, f64)>>,
+    /// Cumulative tiles served since startup (for periodic stats).
+    tiles_served: u64,
+    /// Cumulative tile misses (tile not in cache, relayed miss back to peer).
+    tiles_not_found: u64,
+    /// Peer events suppressed since last peer-log flush (rate-limit noisy churn).
+    peer_events_suppressed: u32,
+    /// Last time a peer connect/disconnect was actually written to the log.
+    last_peer_event_log: Instant,
 }
 
 impl AppState {
@@ -403,6 +411,10 @@ impl AppState {
             osm_priority_tx: None,
             shed_cooldown: HashMap::new(),
             last_shed_at: Instant::now() - Duration::from_secs(3600),
+            tiles_served: 0,
+            tiles_not_found: 0,
+            peer_events_suppressed: 0,
+            last_peer_event_log: Instant::now() - Duration::from_secs(3600),
         }
     }
 
@@ -412,6 +424,24 @@ impl AppState {
         self.log.push_back(entry.clone());
         while self.log.len() > self.config.ui.max_log_entries { self.log.pop_front(); }
         if self.config.headless { println!("{}", entry); }
+    }
+
+    /// Rate-limited peer event logging. At most one log entry every 5 seconds;
+    /// excess events are counted and summarised in the next allowed entry.
+    fn log_peer_event(&mut self, msg: impl Into<String>) {
+        let cooldown = Duration::from_secs(5);
+        if self.last_peer_event_log.elapsed() >= cooldown {
+            // Flush any suppressed count first
+            if self.peer_events_suppressed > 0 {
+                let n = self.peer_events_suppressed;
+                self.peer_events_suppressed = 0;
+                self.log(format!("… ({n} peer event(s) suppressed)"));
+            }
+            self.last_peer_event_log = Instant::now();
+            self.log(msg);
+        } else {
+            self.peer_events_suppressed += 1;
+        }
     }
 
     fn refresh_sys(&mut self) {
@@ -486,9 +516,8 @@ impl AppState {
             self.shedding_relay = false;
         }
 
-        // Periodic debug stats (every 60s when log_level = "debug")
-        if (self.config.log_level == "debug" || self.config.log_level == "trace")
-            && self.last_debug_log.elapsed() >= Duration::from_secs(60)
+        // Periodic stats every 60s — always logged (not only in debug mode)
+        if self.last_debug_log.elapsed() >= Duration::from_secs(60)
         {
             self.last_debug_log = Instant::now();
             let ram_pct = if self.ram_total_mb > 0 {
@@ -498,16 +527,15 @@ impl AppState {
                 self.swap_used_mb * 100 / self.swap_total_mb
             } else { 0 };
             let msg = format!(
-                "🔍 [DEBUG] peers={} circuits={} | \
-                 proc_rss={}MB | \
-                 sys_ram={}/{}MB ({}%) | \
-                 swap={}/{}MB ({}%) | \
-                 cpu={:.1}%",
+                "📊 peers={} circuits={} tiles=✅{}❌{} | \
+                 proc={}MB sys={}/{}MB({}%) swap={}%  cpu={:.1}%",
                 self.connected_peers.len(),
                 self.active_circuits.len(),
+                self.tiles_served,
+                self.tiles_not_found,
                 self.proc_rss_mb,
                 self.ram_used_mb, self.ram_total_mb, ram_pct,
-                self.swap_used_mb, self.swap_total_mb, swap_pct,
+                swap_pct,
                 self.cpu_pct,
             );
             self.log(msg);
@@ -1255,7 +1283,7 @@ fn handle_swarm_event(
                 return actions;
             }
             state.connected_peers.insert(peer_id, (Instant::now(), addr.clone(), "unknown".to_string()));
-            state.log(format!("🔗 Connected  {} via {}", AppState::short(&pid_str), short_addr(&addr)));
+            state.log_peer_event(format!("🔗 Connected  {} via {}", AppState::short(&pid_str), short_addr(&addr)));
         }
         SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
             if num_established == 0 {
@@ -1269,7 +1297,7 @@ fn handle_swarm_event(
                 }
                 state.connected_peers.remove(&peer_id);
                 let reason = cause.map(|e| format!(" (Connection error: {})", e)).unwrap_or_default();
-                state.log(format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
+                state.log_peer_event(format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -1278,7 +1306,7 @@ fn handle_swarm_event(
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             let err_str = error.to_string();
             if let Some(pid) = peer_id {
-                state.log(format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), err_str));
+                state.log_peer_event(format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), err_str));
                 // If this peer is no longer connected, remove from Kademlia to stop infinite retry.
                 // Kademlia learns peer addresses from connections and retries them after disconnect.
                 if !state.connected_peers.contains_key(&pid) {
@@ -1289,10 +1317,10 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(ev)) => match ev {
             relay::Event::ReservationReqAccepted { src_peer_id, .. } => {
                 state.total_reservations += 1;
-                state.log(format!("✅ Reservation  {}", AppState::short(&src_peer_id.to_string())));
+                state.log_peer_event(format!("✅ Reservation  {}", AppState::short(&src_peer_id.to_string())));
             }
             relay::Event::ReservationTimedOut { src_peer_id } => {
-                state.log(format!("⏱  Reservation expired  {}", AppState::short(&src_peer_id.to_string())));
+                state.log_peer_event(format!("⏱  Reservation expired  {}", AppState::short(&src_peer_id.to_string())));
             }
             relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
                 // Load shed: if CPU too high, log but still accept (libp2p handles it)
@@ -1301,7 +1329,7 @@ fn handle_swarm_event(
                         AppState::short(&src_peer_id.to_string()),
                         AppState::short(&dst_peer_id.to_string())));
                 } else {
-                    state.log(format!("🔄 Circuit  {} → {}",
+                    state.log_peer_event(format!("🔄 Circuit  {} → {}",
                         AppState::short(&src_peer_id.to_string()),
                         AppState::short(&dst_peer_id.to_string())));
                 }
@@ -1311,7 +1339,7 @@ fn handle_swarm_event(
             }
             relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
                 state.active_circuits.retain(|c| !(c.src == src_peer_id && c.dst == dst_peer_id));
-                state.log(format!("🔚 Circuit closed  {} → {}",
+                state.log_peer_event(format!("🔚 Circuit closed  {} → {}",
                     AppState::short(&src_peer_id.to_string()),
                     AppState::short(&dst_peer_id.to_string())));
             }
@@ -1352,7 +1380,7 @@ fn handle_swarm_event(
             for (peer_id, addr) in peers {
                 // Only log mDNS for new peers not yet connected
                 if !state.connected_peers.contains_key(&peer_id) {
-                    state.log(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
+                    state.log_peer_event(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
                 }
                 // Dial the peer; Identify will fire and add to Kademlia if they're a server/relay
                 actions.push(SwarmAction::DialPeer(peer_id, addr));
@@ -1508,10 +1536,15 @@ fn handle_swarm_event(
             let response = serve_tile_request(&request, &world_dir,
                 ts_ref.as_deref());
             let found = matches!(response, TileResponse::Found(_));
-            state.log(format!("📡 [P2P] {} {} from {}",
-                if found { "📤" } else { "❌" },
-                tile_desc,
-                AppState::short(&peer.to_string())));
+            if found {
+                state.tiles_served += 1;
+            } else {
+                state.tiles_not_found += 1;
+                // Log misses individually — they're less frequent and more actionable
+                state.log(format!("❌ [P2P] {} from {}",
+                    tile_desc,
+                    AppState::short(&peer.to_string())));
+            }
             // If server doesn't have it, queue it (and neighbours) for on-demand download
             if !found {
                 if let TileRequest::ElevationTile { lat, lon } = &request {
@@ -1572,6 +1605,12 @@ fn serve_tile_request(
             TileResponse::NotFound
         }
         ElevationTile { lat, lon } => {
+            // Check TileStore first (fast bloom filter + Blake3 verified)
+            if let Some(ts) = tile_store {
+                if let Some(bytes) = ts.get_srtm(*lat, *lon) {
+                    return TileResponse::Found(bytes);
+                }
+            }
             let cache_dir = PathBuf::from(world_dir).join("elevation_cache");
             let lat_prefix = if *lat >= 0 { 'n' } else { 's' };
             let lon_prefix = if *lon >= 0 { 'e' } else { 'w' };
@@ -4252,10 +4291,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let api_key = app_state.config.data.opentopography_api_key.clone();
         let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
         let task_log_srtm = Arc::clone(&shared.read().unwrap().task_log);
+        let ts_srtm = shared.read().unwrap().tile_store.clone();
         let (srtm_prio_tx, srtm_prio_rx) = tokio::sync::mpsc::channel::<(i32, i32)>(512);
         app_state.srtm_priority_tx = Some(srtm_prio_tx);
         tokio::spawn(async move {
-            download_srtm_on_demand_task(world_dir_srtm, api_key, srtm_prio_rx, swarm_tx_srtm, task_log_srtm).await;
+            download_srtm_on_demand_task(world_dir_srtm, api_key, srtm_prio_rx, swarm_tx_srtm, task_log_srtm, ts_srtm).await;
         });
     }
 
@@ -4283,8 +4323,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let api_key = app_state.config.data.opentopography_api_key.clone();
         let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
         let task_log_srtm = Arc::clone(&shared.read().unwrap().task_log);
+        let ts_srtm_all = shared.read().unwrap().tile_store.clone();
         tokio::spawn(async move {
-            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm, task_log_srtm).await;
+            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm, task_log_srtm, ts_srtm_all).await;
         });
         app_state.log("📥 Global SRTM download started in background".to_string());
     } else if app_state.config.download_all_srtm {
@@ -4792,6 +4833,7 @@ async fn download_srtm_on_demand_task(
     mut rx: tokio::sync::mpsc::Receiver<(i32, i32)>,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
+    tile_store: Option<Arc<metaverse_core::tile_store::TileStore>>,
 ) {
     macro_rules! tlog {
         ($($arg:tt)*) => {{ if let Ok(mut buf) = task_log.lock() { buf.push(format!($($arg)*)); } }};
@@ -4890,6 +4932,19 @@ async fn download_srtm_on_demand_task(
         match result {
             Ok(Ok(src)) => {
                 tlog!("✅ [SRTM] On-demand: lat={} lon={} via {}", lat, lon, src.name());
+                // Store downloaded tile in TileStore for fast serving and P2P distribution
+                if let Some(ref ts) = tile_store {
+                    let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
+                    let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+                    let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+                    let tif_name = format!("srtm_{}{:02}_{}{:03}.tif", ns.to_lowercase().chars().next().unwrap(), lat.unsigned_abs(), ew.to_lowercase().chars().next().unwrap(), lon.unsigned_abs());
+                    let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, lat.unsigned_abs(), ew, lon.unsigned_abs());
+                    let tif_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tif_name);
+                    let hgt_path2 = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+                    if let Ok(bytes) = std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2)) {
+                        ts.put_srtm(lat, lon, &bytes);
+                    }
+                }
                 if let Some(ref tx) = swarm_tx {
                     let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
                     let _ = tx.send(SwarmAction::StartProviding(key)).await;
@@ -4914,6 +4969,7 @@ async fn download_all_srtm_task(
     api_key: String,
     swarm_tx: Option<tokio::sync::mpsc::Sender<SwarmAction>>,
     task_log: Arc<std::sync::Mutex<Vec<String>>>,
+    tile_store: Option<Arc<metaverse_core::tile_store::TileStore>>,
 ) {
     macro_rules! tlog {
         ($($arg:tt)*) => {{
@@ -5057,6 +5113,19 @@ async fn download_all_srtm_task(
             match result {
                 Ok(Ok(src)) => {
                     total += 1;
+                    // Store in TileStore for fast P2P serving
+                    if let Some(ref ts) = tile_store {
+                        let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
+                        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
+                        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
+                        let tif_name = format!("srtm_{}{:02}_{}{:03}.tif", ns.to_lowercase().chars().next().unwrap(), lat.unsigned_abs(), ew.to_lowercase().chars().next().unwrap(), lon.unsigned_abs());
+                        let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, lat.unsigned_abs(), ew, lon.unsigned_abs());
+                        let tif_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tif_name);
+                        let hgt_path2 = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+                        if let Ok(bytes) = std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2)) {
+                            ts.put_srtm(lat, lon, &bytes);
+                        }
+                    }
                     if let Some(ref tx) = swarm_tx {
                         let key = metaverse_core::elevation::elevation_dht_key(lat, lon);
                         let _ = tx.send(SwarmAction::StartProviding(key)).await;
