@@ -1,6 +1,6 @@
 [package]
 name = "metaverse_core"
-version = "0.1.55"
+version = "0.1.56"
 edition = "2024"
 
 [dependencies]
@@ -104,6 +104,8 @@ base64 = "0.22"     # Base64 encoding for API key submission
 rusqlite = { version = "0.31", features = ["bundled"] }  # SQLite key registry for server
 rocksdb = { version = "0.22", features = ["zstd"] }     # Primary storage engine for tiles + world data
 blake3 = "1"                                             # Fast checksum for tile/op integrity
+# jemalloc: bypass glibc tcache to prevent heap corruption with RocksDB 8.x on Linux
+tikv-jemallocator = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -122,8 +124,8 @@ terrain-gdal = ["gdal", "gdal-sys", "terrain"]
 # Client features (rendering, etc)
 client = ["wgpu", "winit", "egui", "egui-wgpu", "egui-winit", "dep:gltf"]
 
-# Vendor OpenSSL for cross-compilation (builds from source instead of linking system OpenSSL)
-vendored-openssl = ["openssl/vendored"]
+# jemalloc: used in server binary to prevent glibc tcache heap corruption with RocksDB 8.x
+jemalloc = ["tikv-jemallocator"]
 
 # OpenSSL dependency
 [dependencies.openssl]

@@ -15,6 +15,13 @@
 //!
 //! Keybindings: [m] Main  [p] Peers  [w] World  [l] Log  [c] Config  [h] Help  [q] Quit
 
+// Use jemalloc as global allocator to prevent glibc tcache heap corruption with RocksDB 8.x.
+// RocksDB's C++ internals and glibc's tcache have alignment mismatches on Linux
+// that cause "unaligned tcache chunk detected" aborts. jemalloc sidesteps glibc entirely.
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,

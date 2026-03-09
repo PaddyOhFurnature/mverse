@@ -32,7 +32,7 @@ echo ""
 echo "Building release binaries (version $SEMVER)..."
 RUST_MIN_STACK=16777216 cargo build --release \
   --bin metaverse-relay \
-  --bin metaverse-server \
+  --bin metaverse-server --features jemalloc \
   --example metaworld_alpha \
   2>&1 | grep -E "^error|Compiling metaverse|Finished"
 
