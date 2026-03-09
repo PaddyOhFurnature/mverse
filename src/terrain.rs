@@ -33,6 +33,9 @@ pub struct TerrainGenerator {
     osm_cache_dir: Option<std::path::PathBuf>,
     /// Optional handle to request OSM tiles from P2P peers when not cached locally.
     tile_fetcher: Option<Arc<crate::multiplayer::TileFetcher>>,
+    /// When true, building footprints are voxelised directly into the octree.
+    /// Used by the offline worldgen tool; false for live incremental generation.
+    pub bake_buildings: bool,
 }
 
 impl TerrainGenerator {
@@ -49,6 +52,7 @@ impl TerrainGenerator {
             origin_voxel,
             osm_cache_dir: None,
             tile_fetcher: None,
+            bake_buildings: false,
         }
     }
     
@@ -64,6 +68,7 @@ impl TerrainGenerator {
             origin_voxel,
             osm_cache_dir: None,
             tile_fetcher: None,
+            bake_buildings: false,
         }
     }
 
@@ -275,7 +280,7 @@ impl TerrainGenerator {
         let elevation = Arc::clone(&self.elevation);
 
         // Load OSM data for this chunk (water + roads for terrain carving)
-        let (chunk_water_polys, chunk_waterway_lines, chunk_roads, chunk_aeroways) = if let Some(ref dir) = self.osm_cache_dir {
+        let (chunk_water_polys, chunk_waterway_lines, chunk_roads, chunk_aeroways, chunk_buildings, chunk_parks) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
             let mut osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
             // On disk miss, try fetching from a P2P peer
@@ -295,9 +300,9 @@ impl TerrainGenerator {
                     }
                 }
             }
-            (osm.water, osm.waterway_lines, osm.roads, osm.aeroways)
+            (osm.water, osm.waterway_lines, osm.roads, osm.aeroways, osm.buildings, osm.parks)
         } else {
-            (vec![], vec![], vec![], vec![])
+            (vec![], vec![], vec![], vec![], vec![], vec![])
         };
 
         // Two-pass chunk generation:
@@ -319,16 +324,15 @@ impl TerrainGenerator {
             lon:              f64,
             surface_elevation: f64,
             surface_voxel_y:   i64,
-            /// Sub-voxel surface height for smooth marching cubes interpolation.
-            /// For SRTM terrain: fractional position from raw elevation.
-            /// For water/roads: integer voxel + 0.5 (flat surface).
             surface_y_f:       f32,
             in_water:          bool,
             is_road:           bool,
-            /// Set when a tunnel road passes underground here: voxel Y of tunnel floor.
             tunnel_floor_y:    Option<i64>,
-            /// True when this column is an aeroway surface (CONCRETE).
             is_aeroway:        bool,
+            /// Y-coord of the building roof voxel (exclusive). None if no building here.
+            building_top:      Option<i64>,
+            /// Column is inside a park/green area polygon.
+            is_park:           bool,
         }
 
         const WGS84_A: f64 = 6_378_137.0;
@@ -388,6 +392,8 @@ impl TerrainGenerator {
                     is_road: false,
                     tunnel_floor_y: None,
                     is_aeroway: false,
+                    building_top: None,
+                    is_park: false,
                 });
             }
         }
@@ -672,6 +678,66 @@ impl TerrainGenerator {
             }
         }
 
+        // --- Park pass ---
+        // Mark columns inside OSM park/green-area polygons as is_park.
+        // These keep GRASS material on the surface (already the default) but the flag
+        // prevents roads/buildings from overriding them during later passes if needed.
+        if !chunk_parks.is_empty() {
+            for col in columns.iter_mut() {
+                if col.in_water || col.is_road || col.is_aeroway { continue; }
+                if chunk_parks.iter().any(|p| crate::osm::point_in_polygon(col.lat, col.lon, &p.polygon)) {
+                    col.is_park = true;
+                }
+            }
+        }
+
+        // --- Building pass ---
+        // When bake_buildings is enabled (worldgen), voxelise building footprints into
+        // the octree as solid CONCRETE.  The building base is set to the minimum
+        // surface_voxel_y within the footprint so the structure sits on the ground
+        // without floating.  Height comes from OSM tags (height_m / levels) or a
+        // default of 9 m (3 floors).
+        if self.bake_buildings && !chunk_buildings.is_empty() {
+            let col_lookup: std::collections::HashMap<(i64, i64), usize> = columns.iter()
+                .enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
+
+            for building in &chunk_buildings {
+                if building.polygon.len() < 3 { continue; }
+                let height_m = if building.height_m > 0.5 {
+                    building.height_m
+                } else if building.levels > 0 {
+                    building.levels as f64 * 3.5
+                } else {
+                    9.0 // default: 3 storeys
+                };
+                let height_vox = (height_m.ceil() as i64).max(3);
+
+                // Find all columns inside this footprint and their minimum ground Y
+                let mut footprint_idxs: Vec<usize> = Vec::new();
+                let mut min_ground_y = i64::MAX;
+                for (idx, col) in columns.iter().enumerate() {
+                    if crate::osm::point_in_polygon(col.lat, col.lon, &building.polygon) {
+                        footprint_idxs.push(idx);
+                        if col.surface_voxel_y < min_ground_y {
+                            min_ground_y = col.surface_voxel_y;
+                        }
+                    }
+                }
+                let _ = col_lookup; // suppress unused warning
+                if footprint_idxs.is_empty() || min_ground_y == i64::MAX { continue; }
+
+                // Flatten ground to minimum elevation (building sits on lowest point)
+                // and set building_top for Pass 2.
+                for &idx in &footprint_idxs {
+                    let col = &mut columns[idx];
+                    col.surface_voxel_y = min_ground_y;
+                    col.surface_y_f = min_ground_y as f32 + 0.5;
+                    col.building_top = Some(min_ground_y + height_vox);
+                    col.is_road = false; // buildings override roads
+                }
+            }
+        }
+
         // --- Pass 2 ---
         const BEDROCK_DEPTH: i64 = 200;
         const SKY_HEIGHT:    i64 = 100;
@@ -681,7 +747,9 @@ impl TerrainGenerator {
             // Per-column water: each column uses its own SRTM surface elevation.
             // SRTM measures the water surface for rivers — no flat chunk-minimum needed.
             // This lets the river follow the actual terrain slope voxel-by-voxel.
-            let col_top = col.surface_voxel_y + SKY_HEIGHT;
+            let col_top = col.building_top
+                .map(|roof| roof + 1)
+                .unwrap_or(col.surface_voxel_y + SKY_HEIGHT);
             // Tunnel floors may be below the normal bedrock range; extend downward.
             let tunnel_bot = col.tunnel_floor_y.map(|y| y - 10).unwrap_or(i64::MAX);
             let col_bot = (col.surface_voxel_y - BEDROCK_DEPTH).min(tunnel_bot);
@@ -725,7 +793,16 @@ impl TerrainGenerator {
                     }
                 } else {
                     if depth_below_surface < 0 {
-                        MaterialId::AIR
+                        // Above ground surface — but may be inside a building
+                        if let Some(roof_y) = col.building_top {
+                            if voxel_y < roof_y {
+                                MaterialId::CONCRETE
+                            } else {
+                                MaterialId::AIR
+                            }
+                        } else {
+                            MaterialId::AIR
+                        }
                     } else if depth_below_surface == 0 {
                         if col.is_aeroway {
                             MaterialId::CONCRETE

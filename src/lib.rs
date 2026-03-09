@@ -8,6 +8,7 @@ pub mod elevation;
 pub mod materials;
 pub mod voxel;
 pub mod terrain;
+pub mod worldgen;
 pub mod terrain_sync;
 pub mod mesh;
 pub mod marching_cubes;

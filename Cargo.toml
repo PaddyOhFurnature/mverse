@@ -1,6 +1,6 @@
 [package]
 name = "metaverse_core"
-version = "0.1.63"
+version = "0.1.64"
 edition = "2024"
 
 [dependencies]
@@ -158,6 +158,11 @@ required-features = []  # Relay doesn't need terrain or client features
 [[bin]]
 name = "metaverse-server"
 path = "src/bin/metaverse_server.rs"
+required-features = []
+
+[[bin]]
+name = "worldgen"
+path = "src/bin/worldgen.rs"
 required-features = []
 
 [dependencies.zstd]
