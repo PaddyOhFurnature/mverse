@@ -41,6 +41,11 @@ tests/
 /bin/metaworld_alpha
 /bin/metaverse-relay
 /bin/metaverse-server
+/bin/worldgen
 /bin/server.log
 /bin/osm_index
 /bin/metaworld_debug.log
+/bin/world_data
+
+# Runtime caches / generated files — not source, lives locally
+bootstrap_cache.json
