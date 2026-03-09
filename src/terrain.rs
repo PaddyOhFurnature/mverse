@@ -270,7 +270,7 @@ impl TerrainGenerator {
         let elevation = Arc::clone(&self.elevation);
 
         // Load OSM data for this chunk (water + roads for terrain carving)
-        let (chunk_water_polys, chunk_waterway_lines, chunk_roads) = if let Some(ref dir) = self.osm_cache_dir {
+        let (chunk_water_polys, chunk_waterway_lines, chunk_roads, chunk_aeroways) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
             let mut osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
             // On disk miss, try fetching from a P2P peer
@@ -290,9 +290,9 @@ impl TerrainGenerator {
                     }
                 }
             }
-            (osm.water, osm.waterway_lines, osm.roads)
+            (osm.water, osm.waterway_lines, osm.roads, osm.aeroways)
         } else {
-            (vec![], vec![], vec![])
+            (vec![], vec![], vec![], vec![])
         };
 
         // Two-pass chunk generation:
@@ -316,6 +316,10 @@ impl TerrainGenerator {
             surface_voxel_y:   i64,
             in_water:          bool,
             is_road:           bool,
+            /// Set when a tunnel road passes underground here: voxel Y of tunnel floor.
+            tunnel_floor_y:    Option<i64>,
+            /// True when this column is an aeroway surface (CONCRETE).
+            is_aeroway:        bool,
         }
 
         const WGS84_A: f64 = 6_378_137.0;
@@ -368,6 +372,8 @@ impl TerrainGenerator {
                     lon: sample_gps.lon,
                     surface_elevation, surface_voxel_y, in_water,
                     is_road: false,
+                    tunnel_floor_y: None,
+                    is_aeroway: false,
                 });
             }
         }
@@ -406,7 +412,8 @@ impl TerrainGenerator {
 
             let elev_arc = Arc::clone(&elevation);
             for road in &chunk_roads {
-                if road.is_bridge || road.is_tunnel { continue; }
+                if road.is_bridge { continue; } // bridges stay elevated; handled in mesh pipeline
+
                 let half_w = (road.road_type.width_m() / 2.0).ceil() as i64 + 1;
 
                 for pair in road.nodes.windows(2) {
@@ -451,15 +458,27 @@ impl TerrainGenerator {
                         let cz = vaz + (dz as f32 * t).round() as i64;
                         let road_y = ya + ((yb - ya) as f32 * t).round() as i64;
 
-                        // Paint road width as a circle around centerline
                         for ox in -half_w..=half_w {
                             for oz in -half_w..=half_w {
                                 if ox * ox + oz * oz > half_w * half_w { continue; }
                                 if let Some(&idx) = col_lookup.get(&(cx + ox, cz + oz)) {
-                                    // Only flatten if not already water
                                     if !columns[idx].in_water {
-                                        columns[idx].surface_voxel_y = road_y;
-                                        columns[idx].is_road = true;
+                                        if road.is_tunnel {
+                                            // Underground tunnel: surface stays natural.
+                                            // Place the tunnel floor 4m below the road's
+                                            // interpolated grade so the entrance blends in.
+                                            const TUNNEL_BELOW_GRADE: i64 = 4;
+                                            let floor_y = road_y - TUNNEL_BELOW_GRADE;
+                                            // Keep the deepest tunnel if multiple overlap.
+                                            let existing = columns[idx].tunnel_floor_y.unwrap_or(i64::MAX);
+                                            if floor_y < existing {
+                                                columns[idx].tunnel_floor_y = Some(floor_y);
+                                            }
+                                        } else {
+                                            // Surface road: flatten terrain to road grade.
+                                            columns[idx].surface_voxel_y = road_y;
+                                            columns[idx].is_road = true;
+                                        }
                                     }
                                 }
                             }
@@ -540,6 +559,83 @@ impl TerrainGenerator {
             }
         }
 
+        // --- Aeroway carving pass ---
+        // Flatten runways, taxiways, and aprons to grade and mark them as CONCRETE.
+        // Width values are approximate real-world standards:
+        //   runway  ≈ 45 m  (ICAO code C/D paved)
+        //   taxiway ≈ 23 m
+        //   apron   ≈ filled polygon — treat as wide taxiway
+        //   helipad ≈ 30 m
+        if !chunk_aeroways.is_empty() {
+            let aero_col_lookup: std::collections::HashMap<(i64, i64), usize> =
+                columns.iter().enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
+            let elev_arc2 = Arc::clone(&elevation);
+
+            for aw in &chunk_aeroways {
+                if aw.nodes.len() < 2 { continue; }
+
+                let half_w: i64 = match aw.aeroway_type.as_str() {
+                    "runway"   => 23,
+                    "taxiway"  => 12,
+                    "apron"    => 15,
+                    "helipad"  => 15,
+                    _ => continue, // aerodrome / terminal / hangar handled as building
+                };
+
+                for pair in aw.nodes.windows(2) {
+                    let ga = &pair[0];
+                    let gb = &pair[1];
+                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
+                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
+                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
+                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
+
+                    let ya = aero_col_lookup.get(&(vax, vaz))
+                        .map(|&i| columns[i].surface_voxel_y)
+                        .unwrap_or_else(|| {
+                            elev_arc2.lock().unwrap()
+                                .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
+                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .unwrap_or(self.origin_voxel.y)
+                        });
+                    let yb = aero_col_lookup.get(&(vbx, vbz))
+                        .map(|&i| columns[i].surface_voxel_y)
+                        .unwrap_or_else(|| {
+                            elev_arc2.lock().unwrap()
+                                .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
+                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .unwrap_or(self.origin_voxel.y)
+                        });
+
+                    let dx = vbx - vax;
+                    let dz = vbz - vaz;
+                    let steps = dx.abs().max(dz.abs());
+                    if steps == 0 { continue; }
+
+                    for step in 0..=steps {
+                        let t = step as f32 / steps as f32;
+                        let cx = vax + (dx as f32 * t).round() as i64;
+                        let cz = vaz + (dz as f32 * t).round() as i64;
+                        let aw_y = ya + ((yb - ya) as f32 * t).round() as i64;
+
+                        for ox in -half_w..=half_w {
+                            for oz in -half_w..=half_w {
+                                if ox * ox + oz * oz > half_w * half_w { continue; }
+                                if let Some(&idx) = aero_col_lookup.get(&(cx + ox, cz + oz)) {
+                                    if !columns[idx].in_water {
+                                        columns[idx].surface_voxel_y = aw_y;
+                                        columns[idx].is_aeroway = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // --- Pass 2 ---
         const BEDROCK_DEPTH: i64 = 200;
         const SKY_HEIGHT:    i64 = 100;
@@ -550,7 +646,9 @@ impl TerrainGenerator {
             // SRTM measures the water surface for rivers — no flat chunk-minimum needed.
             // This lets the river follow the actual terrain slope voxel-by-voxel.
             let col_top = col.surface_voxel_y + SKY_HEIGHT;
-            let col_bot = col.surface_voxel_y - BEDROCK_DEPTH;
+            // Tunnel floors may be below the normal bedrock range; extend downward.
+            let tunnel_bot = col.tunnel_floor_y.map(|y| y - 10).unwrap_or(i64::MAX);
+            let col_bot = (col.surface_voxel_y - BEDROCK_DEPTH).min(tunnel_bot);
 
             for voxel_y in col_bot..=col_top {
                 if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
@@ -571,11 +669,35 @@ impl TerrainGenerator {
                     } else {
                         MaterialId::STONE
                     }
+                } else if let Some(tunnel_floor) = col.tunnel_floor_y {
+                    // Underground tunnel: surface terrain is normal, but an AIR tube is
+                    // carved beneath it.  Tunnel clearance is 5 voxels (≈5 m headroom).
+                    const TUNNEL_CLEARANCE: i64 = 5;
+                    let tunnel_ceil = tunnel_floor + TUNNEL_CLEARANCE;
+                    if depth_below_surface < 0 {
+                        MaterialId::AIR
+                    } else if depth_below_surface == 0 {
+                        MaterialId::GRASS // surface stays natural above the tunnel
+                    } else if voxel_y == tunnel_floor {
+                        MaterialId::ASPHALT // road surface inside the tunnel
+                    } else if voxel_y > tunnel_floor && voxel_y < tunnel_ceil {
+                        MaterialId::AIR // tunnel interior airspace
+                    } else if depth_below_surface <= 5 {
+                        MaterialId::DIRT
+                    } else {
+                        MaterialId::STONE
+                    }
                 } else {
                     if depth_below_surface < 0 {
                         MaterialId::AIR
                     } else if depth_below_surface == 0 {
-                        if col.is_road { MaterialId::ASPHALT } else { MaterialId::GRASS }
+                        if col.is_aeroway {
+                            MaterialId::CONCRETE
+                        } else if col.is_road {
+                            MaterialId::ASPHALT
+                        } else {
+                            MaterialId::GRASS
+                        }
                     } else if depth_below_surface <= 5 {
                         MaterialId::DIRT
                     } else {

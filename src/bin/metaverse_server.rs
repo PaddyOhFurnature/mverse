@@ -4167,8 +4167,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 ts.osm_count(), ts.srtm_count()));
             // Propagate to SharedState for web handlers
             shared.write().unwrap().tile_store = Some(Arc::clone(&ts));
-            // Trigger background cleanup of old flat .bin tile files
+            // Trigger background cleanup of old flat tile files (OSM .bin, SRTM .hgt/.tif)
             metaverse_core::tile_store::cleanup_old_tile_dir(&world_data_root.join("osm"));
+            metaverse_core::tile_store::cleanup_old_srtm_dir(&world_data_root.join("elevation_cache"));
         }
         Err(e) => app_state.log(format!("⚠️  TileStore open failed: {e}")),
     }
@@ -4206,27 +4207,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
         }
     }
-    // Queue DHT provider announcements for cached OSM tiles — announce at 1°×1° granularity
-    // (not per-tile: millions of 0.01° keys would overflow any DHT provider table)
-    {
-        let osm_dir = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
-        ).join("osm");
+    // Queue DHT provider announcements for cached OSM tiles from TileStore
+    // Announce at 1°×1° granularity (not per-tile: millions of 0.01° keys would overflow any DHT)
+    if let Some(ref ts) = shared.read().unwrap().tile_store {
+        let coords = ts.iter_osm_coords();
         let mut region_keys: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
-        if let Ok(entries) = std::fs::read_dir(&osm_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) {
-                    if name.starts_with("osm_") && name.ends_with(".bin") {
-                        let parts: Vec<&str> = name[4..name.len()-4].split('_').collect();
-                        if parts.len() == 4 {
-                            if let (Ok(s), Ok(w)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
-                                // Announce at 1°×1° granularity — same as SRTM
-                                region_keys.insert((s.floor() as i32, w.floor() as i32));
-                            }
-                        }
-                    }
-                }
-            }
+        for (s, w, _n, _e) in coords {
+            region_keys.insert((s.floor() as i32, w.floor() as i32));
         }
         let tile_count = region_keys.len();
         for (lat, lon) in region_keys {

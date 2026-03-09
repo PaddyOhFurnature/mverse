@@ -41,6 +41,30 @@ fn infer_id(lat_micro: i64, lon_micro: i64, type_tag: &str, instance: u32) -> St
 
 // ── Inference Rules ───────────────────────────────────────────────────────────
 
+/// Compute a Y-axis rotation in radians for a building polygon by finding the
+/// direction of its longest edge.  Buildings are generally rectangular; the
+/// longest edge defines the primary facade orientation.
+fn building_rotation_y(polygon: &[crate::coordinates::GPS]) -> f32 {
+    if polygon.len() < 2 {
+        return 0.0;
+    }
+    let (_best_len, best_dx, best_dz) = polygon
+        .windows(2)
+        .map(|pair| {
+            // Project lon/lat differences into approximate metres (equirectangular).
+            let cos_lat = pair[0].lat.to_radians().cos();
+            let dx = (pair[1].lon - pair[0].lon) * 111_320.0 * cos_lat;
+            let dz = (pair[1].lat - pair[0].lat) * 111_320.0;
+            let len_sq = dx * dx + dz * dz;
+            (len_sq, dx, dz)
+        })
+        .fold((0.0_f64, 1.0_f64, 0.0_f64), |acc, (len_sq, dx, dz)| {
+            if len_sq > acc.0 { (len_sq, dx, dz) } else { acc }
+        });
+    // atan2(x, z) → angle from +Z axis (north), matching wgpu Y-up convention.
+    best_dz.atan2(best_dx) as f32
+}
+
 /// The biome/terrain context inferred for a chunk — used to select rules.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChunkBiome {
@@ -208,7 +232,7 @@ fn infer_from_osm(ctx: &ChunkContext, osm: &OsmData) -> Vec<InferredObject> {
             lat: c.lat,
             lon: c.lon,
             y_offset: 0.0,
-            rotation_y: 0.0,
+            rotation_y: building_rotation_y(&building.polygon),
             label: format!("Building ({})", building.building_type),
             config: format!(r#"{{"height":{:.1},"levels":{},"width":{:.1},"depth":{:.1}}}"#,
                             building.height_m, building.levels, width_m, depth_m),
