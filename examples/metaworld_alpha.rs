@@ -77,7 +77,7 @@ use metaverse_core::{
     coordinates::{GPS, ECEF},
     elevation::{ElevationPipeline, OpenTopographySource, P2PElevationSource, CopernicusElevationSource, SkadiElevationSource},
     identity::{Identity, KeyType},
-    marching_cubes::{extract_chunk_mesh, extract_water_surface_mesh},
+    marching_cubes::{extract_chunk_mesh, extract_chunk_mesh_smooth, extract_water_surface_mesh},
     materials::MaterialId,
     mesh::{Mesh, Triangle, Vertex},
     messages::{Material, MovementMode},
@@ -1994,7 +1994,10 @@ fn main() {
                             if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
-                                let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
+                                let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v),
+                                    None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
+                                };
                                 let offset = Vec3::new(
                                     (chunk_center.x - origin_voxel.x) as f32,
                                     (chunk_center.y - origin_voxel.y) as f32,
@@ -2855,7 +2858,10 @@ fn main() {
                         if dirty_done >= DIRTY_PER_FRAME { break; }
                             let min_voxel = chunk_data.id.min_voxel();
                             let max_voxel = chunk_data.id.max_voxel();
-                            let (mut new_mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
+                            let (mut new_mesh, chunk_center) = match &chunk_data.surface_cache {
+                                Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_voxel, &max_voxel),
+                                None     => extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel),
+                            };
                             
                             let offset = Vec3::new(
                                 (chunk_center.x - origin_voxel.x) as f32,
@@ -2924,7 +2930,10 @@ fn main() {
                             let offset = Vec3::new(cx, cy, cz);
                             let chunk_dist = (player_local_pos - offset).length();
                             if chunk_dist < COLLIDER_RANGE_M {
-                                let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
+                                let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v),
+                                    None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
+                                };
                                 let real_offset = Vec3::new(
                                     (chunk_center.x - origin_voxel.x) as f32,
                                     (chunk_center.y - origin_voxel.y) as f32,

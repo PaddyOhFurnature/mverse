@@ -31,7 +31,7 @@ impl SyncTerrainLoader {
         let generator = self.generator.lock()
             .map_err(|e| format!("Failed to lock terrain generator: {}", e))?;
         
-        generator.generate_chunk(chunk_id)
+        generator.generate_chunk(chunk_id).map(|(octree, _)| octree)
     }
 }
 
@@ -63,7 +63,7 @@ pub fn generate_chunk_terrain(
     chunk_id: &ChunkId
 ) -> Result<Octree, String> {
     // TerrainGenerator is already thread-safe with Arc<Mutex<ElevationPipeline>>
-    generator.generate_chunk(chunk_id)
+    generator.generate_chunk(chunk_id).map(|(octree, _)| octree)
 }
 
 #[cfg(test)]

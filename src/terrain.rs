@@ -20,6 +20,11 @@ use crate::voxel::{Octree, VoxelCoord};
 use crate::chunk::ChunkId;
 use std::sync::{Arc, Mutex};
 
+/// Per-column fractional surface height used by the smooth marching cubes pass.
+/// Maps (voxel_x, voxel_z) → sub-voxel surface Y (f32).
+/// Positive density = solid, density ≥ 0 at surface voxel corner.
+pub type SurfaceCache = std::collections::HashMap<(i64, i64), f32>;
+
 /// Generate terrain voxels from elevation data
 pub struct TerrainGenerator {
     elevation: Arc<Mutex<ElevationPipeline>>,
@@ -258,7 +263,7 @@ impl TerrainGenerator {
     ///
     /// Pure function: same chunk_id + elevation data = same Octree
     /// Can be called from multiple threads simultaneously
-    pub fn generate_chunk(&self, chunk_id: &ChunkId) -> Result<Octree, String> {
+    pub fn generate_chunk(&self, chunk_id: &ChunkId) -> Result<(Octree, SurfaceCache), String> {
         use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
         
         let min_voxel = chunk_id.min_voxel();
@@ -314,6 +319,10 @@ impl TerrainGenerator {
             lon:              f64,
             surface_elevation: f64,
             surface_voxel_y:   i64,
+            /// Sub-voxel surface height for smooth marching cubes interpolation.
+            /// For SRTM terrain: fractional position from raw elevation.
+            /// For water/roads: integer voxel + 0.5 (flat surface).
+            surface_y_f:       f32,
             in_water:          bool,
             is_road:           bool,
             /// Set when a tunnel road passes underground here: voxel Y of tunnel floor.
@@ -354,8 +363,10 @@ impl TerrainGenerator {
                 // SRTM/Copernicus = orthometric (EGM96). origin_gps.alt = WGS-84 ellipsoidal.
                 // Add geoid undulation N so both are in the same datum before differencing.
                 let n_col = crate::elevation::egm96_undulation(sample_gps.lat, sample_gps.lon);
-                let surface_voxel_y = self.origin_voxel.y
-                    + (surface_elevation + n_col - self.origin_gps.alt) as i64;
+                let surface_delta = surface_elevation + n_col - self.origin_gps.alt;
+                let surface_voxel_y = self.origin_voxel.y + surface_delta as i64;
+                // Fractional surface height — used by smooth marching cubes for sub-voxel placement.
+                let surface_y_f = self.origin_voxel.y as f32 + surface_delta as f32;
 
                 // Water from OSM polygon only (centreline handled in post-pass below).
                 let in_water = !chunk_water_polys.is_empty()
@@ -373,7 +384,7 @@ impl TerrainGenerator {
                     voxel_x, voxel_z,
                     lat: sample_gps.lat,
                     lon: sample_gps.lon,
-                    surface_elevation, surface_voxel_y, in_water,
+                    surface_elevation, surface_voxel_y, surface_y_f, in_water,
                     is_road: false,
                     tunnel_floor_y: None,
                     is_aeroway: false,
@@ -409,7 +420,11 @@ impl TerrainGenerator {
                     .map(|c| c.surface_voxel_y).min().unwrap_or(0)
             });
             for col in columns.iter_mut() {
-                if col.in_water { col.surface_voxel_y = water_level_y; }
+                if col.in_water {
+                    col.surface_voxel_y = water_level_y;
+                    // Flat water surface: put isosurface at voxel midpoint
+                    col.surface_y_f = water_level_y as f32 + 0.5;
+                }
             }
         }
 
@@ -494,6 +509,7 @@ impl TerrainGenerator {
                                         } else {
                                             // Surface road: flatten terrain to road grade.
                                             columns[idx].surface_voxel_y = road_y;
+                                            columns[idx].surface_y_f = road_y as f32 + 0.5;
                                             columns[idx].is_road = true;
                                         }
                                     }
@@ -567,6 +583,7 @@ impl TerrainGenerator {
                                     let col_depth = (depth as f64 * taper).round() as i64;
                                     if col_depth > 0 {
                                         columns[idx].surface_voxel_y = centre_y - (depth - col_depth);
+                                        columns[idx].surface_y_f = (centre_y - (depth - col_depth)) as f32 + 0.5;
                                         columns[idx].in_water = true;
                                     }
                                 }
@@ -644,6 +661,7 @@ impl TerrainGenerator {
                                 if let Some(&idx) = aero_col_lookup.get(&(cx + ox, cz + oz)) {
                                     if !columns[idx].in_water {
                                         columns[idx].surface_voxel_y = aw_y;
+                                        columns[idx].surface_y_f = aw_y as f32 + 0.5;
                                         columns[idx].is_aeroway = true;
                                     }
                                 }
@@ -727,7 +745,12 @@ impl TerrainGenerator {
             }
         }
         
-        Ok(octree)
+        let mut surface_cache = SurfaceCache::with_capacity(columns.len());
+        for col in &columns {
+            surface_cache.insert((col.voxel_x, col.voxel_z), col.surface_y_f);
+        }
+
+        Ok((octree, surface_cache))
     }
     
     /// Fill octree with terrain at given GPS location

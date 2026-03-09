@@ -137,7 +137,7 @@ impl ChunkManager {
         }
         
         // 1. Generate base terrain
-        let octree = self.terrain_generator.generate_chunk(&chunk_id)?;
+        let (octree, _surface_cache) = self.terrain_generator.generate_chunk(&chunk_id)?;
         
         // 2. Create chunk data
         let mut chunk_data = ChunkData::new(chunk_id, octree);

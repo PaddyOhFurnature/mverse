@@ -689,3 +689,192 @@ pub fn extract_water_surface_mesh(
 
     mesh
 }
+
+/// Smooth marching cubes mesh extraction using a density field.
+///
+/// Unlike `extract_chunk_mesh` which snaps vertices to voxel midpoints (creating the
+/// visible "grey grid" stairstepping), this function:
+/// 1. Computes continuous density `d(x,y,z) = surface_y_f(x,z) - y + noise` from the
+///    surface cache (which stores sub-voxel surface heights from SRTM interpolation).
+/// 2. Places edge vertices at the true zero-crossing (linear interpolation by density ratio).
+/// 3. Uses density gradient normals instead of per-face normals → smooth shading.
+///
+/// The noise layers add natural-looking surface detail on top of the SRTM base:
+/// - Medium FBM (wavelength ~143m, ±0.4 voxel): gentle hill undulation
+/// - Small FBM (wavelength ~12m, ±0.12 voxel): surface grain / roughness
+pub fn extract_chunk_mesh_smooth(
+    octree: &Octree,
+    surface_cache: &crate::terrain::SurfaceCache,
+    min_voxel: &VoxelCoord,
+    max_voxel: &VoxelCoord,
+) -> (Mesh, VoxelCoord) {
+    use noise::{NoiseFn, Fbm, Perlin, MultiFractal};
+
+    // Medium-scale FBM: adds gentle undulation over ~143m wavelengths
+    let fbm_med: Fbm<Perlin> = Fbm::<Perlin>::new(42)
+        .set_octaves(4)
+        .set_frequency(0.007)
+        .set_lacunarity(2.0)
+        .set_persistence(0.5);
+    // Fine-scale FBM: surface grain at ~12m wavelength
+    let fbm_fine: Fbm<Perlin> = Fbm::<Perlin>::new(137)
+        .set_octaves(2)
+        .set_frequency(0.08)
+        .set_lacunarity(2.0)
+        .set_persistence(0.5);
+
+    let center = VoxelCoord::new(
+        min_voxel.x + (max_voxel.x - min_voxel.x - 1) / 2,
+        min_voxel.y + (max_voxel.y - min_voxel.y - 1) / 2,
+        min_voxel.z + (max_voxel.z - min_voxel.z - 1) / 2,
+    );
+
+    // Grid dimensions (one extra point on each axis for corner sampling)
+    let gx = (max_voxel.x - min_voxel.x + 1) as usize;
+    let gy = (max_voxel.y - min_voxel.y + 1) as usize;
+    let gz = (max_voxel.z - min_voxel.z + 1) as usize;
+
+    // Stride: density_grid[xi * gy * gz + yi * gz + zi]
+    let g_stride = gy * gz;
+    let g_idx = |xi: usize, yi: usize, zi: usize| xi * g_stride + yi * gz + zi;
+
+    // Pre-compute density for all grid points in a single pass.
+    // Outer loop over XZ columns to amortise the per-column noise lookup.
+    let mut density_grid = vec![0.0f32; gx * gy * gz];
+    let max_x_clamp = max_voxel.x - 1;
+    let max_z_clamp = max_voxel.z - 1;
+
+    for xi in 0..gx {
+        let wx = min_voxel.x + xi as i64;
+        let cx = wx.clamp(min_voxel.x, max_x_clamp);
+        for zi in 0..gz {
+            let wz = min_voxel.z + zi as i64;
+            let cz = wz.clamp(min_voxel.z, max_z_clamp);
+            // Surface height from cache (sub-voxel precision for SRTM terrain)
+            let surface_y = surface_cache
+                .get(&(cx, cz))
+                .copied()
+                .unwrap_or((min_voxel.y as f32 + max_voxel.y as f32) * 0.5);
+            // Medium noise is XZ-only (cheaper; computed once per column)
+            let med = fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4;
+            for yi in 0..gy {
+                let wy = min_voxel.y + yi as i64;
+                let fine = fbm_fine.get([wx as f64, wy as f64, wz as f64]) as f32 * 0.12;
+                // Positive density → solid (below surface), negative → air (above surface)
+                density_grid[g_idx(xi, yi, zi)] = surface_y - wy as f32 + med + fine;
+            }
+        }
+    }
+
+    // Corner offset layout (matches CORNER_OFFSETS / EDGE_CONNECTIONS tables above)
+    const OFFSETS: [(usize, usize, usize); 8] = [
+        (0,0,0),(1,0,0),(1,0,1),(0,0,1),
+        (0,1,0),(1,1,0),(1,1,1),(0,1,1),
+    ];
+
+    let mut mesh = Mesh::new();
+
+    for voxel_x in min_voxel.x..max_voxel.x {
+        for voxel_y in min_voxel.y..max_voxel.y {
+            for voxel_z in min_voxel.z..max_voxel.z {
+                let xi0 = (voxel_x - min_voxel.x) as usize;
+                let yi0 = (voxel_y - min_voxel.y) as usize;
+                let zi0 = (voxel_z - min_voxel.z) as usize;
+
+                // Sample density at 8 corners from the pre-computed grid
+                let mut d = [0.0f32; 8];
+                let mut cube_idx = 0usize;
+                for (i, (dx, dy, dz)) in OFFSETS.iter().enumerate() {
+                    let di = density_grid[g_idx(xi0 + dx, yi0 + dy, zi0 + dz)];
+                    d[i] = di;
+                    // Convention: density ≥ 0 → solid (bit set in cube index)
+                    if di >= 0.0 {
+                        cube_idx |= 1 << i;
+                    }
+                }
+
+                let edges = EDGE_TABLE[cube_idx];
+                if edges == 0 { continue; } // fully solid or fully air
+
+                // Compute interpolated vertex position + gradient normal for each active edge
+                let mut edge_verts = [Vec3::ZERO; 12];
+                let mut edge_norms = [Vec3::new(0.0, 1.0, 0.0); 12];
+
+                for edge_idx in 0..12usize {
+                    if (edges & (1 << edge_idx)) == 0 { continue; }
+
+                    let (c1, c2) = EDGE_CONNECTIONS[edge_idx];
+                    let (dx1, dy1, dz1) = OFFSETS[c1];
+                    let (dx2, dy2, dz2) = OFFSETS[c2];
+
+                    let d1 = d[c1];
+                    let d2 = d[c2];
+                    // Linear interpolation to the zero crossing
+                    let t = if (d1 - d2).abs() > 1e-5 {
+                        (d1 / (d1 - d2)).clamp(0.01, 0.99) as f64
+                    } else {
+                        0.5
+                    };
+
+                    // World voxel position of vertex (fractional)
+                    let wx_v = voxel_x as f64 + dx1 as f64 + t * (dx2 as f64 - dx1 as f64);
+                    let wy_v = voxel_y as f64 + dy1 as f64 + t * (dy2 as f64 - dy1 as f64);
+                    let wz_v = voxel_z as f64 + dz1 as f64 + t * (dz2 as f64 - dz1 as f64);
+
+                    // Local position relative to chunk center (what the GPU sees)
+                    edge_verts[edge_idx] = Vec3::new(
+                        (wx_v - center.x as f64) as f32,
+                        (wy_v - center.y as f64) as f32,
+                        (wz_v - center.z as f64) as f32,
+                    );
+
+                    // Gradient normal via central differences on the density grid.
+                    // Grid indices are clamped so boundary vertices use one-sided differences.
+                    let xi_v = (wx_v - min_voxel.x as f64).round() as i64;
+                    let yi_v = (wy_v - min_voxel.y as f64).round() as i64;
+                    let zi_v = (wz_v - min_voxel.z as f64).round() as i64;
+
+                    let gxp = (xi_v + 1).clamp(0, gx as i64 - 1) as usize;
+                    let gxn = (xi_v - 1).clamp(0, gx as i64 - 1) as usize;
+                    let gyp = (yi_v + 1).clamp(0, gy as i64 - 1) as usize;
+                    let gyn = (yi_v - 1).clamp(0, gy as i64 - 1) as usize;
+                    let gzp = (zi_v + 1).clamp(0, gz as i64 - 1) as usize;
+                    let gzn = (zi_v - 1).clamp(0, gz as i64 - 1) as usize;
+                    let yi_c = yi_v.clamp(0, gy as i64 - 1) as usize;
+                    let xi_c = xi_v.clamp(0, gx as i64 - 1) as usize;
+                    let zi_c = zi_v.clamp(0, gz as i64 - 1) as usize;
+
+                    let ngx = density_grid[g_idx(gxp, yi_c, zi_c)]
+                             - density_grid[g_idx(gxn, yi_c, zi_c)];
+                    let ngy = density_grid[g_idx(xi_c, gyp, zi_c)]
+                             - density_grid[g_idx(xi_c, gyn, zi_c)];
+                    let ngz = density_grid[g_idx(xi_c, yi_c, gzp)]
+                             - density_grid[g_idx(xi_c, yi_c, gzn)];
+
+                    // Gradient points "into" the solid; negate for outward-facing normal
+                    let n = Vec3::new(-ngx, -ngy, -ngz);
+                    let len = n.dot(n).sqrt();
+                    edge_norms[edge_idx] = if len > 1e-4 { n / len } else { Vec3::new(0.0, 1.0, 0.0) };
+                }
+
+                // Build triangles from the marching cubes triangle table
+                let tri_table = TRIANGLE_TABLE[cube_idx];
+                let mut ti = 0;
+                while tri_table[ti] != -1 {
+                    let e1 = tri_table[ti]     as usize;
+                    let e2 = tri_table[ti + 1] as usize;
+                    let e3 = tri_table[ti + 2] as usize;
+
+                    let i1 = mesh.add_vertex(Vertex::new(edge_verts[e1], edge_norms[e1]));
+                    let i2 = mesh.add_vertex(Vertex::new(edge_verts[e2], edge_norms[e2]));
+                    let i3 = mesh.add_vertex(Vertex::new(edge_verts[e3], edge_norms[e3]));
+                    mesh.add_triangle(crate::mesh::Triangle::new(i1, i2, i3));
+
+                    ti += 3;
+                }
+            }
+        }
+    }
+
+    (mesh, center)
+}

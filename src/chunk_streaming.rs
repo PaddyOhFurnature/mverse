@@ -37,7 +37,7 @@ use crate::{
     chunk_loader::ChunkLoader,
     coordinates::ECEF,
     renderer::MeshBuffer,
-    terrain::TerrainGenerator,
+    terrain::{TerrainGenerator, SurfaceCache},
     user_content::UserContentLayer,
     voxel::Octree,
 };
@@ -94,6 +94,9 @@ pub struct LoadedChunk {
     
     /// Voxel data (octree)
     pub octree: Octree,
+
+    /// Sub-voxel surface heights per (voxel_x, voxel_z) column for smooth mesh extraction.
+    pub surface_cache: Option<SurfaceCache>,
     
     /// GPU mesh buffer (None until generated)
     pub mesh_buffer: Option<MeshBuffer>,
@@ -378,6 +381,7 @@ impl ChunkStreamer {
                 let chunk = LoadedChunk {
                     id: result.chunk_id,
                     octree,
+                    surface_cache: result.surface_cache,
                     mesh_buffer: None,
                     water_mesh_buffer: None,
                     collider: None,
@@ -535,6 +539,7 @@ impl ChunkStreamer {
         self.loaded_chunks.insert(chunk_id, LoadedChunk {
             id: chunk_id,
             octree,
+            surface_cache: None,
             mesh_buffer: None, // GPU mesh built on first render pass
             water_mesh_buffer: None,
             collider,
@@ -684,6 +689,7 @@ mod tests {
             let chunk = LoadedChunk {
                 id: chunk_id,
                 octree: Octree::new(),
+                surface_cache: None,
                 distance_m: i as f64,
                 in_safe_zone: false,
                 state: ChunkLoadState::Loaded,

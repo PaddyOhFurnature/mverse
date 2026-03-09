@@ -8,7 +8,9 @@ const TERRAIN_CACHE_VERSION: u32 = 12;
 
 use crate::chunk::ChunkId;
 use crate::voxel::Octree;
-use crate::terrain::TerrainGenerator;
+use crate::terrain::{TerrainGenerator, SurfaceCache};
+use crate::materials::MaterialId;
+use crate::voxel::VoxelCoord;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
 use std::thread;
@@ -25,6 +27,7 @@ pub struct LoadRequest {
 pub struct LoadResult {
     pub chunk_id: ChunkId,
     pub octree: Option<Octree>,
+    pub surface_cache: Option<SurfaceCache>,
     pub load_time_ms: u128,
     pub error: Option<String>,
 }
@@ -150,29 +153,33 @@ impl ChunkLoader {
                     let start = Instant::now();
 
                     // Try disk cache first — avoids ~2s regeneration on every launch
-                    let octree = if let Some(ref dir) = cache_dir {
+                    let (octree, surface_cache) = if let Some(ref dir) = cache_dir {
                         match Self::load_from_cache(dir, &request.chunk_id) {
-                            Some(cached) => Some(cached),
+                            Some(cached) => {
+                                // Derive surface cache from the loaded octree (fast column scan)
+                                let sc = Self::compute_surface_cache(&cached, &request.chunk_id);
+                                (Some(cached), Some(sc))
+                            }
                             None => {
                                 // Cache miss: generate, then save
                                 match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
-                                    Ok(octree) => {
+                                    Ok((octree, cache)) => {
                                         Self::save_to_cache(dir, &request.chunk_id, &octree);
-                                        Some(octree)
+                                        (Some(octree), Some(cache))
                                     }
                                     Err(e) => {
                                         eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, request.chunk_id, e);
-                                        None
+                                        (None, None)
                                     }
                                 }
                             }
                         }
                     } else {
                         match terrain_generator.lock().unwrap().generate_chunk(&request.chunk_id) {
-                            Ok(octree) => Some(octree),
+                            Ok((octree, cache)) => (Some(octree), Some(cache)),
                             Err(e) => {
                                 eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, request.chunk_id, e);
-                                None
+                                (None, None)
                             }
                         }
                     };
@@ -187,6 +194,7 @@ impl ChunkLoader {
                     let result = LoadResult {
                         chunk_id: request.chunk_id,
                         octree,
+                        surface_cache,
                         load_time_ms: elapsed,
                         error: None,
                     };
@@ -208,6 +216,31 @@ impl ChunkLoader {
         }
     }
     
+    /// Derive a SurfaceCache by scanning the octree for the topmost solid voxel per column.
+    /// Used when a chunk is loaded from disk cache (no SRTM data available).
+    /// The fractional part is set to 0.5 (midpoint) so interpolation is smooth at height boundaries.
+    fn compute_surface_cache(octree: &Octree, chunk_id: &ChunkId) -> SurfaceCache {
+        use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+        let mut cache = SurfaceCache::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
+        for vx in min_v.x..max_v.x {
+            for vz in min_v.z..max_v.z {
+                let mut surface_y = min_v.y as f32 + 0.5;
+                for vy in (min_v.y..max_v.y).rev() {
+                    let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
+                    if mat != MaterialId::AIR && mat != MaterialId::WATER {
+                        // Put isosurface at midpoint of surface voxel for smooth interpolation
+                        surface_y = vy as f32 + 0.5;
+                        break;
+                    }
+                }
+                cache.insert((vx, vz), surface_y);
+            }
+        }
+        cache
+    }
+
     /// Load a chunk octree from disk cache. Returns None on miss or version mismatch.
     fn load_from_cache(cache_dir: &Path, chunk_id: &ChunkId) -> Option<Octree> {
         let path = cache_dir.join(format!("{}.bin", chunk_id));
