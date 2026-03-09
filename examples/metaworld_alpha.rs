@@ -798,9 +798,6 @@ impl DebugHud {
         near_portal: bool,
         near_terminal: bool,
         near_module: Option<usize>,
-        // Road labels: (world_pos, name) — projected to screen space
-        road_labels: &[(glam::Vec3, String)],
-        view_proj: glam::Mat4,
     ) {
         // Convert yaw to compass bearing: yaw=0 → North, yaw=π/2 → West (wgpu -Z = north)
         // camera_yaw is rotation around Y; 0 = looking -Z (north), positive = clockwise
@@ -909,29 +906,6 @@ impl DebugHud {
             }
 
             // Road name labels — projected from 3D world space to screen
-            let sw = context.config.width as f32;
-            let sh = context.config.height as f32;
-            let ppp = ctx.pixels_per_point();
-            for (world_pos, name) in road_labels {
-                // Project world → clip space
-                let clip = view_proj.project_point3(*world_pos);
-                // clip.z <= 0 means behind camera
-                if clip.z <= 0.0 || clip.z > 1.0 { continue; }
-                // NDC to screen pixels
-                let sx = (clip.x * 0.5 + 0.5) * sw;
-                let sy = (1.0 - (clip.y * 0.5 + 0.5)) * sh;
-                // Skip if outside viewport
-                if sx < 0.0 || sx > sw || sy < 0.0 || sy > sh { continue; }
-                let screen_pos = egui::pos2(sx / ppp, sy / ppp);
-                egui::Area::new(egui::Id::new(format!("road_lbl_{}", name)))
-                    .fixed_pos(screen_pos)
-                    .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(name.as_str())
-                            .color(egui::Color32::from_rgb(255, 255, 100))
-                            .size(11.0)
-                            .background_color(egui::Color32::from_black_alpha(120)));
-                    });
-            }
         });
 
         self.egui_state.handle_platform_output(window, full_output.platform_output);
@@ -1160,18 +1134,16 @@ fn main() {
     let glb_models_loaded = building_glb_models.iter().any(|m| m.is_some());
     println!("🏢 GLB building models loaded: {}/{}", building_glb_models.iter().filter(|m| m.is_some()).count(), building_glb_models.len());
 
-    // Road surface texture — load RGBA bytes at startup, upload to GPU on each road rebuild.
-    // Tile the asphalt texture along each road segment (U tiles along length, V across width).
-    let road_texture_rgba: Option<(Vec<u8>, u32, u32)> = {
+    // Road surface texture — now unused (roads are voxel materials, not mesh overlays).
+    // Kept here to avoid breaking the texture asset pipeline; remove if asset removed.
+    let _road_texture_rgba: Option<(Vec<u8>, u32, u32)> = {
         let tex_path = "assets/textures/road_asphalt.png";
         image::open(tex_path).ok()
             .map(|img| img.to_rgba8())
             .map(|rgba| { let (w, h) = (rgba.width(), rgba.height()); (rgba.into_raw(), w, h) })
     };
-    if road_texture_rgba.is_some() {
-        println!("🛣️  Road texture loaded");
-    } else {
-        println!("⚠️  Road texture not found at assets/textures/road_asphalt.png — using flat colour");
+    if _road_texture_rgba.is_some() {
+        println!("🛣️  Road texture loaded (reserved for future textured voxels)");
     }
 
     // Billboard pipeline — renders textured quads on Construct module room walls
@@ -1181,38 +1153,12 @@ fn main() {
     // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
     let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
 
-    // OSM-inferred geometry buffers (buildings, roads, water)
+    // OSM-inferred geometry buffers (buildings only — roads/waterways/parks are voxel materials)
     let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
-    let mut roads_mesh_buffer: Option<MeshBuffer> = None;
-    // Textured road mesh (GlbModel with road_asphalt.png) — used when road_texture_model is Some.
-    let mut textured_roads: Option<metaverse_core::renderer::GlbModel> = None;
-    let mut water_mesh_buffer: Option<MeshBuffer> = None;
     // GLB building instances for textured rendering: (model_category_idx, model_bind_group)
-    // model_category_idx: 0=commercial, 1=industrial, 2=residential, 3=skyscraper, 4=default
     let mut building_instances: Vec<(usize, wgpu::BindGroup)> = Vec::new();
-    // Accumulated road segments for the visible area: (a, b, width, road_type)
-    let mut road_segments: Vec<(Vec3, Vec3, f32, metaverse_core::osm::RoadType)> = Vec::new();
-    // Named road midpoints for on-screen labels: (world_pos, name)
-    let mut road_labels: Vec<(Vec3, String)> = Vec::new();
-    // Accumulated water polygons: each entry is a list of local-space vertices
-    let mut water_polygons: Vec<Vec<Vec3>> = Vec::new();
-    // Deduplication: track first-vertex GPS (as ordered pair) to avoid adding same polygon twice
-    let mut water_poly_seen: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
-    // Railway segments: (a, b, rail_type, is_bridge, layer)
-    let mut railway_segments: Vec<(Vec3, Vec3, String, bool, i8)> = Vec::new();
-    let mut railway_mesh_buffer: Option<MeshBuffer> = None;
-    // Waterway centreline overlay segments: (a, b, width_m, type)
-    let mut waterway_segments: Vec<(Vec3, Vec3, f32, String)> = Vec::new();
-    let mut waterway_overlay_buffer: Option<MeshBuffer> = None;
-    // Land area / park polygons: (verts, area_type)
-    let mut land_polygons: Vec<(Vec<Vec3>, String)> = Vec::new();
-    let mut land_poly_seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut land_mesh_buffer: Option<MeshBuffer> = None;
-    // Set to true whenever new objects are registered, triggering a mesh rebuild
+    // Set to true whenever new world objects are registered, triggering a mesh rebuild
     let mut osm_geom_dirty = false;
-    // Debug: press O to toggle bright-yellow OSM water polygon outlines
-    let mut show_osm_debug = false;
-    let mut osm_debug_buffer: Option<MeshBuffer> = None;
 
     // WORLDNET terminal screen — rendered onto the kiosk top face
     let terminal_screen = TerminalScreen::new(&context, &billboard_pipeline, SIGNUP_TERMINAL_POS);
@@ -1245,9 +1191,12 @@ fn main() {
     
     // Setup terrain generation with SRTM data
     println!("🗺️  Setting up chunk-based terrain generation...");
-    
-    let origin_gps = GPS::new(-27.463675, 153.035645, 10.0); // Story Bridge, Brisbane
-    
+
+    // Origin: Kangaroo Point south bank — solid land, near the river, good view of Brisbane CBD.
+    // Story Bridge origin was on the bridge deck over water; SRTM there is unreliable.
+    let base_lat = -27.4672_f64;
+    let base_lon = 153.0300_f64;
+
     // Standardise on P2P + OpenTopography — P2P first to avoid unnecessary API calls.
     let data_dir = std::path::PathBuf::from("world_data");
     let elev_cache = data_dir.join("elevation_cache");
@@ -1272,12 +1221,22 @@ fn main() {
     // Free fallback sources — no API key required
     elevation_pipeline.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
     elevation_pipeline.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
-    
-    // Convert GPS origin to voxel coordinates  
+
+    // Query ground elevation at origin (orthometric, EGM96) then convert to WGS-84 ellipsoidal.
+    // This ensures terrain delta_y = 0 at the spawn point → player spawns at terrain surface.
+    let srtm_origin = elevation_pipeline
+        .query(&GPS::new(base_lat, base_lon, 0.0))
+        .map(|e| e.meters)
+        .unwrap_or(26.0); // Kangaroo Point ~26 m orthometric if tile not yet cached
+    let n_origin = metaverse_core::elevation::egm96_undulation(base_lat, base_lon);
+    let origin_gps = GPS::new(base_lat, base_lon, srtm_origin + n_origin); // WGS-84 ellipsoidal
+
+    // Convert GPS origin to voxel coordinates
     let origin_ecef = origin_gps.to_ecef();
     let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
-    
-    println!("   Origin GPS: ({:.6}, {:.6}, {:.1}m)", origin_gps.lat, origin_gps.lon, origin_gps.alt);
+
+    println!("   Origin GPS: ({:.6}, {:.6}, {:.1}m ell / {:.1}m ortho)",
+        origin_gps.lat, origin_gps.lon, origin_gps.alt, srtm_origin);
     println!("   Origin voxel: {:?}", origin_voxel);
     
     // Create terrain generator with origin for coordinate conversion
@@ -1959,12 +1918,6 @@ fn main() {
                                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
                                 }
                                 // Q/E no longer dig/place — use mouse buttons
-                                // O — toggle OSM water polygon debug outlines (bright yellow)
-                                KeyCode::KeyO => {
-                                    show_osm_debug = !show_osm_debug;
-                                    println!("🗺️  OSM debug outlines: {}", if show_osm_debug { "ON" } else { "OFF" });
-                                    osm_geom_dirty = true; // rebuild debug mesh
-                                }
                                 _ => {}
                             }
                         }
@@ -2074,8 +2027,6 @@ fn main() {
                         // OSM inference for newly loaded chunks
                         {
                             use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  infer_road_segments, infer_railway_segments,
-                                                                  infer_waterway_segments, infer_land_polygons,
                                                                   to_placed_object};
                             for &chunk_id in &new_chunks {
                                 let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
@@ -2101,99 +2052,26 @@ fn main() {
                                 } else {
                                     ChunkContext::from_chunk(chunk_id).with_osm(osm)
                                 };
-                                // Buildings: Y = srtm - origin_alt (same formula as terrain generator).
+                                // Buildings: Y = (srtm + N - origin_alt) where N = EGM96 undulation.
                                 // X/Z from GPS(lat,lon,0).to_ecef() → ecef_to_local (horizontal only).
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0), origin_gps.alt);
-                                        // X/Z: sea-level ECEF horizontal (matches terrain column coords).
-                                        // Y:   geographic altitude diff from origin (matches terrain voxel Y).
+                                        let srtm = osm_elev_pipeline.query_nonblocking(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0),
+                                            origin_gps.alt);
+                                        let n_obj = metaverse_core::elevation::egm96_undulation(obj.lat, obj.lon);
                                         let horiz = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [horiz.x, (srtm - origin_gps.alt) as f32, horiz.z];
+                                        let world_pos = [horiz.x, (srtm + n_obj - origin_gps.alt) as f32, horiz.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                let segs = infer_road_segments(&ctx);
-                                if !segs.is_empty() {
-                                    for seg in &segs {
-                                        let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                        let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                        let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                        let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let bridge_off = if seg.is_bridge { 4.0_f32 } else { 0.05 };
-                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + bridge_off, la.z);
-                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + bridge_off, lb.z);
-                                        road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
-                                        if let Some(ref name) = seg.name {
-                                            let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
-                                            if !road_labels.iter().any(|(_, n)| n == name) {
-                                                road_labels.push((mid, name.clone()));
-                                            }
-                                        }
-                                    }
-                                    osm_geom_dirty = true;
-                                }
-                                // Railways
-                                for seg in infer_railway_segments(&ctx) {
-                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                    let elev_off = if seg.is_bridge { seg.layer as f32 * 4.0 + 0.5 } else { 0.1 };
-                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + elev_off, la.z);
-                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + elev_off, lb.z);
-                                    railway_segments.push((pa, pb, seg.railway_type, seg.is_bridge, seg.layer));
-                                    osm_geom_dirty = true;
-                                }
-                                // Waterway centreline overlays
-                                for seg in infer_waterway_segments(&ctx) {
-                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 - 0.1, la.z);
-                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 - 0.1, lb.z);
-                                    waterway_segments.push((pa, pb, seg.width_m, seg.waterway_type));
-                                    osm_geom_dirty = true;
-                                }
-                                // Land area / park polygons
-                                for lp in infer_land_polygons(&ctx) {
-                                    if lp.polygon.len() < 3 { continue; }
-                                    let key = lp.polygon[0].lat.to_bits() ^ lp.polygon[0].lon.to_bits().wrapping_add(lp.area_type.len() as u64);
-                                    if !land_poly_seen.insert(key) { continue; }
-                                    let verts: Vec<Vec3> = lp.polygon.iter().map(|gps| {
-                                        let h = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                        let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), origin_gps.alt);
-                                        Vec3::new(h.x, (elev - origin_gps.alt) as f32 + 0.02, h.z)
-                                    }).collect();
-                                    land_polygons.push((verts, lp.area_type.clone()));
-                                    osm_geom_dirty = true;
-                                }
-                                // Water polygons
-                                if let Some(ref osm_data) = ctx.osm {
-                                    if !osm_data.water.is_empty() {
-                                        for w in &osm_data.water {
-                                            if w.polygon.len() < 3 { continue; }
-                                            let key = ((w.polygon[0].lat * 1e6) as i64,
-                                                       (w.polygon[0].lon * 1e6) as i64);
-                                            if !water_poly_seen.insert(key) { continue; }
-                                            let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
-                                                let h = physics.ecef_to_local(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                                let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), 2.0);
-                                                let vy = (elev - origin_gps.alt) as f32 + 0.05;
-                                                Vec3::new(h.x, vy, h.z)
-                                            }).collect();
-                                            water_polygons.push(verts);
-                                        }
-                                        osm_geom_dirty = true;
-                                    }
-                                }
+                                // Roads, railways, waterways, parks are represented entirely by
+                                // voxel materials (ASPHALT, WATER, GRASS) carved into terrain.
+                                // Flat mesh overlays have been removed — they conflicted with
+                                // terrain voxels and appeared at wrong elevations.
                             }
                         }
 
@@ -2830,8 +2708,6 @@ fn main() {
                         // OSM inference for newly loaded chunks (game phase)
                         {
                             use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  infer_road_segments, infer_railway_segments,
-                                                                  infer_waterway_segments, infer_land_polygons,
                                                                   to_placed_object};
                             const OSM_PER_FRAME: usize = 3;
                             let batch_end = pending_game_osm_queue.len().min(OSM_PER_FRAME);
@@ -2862,94 +2738,19 @@ fn main() {
                                 let inferred = infer_chunk_objects(&ctx);
                                 if !inferred.is_empty() {
                                     for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0), origin_gps.alt);
-                                        // X/Z: sea-level ECEF horizontal (matches terrain column coords).
-                                        // Y:   geographic altitude diff from origin (matches terrain voxel Y).
+                                        let srtm = osm_elev_pipeline.query_nonblocking(
+                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0),
+                                            origin_gps.alt);
+                                        let n_obj = metaverse_core::elevation::egm96_undulation(obj.lat, obj.lon);
                                         let horiz = physics.ecef_to_local(
                                             &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [horiz.x, (srtm - origin_gps.alt) as f32, horiz.z];
+                                        let world_pos = [horiz.x, (srtm + n_obj - origin_gps.alt) as f32, horiz.z];
                                         multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
                                     }
                                     osm_geom_dirty = true;
                                 }
-                                let segs = infer_road_segments(&ctx);
-                                if !segs.is_empty() {
-                                    for seg in &segs {
-                                        let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                        let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                        let la = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                        let lb = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                        let bridge_off = if seg.is_bridge { 4.0_f32 } else { 0.05 };
-                                        let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + bridge_off, la.z);
-                                        let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + bridge_off, lb.z);
-                                        road_segments.push((pa, pb, seg.width_m, seg.road_type.clone()));
-                                        if let Some(ref name) = seg.name {
-                                            let mid = Vec3::new((pa.x+pb.x)*0.5, (pa.y+pb.y)*0.5+3.0, (pa.z+pb.z)*0.5);
-                                            if !road_labels.iter().any(|(_, n)| n == name) {
-                                                road_labels.push((mid, name.clone()));
-                                            }
-                                        }
-                                    }
-                                    osm_geom_dirty = true;
-                                }
-                                // Railways
-                                for seg in infer_railway_segments(&ctx) {
-                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                    let elev_off = if seg.is_bridge { seg.layer as f32 * 4.0 + 0.5 } else { 0.1 };
-                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 + elev_off, la.z);
-                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 + elev_off, lb.z);
-                                    railway_segments.push((pa, pb, seg.railway_type, seg.is_bridge, seg.layer));
-                                    osm_geom_dirty = true;
-                                }
-                                // Waterway centreline overlays
-                                for seg in infer_waterway_segments(&ctx) {
-                                    let sa = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0), origin_gps.alt);
-                                    let sb = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0), origin_gps.alt);
-                                    let la = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.a_lat, seg.a_lon, 0.0).to_ecef());
-                                    let lb = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(seg.b_lat, seg.b_lon, 0.0).to_ecef());
-                                    let pa = Vec3::new(la.x, (sa - origin_gps.alt) as f32 - 0.1, la.z);
-                                    let pb = Vec3::new(lb.x, (sb - origin_gps.alt) as f32 - 0.1, lb.z);
-                                    waterway_segments.push((pa, pb, seg.width_m, seg.waterway_type));
-                                    osm_geom_dirty = true;
-                                }
-                                // Land area / park polygons
-                                for lp in infer_land_polygons(&ctx) {
-                                    if lp.polygon.len() < 3 { continue; }
-                                    let key = lp.polygon[0].lat.to_bits() ^ lp.polygon[0].lon.to_bits().wrapping_add(lp.area_type.len() as u64);
-                                    if !land_poly_seen.insert(key) { continue; }
-                                    let verts: Vec<Vec3> = lp.polygon.iter().map(|gps| {
-                                        let h = physics.ecef_to_local(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                        let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), origin_gps.alt);
-                                        Vec3::new(h.x, (elev - origin_gps.alt) as f32 + 0.02, h.z)
-                                    }).collect();
-                                    land_polygons.push((verts, lp.area_type.clone()));
-                                    osm_geom_dirty = true;
-                                }
-                                // Water polygons — reuse already-fetched ctx.osm (no second fetch)
-                                if let Some(ref osm_data) = ctx.osm {
-                                    if !osm_data.water.is_empty() {
-                                        for w in &osm_data.water {
-                                            if w.polygon.len() < 3 { continue; }
-                                            let key = ((w.polygon[0].lat * 1e6) as i64,
-                                                       (w.polygon[0].lon * 1e6) as i64);
-                                            if !water_poly_seen.insert(key) { continue; }
-                                            let verts: Vec<Vec3> = w.polygon.iter().map(|gps| {
-                                                let h = physics.ecef_to_local(
-                                                    &metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0).to_ecef());
-                                                let elev = osm_elev_pipeline.query_nonblocking(&metaverse_core::coordinates::GPS::new(gps.lat, gps.lon, 0.0), 2.0);
-                                                let vy = (elev - origin_gps.alt) as f32 + 0.05;
-                                                Vec3::new(h.x, vy, h.z)
-                                            }).collect();
-                                            water_polygons.push(verts);
-                                        }
-                                        osm_geom_dirty = true;
-                                    }
-                                }
+                                // Roads, railways, waterways, parks are represented entirely by
+                                // voxel materials (ASPHALT, WATER, GRASS) carved into terrain.
                             }
                         }
 
@@ -3207,39 +3008,6 @@ fn main() {
                         };
                         buildings_mesh_buffer = if bld_mesh.vertices.is_empty() { None }
                             else { Some(MeshBuffer::from_mesh(&context.device, &bld_mesh)) };
-                        let rd_mesh = build_roads_mesh(&road_segments);
-                        roads_mesh_buffer = if rd_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &rd_mesh)) };
-                        // Textured road overlay: UV-mapped quads using the asphalt tile texture.
-                        textured_roads = if let Some((ref rgba, tw, th)) = road_texture_rgba {
-                            let (verts, idxs) = build_roads_textured_mesh(&road_segments);
-                            if verts.is_empty() { None }
-                            else { textured_pipeline.build_textured_mesh(&context.device, &context.queue, &verts, &idxs, rgba, tw, th) }
-                        } else { None };
-                        // Railway tracks
-                        let rail_mesh = build_railways_mesh(&railway_segments);
-                        railway_mesh_buffer = if rail_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &rail_mesh)) };
-                        // Waterway centreline overlays (for streams/canals without OSM polygon)
-                        let ww_mesh = build_waterway_overlay_mesh(&waterway_segments);
-                        waterway_overlay_buffer = if ww_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &ww_mesh)) };
-                        // Land areas (parks, forests, farmland, etc.)
-                        let land_mesh = build_land_mesh(&land_polygons);
-                        land_mesh_buffer = if land_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &land_mesh)) };
-                        // Water is now voxel-based (WATER/GRAVEL/SAND in terrain.rs).
-                        // The OSM polygon overlay is disabled — terrain voxels handle the
-                        // river surface following the actual slope per column.
-                        water_mesh_buffer = None;
-                        // Debug: build bright-yellow polygon outline mesh when O is pressed
-                        osm_debug_buffer = if show_osm_debug {
-                            let dbg = build_osm_debug_outlines(&water_polygons);
-                            if dbg.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &dbg)) }
-                        } else {
-                            None
-                        };
                         osm_geom_dirty = false;
                     }
 
@@ -3383,17 +3151,6 @@ fn main() {
                                             buf.render(&mut render_pass);
                                         }
                                     }
-                                    // Render OSM road surfaces below buildings
-                                    if let Some(road_model) = &textured_roads {
-                                        // Textured roads — switch to textured pipeline with identity model transform
-                                        textured_pipeline.set_pipeline(&mut render_pass, pipeline.camera_bind_group());
-                                        TexturedPipeline::draw_model(&mut render_pass, road_model, &pipeline.model_bind_group);
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                    } else if let Some(buf) = &roads_mesh_buffer {
-                                        buf.render(&mut render_pass);
-                                    }
                                     // Render OSM building boxes (flat-colour fallback)
                                     if !building_instances.is_empty() {
                                         // Switch to textured pipeline for GLB buildings
@@ -3412,38 +3169,6 @@ fn main() {
                                     }
                                     // Restore main pipeline for anything that follows
                                     pipeline.set_pipeline(&mut render_pass);
-                                    // Land areas (parks, forests, farmland) — render below roads
-                                    if let Some(buf) = &land_mesh_buffer {
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                        buf.render(&mut render_pass);
-                                        pipeline.set_pipeline(&mut render_pass);
-                                    }
-                                    // Waterway centreline overlays
-                                    if let Some(buf) = &waterway_overlay_buffer {
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                        buf.render(&mut render_pass);
-                                        pipeline.set_pipeline(&mut render_pass);
-                                    }
-                                    // Railway tracks (on top of terrain, below buildings)
-                                    if let Some(buf) = &railway_mesh_buffer {
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                        buf.render(&mut render_pass);
-                                        pipeline.set_pipeline(&mut render_pass);
-                                    }
-                                    // Debug: OSM water polygon outlines (press O to toggle)
-                                    if let Some(buf) = &osm_debug_buffer {
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                        buf.render(&mut render_pass);
-                                        pipeline.set_pipeline(&mut render_pass);
-                                    }
                                 }
 
                                 // Render placed world-object billboards (any game mode)
@@ -3579,8 +3304,6 @@ fn main() {
                                 dist_portal, dist_terminal,
                                 near_portal, hud_near_terminal,
                                 near_module_hud,
-                                &road_labels,
-                                camera.build_view_projection_matrix(),
                             );
 
                             frame.present();

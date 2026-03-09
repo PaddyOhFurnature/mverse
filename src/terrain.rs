@@ -351,8 +351,11 @@ impl TerrainGenerator {
                 let surface_elevation = elevation.lock().unwrap().query(&sample_gps)
                     .map(|e| e.meters)
                     .unwrap_or(self.origin_gps.alt);
+                // SRTM/Copernicus = orthometric (EGM96). origin_gps.alt = WGS-84 ellipsoidal.
+                // Add geoid undulation N so both are in the same datum before differencing.
+                let n_col = crate::elevation::egm96_undulation(sample_gps.lat, sample_gps.lon);
                 let surface_voxel_y = self.origin_voxel.y
-                    + (surface_elevation - self.origin_gps.alt) as i64;
+                    + (surface_elevation + n_col - self.origin_gps.alt) as i64;
 
                 // Water from OSM polygon only (centreline handled in post-pass below).
                 let in_water = !chunk_water_polys.is_empty()
@@ -379,22 +382,34 @@ impl TerrainGenerator {
         }
 
         // --- Water level normalisation pass ---
-        // SRTM elevation over open water has 1–3 m of pixel noise, which
-        // produces visible "steps" or layered surfaces across the river.
-        // Within any chunk cross-section the water surface must be flat,
-        // so we level all in_water columns to the minimum surface_voxel_y
-        // found in this chunk.  The natural downstream slope is preserved
-        // because each chunk independently finds its own minimum.
+        // SRTM elevation over open water has 1–3 m of pixel noise, which produces
+        // visible "steps" across the river. Use the minimum of adjacent NON-water column
+        // surface Y as the water level — bank elevation is reliable, SRTM-over-water is not.
+        // Falls back to minimum in-water Y if no neighbouring land columns exist in this chunk.
         if columns.iter().any(|c| c.in_water) {
-            let water_level_y = columns.iter()
-                .filter(|c| c.in_water)
-                .map(|c| c.surface_voxel_y)
-                .min()
-                .unwrap_or(0);
-            for col in columns.iter_mut() {
-                if col.in_water {
-                    col.surface_voxel_y = water_level_y;
+            let col_map: std::collections::HashMap<(i64, i64), usize> = columns.iter()
+                .enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
+
+            let mut bank_level: Option<i64> = None;
+            for col in columns.iter() {
+                if !col.in_water { continue; }
+                for dx in -6i64..=6 {
+                    for dz in -6i64..=6 {
+                        if let Some(&ni) = col_map.get(&(col.voxel_x + dx, col.voxel_z + dz)) {
+                            if !columns[ni].in_water {
+                                let bank_y = columns[ni].surface_voxel_y;
+                                bank_level = Some(bank_level.map_or(bank_y, |b: i64| b.min(bank_y)));
+                            }
+                        }
+                    }
                 }
+            }
+            let water_level_y = bank_level.unwrap_or_else(|| {
+                columns.iter().filter(|c| c.in_water)
+                    .map(|c| c.surface_voxel_y).min().unwrap_or(0)
+            });
+            for col in columns.iter_mut() {
+                if col.in_water { col.surface_voxel_y = water_level_y; }
             }
         }
 
@@ -432,17 +447,19 @@ impl TerrainGenerator {
                     let ya = col_lookup.get(&(vax, vaz))
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
+                            let n = crate::elevation::egm96_undulation(ga.lat, ga.lon);
                             elev_arc.lock().unwrap()
                                 .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
                         });
                     let yb = col_lookup.get(&(vbx, vbz))
                         .map(|&i| columns[i].surface_voxel_y)
                         .unwrap_or_else(|| {
+                            let n = crate::elevation::egm96_undulation(gb.lat, gb.lon);
                             elev_arc.lock().unwrap()
                                 .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
                                 .unwrap_or(self.origin_voxel.y)
                         });
 
@@ -528,9 +545,10 @@ impl TerrainGenerator {
                             .unwrap_or_else(|| {
                                 let lat = ga.lat * (1.0 - t as f64) + gb.lat * t as f64;
                                 let lon = ga.lon * (1.0 - t as f64) + gb.lon * t as f64;
+                                let n_ww = crate::elevation::egm96_undulation(lat, lon);
                                 elevation.lock().unwrap()
                                     .query(&crate::coordinates::GPS::new(lat, lon, 0.0))
-                                    .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
+                                    .map(|e| self.origin_voxel.y + (e.meters + n_ww - self.origin_gps.alt) as i64)
                                     .unwrap_or(self.origin_voxel.y)
                             });
 
