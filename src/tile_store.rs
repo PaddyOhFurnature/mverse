@@ -26,6 +26,23 @@ use rocksdb::{
     SliceTransform, WriteBatch, ReadOptions,
 };
 
+// ── Process-level TileStore registry ──────────────────────────────────────────
+// RocksDB allows only one open per DB path per process. This registry returns
+// the existing Arc when the same path is opened a second time,
+// preventing "lock hold by current process" LOCK conflicts.
+// Uses Weak so the DB is closed when all real holders drop their Arcs.
+use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+static TILE_STORE_REGISTRY: std::sync::OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>>>> =
+    std::sync::OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>>> {
+    TILE_STORE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+
 // ── Schema versions ────────────────────────────────────────────────────────────
 pub const OSM_TILE_VERSION:     u32 = 8;
 pub const SRTM_TILE_VERSION:    u32 = 1;
@@ -119,19 +136,48 @@ fn meta_opts() -> Options {
 
 // ── TileStore ──────────────────────────────────────────────────────────────────
 
+/// Inner DB holder — one per unique path, reference-counted via Arc.
+struct TileStoreInner {
+    db: DB,
+}
+
 /// Shared handle to the tile cache database.
-/// Cheap to clone — backed by `Arc<DB>`.
+/// Cheap to clone — backed by `Arc<TileStoreInner>`.
+/// **Process-singleton per path**: calling `open()` with the same canonical path
+/// returns the same underlying `Arc` instead of attempting a second RocksDB open.
 #[derive(Clone)]
 pub struct TileStore {
-    db: Arc<DB>,
+    db: Arc<TileStoreInner>,
 }
 
 impl TileStore {
     /// Open (or create) the tile database at `path`.
     ///
+    /// If the same canonical path is already open in this process, returns
+    /// a clone of the existing handle (no second RocksDB open, no LOCK conflict).
+    ///
     /// Automatically checks schema versions and wipes stale column families.
-    /// Safe to call from multiple threads after open — `Arc<DB>` is `Send + Sync`.
+    /// Safe to call from multiple threads after open — `Arc` is `Send + Sync`.
     pub fn open(path: &Path) -> Result<Self, String> {
+        let canonical = path.canonicalize()
+            .unwrap_or_else(|_| {
+                // Path doesn't exist yet — create dir first, then canonicalize
+                let _ = std::fs::create_dir_all(path);
+                path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+            });
+
+        // Check registry first — return existing Arc if already open
+        {
+            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(weak) = reg.get(&canonical) {
+                if let Some(strong) = weak.upgrade() {
+                    return Ok(TileStore { db: strong });
+                }
+                // Weak expired — remove stale entry and open fresh
+                reg.remove(&canonical);
+            }
+        }
+
         std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
 
         let mut db_opts = Options::default();
@@ -148,7 +194,13 @@ impl TileStore {
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descs)
             .map_err(|e| format!("TileStore open failed: {e}"))?;
 
-        let store = TileStore { db: Arc::new(db) };
+        let inner = Arc::new(TileStoreInner { db });
+        {
+            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+            reg.insert(canonical, Arc::downgrade(&inner));
+        }
+
+        let store = TileStore { db: inner };
         store.check_versions()?;
         Ok(store)
     }
@@ -161,17 +213,17 @@ impl TileStore {
     }
 
     fn check_cf_version(&self, meta_key: &str, expected: u32, cf_name: &str) -> Result<(), String> {
-        let meta_cf = self.db.cf_handle(CF_META)
+        let meta_cf = self.db.db.cf_handle(CF_META)
             .ok_or("meta CF missing")?;
-        let stored = self.db.get_cf(&meta_cf, meta_key)
+        let stored = self.db.db.get_cf(&meta_cf, meta_key)
             .map_err(|e| e.to_string())?
             .and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
             .unwrap_or(0);
 
         if stored != expected {
             // Stale version — wipe the CF by deleting all keys in range
-            let cf = self.db.cf_handle(cf_name).ok_or(format!("{cf_name} CF missing"))?;
-            let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+            let cf = self.db.db.cf_handle(cf_name).ok_or(format!("{cf_name} CF missing"))?;
+            let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
             let mut batch = WriteBatch::default();
             for item in iter {
                 if let Ok((key, _)) = item {
@@ -183,13 +235,13 @@ impl TileStore {
             batch.put_cf(&meta_cf, count_key.as_bytes(), 0u64.to_be_bytes());
             // Store new version
             batch.put_cf(&meta_cf, meta_key.as_bytes(), expected.to_be_bytes());
-            self.db.write(batch).map_err(|e| e.to_string())?;
+            self.db.db.write(batch).map_err(|e| e.to_string())?;
             eprintln!("TileStore: {cf_name} version {stored}→{expected}, stale entries cleared");
         } else {
             // Write version if it was absent (first open)
             let mut batch = WriteBatch::default();
             batch.put_cf(&meta_cf, meta_key.as_bytes(), expected.to_be_bytes());
-            self.db.write(batch).map_err(|e| e.to_string())?;
+            self.db.db.write(batch).map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -197,13 +249,13 @@ impl TileStore {
     // ── OSM ───────────────────────────────────────────────────────────────────
 
     pub fn get_osm(&self, s: f64, w: f64, n: f64, e: f64) -> Option<Vec<u8>> {
-        let cf = self.db.cf_handle(CF_OSM)?;
-        let raw = self.db.get_cf(&cf, osm_key(s, w, n, e)).ok()??;
+        let cf = self.db.db.cf_handle(CF_OSM)?;
+        let raw = self.db.db.get_cf(&cf, osm_key(s, w, n, e)).ok()??;
         match verify_and_extract(&raw) {
             Some(data) => Some(data.to_vec()),
             None => {
                 // Corrupt entry — evict and return None (triggers re-download)
-                let _ = self.db.delete_cf(&cf, osm_key(s, w, n, e));
+                let _ = self.db.db.delete_cf(&cf, osm_key(s, w, n, e));
                 self.dec_count(CF_OSM);
                 eprintln!("TileStore: evicted corrupt OSM tile s={s:.4} w={w:.4}");
                 None
@@ -213,23 +265,23 @@ impl TileStore {
 
     /// Store a pre-validated OSM tile (bincode bytes that already deserialised OK).
     pub fn put_osm(&self, s: f64, w: f64, n: f64, e: f64, data: &[u8]) {
-        let Some(cf) = self.db.cf_handle(CF_OSM) else { return };
-        let existed = self.db.get_cf(&cf, osm_key(s, w, n, e))
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return };
+        let existed = self.db.db.get_cf(&cf, osm_key(s, w, n, e))
             .ok().flatten().is_some();
-        let _ = self.db.put_cf(&cf, osm_key(s, w, n, e), make_value(data));
+        let _ = self.db.db.put_cf(&cf, osm_key(s, w, n, e), make_value(data));
         if !existed { self.inc_count(CF_OSM); }
     }
 
     pub fn has_osm(&self, s: f64, w: f64, n: f64, e: f64) -> bool {
-        let Some(cf) = self.db.cf_handle(CF_OSM) else { return false };
-        self.db.get_cf(&cf, osm_key(s, w, n, e))
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return false };
+        self.db.db.get_cf(&cf, osm_key(s, w, n, e))
             .ok().flatten().is_some()
     }
 
     pub fn delete_osm(&self, s: f64, w: f64, n: f64, e: f64) {
-        let Some(cf) = self.db.cf_handle(CF_OSM) else { return };
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return };
         if self.has_osm(s, w, n, e) {
-            let _ = self.db.delete_cf(&cf, osm_key(s, w, n, e));
+            let _ = self.db.db.delete_cf(&cf, osm_key(s, w, n, e));
             self.dec_count(CF_OSM);
         }
     }
@@ -237,12 +289,12 @@ impl TileStore {
     // ── SRTM ──────────────────────────────────────────────────────────────────
 
     pub fn get_srtm(&self, lat: i32, lon: i32) -> Option<Vec<u8>> {
-        let cf = self.db.cf_handle(CF_SRTM)?;
-        let raw = self.db.get_cf(&cf, srtm_key(lat, lon)).ok()??;
+        let cf = self.db.db.cf_handle(CF_SRTM)?;
+        let raw = self.db.db.get_cf(&cf, srtm_key(lat, lon)).ok()??;
         match verify_and_extract(&raw) {
             Some(data) => Some(data.to_vec()),
             None => {
-                let _ = self.db.delete_cf(&cf, srtm_key(lat, lon));
+                let _ = self.db.db.delete_cf(&cf, srtm_key(lat, lon));
                 self.dec_count(CF_SRTM);
                 eprintln!("TileStore: evicted corrupt SRTM tile lat={lat} lon={lon}");
                 None
@@ -251,22 +303,22 @@ impl TileStore {
     }
 
     pub fn put_srtm(&self, lat: i32, lon: i32, data: &[u8]) {
-        let Some(cf) = self.db.cf_handle(CF_SRTM) else { return };
-        let existed = self.db.get_cf(&cf, srtm_key(lat, lon))
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return };
+        let existed = self.db.db.get_cf(&cf, srtm_key(lat, lon))
             .ok().flatten().is_some();
-        let _ = self.db.put_cf(&cf, srtm_key(lat, lon), make_value(data));
+        let _ = self.db.db.put_cf(&cf, srtm_key(lat, lon), make_value(data));
         if !existed { self.inc_count(CF_SRTM); }
     }
 
     pub fn has_srtm(&self, lat: i32, lon: i32) -> bool {
-        let Some(cf) = self.db.cf_handle(CF_SRTM) else { return false };
-        self.db.get_cf(&cf, srtm_key(lat, lon)).ok().flatten().is_some()
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return false };
+        self.db.db.get_cf(&cf, srtm_key(lat, lon)).ok().flatten().is_some()
     }
 
     pub fn delete_srtm(&self, lat: i32, lon: i32) {
-        let Some(cf) = self.db.cf_handle(CF_SRTM) else { return };
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return };
         if self.has_srtm(lat, lon) {
-            let _ = self.db.delete_cf(&cf, srtm_key(lat, lon));
+            let _ = self.db.db.delete_cf(&cf, srtm_key(lat, lon));
             self.dec_count(CF_SRTM);
         }
     }
@@ -274,12 +326,12 @@ impl TileStore {
     // ── Terrain ───────────────────────────────────────────────────────────────
 
     pub fn get_terrain(&self, cx: i32, cy: i32, cz: i32) -> Option<Vec<u8>> {
-        let cf = self.db.cf_handle(CF_TERRAIN)?;
-        let raw = self.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok()??;
+        let cf = self.db.db.cf_handle(CF_TERRAIN)?;
+        let raw = self.db.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok()??;
         match verify_and_extract(&raw) {
             Some(data) => Some(data.to_vec()),
             None => {
-                let _ = self.db.delete_cf(&cf, terrain_key(cx, cy, cz));
+                let _ = self.db.db.delete_cf(&cf, terrain_key(cx, cy, cz));
                 self.dec_count(CF_TERRAIN);
                 eprintln!("TileStore: evicted corrupt terrain chunk {cx},{cy},{cz}");
                 None
@@ -288,25 +340,25 @@ impl TileStore {
     }
 
     pub fn put_terrain(&self, cx: i32, cy: i32, cz: i32, data: &[u8]) {
-        let Some(cf) = self.db.cf_handle(CF_TERRAIN) else { return };
-        let existed = self.db.get_cf(&cf, terrain_key(cx, cy, cz))
+        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else { return };
+        let existed = self.db.db.get_cf(&cf, terrain_key(cx, cy, cz))
             .ok().flatten().is_some();
-        let _ = self.db.put_cf(&cf, terrain_key(cx, cy, cz), make_value(data));
+        let _ = self.db.db.put_cf(&cf, terrain_key(cx, cy, cz), make_value(data));
         if !existed { self.inc_count(CF_TERRAIN); }
     }
 
     pub fn has_terrain(&self, cx: i32, cy: i32, cz: i32) -> bool {
-        let Some(cf) = self.db.cf_handle(CF_TERRAIN) else { return false };
-        self.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok().flatten().is_some()
+        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else { return false };
+        self.db.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok().flatten().is_some()
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     /// Instant tile count read from a meta counter (no full scan).
     pub fn tile_count(&self, cf_name: &str) -> u64 {
-        let Some(meta_cf) = self.db.cf_handle(CF_META) else { return 0 };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return 0 };
         let key = format!("{cf_name}_count");
-        self.db.get_cf(&meta_cf, key.as_bytes())
+        self.db.db.get_cf(&meta_cf, key.as_bytes())
             .ok().flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(0)
@@ -320,9 +372,9 @@ impl TileStore {
     /// Decodes each 16-byte key back to (s, w, n, e) float pairs.
     /// Used for DHT announce-all at startup.
     pub fn iter_osm_coords(&self) -> Vec<(f64, f64, f64, f64)> {
-        let Some(cf) = self.db.cf_handle(CF_OSM) else { return vec![] };
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return vec![] };
         let mut result = Vec::new();
-        for item in self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+        for item in self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
             if let Ok((key, _)) = item {
                 if key.len() == 16 {
                     let s = i32::from_be_bytes(key[0..4].try_into().unwrap()) as f64 / 10000.0;
@@ -339,8 +391,8 @@ impl TileStore {
     /// Scan all tiles in a CF and verify checksums.
     /// Returns `(total, corrupt)` — corrupt entries are deleted automatically.
     pub fn verify_cf(&self, cf_name: &str) -> (u64, u64) {
-        let Some(cf) = self.db.cf_handle(cf_name) else { return (0, 0) };
-        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let Some(cf) = self.db.db.cf_handle(cf_name) else { return (0, 0) };
+        let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let (mut total, mut corrupt) = (0u64, 0u64);
         let mut to_delete: Vec<Vec<u8>> = Vec::new();
         for item in iter {
@@ -353,23 +405,23 @@ impl TileStore {
             }
         }
         for key in &to_delete {
-            let _ = self.db.delete_cf(&cf, key);
+            let _ = self.db.db.delete_cf(&cf, key);
         }
         if corrupt > 0 {
             // Recount — easier than trying to decrement by exact corrupt count
-            let Some(meta_cf) = self.db.cf_handle(CF_META) else { return (total, corrupt) };
+            let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return (total, corrupt) };
             let new_count = total - corrupt;
             let count_key = format!("{cf_name}_count");
-            let _ = self.db.put_cf(&meta_cf, count_key.as_bytes(), new_count.to_be_bytes());
+            let _ = self.db.db.put_cf(&meta_cf, count_key.as_bytes(), new_count.to_be_bytes());
         }
         (total, corrupt)
     }
 
     /// Wipe an entire column family (nuclear option — all tiles deleted).
     pub fn purge_cf(&self, cf_name: &str) -> Result<usize, String> {
-        let cf = self.db.cf_handle(cf_name)
+        let cf = self.db.db.cf_handle(cf_name)
             .ok_or(format!("unknown CF: {cf_name}"))?;
-        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+        let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut batch = WriteBatch::default();
         let mut count = 0usize;
         for item in iter {
@@ -379,34 +431,34 @@ impl TileStore {
             }
         }
         // Reset counter
-        if let Some(meta_cf) = self.db.cf_handle(CF_META) {
+        if let Some(meta_cf) = self.db.db.cf_handle(CF_META) {
             let count_key = format!("{cf_name}_count");
             batch.put_cf(&meta_cf, count_key.as_bytes(), 0u64.to_be_bytes());
         }
-        self.db.write(batch).map_err(|e| e.to_string())?;
+        self.db.db.write(batch).map_err(|e| e.to_string())?;
         Ok(count)
     }
 
     // ── Internal counter helpers ───────────────────────────────────────────────
 
     fn inc_count(&self, cf_name: &str) {
-        let Some(meta_cf) = self.db.cf_handle(CF_META) else { return };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return };
         let key = format!("{cf_name}_count");
-        let cur = self.db.get_cf(&meta_cf, key.as_bytes())
+        let cur = self.db.db.get_cf(&meta_cf, key.as_bytes())
             .ok().flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(0);
-        let _ = self.db.put_cf(&meta_cf, key.as_bytes(), (cur + 1).to_be_bytes());
+        let _ = self.db.db.put_cf(&meta_cf, key.as_bytes(), (cur + 1).to_be_bytes());
     }
 
     fn dec_count(&self, cf_name: &str) {
-        let Some(meta_cf) = self.db.cf_handle(CF_META) else { return };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return };
         let key = format!("{cf_name}_count");
-        let cur = self.db.get_cf(&meta_cf, key.as_bytes())
+        let cur = self.db.db.get_cf(&meta_cf, key.as_bytes())
             .ok().flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(1);
-        let _ = self.db.put_cf(&meta_cf, key.as_bytes(), cur.saturating_sub(1).to_be_bytes());
+        let _ = self.db.db.put_cf(&meta_cf, key.as_bytes(), cur.saturating_sub(1).to_be_bytes());
     }
 }
 

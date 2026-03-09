@@ -438,6 +438,11 @@ impl CopernicusElevationSource {
         Self { cache_dir, tile_store: ts }
     }
 
+    /// Create with a pre-opened TileStore Arc to avoid double-open LOCK conflicts.
+    pub fn with_tile_store(cache_dir: PathBuf, ts: std::sync::Arc<crate::tile_store::TileStore>) -> Self {
+        Self { cache_dir, tile_store: Some(SrtmTileStore::from_arc(ts)) }
+    }
+
     fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
         let ns = if lat >= 0 { "N" } else { "S" };
         let ew = if lon >= 0 { "E" } else { "W" };
@@ -539,6 +544,11 @@ impl SkadiElevationSource {
     pub fn new(cache_dir: PathBuf) -> Self {
         let ts = SrtmTileStore::new(&cache_dir);
         Self { cache_dir, tile_store: ts }
+    }
+
+    /// Create with a pre-opened TileStore Arc to avoid double-open LOCK conflicts.
+    pub fn with_tile_store(cache_dir: PathBuf, ts: std::sync::Arc<crate::tile_store::TileStore>) -> Self {
+        Self { cache_dir, tile_store: Some(SrtmTileStore::from_arc(ts)) }
     }
 
     fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {

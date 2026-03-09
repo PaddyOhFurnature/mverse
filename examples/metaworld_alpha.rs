@@ -1252,6 +1252,13 @@ fn main() {
     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").ok();
     let tile_fetcher = Arc::new(multiplayer.tile_fetcher());
 
+    // Open TileStore ONCE — shared by all OSM and SRTM consumers in this process.
+    // RocksDB allows only one open per path per process; passing Arc avoids LOCK conflicts.
+    let client_tile_store: Arc<metaverse_core::tile_store::TileStore> = Arc::new(
+        metaverse_core::tile_store::TileStore::open(&data_dir.join("tiles.db"))
+            .expect("Failed to open client TileStore")
+    );
+
     let mut elevation_pipeline = ElevationPipeline::new();
     // P2P first — try peers before hitting any API
     elevation_pipeline.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
@@ -1261,8 +1268,8 @@ fn main() {
         println!("⚠️  No OPENTOPOGRAPHY_API_KEY set — using free elevation sources only");
     }
     // Free fallback sources — no API key required
-    elevation_pipeline.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
-    elevation_pipeline.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
+    elevation_pipeline.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
+    elevation_pipeline.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
     
     // Convert GPS origin to voxel coordinates  
     let origin_ecef = origin_gps.to_ecef();
@@ -1284,8 +1291,8 @@ fn main() {
     if let Some(ref key) = api_key {
         elevation_pipeline_2.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
-    elevation_pipeline_2.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
-    elevation_pipeline_2.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
+    elevation_pipeline_2.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
+    elevation_pipeline_2.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
     let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
         .with_osm_cache(data_dir.join("osm"))
         .with_tile_fetcher(Arc::clone(&tile_fetcher));
@@ -1296,8 +1303,8 @@ fn main() {
     if let Some(ref key) = api_key {
         osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
     }
-    osm_elev_pipeline.add_source(Box::new(CopernicusElevationSource::new(elev_cache.clone())));
-    osm_elev_pipeline.add_source(Box::new(SkadiElevationSource::new(elev_cache.clone())));
+    osm_elev_pipeline.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
+    osm_elev_pipeline.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
     let osm_cache_dir = data_dir.join("osm");
     // Trigger cleanup of old flat-file elevation cache tiles in the background
     metaverse_core::tile_store::cleanup_old_tile_dir(&elev_cache);
@@ -2066,7 +2073,7 @@ fn main() {
                                     let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
                                     if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
                                         if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
-                                            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_cache_dir);
+                                            let cache = metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(&client_tile_store));
                                             cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
                                             tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
                                             osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
@@ -2824,7 +2831,7 @@ fn main() {
                                     let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
                                     if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
                                         if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
-                                            let cache = metaverse_core::osm::OsmDiskCache::new(&osm_cache_dir);
+                                            let cache = metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(&client_tile_store));
                                             cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
                                             tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
                                             osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
