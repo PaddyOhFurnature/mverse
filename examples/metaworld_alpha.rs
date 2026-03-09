@@ -3109,24 +3109,30 @@ fn main() {
                     }
                     // Lazy collider build: chunks close to player that have a mesh but no collider
                     // (were meshed while player was far, now player has approached).
+                    // IMPORTANT: compute distance from voxel coords — do NOT call extract_chunk_mesh
+                    // just for the center, as that's ~80ms per chunk and would stall every frame.
                     if colliders_built < COLLIDER_PER_FRAME {
                         for chunk_data in chunk_streamer.loaded_chunks_mut() {
                             if chunk_data.collider.is_some() || chunk_data.mesh_buffer.is_none() { continue; }
-                            let min_voxel = chunk_data.id.min_voxel();
-                            let (_, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &chunk_data.id.max_voxel());
-                            let offset = Vec3::new(
-                                (chunk_center.x - origin_voxel.x) as f32,
-                                (chunk_center.y - origin_voxel.y) as f32,
-                                (chunk_center.z - origin_voxel.z) as f32,
-                            );
+                            let min_v = chunk_data.id.min_voxel();
+                            let max_v = chunk_data.id.max_voxel();
+                            // Cheap center from voxel arithmetic — no mesh extraction.
+                            let cx = ((min_v.x + max_v.x) / 2 - origin_voxel.x) as f32;
+                            let cy = ((min_v.y + max_v.y) / 2 - origin_voxel.y) as f32;
+                            let cz = ((min_v.z + max_v.z) / 2 - origin_voxel.z) as f32;
+                            let offset = Vec3::new(cx, cy, cz);
                             let chunk_dist = (player_local_pos - offset).length();
                             if chunk_dist < COLLIDER_RANGE_M {
-                                let max_voxel = chunk_data.id.max_voxel();
-                                let (mut mesh, _) = extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel);
+                                let (mut mesh, chunk_center) = extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v);
+                                let real_offset = Vec3::new(
+                                    (chunk_center.x - origin_voxel.x) as f32,
+                                    (chunk_center.y - origin_voxel.y) as f32,
+                                    (chunk_center.z - origin_voxel.z) as f32,
+                                );
                                 for v in &mut mesh.vertices {
-                                    v.position[0] += offset.x;
-                                    v.position[1] += offset.y;
-                                    v.position[2] += offset.z;
+                                    v.position[0] += real_offset.x;
+                                    v.position[1] += real_offset.y;
+                                    v.position[2] += real_offset.z;
                                 }
                                 if !mesh.vertices.is_empty() {
                                     let col = metaverse_core::physics::create_collision_from_mesh(
