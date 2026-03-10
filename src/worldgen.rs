@@ -84,6 +84,8 @@ pub struct WorldgenConfig {
     pub extra_y_layers: i32,
     /// Print progress to stderr every `report_interval` chunks.
     pub report_interval: usize,
+    /// Enable per-chunk timing output (prints generate/serialize times).
+    pub verbose: bool,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -221,6 +223,9 @@ pub fn generate_region(
     let done    = Arc::new(AtomicU64::new(0));
     let results = Arc::new(Mutex::new(Vec::<ManifestChunk>::new()));
     let errors  = Arc::new(Mutex::new(Vec::<String>::new()));
+    // For rate tracking: (total_gen_ms, total_ser_ms, count)
+    let timing  = Arc::new(Mutex::new((0u64, 0u64, 0u64)));
+    let run_start = std::time::Instant::now();
 
     pool.install(|| {
         chunk_ids.par_iter().for_each(|id| {
@@ -244,10 +249,14 @@ pub fn generate_region(
                 return;
             }
 
+            let t_gen = std::time::Instant::now();
             match terrain_gen.generate_chunk(id) {
                 Ok((octree, _surface_cache)) => {
+                    let gen_ms = t_gen.elapsed().as_millis() as u64;
+                    let t_ser = std::time::Instant::now();
                     match serialise_chunk(&octree) {
                         Ok(data) => {
+                            let ser_ms = t_ser.elapsed().as_millis() as u64;
                             let entry = ManifestChunk {
                                 chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                                 size: data.len() as u64,
@@ -259,6 +268,11 @@ pub fn generate_region(
                                 );
                             } else {
                                 results.lock().unwrap().push(entry);
+                                let mut t = timing.lock().unwrap();
+                                t.0 += gen_ms; t.1 += ser_ms; t.2 += 1;
+                                if cfg.verbose {
+                                    eprintln!("[chunk] {:?}  gen={gen_ms}ms  ser={ser_ms}ms", id);
+                                }
                             }
                         }
                         Err(e) => {
@@ -272,6 +286,19 @@ pub fn generate_region(
             }
 
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            // Print rolling rate stats every 50 generated chunks
+            if n % 50 == 0 {
+                let elapsed = run_start.elapsed().as_secs_f64();
+                let rate = n as f64 / elapsed * 60.0;
+                let t = timing.lock().unwrap();
+                let (avg_gen, avg_ser) = if t.2 > 0 {
+                    (t.0 / t.2, t.1 / t.2)
+                } else { (0, 0) };
+                eprintln!(
+                    "[worldgen] {n}/{total} ({:.1}%)  {rate:.1} chunks/min  avg gen={avg_gen}ms ser={avg_ser}ms",
+                    n as f64 / total as f64 * 100.0
+                );
+            }
             if let Some(ref p) = progress {
                 p(n, total, id);
             }

@@ -634,6 +634,10 @@ impl ElevationSource for SkadiElevationSource {
     fn query(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
+        // Fast path: in-process tile bytes cache — avoids all FS/RocksDB access after first load
+        if let Some(bytes) = hgt_tile_get(lat_tile, lon_tile) {
+            return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &bytes, gps)?));
+        }
         let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
         let ns = if lat_tile >= 0 { "N" } else { "S" };
         let ew = if lon_tile >= 0 { "E" } else { "W" };
@@ -641,23 +645,43 @@ impl ElevationSource for SkadiElevationSource {
         let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lo) };
         let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, la, ew, lo);
         let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+        // TileStore path
         if let Some(ts) = &self.tile_store {
             if ts.has(lat_tile, lon_tile) {
                 if let Some(data) = ts.get_bytes(lat_tile, lon_tile) {
-                    return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &data, gps)?));
+                    let arc = Arc::new(data);
+                    hgt_tile_insert(lat_tile, lon_tile, arc.clone());
+                    return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &arc, gps)?));
                 }
             }
         }
+        // File path
         let tile_file = if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
             hgt_path
         } else {
             self.fetch_tile(lat_tile, lon_tile)?
         };
-        Ok(Some(extract_elevation(&tile_file, gps)?))
+        // extract_elevation reads the file and uses the path-based cache; also populate tile cache
+        let result = extract_elevation(&tile_file, gps);
+        if result.is_ok() {
+            // Read bytes into tile cache so subsequent calls skip FS entirely
+            if let Some(arc) = cached_hgt_get(&tile_file) {
+                hgt_tile_insert(lat_tile, lon_tile, arc);
+            } else if let Ok(raw) = std::fs::read(&tile_file) {
+                let arc = Arc::new(raw);
+                cached_hgt_insert(tile_file.clone(), arc.clone());
+                hgt_tile_insert(lat_tile, lon_tile, arc);
+            }
+        }
+        result.map(Some)
     }
     fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
+        // Fast path: in-process tile bytes cache
+        if let Some(bytes) = hgt_tile_get(lat_tile, lon_tile) {
+            return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &bytes, gps)?));
+        }
         let la = lat_tile.unsigned_abs(); let lo = lon_tile.unsigned_abs();
         let ns = if lat_tile >= 0 { "N" } else { "S" };
         let ew = if lon_tile >= 0 { "E" } else { "W" };
@@ -668,12 +692,20 @@ impl ElevationSource for SkadiElevationSource {
         if let Some(ts) = &self.tile_store {
             if ts.has(lat_tile, lon_tile) {
                 if let Some(data) = ts.get_bytes(lat_tile, lon_tile) {
-                    return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &data, gps)?));
+                    let arc = Arc::new(data);
+                    hgt_tile_insert(lat_tile, lon_tile, arc.clone());
+                    return Ok(Some(extract_elevation_hgt_bytes(lat_tile, lon_tile, &arc, gps)?));
                 }
             }
         }
         if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
-            Ok(Some(extract_elevation(&hgt_path, gps)?))
+            let result = extract_elevation(&hgt_path, gps);
+            if result.is_ok() {
+                if let Some(arc) = cached_hgt_get(&hgt_path) {
+                    hgt_tile_insert(lat_tile, lon_tile, arc);
+                }
+            }
+            result.map(Some)
         } else {
             Ok(None)
         }
@@ -769,6 +801,21 @@ use std::sync::OnceLock;
 fn global_hgt_cache() -> &'static std::sync::RwLock<HashMap<PathBuf, Arc<Vec<u8>>>> {
     static CACHE: OnceLock<std::sync::RwLock<HashMap<PathBuf, Arc<Vec<u8>>>>> = OnceLock::new();
     CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+
+/// Separate cache keyed by (lat_tile, lon_tile) so the TileStore / bytes path
+/// also avoids re-reading/deserialising the same 25 MB tile on every column query.
+fn global_hgt_tile_cache() -> &'static std::sync::RwLock<HashMap<(i32, i32), Arc<Vec<u8>>>> {
+    static CACHE: OnceLock<std::sync::RwLock<HashMap<(i32, i32), Arc<Vec<u8>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+}
+fn hgt_tile_get(lat: i32, lon: i32) -> Option<Arc<Vec<u8>>> {
+    global_hgt_tile_cache().read().ok()?.get(&(lat, lon)).cloned()
+}
+fn hgt_tile_insert(lat: i32, lon: i32, data: Arc<Vec<u8>>) {
+    if let Ok(mut w) = global_hgt_tile_cache().write() {
+        w.insert((lat, lon), data);
+    }
 }
 
 fn cached_tiff_get(path: &PathBuf) -> Option<Arc<CachedTiffData>> {

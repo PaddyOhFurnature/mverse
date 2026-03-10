@@ -42,6 +42,7 @@ fn main() {
     let mut srtm_dir      = PathBuf::from("world_data/srtm");
     let mut osm_dir       = PathBuf::from("world_data/osm_cache");
     let mut bake_buildings = true;
+    let mut verbose = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -83,6 +84,9 @@ fn main() {
             }
             "--no-buildings" => {
                 bake_buildings = false;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
             }
             "--help" | "-h" => {
                 print_help();
@@ -134,6 +138,7 @@ fn main() {
         workers,
         extra_y_layers: extra_layers,
         report_interval: 100,
+        verbose,
     };
 
     eprintln!("[worldgen] Region: {:?}", region);

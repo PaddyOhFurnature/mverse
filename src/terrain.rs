@@ -155,7 +155,7 @@ impl TerrainGenerator {
             }
         }
         
-        println!("  Generating voxel columns at 1m resolution...");
+
         
         // Convert origin to voxel coordinates ONCE
         let origin_ecef = origin.to_ecef();
