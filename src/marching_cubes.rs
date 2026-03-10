@@ -740,27 +740,53 @@ pub fn extract_chunk_mesh_smooth(
 
     // Pre-compute density for all grid points in a single pass.
     // Outer loop over XZ columns to amortise the per-column noise lookup.
+    //
+    // The density grid needs one extra point on each XZ axis (gx = CHUNK_SIZE+1) so
+    // the MC cubes at the chunk edge have all 8 corners.  Previously the boundary
+    // point was clamped to the last interior column, duplicating its surface_y.
+    // That creates a flat shelf at every chunk boundary → the visible half-voxel
+    // ridge between adjacent chunks.
+    //
+    // Fix: linearly extrapolate from the last two interior columns to predict the
+    // neighboring chunk's first column surface height.  For uniform slope this is
+    // exact; for typical SRTM terrain it nearly eliminates the seam.
     let mut density_grid = vec![0.0f32; gx * gy * gz];
-    let max_x_clamp = max_voxel.x - 1;
-    let max_z_clamp = max_voxel.z - 1;
+    let xi_last = gx - 1;
+    let zi_last = gz - 1;
+    let no_surface = min_voxel.y as f32 - 1.0; // sentinel: all-air when below chunk
+
+    let lookup = |cx: i64, cz: i64| -> f32 {
+        surface_cache.get(&(cx, cz)).copied().unwrap_or(no_surface)
+    };
 
     for xi in 0..gx {
         let wx = min_voxel.x + xi as i64;
-        let cx = wx.clamp(min_voxel.x, max_x_clamp);
+        let x_bnd = xi == xi_last;
+        let cx1 = max_voxel.x - 1;          // last interior X column
+        let cx0 = (max_voxel.x - 2).max(min_voxel.x); // second-to-last
         for zi in 0..gz {
             let wz = min_voxel.z + zi as i64;
-            let cz = wz.clamp(min_voxel.z, max_z_clamp);
-            // Surface height from cache (sub-voxel precision for SRTM terrain)
-            let surface_y = surface_cache
-                .get(&(cx, cz))
-                .copied()
-                .unwrap_or(min_voxel.y as f32 - 1.0); // below chunk bottom → all air, no phantom surface
-            // Medium noise is XZ-only (cheaper; computed once per column)
+            let z_bnd = zi == zi_last;
+            let cz1 = max_voxel.z - 1;
+            let cz0 = (max_voxel.z - 2).max(min_voxel.z);
+
+            // Surface height: exact interior lookup, linear extrapolation at edges.
+            let surface_y = match (x_bnd, z_bnd) {
+                (false, false) => lookup(wx, wz),
+                (true,  false) => 2.0 * lookup(cx1, wz) - lookup(cx0, wz),
+                (false, true ) => 2.0 * lookup(wx, cz1) - lookup(wx, cz0),
+                (true,  true ) => {
+                    // Corner: average of both extrapolation directions
+                    let ex = 2.0 * lookup(cx1, cz1) - lookup(cx0, cz1);
+                    let ez = 2.0 * lookup(cx1, cz1) - lookup(cx1, cz0);
+                    (ex + ez) * 0.5
+                }
+            };
+
             let med = fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4;
             for yi in 0..gy {
                 let wy = min_voxel.y + yi as i64;
                 let fine = fbm_fine.get([wx as f64, wy as f64, wz as f64]) as f32 * 0.12;
-                // Positive density → solid (below surface), negative → air (above surface)
                 density_grid[g_idx(xi, yi, zi)] = surface_y - wy as f32 + med + fine;
             }
         }
