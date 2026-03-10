@@ -18,7 +18,7 @@ use crate::elevation::ElevationPipeline;
 use crate::materials::MaterialId;
 use crate::voxel::{Octree, VoxelCoord};
 use crate::chunk::ChunkId;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 /// Per-column fractional surface height used by the smooth marching cubes pass.
 /// Maps (voxel_x, voxel_z) → sub-voxel surface Y (f32).
@@ -30,15 +30,6 @@ pub struct TerrainGenerator {
     elevation: Arc<RwLock<ElevationPipeline>>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
-    osm_cache_dir: Option<std::path::PathBuf>,
-    /// Pre-opened OSM disk cache — avoids re-opening RocksDB on every chunk.
-    /// Set automatically by `with_osm_cache`; None falls back to per-call open.
-    osm_cache: Option<Arc<crate::osm::OsmDiskCache>>,
-    /// Optional handle to request OSM tiles from P2P peers when not cached locally.
-    tile_fetcher: Option<Arc<crate::multiplayer::TileFetcher>>,
-    /// When true, building footprints are voxelised directly into the octree.
-    /// Used by the offline worldgen tool; false for live incremental generation.
-    pub bake_buildings: bool,
 }
 
 impl TerrainGenerator {
@@ -53,10 +44,6 @@ impl TerrainGenerator {
             elevation: Arc::new(RwLock::new(elevation)),
             origin_gps,
             origin_voxel,
-            osm_cache_dir: None,
-            osm_cache: None,
-            tile_fetcher: None,
-            bake_buildings: false,
         }
     }
     
@@ -70,28 +57,7 @@ impl TerrainGenerator {
             elevation,
             origin_gps,
             origin_voxel,
-            osm_cache_dir: None,
-            osm_cache: None,
-            tile_fetcher: None,
-            bake_buildings: false,
         }
-    }
-
-    /// Set OSM cache directory for water-aware terrain generation.
-    pub fn with_osm_cache(mut self, dir: std::path::PathBuf) -> Self {
-        // Pre-open the OsmDiskCache (opens RocksDB once) so generate_chunk can
-        // reuse it across all chunks without re-opening the DB every call.
-        if dir.parent().map(|p| p.exists()).unwrap_or(false) || dir.exists() {
-            self.osm_cache = Some(Arc::new(crate::osm::OsmDiskCache::new(&dir)));
-        }
-        self.osm_cache_dir = Some(dir);
-        self
-    }
-
-    /// Set an optional P2P tile fetcher for fetching OSM tiles from peers on cache miss.
-    pub fn with_tile_fetcher(mut self, fetcher: Arc<crate::multiplayer::TileFetcher>) -> Self {
-        self.tile_fetcher = Some(fetcher);
-        self
     }
     
     /// Get shared elevation pipeline (for cloning generator)
@@ -289,51 +255,9 @@ impl TerrainGenerator {
         // Clone Arc for direct access (ElevationPipeline methods are now &self, thread-safe)
         let elevation = Arc::clone(&self.elevation);
 
-        // Load OSM data for this chunk (water + roads for terrain carving)
-        let (chunk_water_polys, chunk_waterway_lines, chunk_roads, chunk_aeroways, chunk_buildings, chunk_parks) = if let Some(ref dir) = self.osm_cache_dir {
-            let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-            // Use pre-opened cache when available (avoids re-opening RocksDB per chunk)
-            let mut osm = if let Some(ref cache) = self.osm_cache {
-                crate::osm::fetch_osm_for_chunk_with_cache(lat_min, lat_max, lon_min, lon_max, cache)
-            } else {
-                crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir)
-            };
-            // On disk miss, try fetching from a P2P peer
-            if osm.is_empty() {
-                if let Some(ref fetcher) = self.tile_fetcher {
-                    let tile_size = 0.01_f64;
-                    let s = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
-                    let w = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
-                    if let Some(bytes) = fetcher.fetch_osm(s, w, s + tile_size, w + tile_size) {
-                        if let Ok(data) = bincode::deserialize::<crate::osm::OsmData>(&bytes) {
-                            // Use pre-opened cache if available, else open once for save
-                            if let Some(ref cache) = self.osm_cache {
-                                cache.save(s, w, s + tile_size, w + tile_size, &data);
-                                osm = crate::osm::fetch_osm_for_chunk_with_cache(lat_min, lat_max, lon_min, lon_max, cache);
-                            } else {
-                                let cache = crate::osm::OsmDiskCache::new(dir);
-                                cache.save(s, w, s + tile_size, w + tile_size, &data);
-                                osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
-                            }
-                            // Announce to DHT — we now have this tile cached
-                            fetcher.announce_osm(s, w, s + tile_size, w + tile_size);
-                        }
-                    }
-                }
-            }
-            (osm.water, osm.waterway_lines, osm.roads, osm.aeroways, osm.buildings, osm.parks)
-        } else {
-            (vec![], vec![], vec![], vec![], vec![], vec![])
-        };
-
         // Two-pass chunk generation:
-        //   Pass 1 — sample every column, compute SRTM elevation, check OSM water polygon.
-        //   Post-pass — mark boundary (bank) columns adjacent to water as is_bank.
-        //   Pass 2 — generate voxels per-column.
-        //
-        //   Water columns use their OWN SRTM elevation as the water surface — not a
-        //   single chunk-minimum. SRTM measures the actual water surface for rivers
-        //   so this correctly follows the terrain slope (15m upstream → 5m at bay).
+        //   Pass 1 — sample every column, compute SRTM elevation.
+        //   Pass 2 — fill voxels: STONE bedrock, DIRT sublayer, GRASS surface.
         //
         // GPS per column computed via ellipsoid equation (not fixed origin Y).
         // At Brisbane lon≈153°, fixing ECEF Y at origin causes 726m geographic error at 1km.
@@ -341,19 +265,9 @@ impl TerrainGenerator {
         struct ColSample {
             voxel_x: i64,
             voxel_z: i64,
-            lat:              f64,
-            lon:              f64,
             surface_elevation: f64,
             surface_voxel_y:   i64,
             surface_y_f:       f32,
-            in_water:          bool,
-            is_road:           bool,
-            tunnel_floor_y:    Option<i64>,
-            is_aeroway:        bool,
-            /// Y-coord of the building roof voxel (exclusive). None if no building here.
-            building_top:      Option<i64>,
-            /// Column is inside a park/green area polygon.
-            is_park:           bool,
         }
 
         const WGS84_A: f64 = 6_378_137.0;
@@ -393,387 +307,19 @@ impl TerrainGenerator {
                 // Fractional surface height — used by smooth marching cubes for sub-voxel placement.
                 let surface_y_f = self.origin_voxel.y as f32 + surface_delta as f32;
 
-                // Water from OSM polygon only (centreline handled in post-pass below).
-                let in_water = !chunk_water_polys.is_empty()
-                    && chunk_water_polys.iter().any(|w| {
-                        crate::osm::point_in_polygon(
-                            sample_gps.lat, sample_gps.lon, &w.polygon,
-                        ) && !w.holes.iter().any(|hole| {
-                            crate::osm::point_in_polygon(
-                                sample_gps.lat, sample_gps.lon, hole,
-                            )
-                        })
-                    });
-
                 columns.push(ColSample {
                     voxel_x, voxel_z,
-                    lat: sample_gps.lat,
-                    lon: sample_gps.lon,
-                    surface_elevation, surface_voxel_y, surface_y_f, in_water,
-                    is_road: false,
-                    tunnel_floor_y: None,
-                    is_aeroway: false,
-                    building_top: None,
-                    is_park: false,
+                    surface_elevation, surface_voxel_y, surface_y_f,
                 });
-            }
-        }
-
-        // --- Water level normalisation pass ---
-        // SRTM elevation over open water has 1–3 m of pixel noise, which produces
-        // visible "steps" across the river. Use the minimum of adjacent NON-water column
-        // surface Y as the water level — bank elevation is reliable, SRTM-over-water is not.
-        // Falls back to minimum in-water Y if no neighbouring land columns exist in this chunk.
-        if columns.iter().any(|c| c.in_water) {
-            let col_map: std::collections::HashMap<(i64, i64), usize> = columns.iter()
-                .enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
-
-            let mut bank_level: Option<i64> = None;
-            for col in columns.iter() {
-                if !col.in_water { continue; }
-                for dx in -6i64..=6 {
-                    for dz in -6i64..=6 {
-                        if let Some(&ni) = col_map.get(&(col.voxel_x + dx, col.voxel_z + dz)) {
-                            if !columns[ni].in_water {
-                                let bank_y = columns[ni].surface_voxel_y;
-                                bank_level = Some(bank_level.map_or(bank_y, |b: i64| b.min(bank_y)));
-                            }
-                        }
-                    }
-                }
-            }
-            let water_level_y = bank_level.unwrap_or_else(|| {
-                columns.iter().filter(|c| c.in_water)
-                    .map(|c| c.surface_voxel_y).min().unwrap_or(0)
-            });
-            for col in columns.iter_mut() {
-                if col.in_water {
-                    col.surface_voxel_y = water_level_y;
-                    // Flat water surface: put isosurface at voxel midpoint
-                    col.surface_y_f = water_level_y as f32 + 0.5;
-                }
-            }
-        }
-
-        // --- Road carving pass ---
-        // For each non-bridge road segment, flatten terrain to road elevation.
-        // Uses the same Y formula as the OSM render pipeline:
-        //   render_y = (geographic_elevation - origin_gps.alt)
-        // X/Z from sea-level ECEF, matching terrain column coords.
-        if !chunk_roads.is_empty() {
-            use std::collections::HashMap;
-            let mut col_lookup: HashMap<(i64, i64), usize> = HashMap::with_capacity(columns.len());
-            for (i, c) in columns.iter().enumerate() {
-                col_lookup.insert((c.voxel_x, c.voxel_z), i);
-            }
-
-            let elev_arc = Arc::clone(&elevation);
-            for road in &chunk_roads {
-                if road.is_bridge { continue; } // bridges stay elevated; handled in mesh pipeline
-
-                let half_w = (road.road_type.width_m() / 2.0).ceil() as i64 + 1;
-
-                for pair in road.nodes.windows(2) {
-                    let ga = &pair[0];
-                    let gb = &pair[1];
-
-                    // GPS → voxel XZ (sea-level ECEF matches terrain column formula)
-                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
-                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
-                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-
-                    // Endpoint surface Y (from column data if in chunk, else elevation query)
-                    let ya = col_lookup.get(&(vax, vaz))
-                        .map(|&i| columns[i].surface_voxel_y)
-                        .unwrap_or_else(|| {
-                            let n = crate::elevation::egm96_undulation(ga.lat, ga.lon);
-                            elev_arc.read().unwrap()
-                                .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
-                                .unwrap_or(self.origin_voxel.y)
-                        });
-                    let yb = col_lookup.get(&(vbx, vbz))
-                        .map(|&i| columns[i].surface_voxel_y)
-                        .unwrap_or_else(|| {
-                            let n = crate::elevation::egm96_undulation(gb.lat, gb.lon);
-                            elev_arc.read().unwrap()
-                                .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters + n - self.origin_gps.alt) as i64)
-                                .unwrap_or(self.origin_voxel.y)
-                        });
-
-                    // Step along segment, one voxel at a time
-                    let dx = vbx - vax;
-                    let dz = vbz - vaz;
-                    let steps = dx.abs().max(dz.abs());
-                    if steps == 0 { continue; }
-
-                    for step in 0..=steps {
-                        let t = step as f32 / steps as f32;
-                        let cx = vax + (dx as f32 * t).round() as i64;
-                        let cz = vaz + (dz as f32 * t).round() as i64;
-                        let road_y = ya + ((yb - ya) as f32 * t).round() as i64;
-
-                        for ox in -half_w..=half_w {
-                            for oz in -half_w..=half_w {
-                                if ox * ox + oz * oz > half_w * half_w { continue; }
-                                if let Some(&idx) = col_lookup.get(&(cx + ox, cz + oz)) {
-                                    if !columns[idx].in_water {
-                                        if road.is_tunnel {
-                                            // Underground tunnel: surface stays natural.
-                                            // Place the tunnel floor 4m below the road's
-                                            // interpolated grade so the entrance blends in.
-                                            const TUNNEL_BELOW_GRADE: i64 = 4;
-                                            let floor_y = road_y - TUNNEL_BELOW_GRADE;
-                                            // Keep the deepest tunnel if multiple overlap.
-                                            let existing = columns[idx].tunnel_floor_y.unwrap_or(i64::MAX);
-                                            if floor_y < existing {
-                                                columns[idx].tunnel_floor_y = Some(floor_y);
-                                            }
-                                        } else {
-                                            // Surface road: flatten terrain to road grade.
-                                            columns[idx].surface_voxel_y = road_y;
-                                            columns[idx].surface_y_f = road_y as f32 + 0.5;
-                                            columns[idx].is_road = true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Waterway channel carving pass ---
-        // Carve V-shaped river/stream channels into terrain for open waterway lines
-        // that aren't already covered by a polygon water area.
-        // Channel width and depth are derived from the OSM waterway type.
-        if !chunk_waterway_lines.is_empty() {
-            let ww_col_lookup: std::collections::HashMap<(i64, i64), usize> =
-                columns.iter().enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
-
-            for wl in &chunk_waterway_lines {
-                let half_w_m  = wl.half_width_m();
-                let depth     = wl.channel_depth_vox();
-                // Voxel radius: 1 voxel ≈ 1m at equator
-                let half_w_vox = (half_w_m.ceil() as i64 + 1).max(2);
-
-                for pair in wl.nodes.windows(2) {
-                    let ga = &pair[0];
-                    let gb = &pair[1];
-                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
-                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
-                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-
-                    let dx = vbx - vax;
-                    let dz = vbz - vaz;
-                    let steps = dx.abs().max(dz.abs());
-                    if steps == 0 { continue; }
-
-                    for step in 0..=steps {
-                        let t = step as f32 / steps as f32;
-                        let cx = vax + (dx as f32 * t).round() as i64;
-                        let cz = vaz + (dz as f32 * t).round() as i64;
-
-                        // Retrieve the centreline elevation at this step
-                        let centre_y = ww_col_lookup.get(&(cx, cz))
-                            .map(|&i| columns[i].surface_voxel_y)
-                            .unwrap_or_else(|| {
-                                let lat = ga.lat * (1.0 - t as f64) + gb.lat * t as f64;
-                                let lon = ga.lon * (1.0 - t as f64) + gb.lon * t as f64;
-                                let n_ww = crate::elevation::egm96_undulation(lat, lon);
-                                elevation.read().unwrap()
-                                    .query(&crate::coordinates::GPS::new(lat, lon, 0.0))
-                                    .map(|e| self.origin_voxel.y + (e.meters + n_ww - self.origin_gps.alt) as i64)
-                                    .unwrap_or(self.origin_voxel.y)
-                            });
-
-                        // Carve a flat-bottomed V channel: full depth at centre,
-                        // tapering to 0 at the banks.
-                        for ox in -half_w_vox..=half_w_vox {
-                            for oz in -half_w_vox..=half_w_vox {
-                                let dist_sq = ox * ox + oz * oz;
-                                if dist_sq > half_w_vox * half_w_vox { continue; }
-                                if let Some(&idx) = ww_col_lookup.get(&(cx + ox, cz + oz)) {
-                                    // Skip if already a polygon water area
-                                    if columns[idx].in_water { continue; }
-                                    // Taper depth towards banks using Euclidean distance
-                                    let dist = (dist_sq as f64).sqrt();
-                                    let taper = (1.0 - dist / half_w_vox as f64).max(0.0);
-                                    let col_depth = (depth as f64 * taper).round() as i64;
-                                    if col_depth > 0 {
-                                        columns[idx].surface_voxel_y = centre_y - (depth - col_depth);
-                                        columns[idx].surface_y_f = (centre_y - (depth - col_depth)) as f32 + 0.5;
-                                        columns[idx].in_water = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Aeroway carving pass ---
-        // Flatten runways, taxiways, and aprons to grade and mark them as CONCRETE.
-        // Width values are approximate real-world standards:
-        //   runway  ≈ 45 m  (ICAO code C/D paved)
-        //   taxiway ≈ 23 m
-        //   apron   ≈ filled polygon — treat as wide taxiway
-        //   helipad ≈ 30 m
-        if !chunk_aeroways.is_empty() {
-            let aero_col_lookup: std::collections::HashMap<(i64, i64), usize> =
-                columns.iter().enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
-            let elev_arc2 = Arc::clone(&elevation);
-
-            for aw in &chunk_aeroways {
-                if aw.nodes.len() < 2 { continue; }
-
-                let half_w: i64 = match aw.aeroway_type.as_str() {
-                    "runway"   => 23,
-                    "taxiway"  => 12,
-                    "apron"    => 15,
-                    "helipad"  => 15,
-                    _ => continue, // aerodrome / terminal / hangar handled as building
-                };
-
-                for pair in aw.nodes.windows(2) {
-                    let ga = &pair[0];
-                    let gb = &pair[1];
-                    let ea = crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0).to_ecef();
-                    let eb = crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0).to_ecef();
-                    let vax = (ea.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vaz = (ea.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbx = (eb.x - crate::voxel::WORLD_MIN_METERS).round() as i64;
-                    let vbz = (eb.z - crate::voxel::WORLD_MIN_METERS).round() as i64;
-
-                    let ya = aero_col_lookup.get(&(vax, vaz))
-                        .map(|&i| columns[i].surface_voxel_y)
-                        .unwrap_or_else(|| {
-                            elev_arc2.read().unwrap()
-                                .query(&crate::coordinates::GPS::new(ga.lat, ga.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
-                                .unwrap_or(self.origin_voxel.y)
-                        });
-                    let yb = aero_col_lookup.get(&(vbx, vbz))
-                        .map(|&i| columns[i].surface_voxel_y)
-                        .unwrap_or_else(|| {
-                            elev_arc2.read().unwrap()
-                                .query(&crate::coordinates::GPS::new(gb.lat, gb.lon, 0.0))
-                                .map(|e| self.origin_voxel.y + (e.meters - self.origin_gps.alt) as i64)
-                                .unwrap_or(self.origin_voxel.y)
-                        });
-
-                    let dx = vbx - vax;
-                    let dz = vbz - vaz;
-                    let steps = dx.abs().max(dz.abs());
-                    if steps == 0 { continue; }
-
-                    for step in 0..=steps {
-                        let t = step as f32 / steps as f32;
-                        let cx = vax + (dx as f32 * t).round() as i64;
-                        let cz = vaz + (dz as f32 * t).round() as i64;
-                        let aw_y = ya + ((yb - ya) as f32 * t).round() as i64;
-
-                        for ox in -half_w..=half_w {
-                            for oz in -half_w..=half_w {
-                                if ox * ox + oz * oz > half_w * half_w { continue; }
-                                if let Some(&idx) = aero_col_lookup.get(&(cx + ox, cz + oz)) {
-                                    if !columns[idx].in_water {
-                                        columns[idx].surface_voxel_y = aw_y;
-                                        columns[idx].surface_y_f = aw_y as f32 + 0.5;
-                                        columns[idx].is_aeroway = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- Park pass ---
-        // Mark columns inside OSM park/green-area polygons as is_park.
-        // These keep GRASS material on the surface (already the default) but the flag
-        // prevents roads/buildings from overriding them during later passes if needed.
-        if !chunk_parks.is_empty() {
-            for col in columns.iter_mut() {
-                if col.in_water || col.is_road || col.is_aeroway { continue; }
-                if chunk_parks.iter().any(|p| crate::osm::point_in_polygon(col.lat, col.lon, &p.polygon)) {
-                    col.is_park = true;
-                }
-            }
-        }
-
-        // --- Building pass ---
-        // When bake_buildings is enabled (worldgen), voxelise building footprints into
-        // the octree as solid CONCRETE.  The building base is set to the minimum
-        // surface_voxel_y within the footprint so the structure sits on the ground
-        // without floating.  Height comes from OSM tags (height_m / levels) or a
-        // default of 9 m (3 floors).
-        if self.bake_buildings && !chunk_buildings.is_empty() {
-            let col_lookup: std::collections::HashMap<(i64, i64), usize> = columns.iter()
-                .enumerate().map(|(i, c)| ((c.voxel_x, c.voxel_z), i)).collect();
-
-            for building in &chunk_buildings {
-                if building.polygon.len() < 3 { continue; }
-                let height_m = if building.height_m > 0.5 {
-                    building.height_m
-                } else if building.levels > 0 {
-                    building.levels as f64 * 3.5
-                } else {
-                    9.0 // default: 3 storeys
-                };
-                let height_vox = (height_m.ceil() as i64).max(3);
-
-                // Find all columns inside this footprint and their minimum ground Y
-                let mut footprint_idxs: Vec<usize> = Vec::new();
-                let mut min_ground_y = i64::MAX;
-                for (idx, col) in columns.iter().enumerate() {
-                    if crate::osm::point_in_polygon(col.lat, col.lon, &building.polygon) {
-                        footprint_idxs.push(idx);
-                        if col.surface_voxel_y < min_ground_y {
-                            min_ground_y = col.surface_voxel_y;
-                        }
-                    }
-                }
-                let _ = col_lookup; // suppress unused warning
-                if footprint_idxs.is_empty() || min_ground_y == i64::MAX { continue; }
-
-                // Flatten ground to minimum elevation (building sits on lowest point)
-                // and set building_top for Pass 2.
-                for &idx in &footprint_idxs {
-                    let col = &mut columns[idx];
-                    col.surface_voxel_y = min_ground_y;
-                    col.surface_y_f = min_ground_y as f32 + 0.5;
-                    col.building_top = Some(min_ground_y + height_vox);
-                    col.is_road = false; // buildings override roads
-                }
             }
         }
 
         // --- Pass 2 ---
         const BEDROCK_DEPTH: i64 = 200;
-        const SKY_HEIGHT:    i64 = 100;
-        const WATER_DEPTH:   i64 = 5;
 
         for col in &columns {
-            // Per-column water: each column uses its own SRTM surface elevation.
-            // SRTM measures the water surface for rivers — no flat chunk-minimum needed.
-            // This lets the river follow the actual terrain slope voxel-by-voxel.
-            let col_top = col.building_top
-                .map(|roof| roof + 1)
-                .unwrap_or(col.surface_voxel_y + SKY_HEIGHT);
-            // Tunnel floors may be below the normal bedrock range; extend downward.
-            let tunnel_bot = col.tunnel_floor_y.map(|y| y - 10).unwrap_or(i64::MAX);
-            let col_bot = (col.surface_voxel_y - BEDROCK_DEPTH).min(tunnel_bot);
+            let col_bot = col.surface_voxel_y - BEDROCK_DEPTH;
+            let col_top = col.surface_voxel_y;
 
             for voxel_y in col_bot..=col_top {
                 if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
@@ -782,61 +328,12 @@ impl TerrainGenerator {
                 let voxel_pos = VoxelCoord::new(col.voxel_x, voxel_y, col.voxel_z);
                 let depth_below_surface = col.surface_voxel_y - voxel_y;
 
-                let material = if col.in_water {
-                    // Water column: surface_voxel_y IS the water surface (SRTM = water level).
-                    // WATER fills from surface down WATER_DEPTH voxels, then GRAVEL riverbed.
-                    if depth_below_surface < 0 {
-                        MaterialId::AIR
-                    } else if depth_below_surface < WATER_DEPTH {
-                        MaterialId::WATER
-                    } else if depth_below_surface < WATER_DEPTH + 5 {
-                        MaterialId::GRAVEL
-                    } else {
-                        MaterialId::STONE
-                    }
-                } else if let Some(tunnel_floor) = col.tunnel_floor_y {
-                    // Underground tunnel: surface terrain is normal, but an AIR tube is
-                    // carved beneath it.  Tunnel clearance is 5 voxels (≈5 m headroom).
-                    const TUNNEL_CLEARANCE: i64 = 5;
-                    let tunnel_ceil = tunnel_floor + TUNNEL_CLEARANCE;
-                    if depth_below_surface < 0 {
-                        MaterialId::AIR
-                    } else if depth_below_surface == 0 {
-                        MaterialId::GRASS // surface stays natural above the tunnel
-                    } else if voxel_y == tunnel_floor {
-                        MaterialId::ASPHALT // road surface inside the tunnel
-                    } else if voxel_y > tunnel_floor && voxel_y < tunnel_ceil {
-                        MaterialId::AIR // tunnel interior airspace
-                    } else if depth_below_surface <= 5 {
-                        MaterialId::DIRT
-                    } else {
-                        MaterialId::STONE
-                    }
+                let material = if depth_below_surface == 0 {
+                    MaterialId::GRASS
+                } else if depth_below_surface <= 5 {
+                    MaterialId::DIRT
                 } else {
-                    if depth_below_surface < 0 {
-                        // Above ground surface — but may be inside a building
-                        if let Some(roof_y) = col.building_top {
-                            if voxel_y < roof_y {
-                                MaterialId::CONCRETE
-                            } else {
-                                MaterialId::AIR
-                            }
-                        } else {
-                            MaterialId::AIR
-                        }
-                    } else if depth_below_surface == 0 {
-                        if col.is_aeroway {
-                            MaterialId::CONCRETE
-                        } else if col.is_road {
-                            MaterialId::ASPHALT
-                        } else {
-                            MaterialId::GRASS
-                        }
-                    } else if depth_below_surface <= 5 {
-                        MaterialId::DIRT
-                    } else {
-                        MaterialId::STONE
-                    }
+                    MaterialId::STONE
                 };
 
                 octree.set_voxel(voxel_pos, material);

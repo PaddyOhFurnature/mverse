@@ -14,9 +14,8 @@
 ///   --workers <n>            Parallel workers [default: logical CPU count]
 ///   --extra-layers <n>       Extra Y chunk layers above surface for tall buildings [default: 1]
 ///   --srtm-dir <dir>         SRTM tile cache directory [default: ./world_data/srtm]
-///   --osm-dir <dir>          OSM tile cache directory [default: ./world_data/osm_cache]
+///   --osm-cache <dir>        OSM tile cache for waterway carving [default: ./world_data/osm]
 ///   --resume                 Skip already-generated chunks (default: enabled)
-///   --no-buildings           Disable building voxelisation
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +24,7 @@ use std::time::Instant;
 use metaverse_core::{
     coordinates::GPS,
     elevation::{ElevationPipeline, SkadiElevationSource, egm96_undulation},
+    osm::OsmDiskCache,
     terrain::TerrainGenerator,
     tile_store::TileStore,
     voxel::VoxelCoord,
@@ -41,8 +41,7 @@ fn main() {
     let mut workers       = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let mut extra_layers  = 2i32; // origin-1 (river), origin (surface), origin+1 (buildings)
     let mut srtm_dir      = PathBuf::from("world_data/srtm");
-    let mut osm_dir       = PathBuf::from("world_data/osm_cache");
-    let mut bake_buildings = true;
+    let mut osm_cache_dir = PathBuf::from("world_data/osm");
     let mut verbose = false;
 
     let mut i = 1;
@@ -79,12 +78,9 @@ fn main() {
                 i += 1;
                 srtm_dir = PathBuf::from(&args[i]);
             }
-            "--osm-dir" => {
+            "--osm-cache" => {
                 i += 1;
-                osm_dir = PathBuf::from(&args[i]);
-            }
-            "--no-buildings" => {
-                bake_buildings = false;
+                osm_cache_dir = PathBuf::from(&args[i]);
             }
             "--verbose" | "-v" => {
                 verbose = true;
@@ -141,11 +137,15 @@ fn main() {
     let mut elevation = ElevationPipeline::new();
     elevation.add_source(Box::new(SkadiElevationSource::new(srtm_dir.clone())));
 
-    let mut terrain_gen = TerrainGenerator::new(elevation, origin_gps.clone(), origin_voxel);
-    terrain_gen.bake_buildings = bake_buildings;
-    terrain_gen = terrain_gen.with_osm_cache(osm_dir);
+    let terrain_gen = Arc::new(TerrainGenerator::new(elevation, origin_gps.clone(), origin_voxel));
 
-    let terrain_gen = Arc::new(terrain_gen);
+    // ── Open OSM cache if available ─────────────────────────────────────────
+    let osm_cache = if osm_cache_dir.exists() {
+        Some(Arc::new(OsmDiskCache::new(&osm_cache_dir)))
+    } else {
+        eprintln!("[worldgen] OSM cache dir not found ({:?}); waterway carving disabled", osm_cache_dir);
+        None
+    };
 
     // ── Worldgen config ─────────────────────────────────────────────────────
     // Open the output TileStore up front so we can report the path clearly.
@@ -163,13 +163,13 @@ fn main() {
         report_interval: 100,
         verbose,
         tile_store: Some(Arc::clone(&tile_store)),
+        osm_cache,
     };
 
     eprintln!("[worldgen] Region: {:?}", region);
     eprintln!("[worldgen] Output: {:?}/tiles.db", output_dir);
     eprintln!("[worldgen] Workers: {workers}");
     eprintln!("[worldgen] Extra Y layers: {extra_layers}");
-    eprintln!("[worldgen] Bake buildings: {bake_buildings}");
 
     let start = Instant::now();
 
@@ -210,8 +210,7 @@ OPTIONS:
     --workers <n>         Parallel workers [default: CPU count]
     --extra-layers <n>    Extra Y layers above surface for tall buildings [default: 1]
     --srtm-dir <dir>      SRTM tile cache directory [default: ./world_data/srtm]
-    --osm-dir <dir>       OSM tile cache directory [default: ./world_data/osm_cache]
-    --no-buildings        Disable building voxelisation
+    --osm-cache <dir>     OSM tile cache for waterway carving [default: ./world_data/osm]
     --help                Show this help
 
 EXAMPLES:

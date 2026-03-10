@@ -87,6 +87,9 @@ pub struct WorldgenConfig {
     pub verbose: bool,
     /// TileStore to write terrain chunks into.  Opens `output_dir/tiles.db` if None.
     pub tile_store: Option<Arc<TileStore>>,
+    /// OSM cache for applying waterways and water polygons after terrain generation.
+    /// When set, an `OsmProcessor` is applied to each chunk after `generate_chunk`.
+    pub osm_cache: Option<Arc<crate::osm::OsmDiskCache>>,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -246,7 +249,16 @@ pub fn generate_region(
 
             let t_gen = std::time::Instant::now();
             match terrain_gen.generate_chunk(id) {
-                Ok((octree, _surface_cache)) => {
+                Ok((mut octree, _surface_cache)) => {
+                    // Apply OSM waterways/water-polygons when cache is available.
+                    if let Some(ref osm_cache) = cfg.osm_cache {
+                        let processor = crate::worldgen_osm::OsmProcessor::new(
+                            Arc::clone(osm_cache),
+                            *origin_gps,
+                            *origin_voxel,
+                        );
+                        processor.apply_to_chunk(id, &mut octree);
+                    }
                     let gen_ms = t_gen.elapsed().as_millis() as u64;
                     let t_ser = std::time::Instant::now();
                     match serialise_chunk(&octree) {

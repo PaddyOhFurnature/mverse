@@ -85,7 +85,7 @@ use metaverse_core::{
     physics::{PhysicsWorld, Player, PHYSICS_TIMESTEP},
     player_persistence::PlayerPersistence,
     remote_render::{create_remote_player_capsule, remote_player_transform, short_peer_id},
-    renderer::{Camera, GlbModel, MeshBuffer, OsmPipeline, RenderContext, RenderPipeline, TexturedPipeline},
+    renderer::{Camera, MeshBuffer, OsmPipeline, RenderContext, RenderPipeline},
     meshsite::Section,
     terrain::TerrainGenerator,
     user_content::UserContentLayer,
@@ -1094,46 +1094,6 @@ fn main() {
         &pipeline.model_bind_group_layout,
     );
 
-    // Textured pipeline for GLB model rendering (buildings, world objects)
-    let textured_pipeline = TexturedPipeline::new(
-        &context,
-        &pipeline.camera_bind_group_layout,
-        &pipeline.model_bind_group_layout,
-    );
-
-    // Pre-load Kenney building GLB models — 5 variants per category for visual variety.
-    // Layout: [commercial a-e, industrial a-e, residential type-a to type-e,
-    //          skyscraper a-e, default/generic b-f (commercial alternate)]
-    // Each category occupies GLB_VARIANTS consecutive indices.
-    const GLB_VARIANTS: usize = 5;
-    let assets_base = "assets/models";
-    let building_glb_paths: Vec<String> = {
-        let letters = ["a", "b", "c", "d", "e"];
-        let mut paths = Vec::with_capacity(GLB_VARIANTS * 5);
-        // commercial (0–4)
-        for &l in &letters { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-{}.glb", assets_base, l)); }
-        // industrial (5–9)
-        for &l in &letters { paths.push(format!("{}/kenney_city-kit-industrial_1.0/Models/GLB format/building-{}.glb", assets_base, l)); }
-        // residential (10–14)
-        for &l in &letters { paths.push(format!("{}/kenney_city-kit-suburban_20/Models/GLB format/building-type-{}.glb", assets_base, l)); }
-        // skyscraper (15–19)
-        for &l in &letters { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-skyscraper-{}.glb", assets_base, l)); }
-        // default/generic (20–24) — reuse commercial f-j
-        for &l in &["f", "g", "h", "i", "j"] { paths.push(format!("{}/kenney_city-kit-commercial_2.1/Models/GLB format/building-{}.glb", assets_base, l)); }
-        paths
-    };
-    let building_glb_models: Vec<Option<GlbModel>> = building_glb_paths.iter().map(|p| {
-        let model = textured_pipeline.load_glb(&context.device, &context.queue, p);
-        if model.is_none() {
-            println!("⚠️  Failed to load GLB model: {}", p);
-        } else {
-            println!("✅ Loaded GLB model: {}", p);
-        }
-        model
-    }).collect();
-    let glb_models_loaded = building_glb_models.iter().any(|m| m.is_some());
-    println!("🏢 GLB building models loaded: {}/{}", building_glb_models.iter().filter(|m| m.is_some()).count(), building_glb_models.len());
-
     // Road surface texture — now unused (roads are voxel materials, not mesh overlays).
     // Kept here to avoid breaking the texture asset pipeline; remove if asset removed.
     let _road_texture_rgba: Option<(Vec<u8>, u32, u32)> = {
@@ -1152,13 +1112,6 @@ fn main() {
     let mut billboard_frame_counter = 0u32;
     // Placed world-object billboards: (object_id, built billboard). Rebuilt on cache change.
     let mut placed_billboards: Vec<(String, ModuleBillboards)> = Vec::new();
-
-    // OSM-inferred geometry buffers (buildings only — roads/waterways/parks are voxel materials)
-    let mut buildings_mesh_buffer: Option<MeshBuffer> = None;
-    // GLB building instances for textured rendering: (model_category_idx, model_bind_group)
-    let mut building_instances: Vec<(usize, wgpu::BindGroup)> = Vec::new();
-    // Set to true whenever new world objects are registered, triggering a mesh rebuild
-    let mut osm_geom_dirty = false;
 
     // WORLDNET terminal screen — rendered onto the kiosk top face
     let terminal_screen = TerminalScreen::new(&context, &billboard_pipeline, SIGNUP_TERMINAL_POS);
@@ -1241,9 +1194,7 @@ fn main() {
     
     // Create terrain generator with origin for coordinate conversion
     let elevation_pipeline_1 = elevation_pipeline;
-    let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel)
-        .with_osm_cache(data_dir.join("osm"))
-        .with_tile_fetcher(Arc::clone(&tile_fetcher));
+    let generator = TerrainGenerator::new(elevation_pipeline_1, origin_gps, origin_voxel);
     let generator_arc = Arc::new(Mutex::new(generator));
     
     // Create second elevation pipeline for chunk_manager (same source as above)
@@ -1254,19 +1205,8 @@ fn main() {
     }
     elevation_pipeline_2.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
     elevation_pipeline_2.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
-    let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel)
-        .with_osm_cache(data_dir.join("osm"))
-        .with_tile_fetcher(Arc::clone(&tile_fetcher));
+    let chunk_manager_generator = TerrainGenerator::new(elevation_pipeline_2, origin_gps, origin_voxel);
 
-    // Third elevation pipeline for OSM inference (objects need ground-truth elevation)
-    let mut osm_elev_pipeline = ElevationPipeline::new();
-    osm_elev_pipeline.add_source(Box::new(P2PElevationSource::new(Arc::clone(&tile_fetcher), elev_cache.clone())));
-    if let Some(ref key) = api_key {
-        osm_elev_pipeline.add_source(Box::new(OpenTopographySource::new(key.clone(), elev_cache.clone())));
-    }
-    osm_elev_pipeline.add_source(Box::new(CopernicusElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
-    osm_elev_pipeline.add_source(Box::new(SkadiElevationSource::with_tile_store(elev_cache.clone(), Arc::clone(&client_tile_store))));
-    let osm_cache_dir = data_dir.join("osm");
     // Trigger cleanup of old flat-file elevation cache tiles in the background
     metaverse_core::tile_store::cleanup_old_tile_dir(&elev_cache);
     metaverse_core::tile_store::cleanup_old_srtm_dir(&elev_cache);
@@ -1440,15 +1380,6 @@ fn main() {
         multiplayer.fetch_session_record();
     }
 
-    // Prefetch world objects for the Construct area (chunk around origin) and
-    // the 3×3 neighbourhood so placed billboards/terminals appear immediately.
-    {
-        use metaverse_core::world_objects::chunk_coords_for_pos;
-        let (ox, oz) = chunk_coords_for_pos(0.0, 0.0);
-        multiplayer.fetch_world_objects_for_area(ox, oz, 2);
-        println!("🗺️  Requesting world objects for spawn area chunks…");
-    }
-
     // Fetch content for all sections from the server so billboards are populated
     // immediately on first render rather than waiting for gossipsub messages.
     // The channel carries batches of ContentItems from the background thread.
@@ -1600,9 +1531,6 @@ fn main() {
     // Track local voxel operations for CRDT merge
     let mut local_voxel_ops: HashMap<VoxelCoord, metaverse_core::messages::SignedOperation> = HashMap::new();
 
-    // Track the world-object chunk we last fetched for, to avoid redundant DHT queries.
-    let mut last_world_obj_chunk: Option<(i32, i32)> = None;
-
     // Loading phase: true until enough spawn-area chunks have meshes and collision built.
     // The event loop renders the loading bar while this is true.
     // In Construct mode we skip terrain loading entirely — floor is ready from frame 1.
@@ -1615,8 +1543,6 @@ fn main() {
     // meshes in one frame (15+ chunks × mesh+physics ≈ seconds on a single frame).
     // We drain newly_loaded_chunks into this buffer and process at most N per frame.
     let mut pending_mesh_queue: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
-    // Same idea for game-phase OSM inference (objects, roads, water per chunk).
-    let mut pending_game_osm_queue: Vec<metaverse_core::chunk::ChunkId> = Vec::new();
 
     println!("\n🌍 Loading spawn area (chunks stream in during first frames)...");
     println!("   Target: {} chunks, spawn chunk must have collider", LOADING_TARGET);
@@ -2041,56 +1967,7 @@ fn main() {
                             }
                         }
 
-                        // OSM inference for newly loaded chunks
-                        {
-                            use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  to_placed_object};
-                            for &chunk_id in &new_chunks {
-                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-                                let mut osm = metaverse_core::osm::fetch_osm_for_chunk(
-                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
-                                // On disk miss, try P2P — same fallback as terrain generator.
-                                // If P2P also misses, tile is queued for idle Overpass download.
-                                if osm.is_empty() {
-                                    let tile_size = 0.01_f64;
-                                    let ts = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
-                                    let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
-                                    if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
-                                        if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
-                                            let cache = metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(&client_tile_store));
-                                            cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
-                                            tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
-                                            osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
-                                        }
-                                    }
-                                }
-                                let ctx = if osm.is_empty() {
-                                    ChunkContext::from_chunk(chunk_id)
-                                } else {
-                                    ChunkContext::from_chunk(chunk_id).with_osm(osm)
-                                };
-                                // Buildings: Y = (srtm + N - origin_alt) where N = EGM96 undulation.
-                                // X/Z from GPS(lat,lon,0).to_ecef() → ecef_to_local (horizontal only).
-                                let inferred = infer_chunk_objects(&ctx);
-                                if !inferred.is_empty() {
-                                    for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query_nonblocking(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0),
-                                            origin_gps.alt);
-                                        let n_obj = metaverse_core::elevation::egm96_undulation(obj.lat, obj.lon);
-                                        let horiz = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [horiz.x, (srtm + n_obj - origin_gps.alt) as f32, horiz.z];
-                                        multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
-                                    }
-                                    osm_geom_dirty = true;
-                                }
-                                // Roads, railways, waterways, parks are represented entirely by
-                                // voxel materials (ASPHALT, WATER, GRASS) carved into terrain.
-                                // Flat mesh overlays have been removed — they conflicted with
-                                // terrain voxels and appeared at wrong elevations.
-                            }
-                        }
+
 
                         loading_frames += 1;
 
@@ -2641,17 +2518,6 @@ fn main() {
                         terminal_screen.update(&context.queue, &worldnet_buf);
                     }
 
-                    // Fetch world objects when the player moves into a new chunk
-                    {
-                        use metaverse_core::world_objects::chunk_coords_for_pos;
-                        let current_chunk = chunk_coords_for_pos(ploc3.x, ploc3.z);
-                        if last_world_obj_chunk != Some(current_chunk) {
-                            last_world_obj_chunk = Some(current_chunk);
-                            let (cx, cz) = current_chunk;
-                            multiplayer.fetch_world_objects_for_area(cx, cz, 2);
-                        }
-                    }
-
                     // Auto-trigger signup overlay if player walks to terminal
                     // and no identity exists yet.
                     if near_signup && signup.is_none() && !Identity::key_file_exists() {
@@ -2719,57 +2585,7 @@ fn main() {
                     // if they haven't loaded this chunk yet (or ours is newer due to user edits).
                     // Drain new chunks into the pending queue; keep a snapshot for AOI+manifest.
                     let new_this_frame: Vec<_> = chunk_streamer.newly_loaded_chunks.drain(..).collect();
-                    if !new_this_frame.is_empty() || !pending_game_osm_queue.is_empty() {
-                        // Add this frame's new chunks to the rate-limited processing queue.
-                        pending_game_osm_queue.extend(new_this_frame.iter().copied());
-                        // OSM inference for newly loaded chunks (game phase)
-                        {
-                            use metaverse_core::world_inference::{ChunkContext, infer_chunk_objects,
-                                                                  to_placed_object};
-                            const OSM_PER_FRAME: usize = 3;
-                            let batch_end = pending_game_osm_queue.len().min(OSM_PER_FRAME);
-                            let new_ids: Vec<_> = pending_game_osm_queue.drain(..batch_end).collect();
-                            for chunk_id in new_ids {
-                                let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-                                let mut osm = metaverse_core::osm::fetch_osm_for_chunk(
-                                    lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
-                                // P2P fallback on disk miss (same as terrain generator + loading phase)
-                                if osm.is_empty() {
-                                    let tile_size = 0.01_f64;
-                                    let ts = ((lat_min + lat_max) * 0.5 / tile_size).floor() * tile_size;
-                                    let tw = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
-                                    if let Some(bytes) = tile_fetcher.fetch_osm(ts, tw, ts + tile_size, tw + tile_size) {
-                                        if let Ok(data) = bincode::deserialize::<metaverse_core::osm::OsmData>(&bytes) {
-                                            let cache = metaverse_core::osm::OsmDiskCache::from_arc(Arc::clone(&client_tile_store));
-                                            cache.save(ts, tw, ts + tile_size, tw + tile_size, &data);
-                                            tile_fetcher.announce_osm(ts, tw, ts + tile_size, tw + tile_size);
-                                            osm = metaverse_core::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, &osm_cache_dir);
-                                        }
-                                    }
-                                }
-                                let ctx = if osm.is_empty() {
-                                    ChunkContext::from_chunk(chunk_id)
-                                } else {
-                                    ChunkContext::from_chunk(chunk_id).with_osm(osm)
-                                };
-                                let inferred = infer_chunk_objects(&ctx);
-                                if !inferred.is_empty() {
-                                    for obj in &inferred {
-                                        let srtm = osm_elev_pipeline.query_nonblocking(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0),
-                                            origin_gps.alt);
-                                        let n_obj = metaverse_core::elevation::egm96_undulation(obj.lat, obj.lon);
-                                        let horiz = physics.ecef_to_local(
-                                            &metaverse_core::coordinates::GPS::new(obj.lat, obj.lon, 0.0).to_ecef());
-                                        let world_pos = [horiz.x, (srtm + n_obj - origin_gps.alt) as f32, horiz.z];
-                                        multiplayer.register_inferred_object(to_placed_object(obj, world_pos));
-                                    }
-                                    osm_geom_dirty = true;
-                                }
-                                // Roads, railways, waterways, parks are represented entirely by
-                                // voxel materials (ASPHALT, WATER, GRASS) carved into terrain.
-                            }
-                        }
+                    if !new_this_frame.is_empty() {
 
                         // AOI subscriptions and manifest broadcast fire for each newly arrived
                         // chunk (cheap operations, no rate-limiting needed).
@@ -3003,72 +2819,6 @@ fn main() {
                         }
                     }
                     
-                    // Rebuild OSM geometry buffers when new objects arrived
-                    if osm_geom_dirty {
-                        let all_objs: Vec<_> = multiplayer.all_world_objects().cloned().collect();
-
-                        // Rebuild GLB building instances (used when GLB models are loaded)
-                        building_instances.clear();
-                        if glb_models_loaded {
-                            for obj in &all_objs {
-                                let type_str = obj.object_type.as_str();
-                                if !type_str.starts_with("building") { continue; }
-                                let [cx, cy, cz] = obj.position;
-
-                                // Deterministic rotation from position hash
-                                let hash = ((cx * 100.0) as i32)
-                                    .wrapping_mul(1664525)
-                                    .wrapping_add(((cz * 100.0) as i32).wrapping_mul(1013904223));
-                                let rotation_y = (hash.abs() % 360) as f32 * std::f32::consts::PI / 180.0;
-
-                                // Scale from footprint dimensions if available
-                                let cfg: serde_json::Value =
-                                    serde_json::from_str(&obj.content_key).unwrap_or_default();
-                                let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-                                let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-                                let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-                                // Kenney model actual dimensions (measured from GLB bounds):
-                                // category 0 commercial: 0.884×1.293×0.940 m
-                                // category 1 industrial: 2.084×1.470×1.242 m
-                                // category 2 residential: 1.300×0.834×1.028 m
-                                // category 3 skyscraper: 1.360×2.880×1.360 m
-                                let cat = building_model_category(type_str);
-                                let (mw, mh, md) = match cat {
-                                    0 => (0.884_f32, 1.293_f32, 0.940_f32),
-                                    1 => (2.084_f32, 1.470_f32, 1.242_f32),
-                                    2 => (1.300_f32, 0.834_f32, 1.028_f32),
-                                    3 => (1.360_f32, 2.880_f32, 1.360_f32),
-                                    _ => (0.884_f32, 1.293_f32, 0.940_f32),
-                                };
-                                let sx = w / mw;
-                                let sy = h / mh;
-                                let sz = d / md;
-
-                                let transform = glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz))
-                                    * glam::Mat4::from_rotation_y(rotation_y)
-                                    * glam::Mat4::from_scale(glam::Vec3::new(sx, sy, sz));
-
-                                let model_idx = building_model_idx(type_str, cx, cz);
-                                if building_glb_models[model_idx].as_ref().map(|m| m.has_real_texture).unwrap_or(false) {
-                                    let (_, bind_group) = pipeline.create_model_bind_group(&context.device, &transform);
-                                    building_instances.push((model_idx, bind_group));
-                                }
-                            }
-                        }
-
-                        // Flat-colour fallback mesh: used when GLB models have no real texture
-                        // (render white on user machines) or when GLB didn't load at all.
-                        let use_flat_colour = building_instances.is_empty();
-                        let bld_mesh = if use_flat_colour {
-                            build_buildings_mesh(&all_objs)
-                        } else {
-                            metaverse_core::mesh::Mesh::new()
-                        };
-                        buildings_mesh_buffer = if bld_mesh.vertices.is_empty() { None }
-                            else { Some(MeshBuffer::from_mesh(&context.device, &bld_mesh)) };
-                        osm_geom_dirty = false;
-                    }
-
                     // Render
                     pipeline.update_camera(&context.queue, &camera);
                     billboard_pipeline.update_camera(&context.queue, &camera.build_view_projection_matrix());
@@ -3209,22 +2959,6 @@ fn main() {
                                             buf.render(&mut render_pass);
                                         }
                                     }
-                                    // Render OSM building boxes (flat-colour fallback)
-                                    if !building_instances.is_empty() {
-                                        // Switch to textured pipeline for GLB buildings
-                                        textured_pipeline.set_pipeline(&mut render_pass, pipeline.camera_bind_group());
-                                        for (model_idx, model_bind_group) in &building_instances {
-                                            if let Some(model) = &building_glb_models[*model_idx] {
-                                                TexturedPipeline::draw_model(&mut render_pass, model, model_bind_group);
-                                            }
-                                        }
-                                        // Restore OSM pipeline for anything that follows in this block
-                                        osm_pipeline.set_pipeline(&mut render_pass);
-                                        render_pass.set_bind_group(0, pipeline.camera_bind_group(), &[]);
-                                        render_pass.set_bind_group(1, &pipeline.model_bind_group, &[]);
-                                    } else if let Some(buf) = &buildings_mesh_buffer {
-                                        buf.render(&mut render_pass);
-                                    }
                                     // Restore main pipeline for anything that follows
                                     pipeline.set_pipeline(&mut render_pass);
                                 }
@@ -3336,8 +3070,6 @@ fn main() {
                                     let _ = window.set_cursor_grab(winit::window::CursorGrabMode::Locked);
                                     window.set_cursor_visible(false);
                                     cursor_grabbed = true;
-                                    // Trigger world objects refresh next frame
-                                    last_world_obj_chunk = None;
                                 }
                             }
 
@@ -3495,404 +3227,3 @@ fn create_crosshair() -> Mesh {
 // ─── Loading screen ──────────────────────────────────────────────────────────
 
 
-/// Build a triangle mesh of coloured boxes for all registered building objects.
-///
-/// Each building's config JSON contains `height`, `width`, `depth`.
-/// Winding: CCW from outside, matching the pipeline `front_face: Ccw` setting.
-fn build_buildings_mesh(
-    objects: &[metaverse_core::world_objects::PlacedObject],
-) -> Mesh {
-    let mut mesh = Mesh::new();
-
-    for obj in objects {
-        let type_str = obj.object_type.as_str();
-        if !type_str.starts_with("building") { continue; }
-
-        // Parse footprint dimensions from config JSON
-        let cfg: serde_json::Value = serde_json::from_str(&obj.content_key).unwrap_or_default();
-        let h = cfg.get("height").and_then(|v| v.as_f64()).unwrap_or(10.5) as f32;
-        let w = cfg.get("width").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-        let d = cfg.get("depth").and_then(|v| v.as_f64()).unwrap_or(10.0) as f32;
-
-        let color = building_color(type_str);
-        let [cx, cy, cz] = obj.position;
-        let hw = w * 0.5;
-        let hd = d * 0.5;
-
-        // 8 corners of the box
-        let bot = cy;
-        let top = cy + h;
-
-        // bottom face vertices (y = bot)
-        let b0 = Vec3::new(cx - hw, bot, cz - hd);
-        let b1 = Vec3::new(cx + hw, bot, cz - hd);
-        let b2 = Vec3::new(cx + hw, bot, cz + hd);
-        let b3 = Vec3::new(cx - hw, bot, cz + hd);
-        // top face vertices (y = top)
-        let t0 = Vec3::new(cx - hw, top, cz - hd);
-        let t1 = Vec3::new(cx + hw, top, cz - hd);
-        let t2 = Vec3::new(cx + hw, top, cz + hd);
-        let t3 = Vec3::new(cx - hw, top, cz + hd);
-
-        // Top face — CCW from above (normal +Y)
-        let vt0 = mesh.add_vertex(Vertex::new(t0, color));
-        let vt1 = mesh.add_vertex(Vertex::new(t1, color));
-        let vt2 = mesh.add_vertex(Vertex::new(t2, color));
-        let vt3 = mesh.add_vertex(Vertex::new(t3, color));
-        mesh.add_triangle(Triangle::new(vt0, vt2, vt1));
-        mesh.add_triangle(Triangle::new(vt0, vt3, vt2));
-
-        // Four side faces — each CCW from outside
-        // North face (z = cz - hd, normal -Z)
-        let vn0 = mesh.add_vertex(Vertex::new(b1, color));
-        let vn1 = mesh.add_vertex(Vertex::new(b0, color));
-        let vn2 = mesh.add_vertex(Vertex::new(t0, color));
-        let vn3 = mesh.add_vertex(Vertex::new(t1, color));
-        mesh.add_triangle(Triangle::new(vn0, vn1, vn2));
-        mesh.add_triangle(Triangle::new(vn0, vn2, vn3));
-
-        // South face (z = cz + hd, normal +Z)
-        let vs0 = mesh.add_vertex(Vertex::new(b3, color));
-        let vs1 = mesh.add_vertex(Vertex::new(b2, color));
-        let vs2 = mesh.add_vertex(Vertex::new(t2, color));
-        let vs3 = mesh.add_vertex(Vertex::new(t3, color));
-        mesh.add_triangle(Triangle::new(vs0, vs1, vs2));
-        mesh.add_triangle(Triangle::new(vs0, vs2, vs3));
-
-        // East face (x = cx + hw, normal +X)
-        let ve0 = mesh.add_vertex(Vertex::new(b2, color));
-        let ve1 = mesh.add_vertex(Vertex::new(b1, color));
-        let ve2 = mesh.add_vertex(Vertex::new(t1, color));
-        let ve3 = mesh.add_vertex(Vertex::new(t2, color));
-        mesh.add_triangle(Triangle::new(ve0, ve1, ve2));
-        mesh.add_triangle(Triangle::new(ve0, ve2, ve3));
-
-        // West face (x = cx - hw, normal -X)
-        let vw0 = mesh.add_vertex(Vertex::new(b0, color));
-        let vw1 = mesh.add_vertex(Vertex::new(b3, color));
-        let vw2 = mesh.add_vertex(Vertex::new(t3, color));
-        let vw3 = mesh.add_vertex(Vertex::new(t0, color));
-        mesh.add_triangle(Triangle::new(vw0, vw1, vw2));
-        mesh.add_triangle(Triangle::new(vw0, vw2, vw3));
-    }
-
-    mesh
-}
-
-/// Road surface colour by type.
-fn road_color(road_type: &metaverse_core::osm::RoadType) -> Vec3 {
-    use metaverse_core::osm::RoadType;
-    match road_type {
-        RoadType::Motorway | RoadType::Trunk => Vec3::new(0.9, 0.5, 0.1),
-        RoadType::Primary | RoadType::Secondary => Vec3::new(0.85, 0.75, 0.2),
-        RoadType::Tertiary | RoadType::Residential => Vec3::new(0.55, 0.55, 0.55),
-        _ => Vec3::new(0.45, 0.45, 0.45),
-    }
-}
-
-/// Build colour for building type.
-fn building_color(type_str: &str) -> Vec3 {
-    match type_str {
-        s if s.contains("commercial") || s.contains("retail") => Vec3::new(0.4, 0.5, 0.85),
-        s if s.contains("industrial") || s.contains("warehouse") => Vec3::new(0.55, 0.45, 0.35),
-        s if s.contains("residential") || s.contains("house") => Vec3::new(0.85, 0.75, 0.55),
-        _ => Vec3::new(0.7, 0.68, 0.62),
-    }
-}
-
-/// Returns the base index into building_glb_models for this building category.
-/// Each category occupies GLB_VARIANTS (5) consecutive slots.
-fn building_model_category(type_str: &str) -> usize {
-    if type_str.contains("commercial") || type_str.contains("retail") { 0 }
-    else if type_str.contains("industrial") || type_str.contains("warehouse") { 1 }
-    else if type_str.contains("residential") || type_str.contains("house") || type_str.contains("suburb") { 2 }
-    else if type_str.contains("skyscraper") || type_str.contains("highrise") || type_str.contains("tower") { 3 }
-    else { 4 }
-}
-
-/// Pick the GLB model index for a building: category base + position-derived variant.
-fn building_model_idx(type_str: &str, cx: f32, cz: f32) -> usize {
-    const GLB_VARIANTS: usize = 5;
-    let cat = building_model_category(type_str);
-    let hash = ((cx * 100.0) as i32)
-        .wrapping_mul(2246822519u32 as i32)
-        .wrapping_add(((cz * 100.0) as i32).wrapping_mul(3266489917u32 as i32));
-    cat * GLB_VARIANTS + (hash.unsigned_abs() as usize % GLB_VARIANTS)
-}
-
-/// Build a road surface mesh from road segment data stored in placed objects.
-///
-/// Roads are stored as `Custom("road_*")` objects whose config JSON has
-/// `a` and `b` endpoint positions and `width`.  Each segment becomes a
-/// flat quad lying on the ground.
-fn build_roads_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::RoadType)]) -> Mesh {
-    let mut mesh = Mesh::new();
-
-    for (a, b, width, road_type) in road_segments {
-        let color = road_color(road_type);
-        let hw = width * 0.5;
-
-        // Perpendicular to road in XZ plane
-        let dir = (*b - *a).normalize();
-        let perp = Vec3::new(-dir.z, 0.0, dir.x) * hw;
-
-        let v0 = *a - perp;
-        let v1 = *a + perp;
-        let v2 = *b + perp;
-        let v3 = *b - perp;
-
-        // Quad lying flat — CCW from above (+Y normal)
-        let i0 = mesh.add_vertex(Vertex::new(v0, color));
-        let i1 = mesh.add_vertex(Vertex::new(v1, color));
-        let i2 = mesh.add_vertex(Vertex::new(v2, color));
-        let i3 = mesh.add_vertex(Vertex::new(v3, color));
-        // CCW from above: normal = +Y (visible looking down at road surface)
-        mesh.add_triangle(Triangle::new(i0, i1, i2));
-        mesh.add_triangle(Triangle::new(i0, i2, i3));
-    }
-
-    mesh
-}
-
-/// Build UV-mapped road surface quads using TexturedVertex.
-///
-/// U coordinate tiles along the road length (one texture repeat per `width` metres).
-/// V coordinate goes 0→1 across the road width.
-/// Returns (vertices, indices) for use with TexturedPipeline + road asphalt texture.
-fn build_roads_textured_mesh(road_segments: &[(Vec3, Vec3, f32, metaverse_core::osm::RoadType)]) -> (Vec<metaverse_core::renderer::TexturedVertex>, Vec<u32>) {
-    use metaverse_core::renderer::TexturedVertex;
-    let mut verts: Vec<TexturedVertex> = Vec::new();
-    let mut idxs: Vec<u32> = Vec::new();
-
-    for (a, b, width, _) in road_segments {
-        let dir = (*b - *a).normalize();
-        let perp = Vec3::new(-dir.z, 0.0, dir.x) * (width * 0.5);
-        let len = (*b - *a).length();
-        let u_tiles = (len / width).max(0.1); // tile texture along length
-
-        let v0 = *a - perp;
-        let v1 = *a + perp;
-        let v2 = *b + perp;
-        let v3 = *b - perp;
-
-        let base = verts.len() as u32;
-        verts.push(TexturedVertex { position: v0.into(), normal: [0.0, 1.0, 0.0], uv: [0.0,     1.0] });
-        verts.push(TexturedVertex { position: v1.into(), normal: [0.0, 1.0, 0.0], uv: [0.0,     0.0] });
-        verts.push(TexturedVertex { position: v2.into(), normal: [0.0, 1.0, 0.0], uv: [u_tiles, 0.0] });
-        verts.push(TexturedVertex { position: v3.into(), normal: [0.0, 1.0, 0.0], uv: [u_tiles, 1.0] });
-        // CCW from above
-        idxs.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
-    }
-    (verts, idxs)
-}
-
-
-///
-/// Each polygon is triangulated as a fan from its centroid.
-/// Vertex Y values are per-vertex SRTM elevations so the surface
-/// correctly follows the river gradient (e.g., 15m→5m over 15km
-/// for the Brisbane CBD reach). Both faces rendered so water is
-/// visible from bank level looking across.
-fn build_water_mesh(water_polygons: &[Vec<Vec3>]) -> Mesh {
-    let mut mesh = Mesh::new();
-    let color = Vec3::new(0.18, 0.42, 0.72); // river blue
-
-    for poly in water_polygons {
-        if poly.len() < 3 { continue; }
-        let sum = poly.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
-        let centroid = sum / poly.len() as f32;
-        let n = poly.len();
-        for i in 0..n {
-            let next = (i + 1) % n;
-            let ci = mesh.add_vertex(Vertex::new(centroid, color));
-            let ai = mesh.add_vertex(Vertex::new(poly[i], color));
-            let bi = mesh.add_vertex(Vertex::new(poly[next], color));
-            // CCW from above (visible looking down)
-            mesh.add_triangle(Triangle::new(ci, ai, bi));
-            // CW — visible from bank level / below
-            mesh.add_triangle(Triangle::new(ci, bi, ai));
-        }
-    }
-
-    mesh
-}
-
-/// Build bright-yellow outline mesh of OSM water polygon edges (debug overlay).
-/// Press O to toggle. Shows exactly where OSM polygon coverage exists.
-fn build_osm_debug_outlines(water_polygons: &[Vec<Vec3>]) -> Mesh {
-    let mut mesh = Mesh::new();
-    let yellow = Vec3::new(1.0, 1.0, 0.0);
-    for poly in water_polygons {
-        if poly.len() < 2 { continue; }
-        let n = poly.len();
-        for i in 0..n {
-            let a = poly[i];
-            let b = poly[(i + 1) % n];
-            // Raise slightly above terrain so lines are visible
-            let a_up = Vec3::new(a.x, a.y + 0.5, a.z);
-            let b_up = Vec3::new(b.x, b.y + 0.5, b.z);
-            let va = mesh.add_vertex(Vertex::new(a_up, yellow));
-            let vb = mesh.add_vertex(Vertex::new(b_up, yellow));
-            mesh.add_line(va, vb);
-        }
-    }
-    mesh
-}
-
-/// Build railway track mesh: two parallel rails + sleeper ties.
-/// Rail colour: dark steel grey. Tram/light rail: lighter grey.
-/// Each segment = 2 rails offset ±0.717m (standard gauge half-width) + ties every 2m.
-fn build_railways_mesh(
-    railway_segments: &[(Vec3, Vec3, String, bool, i8)],
-) -> Mesh {
-    let mut mesh = Mesh::new();
-
-    for (pa, pb, rtype, _is_bridge, _layer) in railway_segments {
-        let rail_col = if rtype == "tram" || rtype == "light_rail" {
-            Vec3::new(0.55, 0.55, 0.55)
-        } else {
-            Vec3::new(0.28, 0.28, 0.28)
-        };
-        let tie_col = Vec3::new(0.35, 0.25, 0.18); // creosote-treated timber
-
-        let dir = (*pb - *pa).normalize_or_zero();
-        let len = (*pb - *pa).length();
-        if len < 0.01 { continue; }
-
-        // Right-hand perpendicular (XZ plane)
-        let right = Vec3::new(dir.z, 0.0, -dir.x);
-
-        let gauge_half = 0.717_f32; // half of 1.435m standard gauge
-        let rail_half_w = 0.035_f32; // rail head width / 2
-        let rail_height = 0.10_f32;
-
-        // Two rails
-        for side in [-gauge_half, gauge_half] {
-            let offset = right * side;
-            let a = *pa + offset;
-            let b = *pb + offset;
-            // Thin elevated quad for each rail
-            let v0 = a + right * (-rail_half_w) + Vec3::new(0.0, rail_height, 0.0);
-            let v1 = a + right * (rail_half_w)  + Vec3::new(0.0, rail_height, 0.0);
-            let v2 = b + right * (rail_half_w)  + Vec3::new(0.0, rail_height, 0.0);
-            let v3 = b + right * (-rail_half_w) + Vec3::new(0.0, rail_height, 0.0);
-            let base = mesh.add_vertex(Vertex::new(v0, rail_col));
-            let i1   = mesh.add_vertex(Vertex::new(v1, rail_col));
-            let i2   = mesh.add_vertex(Vertex::new(v2, rail_col));
-            let i3   = mesh.add_vertex(Vertex::new(v3, rail_col));
-            mesh.add_triangle(Triangle::new(base, i1, i2));
-            mesh.add_triangle(Triangle::new(base, i2, i3));
-        }
-
-        // Sleeper ties every 0.6m
-        let tie_spacing = 0.6_f32;
-        let tie_half_w = gauge_half + 0.12;
-        let tie_half_t = 0.07_f32;
-        let tie_half_d = 0.12_f32;
-        let steps = ((len / tie_spacing) as usize).max(1);
-        for i in 0..=steps {
-            let t = (i as f32 * tie_spacing).min(len);
-            let centre = *pa + dir * t;
-            let a = centre - right * tie_half_w;
-            let b = centre + right * tie_half_w;
-            // flat tie quad on the ground
-            let v0 = a - dir * tie_half_d;
-            let v1 = a + dir * tie_half_d;
-            let v2 = b + dir * tie_half_d;
-            let v3 = b - dir * tie_half_d;
-            let _ = tie_half_t; // used for 3D ties if needed later
-            let base = mesh.add_vertex(Vertex::new(v0, tie_col));
-            let i1   = mesh.add_vertex(Vertex::new(v1, tie_col));
-            let i2   = mesh.add_vertex(Vertex::new(v2, tie_col));
-            let i3   = mesh.add_vertex(Vertex::new(v3, tie_col));
-            mesh.add_triangle(Triangle::new(base, i1, i2));
-            mesh.add_triangle(Triangle::new(base, i2, i3));
-        }
-    }
-
-    mesh
-}
-
-/// Build waterway centreline overlay quads (rivers/streams without OSM polygon).
-/// Water blue, width from segment type, slightly below terrain Y to fill carved channel.
-fn build_waterway_overlay_mesh(
-    waterway_segments: &[(Vec3, Vec3, f32, String)],
-) -> Mesh {
-    let mut mesh = Mesh::new();
-    let water_col = Vec3::new(0.18, 0.42, 0.72);
-
-    for (pa, pb, width_m, _wtype) in waterway_segments {
-        let hw = width_m * 0.5;
-        let dir = (*pb - *pa).normalize_or_zero();
-        let len = (*pb - *pa).length();
-        if len < 0.01 { continue; }
-        let right = Vec3::new(dir.z, 0.0, -dir.x);
-
-        let v0 = *pa - right * hw;
-        let v1 = *pa + right * hw;
-        let v2 = *pb + right * hw;
-        let v3 = *pb - right * hw;
-
-        let base = mesh.add_vertex(Vertex::new(v0, water_col));
-        let i1   = mesh.add_vertex(Vertex::new(v1, water_col));
-        let i2   = mesh.add_vertex(Vertex::new(v2, water_col));
-        let i3   = mesh.add_vertex(Vertex::new(v3, water_col));
-        mesh.add_triangle(Triangle::new(base, i1, i2));
-        mesh.add_triangle(Triangle::new(base, i2, i3));
-        // Back face so it's visible from below water level
-        mesh.add_triangle(Triangle::new(base, i2, i1));
-        mesh.add_triangle(Triangle::new(base, i3, i2));
-    }
-
-    mesh
-}
-
-/// Build land area / park polygon mesh using centroid-fan triangulation.
-/// Colours by area_type: park=green, forest=dark-green, farmland=tan, beach=sand, etc.
-/// Rendered at Y+0.02 above terrain (set per vertex during processing).
-fn build_land_mesh(land_polygons: &[(Vec<Vec3>, String)]) -> Mesh {
-    let mut mesh = Mesh::new();
-
-    for (poly, area_type) in land_polygons {
-        if poly.len() < 3 { continue; }
-
-        let color = match area_type.as_str() {
-            "park" | "playground" | "recreation_ground" =>
-                Vec3::new(0.13, 0.55, 0.13),
-            "forest" | "wood" =>
-                Vec3::new(0.06, 0.35, 0.06),
-            "farmland" | "farm" | "orchard" | "vineyard" =>
-                Vec3::new(0.76, 0.69, 0.36),
-            "grass" | "meadow" | "village_green" | "allotments" =>
-                Vec3::new(0.45, 0.70, 0.30),
-            "beach" | "sand" =>
-                Vec3::new(0.93, 0.84, 0.69),
-            "cemetery" | "grave_yard" =>
-                Vec3::new(0.50, 0.60, 0.50),
-            "wetland" | "marsh" =>
-                Vec3::new(0.40, 0.62, 0.45),
-            "scrub" | "heath" =>
-                Vec3::new(0.60, 0.65, 0.30),
-            "industrial" | "commercial" | "retail" =>
-                Vec3::new(0.72, 0.68, 0.62),
-            "residential" =>
-                Vec3::new(0.85, 0.80, 0.75),
-            _ => Vec3::new(0.50, 0.68, 0.40), // default: light green
-        };
-
-        let sum = poly.iter().fold(Vec3::ZERO, |acc, v| acc + *v);
-        let centroid = sum / poly.len() as f32;
-        let n = poly.len();
-        for i in 0..n {
-            let next = (i + 1) % n;
-            let ci = mesh.add_vertex(Vertex::new(centroid, color));
-            let ai = mesh.add_vertex(Vertex::new(poly[i], color));
-            let bi = mesh.add_vertex(Vertex::new(poly[next], color));
-            mesh.add_triangle(Triangle::new(ci, ai, bi));
-            // Back face so land areas are visible from above and below
-            mesh.add_triangle(Triangle::new(ci, bi, ai));
-        }
-    }
-
-    mesh
-}
