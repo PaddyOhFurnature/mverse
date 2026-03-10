@@ -754,7 +754,7 @@ pub fn extract_chunk_mesh_smooth(
             let surface_y = surface_cache
                 .get(&(cx, cz))
                 .copied()
-                .unwrap_or((min_voxel.y as f32 + max_voxel.y as f32) * 0.5);
+                .unwrap_or(min_voxel.y as f32 - 1.0); // below chunk bottom → all air, no phantom surface
             // Medium noise is XZ-only (cheaper; computed once per column)
             let med = fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4;
             for yi in 0..gy {

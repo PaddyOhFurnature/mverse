@@ -226,11 +226,10 @@ impl ChunkLoader {
         let mut cache = SurfaceCache::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
         for vx in min_v.x..max_v.x {
             for vz in min_v.z..max_v.z {
-                let mut surface_y = min_v.y as f32 + 0.5;
+                let mut surface_y = min_v.y as f32 - 1.0; // default: below chunk → all air, no phantom surface
                 for vy in (min_v.y..max_v.y).rev() {
                     let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
                     if mat != MaterialId::AIR && mat != MaterialId::WATER {
-                        // Put isosurface at midpoint of surface voxel for smooth interpolation
                         surface_y = vy as f32 + 0.5;
                         break;
                     }
