@@ -783,6 +783,21 @@ pub fn fetch_osm_for_chunk(
     chunk_lon_min: f64, chunk_lon_max: f64,
     cache_dir: &Path,
 ) -> OsmData {
+    let cache = OsmDiskCache::new(cache_dir);
+    fetch_osm_for_chunk_with_cache(chunk_lat_min, chunk_lat_max, chunk_lon_min, chunk_lon_max, &cache)
+}
+
+/// Same as `fetch_osm_for_chunk` but reuses a pre-opened `OsmDiskCache`.
+///
+/// **Use this in hot paths** (e.g. worldgen, parallel chunk generation) — opening
+/// `OsmDiskCache::new()` opens a RocksDB instance every call, which is expensive
+/// (~50–200 ms) and causes LOCK contention under concurrent threads.
+/// Open the cache once at startup and pass it here.
+pub fn fetch_osm_for_chunk_with_cache(
+    chunk_lat_min: f64, chunk_lat_max: f64,
+    chunk_lon_min: f64, chunk_lon_max: f64,
+    cache: &OsmDiskCache,
+) -> OsmData {
     // Snap the chunk centre to the nearest 0.01° tile
     let chunk_lat_centre = (chunk_lat_min + chunk_lat_max) * 0.5;
     let chunk_lon_centre = (chunk_lon_min + chunk_lon_max) * 0.5;
@@ -800,7 +815,7 @@ pub fn fetch_osm_for_chunk(
     let lon_max = chunk_lon_max + margin;
 
     // Fetch the whole tile (instant if cached; empty if no local data)
-    let tile = match fetch_osm_for_bounds(tile_s, tile_w, tile_n, tile_e, cache_dir, &[]) {
+    let tile = match fetch_osm_with_cache(tile_s, tile_w, tile_n, tile_e, cache, &[]) {
         Ok(data) => data,
         Err(_) => {
             // No local tile — inference will use GPS heuristics instead.
@@ -830,7 +845,7 @@ pub fn fetch_osm_for_chunk(
         let nw = tile_w + dlon;
         let nn = ns + tile_size;
         let ne = nw + tile_size;
-        if let Ok(nb_tile) = fetch_osm_for_bounds(ns, nw, nn, ne, cache_dir, &[]) {
+        if let Ok(nb_tile) = fetch_osm_with_cache(ns, nw, nn, ne, cache, &[]) {
             let poly_intersects = |pts: &[crate::coordinates::GPS]| -> bool {
                 if pts.iter().any(|p| p.lat >= lat_min && p.lat <= lat_max
                                   && p.lon >= lon_min && p.lon <= lon_max) {

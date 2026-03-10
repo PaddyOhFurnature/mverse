@@ -31,6 +31,9 @@ pub struct TerrainGenerator {
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
     osm_cache_dir: Option<std::path::PathBuf>,
+    /// Pre-opened OSM disk cache — avoids re-opening RocksDB on every chunk.
+    /// Set automatically by `with_osm_cache`; None falls back to per-call open.
+    osm_cache: Option<Arc<crate::osm::OsmDiskCache>>,
     /// Optional handle to request OSM tiles from P2P peers when not cached locally.
     tile_fetcher: Option<Arc<crate::multiplayer::TileFetcher>>,
     /// When true, building footprints are voxelised directly into the octree.
@@ -51,6 +54,7 @@ impl TerrainGenerator {
             origin_gps,
             origin_voxel,
             osm_cache_dir: None,
+            osm_cache: None,
             tile_fetcher: None,
             bake_buildings: false,
         }
@@ -67,6 +71,7 @@ impl TerrainGenerator {
             origin_gps,
             origin_voxel,
             osm_cache_dir: None,
+            osm_cache: None,
             tile_fetcher: None,
             bake_buildings: false,
         }
@@ -74,6 +79,11 @@ impl TerrainGenerator {
 
     /// Set OSM cache directory for water-aware terrain generation.
     pub fn with_osm_cache(mut self, dir: std::path::PathBuf) -> Self {
+        // Pre-open the OsmDiskCache (opens RocksDB once) so generate_chunk can
+        // reuse it across all chunks without re-opening the DB every call.
+        if dir.parent().map(|p| p.exists()).unwrap_or(false) || dir.exists() {
+            self.osm_cache = Some(Arc::new(crate::osm::OsmDiskCache::new(&dir)));
+        }
         self.osm_cache_dir = Some(dir);
         self
     }
@@ -282,7 +292,12 @@ impl TerrainGenerator {
         // Load OSM data for this chunk (water + roads for terrain carving)
         let (chunk_water_polys, chunk_waterway_lines, chunk_roads, chunk_aeroways, chunk_buildings, chunk_parks) = if let Some(ref dir) = self.osm_cache_dir {
             let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
-            let mut osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+            // Use pre-opened cache when available (avoids re-opening RocksDB per chunk)
+            let mut osm = if let Some(ref cache) = self.osm_cache {
+                crate::osm::fetch_osm_for_chunk_with_cache(lat_min, lat_max, lon_min, lon_max, cache)
+            } else {
+                crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir)
+            };
             // On disk miss, try fetching from a P2P peer
             if osm.is_empty() {
                 if let Some(ref fetcher) = self.tile_fetcher {
@@ -291,11 +306,17 @@ impl TerrainGenerator {
                     let w = ((lon_min + lon_max) * 0.5 / tile_size).floor() * tile_size;
                     if let Some(bytes) = fetcher.fetch_osm(s, w, s + tile_size, w + tile_size) {
                         if let Ok(data) = bincode::deserialize::<crate::osm::OsmData>(&bytes) {
-                            let cache = crate::osm::OsmDiskCache::new(dir);
-                            cache.save(s, w, s + tile_size, w + tile_size, &data);
+                            // Use pre-opened cache if available, else open once for save
+                            if let Some(ref cache) = self.osm_cache {
+                                cache.save(s, w, s + tile_size, w + tile_size, &data);
+                                osm = crate::osm::fetch_osm_for_chunk_with_cache(lat_min, lat_max, lon_min, lon_max, cache);
+                            } else {
+                                let cache = crate::osm::OsmDiskCache::new(dir);
+                                cache.save(s, w, s + tile_size, w + tile_size, &data);
+                                osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
+                            }
                             // Announce to DHT — we now have this tile cached
                             fetcher.announce_osm(s, w, s + tile_size, w + tile_size);
-                            osm = crate::osm::fetch_osm_for_chunk(lat_min, lat_max, lon_min, lon_max, dir);
                         }
                     }
                 }
