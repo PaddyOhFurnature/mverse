@@ -3337,8 +3337,15 @@ fn main() {
                             hud.render(
                                 &context, &view, &window,
                                 mode_str, {
+                                    // Altitude: the terrain formula stores geographic altitude as
+                                    // surface_voxel_y = origin_voxel.y + (geo_alt − origin_alt),
+                                    // so local.y IS the altitude offset from origin.
+                                    // player.position.to_gps().alt is wrong here — ECEF Y at Brisbane
+                                    // is only ~0.40× the altitude direction, so it reads ~60 % low
+                                    // and also drifts with horizontal movement.
                                     let g = player.position.to_gps();
-                                    (g.lat, g.lon, g.alt)
+                                    let local_y = physics.ecef_to_local(&player.position).y as f64;
+                                    (g.lat, g.lon, origin_gps.alt + local_y)
                                 },
                                 player.camera_yaw,
                                 dist_portal, dist_terminal,
