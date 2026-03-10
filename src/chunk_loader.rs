@@ -243,7 +243,7 @@ impl ChunkLoader {
 
     /// Load a chunk octree from disk cache. Returns None on miss or version mismatch.
     fn load_from_cache(cache_dir: &Path, chunk_id: &ChunkId) -> Option<Octree> {
-        let path = cache_dir.join(format!("{}.bin", chunk_id));
+        let path = cache_dir.join(format!("{}_{}_{}.bin", chunk_id.x, chunk_id.y, chunk_id.z));
         let data = std::fs::read(&path).ok()?;
         if data.len() < 4 { return None; }
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
@@ -253,7 +253,7 @@ impl ChunkLoader {
 
     /// Persist a generated chunk octree to the disk cache.
     fn save_to_cache(cache_dir: &Path, chunk_id: &ChunkId, octree: &Octree) {
-        let path = cache_dir.join(format!("{}.bin", chunk_id));
+        let path = cache_dir.join(format!("{}_{}_{}.bin", chunk_id.x, chunk_id.y, chunk_id.z));
         if let Ok(octree_bytes) = octree.to_bytes() {
             let mut data = TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
             data.extend_from_slice(&octree_bytes);

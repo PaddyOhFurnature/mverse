@@ -106,20 +106,14 @@ pub fn enumerate_surface_chunks(
 ) -> Vec<ChunkId> {
     use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
 
-    // Estimate surface chunk_y from origin.
-    // We sample a GPS point at the centre of the region and compute which chunk
-    // Y layer contains its ECEF Y coordinate.
-    let centre_gps = GPS::new(
-        (bounds.lat_min + bounds.lat_max) * 0.5,
-        (bounds.lon_min + bounds.lon_max) * 0.5,
-        origin_gps.alt,
-    );
-    let centre_ecef = centre_gps.to_ecef();
-    let centre_vox  = VoxelCoord::from_ecef(&centre_ecef);
-
-    // Chunk Y for the surface at the centre of the region.
-    let surface_chunk_y = (centre_vox.y - origin_voxel.y).div_euclid(CHUNK_SIZE_Y)
-        + (origin_voxel.y).div_euclid(CHUNK_SIZE_Y);
+    // terrain.rs places surface voxels at: origin_voxel.y + (srtm_ell - origin_gps.alt)
+    // Highest terrain (at spawn altitude) → surface at origin_voxel.y
+    // Lowest terrain (river/sea, ~57 voxels below origin) → origin_voxel.y - 57
+    //
+    // Start one chunk below origin_chunk_y so low-lying terrain (river level)
+    // is captured. extra_y_layers adds chunks above for buildings.
+    let origin_chunk_y = origin_voxel.y.div_euclid(CHUNK_SIZE_Y);
+    let surface_chunk_y = origin_chunk_y - 1;
 
     // Corners → voxel space → chunk XZ range.
     let corners = [

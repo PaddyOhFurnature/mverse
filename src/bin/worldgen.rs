@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use metaverse_core::{
     coordinates::GPS,
-    elevation::{ElevationPipeline, SkadiElevationSource},
+    elevation::{ElevationPipeline, SkadiElevationSource, egm96_undulation},
     terrain::TerrainGenerator,
     voxel::VoxelCoord,
     worldgen::{RegionBounds, WorldgenConfig, generate_region},
@@ -38,7 +38,7 @@ fn main() {
     let mut custom_bbox: Option<RegionBounds> = None;
     let mut output_dir    = PathBuf::from("world_data/worldgen");
     let mut workers       = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let mut extra_layers  = 1i32;
+    let mut extra_layers  = 2i32; // origin-1 (river), origin (surface), origin+1 (buildings)
     let mut srtm_dir      = PathBuf::from("world_data/srtm");
     let mut osm_dir       = PathBuf::from("world_data/osm_cache");
     let mut bake_buildings = true;
@@ -117,11 +117,26 @@ fn main() {
         }
     };
 
-    // ── Set up elevation + terrain ──────────────────────────────────────────
-    let origin_gps    = GPS::new(-27.3996, 153.1871, 2.0);
-    let origin_ecef   = origin_gps.to_ecef();
-    let origin_voxel  = VoxelCoord::from_ecef(&origin_ecef);
+    // ── Compute origin GPS (same formula as metaworld_alpha.rs) ────────────
+    // Origin is Kangaroo Point, Brisbane — same as the client spawn point.
+    // We query SRTM at the origin to get the true ellipsoidal altitude so that
+    // surface_delta = 0 at spawn → terrain is placed at the correct absolute voxel Y.
+    let base_lat = -27.4672_f64;
+    let base_lon = 153.0300_f64;
+    let mut init_elev = ElevationPipeline::new();
+    init_elev.add_source(Box::new(SkadiElevationSource::new(srtm_dir.clone())));
+    let srtm_origin = init_elev
+        .query(&GPS::new(base_lat, base_lon, 0.0))
+        .map(|e| e.meters)
+        .unwrap_or(26.0); // Kangaroo Point ~26 m orthometric fallback
+    let n_origin  = egm96_undulation(base_lat, base_lon);
+    let origin_gps   = GPS::new(base_lat, base_lon, srtm_origin + n_origin);
+    let origin_ecef  = origin_gps.to_ecef();
+    let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
+    eprintln!("[worldgen] Origin GPS: ({:.6}, {:.6}, {:.1}m ell / {:.1}m ortho)",
+        origin_gps.lat, origin_gps.lon, origin_gps.alt, srtm_origin);
 
+    // ── Set up elevation + terrain ──────────────────────────────────────────
     let mut elevation = ElevationPipeline::new();
     elevation.add_source(Box::new(SkadiElevationSource::new(srtm_dir.clone())));
 
