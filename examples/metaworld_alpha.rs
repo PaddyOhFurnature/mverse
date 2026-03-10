@@ -1991,11 +1991,19 @@ fn main() {
                         let batch_end = pending_mesh_queue.len().min(MESH_PER_FRAME);
                         let new_chunks: Vec<_> = pending_mesh_queue.drain(..batch_end).collect();
                         for chunk_id in &new_chunks {
+                            // Clone neighbour surface caches before the mutable borrow so the
+                            // boundary grid points use the exact values the neighbour computed.
+                            let nx_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x + 1, chunk_id.y, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
+                            let nz_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
+                                .and_then(|c| c.surface_cache.clone());
                             if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
-                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v),
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref()),
                                     None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
                                 };
                                 let offset = Vec3::new(
@@ -2853,13 +2861,25 @@ fn main() {
                     let mut colliders_built = 0;
                     let mut dirty_done = 0;
                     let player_local_pos = physics.ecef_to_local(&player.position);
-                    for chunk_data in chunk_streamer.loaded_chunks_mut() {
-                        if !chunk_data.dirty { continue; }
-                        if dirty_done >= DIRTY_PER_FRAME { break; }
+                    // Collect dirty chunk IDs first so we can do immutable neighbour lookups
+                    // without conflicting with the mutable borrow on the same map.
+                    let dirty_ids: Vec<ChunkId> = chunk_streamer.loaded_chunks()
+                        .filter(|c| c.dirty)
+                        .take(DIRTY_PER_FRAME)
+                        .map(|c| c.id)
+                        .collect();
+                    for chunk_id in &dirty_ids {
+                        let nx_sc = chunk_streamer
+                            .get_chunk(&ChunkId::new(chunk_id.x + 1, chunk_id.y, chunk_id.z))
+                            .and_then(|c| c.surface_cache.clone());
+                        let nz_sc = chunk_streamer
+                            .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
+                            .and_then(|c| c.surface_cache.clone());
+                        if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                             let min_voxel = chunk_data.id.min_voxel();
                             let max_voxel = chunk_data.id.max_voxel();
                             let (mut new_mesh, chunk_center) = match &chunk_data.surface_cache {
-                                Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_voxel, &max_voxel),
+                                Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_voxel, &max_voxel, nx_sc.as_ref(), nz_sc.as_ref()),
                                 None     => extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel),
                             };
                             
@@ -2911,27 +2931,39 @@ fn main() {
                             } else {
                                 chunk_data.water_mesh_buffer = None;
                             }
-                             chunk_data.dirty = false;
-                             dirty_done += 1;
-                    }
+                            chunk_data.dirty = false;
+                            dirty_done += 1;
+                        } // if let Some(chunk_data)
+                    } // for chunk_id in dirty_ids
                     // Lazy collider build: chunks close to player that have a mesh but no collider
                     // (were meshed while player was far, now player has approached).
                     // IMPORTANT: compute distance from voxel coords — do NOT call extract_chunk_mesh
                     // just for the center, as that's ~80ms per chunk and would stall every frame.
                     if colliders_built < COLLIDER_PER_FRAME {
-                        for chunk_data in chunk_streamer.loaded_chunks_mut() {
-                            if chunk_data.collider.is_some() || chunk_data.mesh_buffer.is_none() { continue; }
-                            let min_v = chunk_data.id.min_voxel();
-                            let max_v = chunk_data.id.max_voxel();
-                            // Cheap center from voxel arithmetic — no mesh extraction.
-                            let cx = ((min_v.x + max_v.x) / 2 - origin_voxel.x) as f32;
-                            let cy = ((min_v.y + max_v.y) / 2 - origin_voxel.y) as f32;
-                            let cz = ((min_v.z + max_v.z) / 2 - origin_voxel.z) as f32;
-                            let offset = Vec3::new(cx, cy, cz);
-                            let chunk_dist = (player_local_pos - offset).length();
-                            if chunk_dist < COLLIDER_RANGE_M {
+                        // Collect candidate IDs first for immutable neighbour lookups.
+                        let candidate: Option<ChunkId> = chunk_streamer.loaded_chunks()
+                            .filter(|c| c.collider.is_none() && c.mesh_buffer.is_some())
+                            .find(|c| {
+                                let min_v = c.id.min_voxel();
+                                let max_v = c.id.max_voxel();
+                                let cx = ((min_v.x + max_v.x) / 2 - origin_voxel.x) as f32;
+                                let cy = ((min_v.y + max_v.y) / 2 - origin_voxel.y) as f32;
+                                let cz = ((min_v.z + max_v.z) / 2 - origin_voxel.z) as f32;
+                                (player_local_pos - Vec3::new(cx, cy, cz)).length() < COLLIDER_RANGE_M
+                            })
+                            .map(|c| c.id);
+                        if let Some(chunk_id) = candidate {
+                            let nx_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x + 1, chunk_id.y, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
+                            let nz_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
+                                .and_then(|c| c.surface_cache.clone());
+                            if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
+                                let min_v = chunk_data.id.min_voxel();
+                                let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
-                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v),
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref()),
                                     None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
                                 };
                                 let real_offset = Vec3::new(
@@ -2949,7 +2981,6 @@ fn main() {
                                         &mut physics, &mesh, &origin_voxel, None);
                                     chunk_data.collider = Some(col);
                                 }
-                                break; // one collider per frame max
                             }
                         }
                     }

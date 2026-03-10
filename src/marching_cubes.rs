@@ -702,11 +702,22 @@ pub fn extract_water_surface_mesh(
 /// The noise layers add natural-looking surface detail on top of the SRTM base:
 /// - Medium FBM (wavelength ~143m, ±0.4 voxel): gentle hill undulation
 /// - Small FBM (wavelength ~12m, ±0.12 voxel): surface grain / roughness
+/// Smooth marching cubes mesh extraction with optional neighbour surface caches.
+///
+/// `neighbor_x` — surface cache of the chunk at (chunk_id.x + 1, same y, same z).
+/// `neighbor_z` — surface cache of the chunk at (same x, same y, chunk_id.z + 1).
+///
+/// When a neighbour cache is provided the shared boundary grid points use its exact
+/// surface_y values, eliminating the seam entirely.  When a neighbour is absent (not
+/// yet loaded) we fall back to clamping the last interior column — a minor flat shelf
+/// that disappears once that neighbour loads.
 pub fn extract_chunk_mesh_smooth(
     octree: &Octree,
     surface_cache: &crate::terrain::SurfaceCache,
     min_voxel: &VoxelCoord,
     max_voxel: &VoxelCoord,
+    neighbor_x: Option<&crate::terrain::SurfaceCache>,
+    neighbor_z: Option<&crate::terrain::SurfaceCache>,
 ) -> (Mesh, VoxelCoord) {
     use noise::{NoiseFn, Fbm, Perlin, MultiFractal};
 
@@ -739,47 +750,56 @@ pub fn extract_chunk_mesh_smooth(
     let g_idx = |xi: usize, yi: usize, zi: usize| xi * g_stride + yi * gz + zi;
 
     // Pre-compute density for all grid points in a single pass.
-    // Outer loop over XZ columns to amortise the per-column noise lookup.
     //
-    // The density grid needs one extra point on each XZ axis (gx = CHUNK_SIZE+1) so
-    // the MC cubes at the chunk edge have all 8 corners.  Previously the boundary
-    // point was clamped to the last interior column, duplicating its surface_y.
-    // That creates a flat shelf at every chunk boundary → the visible half-voxel
-    // ridge between adjacent chunks.
+    // The density grid is gx × gy × gz where gx = CHUNK_SIZE_X + 1 and
+    // gz = CHUNK_SIZE_Z + 1.  The extra column on each axis provides the outer
+    // corner of the edge cubes.  surface_cache only covers the interior columns
+    // [min_voxel.x, max_voxel.x) × [min_voxel.z, max_voxel.z), so the boundary
+    // column (xi=gx-1 or zi=gz-1) must come from the neighbour chunk.
     //
-    // Fix: linearly extrapolate from the last two interior columns to predict the
-    // neighboring chunk's first column surface height.  For uniform slope this is
-    // exact; for typical SRTM terrain it nearly eliminates the seam.
+    // If the neighbour's surface cache is available we use its exact value →
+    // seamless join.  If it is not yet loaded we clamp to the last interior column
+    // (minor flat shelf at that edge) which disappears once the neighbour loads.
     let mut density_grid = vec![0.0f32; gx * gy * gz];
     let xi_last = gx - 1;
     let zi_last = gz - 1;
-    let no_surface = min_voxel.y as f32 - 1.0; // sentinel: all-air when below chunk
+    let no_surface = min_voxel.y as f32 - 1.0; // sentinel → all air
 
-    let lookup = |cx: i64, cz: i64| -> f32 {
+    // Look up surface_y from this chunk's cache (interior only).
+    let own = |cx: i64, cz: i64| -> f32 {
         surface_cache.get(&(cx, cz)).copied().unwrap_or(no_surface)
     };
 
     for xi in 0..gx {
         let wx = min_voxel.x + xi as i64;
         let x_bnd = xi == xi_last;
-        let cx1 = max_voxel.x - 1;          // last interior X column
-        let cx0 = (max_voxel.x - 2).max(min_voxel.x); // second-to-last
         for zi in 0..gz {
             let wz = min_voxel.z + zi as i64;
             let z_bnd = zi == zi_last;
-            let cz1 = max_voxel.z - 1;
-            let cz0 = (max_voxel.z - 2).max(min_voxel.z);
 
-            // Surface height: exact interior lookup, linear extrapolation at edges.
             let surface_y = match (x_bnd, z_bnd) {
-                (false, false) => lookup(wx, wz),
-                (true,  false) => 2.0 * lookup(cx1, wz) - lookup(cx0, wz),
-                (false, true ) => 2.0 * lookup(wx, cz1) - lookup(wx, cz0),
-                (true,  true ) => {
-                    // Corner: average of both extrapolation directions
-                    let ex = 2.0 * lookup(cx1, cz1) - lookup(cx0, cz1);
-                    let ez = 2.0 * lookup(cx1, cz1) - lookup(cx1, cz0);
-                    (ex + ez) * 0.5
+                // Interior point: use this chunk's surface cache directly.
+                (false, false) => own(wx, wz),
+
+                // X-boundary: use the +X neighbour's first column.
+                (true, false) => neighbor_x
+                    .and_then(|nx| nx.get(&(max_voxel.x, wz)).copied())
+                    .unwrap_or_else(|| own(max_voxel.x - 1, wz)), // clamp fallback
+
+                // Z-boundary: use the +Z neighbour's first column.
+                (false, true) => neighbor_z
+                    .and_then(|nz| nz.get(&(wx, max_voxel.z)).copied())
+                    .unwrap_or_else(|| own(wx, max_voxel.z - 1)), // clamp fallback
+
+                // Corner: average both neighbour first columns (or clamp if missing).
+                (true, true) => {
+                    let sx = neighbor_x
+                        .and_then(|nx| nx.get(&(max_voxel.x, max_voxel.z)).copied())
+                        .unwrap_or_else(|| own(max_voxel.x - 1, max_voxel.z - 1));
+                    let sz = neighbor_z
+                        .and_then(|nz| nz.get(&(max_voxel.x, max_voxel.z)).copied())
+                        .unwrap_or_else(|| own(max_voxel.x - 1, max_voxel.z - 1));
+                    (sx + sz) * 0.5
                 }
             };
 
