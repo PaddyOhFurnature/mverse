@@ -1999,11 +1999,17 @@ fn main() {
                             let nz_sc = chunk_streamer
                                 .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
                                 .and_then(|c| c.surface_cache.clone());
+                            let ny_lower_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y - 1, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
+                            let ny_upper_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
                             if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
-                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref()),
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref(), ny_lower_sc.as_ref(), ny_upper_sc.as_ref()),
                                     None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
                                 };
                                 let offset = Vec3::new(
@@ -2875,11 +2881,17 @@ fn main() {
                         let nz_sc = chunk_streamer
                             .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
                             .and_then(|c| c.surface_cache.clone());
+                        let ny_lower_sc = chunk_streamer
+                            .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y - 1, chunk_id.z))
+                            .and_then(|c| c.surface_cache.clone());
+                        let ny_upper_sc = chunk_streamer
+                            .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z))
+                            .and_then(|c| c.surface_cache.clone());
                         if let Some(chunk_data) = chunk_streamer.get_chunk_mut(chunk_id) {
                             let min_voxel = chunk_data.id.min_voxel();
                             let max_voxel = chunk_data.id.max_voxel();
                             let (mut new_mesh, chunk_center) = match &chunk_data.surface_cache {
-                                Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_voxel, &max_voxel, nx_sc.as_ref(), nz_sc.as_ref()),
+                                Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_voxel, &max_voxel, nx_sc.as_ref(), nz_sc.as_ref(), ny_lower_sc.as_ref(), ny_upper_sc.as_ref()),
                                 None     => extract_chunk_mesh(&chunk_data.octree, &min_voxel, &max_voxel),
                             };
                             
@@ -2959,11 +2971,17 @@ fn main() {
                             let nz_sc = chunk_streamer
                                 .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y, chunk_id.z + 1))
                                 .and_then(|c| c.surface_cache.clone());
+                            let ny_lower_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y - 1, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
+                            let ny_upper_sc = chunk_streamer
+                                .get_chunk(&ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z))
+                                .and_then(|c| c.surface_cache.clone());
                             if let Some(chunk_data) = chunk_streamer.get_chunk_mut(&chunk_id) {
                                 let min_v = chunk_data.id.min_voxel();
                                 let max_v = chunk_data.id.max_voxel();
                                 let (mut mesh, chunk_center) = match &chunk_data.surface_cache {
-                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref()),
+                                    Some(sc) => extract_chunk_mesh_smooth(&chunk_data.octree, sc, &min_v, &max_v, nx_sc.as_ref(), nz_sc.as_ref(), ny_lower_sc.as_ref(), ny_upper_sc.as_ref()),
                                     None     => extract_chunk_mesh(&chunk_data.octree, &min_v, &max_v),
                                 };
                                 let real_offset = Vec3::new(

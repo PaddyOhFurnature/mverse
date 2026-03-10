@@ -718,6 +718,12 @@ pub fn extract_chunk_mesh_smooth(
     max_voxel: &VoxelCoord,
     neighbor_x: Option<&crate::terrain::SurfaceCache>,
     neighbor_z: Option<&crate::terrain::SurfaceCache>,
+    // −Y neighbour: used for all-air bottom columns so both chunks agree on density
+    // at wy = min_voxel.y (shared boundary with the chunk below).
+    neighbor_y_lower: Option<&crate::terrain::SurfaceCache>,
+    // +Y neighbour: used for all-solid top columns so both chunks agree on density
+    // at wy = max_voxel.y (shared boundary with the chunk above).
+    neighbor_y_upper: Option<&crate::terrain::SurfaceCache>,
 ) -> (Mesh, VoxelCoord) {
     use noise::{NoiseFn, Fbm, Perlin, MultiFractal};
 
@@ -801,6 +807,37 @@ pub fn extract_chunk_mesh_smooth(
                         .unwrap_or_else(|| own(max_voxel.x - 1, max_voxel.z - 1));
                     (sx + sz) * 0.5
                 }
+            };
+
+            // Y-boundary override — ensures the density at the shared row
+            // (wy = max_voxel.y = min_voxel.y of the chunk above, and vice-versa)
+            // is IDENTICAL in both the lower and upper Y chunk, eliminating the
+            // horizontal seam at Y-chunk boundaries.
+            //
+            // The column key used below matches the key used in the match above so
+            // we always look up the same column from the Y-neighbour.
+            let ny_key = match (x_bnd, z_bnd) {
+                (false, false) => (wx, wz),
+                (true,  false) => (max_voxel.x, wz),
+                (false, true)  => (wx, max_voxel.z),
+                (true,  true)  => (max_voxel.x, max_voxel.z),
+            };
+            let surface_y = if surface_y >= max_voxel.y as f32 {
+                // All-solid column: real surface is in the +Y chunk.
+                // Use the +Y neighbour's exact surface_y so both chunks agree on
+                // density at wy = max_voxel.y.
+                neighbor_y_upper
+                    .and_then(|ny| ny.get(&ny_key).copied())
+                    .unwrap_or(surface_y)
+            } else if surface_y < min_voxel.y as f32 {
+                // All-air column: real surface is in the −Y chunk.
+                // Use the −Y neighbour's exact surface_y so both chunks agree on
+                // density at wy = min_voxel.y.
+                neighbor_y_lower
+                    .and_then(|ny| ny.get(&ny_key).copied())
+                    .unwrap_or(surface_y)
+            } else {
+                surface_y
             };
 
             let med = fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4;
