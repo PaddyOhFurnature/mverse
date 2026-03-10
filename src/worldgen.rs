@@ -1,9 +1,8 @@
 /// Offline world generation — pre-bakes terrain, buildings, roads and other
-/// static OSM features into versioned chunk files that are served via P2P.
+/// static OSM features into a TileStore database that is served via P2P.
 ///
-/// The output format is identical to the live chunk cache produced by
-/// `ChunkLoader`, so the client transparently reads worldgen chunks from disk
-/// (or downloaded via P2P) without any special-case logic.
+/// The output is written to `output_dir/tiles.db` (a TileStore RocksDB database).
+/// Copying that single file to the server is all that's needed to deploy a region.
 ///
 /// # Architecture
 /// 1.  `RegionBounds` — a geographic bounding box (lat/lon degrees)
@@ -11,7 +10,7 @@
 ///     the bbox; buildings/tall objects may need the Y+1 layer too.
 /// 3.  `generate_region` — parallel Rayon loop; calls
 ///     `TerrainGenerator::generate_chunk` (with `bake_buildings=true`) for
-///     each ChunkId, serialises result, writes to output dir.
+///     each ChunkId, serialises result, writes to TileStore.
 /// 4.  `RegionManifest` — JSON summary written on completion; server uses this
 ///     to answer "what chunks do you have?" queries from peers.
 
@@ -22,12 +21,11 @@ use serde::{Serialize, Deserialize};
 use rayon::prelude::*;
 
 use crate::chunk::ChunkId;
+use crate::chunk_loader::TERRAIN_CACHE_VERSION;
 use crate::coordinates::GPS;
 use crate::voxel::VoxelCoord;
 use crate::terrain::TerrainGenerator;
-
-/// Matches `WORLDGEN_CACHE_VERSION` in chunk_loader.rs — bump both together.
-const WORLDGEN_CACHE_VERSION: u32 = 13;
+use crate::tile_store::TileStore;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +76,7 @@ pub struct RegionManifest {
 /// Configuration for a worldgen run.
 pub struct WorldgenConfig {
     pub region:      RegionBounds,
+    /// Directory for the manifest JSON and the `tiles.db` TileStore output.
     pub output_dir:  PathBuf,
     pub workers:     usize,
     /// Also generate Y+1 layer for tall buildings / multi-storey structures.
@@ -86,6 +85,8 @@ pub struct WorldgenConfig {
     pub report_interval: usize,
     /// Enable per-chunk timing output (prints generate/serialize times).
     pub verbose: bool,
+    /// TileStore to write terrain chunks into.  Opens `output_dir/tiles.db` if None.
+    pub tile_store: Option<Arc<TileStore>>,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -154,30 +155,22 @@ pub fn enumerate_surface_chunks(
 
 // ─── Chunk serialisation ──────────────────────────────────────────────────────
 
-/// Serialise an octree to the same format as `ChunkLoader`'s disk cache:
-///   `[u32 version][bincode Octree]`
+/// Serialise an octree to the TileStore wire format:
+///   `[u32 TERRAIN_CACHE_VERSION LE][bincode Octree bytes]`
+/// (The TileStore then wraps this with a blake3 checksum internally.)
 pub fn serialise_chunk(octree: &crate::voxel::Octree) -> Result<Vec<u8>, String> {
     let mut buf: Vec<u8> = Vec::new();
-    // 4-byte little-endian version header
-    buf.extend_from_slice(&(WORLDGEN_CACHE_VERSION as u32).to_le_bytes());
+    buf.extend_from_slice(&TERRAIN_CACHE_VERSION.to_le_bytes());
     let encoded = bincode::serialize(octree)
         .map_err(|e| format!("bincode error: {e}"))?;
     buf.extend_from_slice(&encoded);
     Ok(buf)
 }
 
-fn chunk_cache_path(output_dir: &Path, id: &ChunkId) -> PathBuf {
-    // Mirror ChunkLoader's path scheme: output_dir/<x>_<y>_<z>.bin
-    output_dir.join(format!("{}_{}_{}.bin", id.x, id.y, id.z))
-}
-
-fn sha256_hex(data: &[u8]) -> String {
-    // FNV-1a 64-bit hash for file integrity tagging (not crypto).
+fn fnv1a_hex(data: &[u8]) -> String {
+    // FNV-1a 64-bit hash for manifest integrity tagging (not crypto).
     let mut h: u64 = 14695981039346656037;
-    for &b in data {
-        h ^= b as u64;
-        h = h.wrapping_mul(1099511628211);
-    }
+    for &b in data { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
     format!("{h:016x}")
 }
 
@@ -187,7 +180,11 @@ fn sha256_hex(data: &[u8]) -> String {
 /// Args: (chunks_done, chunks_total, last_chunk_id)
 pub type ProgressFn = Arc<dyn Fn(u64, u64, &ChunkId) + Send + Sync>;
 
-/// Generate an entire region.  Returns the manifest.
+/// Generate an entire region and write chunks into a TileStore.
+///
+/// The TileStore is written to `cfg.output_dir/tiles.db` unless `cfg.tile_store`
+/// is pre-populated (useful when the caller wants to share a DB with the server).
+/// A JSON manifest is written to `cfg.output_dir/manifest.json` on completion.
 ///
 /// `terrain_gen` must already have `bake_buildings = true` set if you want
 /// building voxels in the output.
@@ -201,12 +198,19 @@ pub fn generate_region(
     std::fs::create_dir_all(&cfg.output_dir)
         .map_err(|e| format!("Cannot create output dir: {e}"))?;
 
+    // Open or reuse the TileStore for this region.
+    let ts: Arc<TileStore> = match cfg.tile_store.clone() {
+        Some(existing) => existing,
+        None => Arc::new(TileStore::open(&cfg.output_dir.join("tiles.db"))
+            .map_err(|e| format!("TileStore open failed: {e}"))?),
+    };
+
     let chunk_ids = enumerate_surface_chunks(
         &cfg.region, origin_gps, origin_voxel, cfg.extra_y_layers,
     );
     let total = chunk_ids.len() as u64;
 
-    eprintln!("[worldgen] {} chunks to generate across {:?}", total, cfg.output_dir);
+    eprintln!("[worldgen] {} chunks to generate → {:?}/tiles.db", total, cfg.output_dir);
 
     // Build a rayon thread pool with the requested worker count.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -217,28 +221,25 @@ pub fn generate_region(
     let done    = Arc::new(AtomicU64::new(0));
     let results = Arc::new(Mutex::new(Vec::<ManifestChunk>::new()));
     let errors  = Arc::new(Mutex::new(Vec::<String>::new()));
-    // For rate tracking: (total_gen_ms, total_ser_ms, count)
     let timing  = Arc::new(Mutex::new((0u64, 0u64, 0u64)));
     let run_start = std::time::Instant::now();
 
     pool.install(|| {
         chunk_ids.par_iter().for_each(|id| {
-            let out_path = chunk_cache_path(&cfg.output_dir, id);
+            let cx = id.x as i32;
+            let cy = id.y as i32;
+            let cz = id.z as i32;
 
-            // Skip already-generated chunks (resume support).
-            if out_path.exists() {
+            // Resume support: skip chunks already in the DB.
+            if ts.has_terrain(cx, cy, cz) {
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Some(ref p) = progress {
-                    p(n, total, id);
-                }
-                // Still collect manifest entry from existing file.
-                if let Ok(data) = std::fs::read(&out_path) {
-                    let entry = ManifestChunk {
+                if let Some(ref p) = progress { p(n, total, id); }
+                if let Some(data) = ts.get_terrain(cx, cy, cz) {
+                    results.lock().unwrap().push(ManifestChunk {
                         chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                         size: data.len() as u64,
-                        sha256: sha256_hex(&data),
-                    };
-                    results.lock().unwrap().push(entry);
+                        sha256: fnv1a_hex(&data),
+                    });
                 }
                 return;
             }
@@ -251,51 +252,36 @@ pub fn generate_region(
                     match serialise_chunk(&octree) {
                         Ok(data) => {
                             let ser_ms = t_ser.elapsed().as_millis() as u64;
-                            let entry = ManifestChunk {
+                            ts.put_terrain(cx, cy, cz, &data);
+                            results.lock().unwrap().push(ManifestChunk {
                                 chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                                 size: data.len() as u64,
-                                sha256: sha256_hex(&data),
-                            };
-                            if let Err(e) = std::fs::write(&out_path, &data) {
-                                errors.lock().unwrap().push(
-                                    format!("{:?}: write error: {e}", id)
-                                );
-                            } else {
-                                results.lock().unwrap().push(entry);
-                                let mut t = timing.lock().unwrap();
-                                t.0 += gen_ms; t.1 += ser_ms; t.2 += 1;
-                                if cfg.verbose {
-                                    eprintln!("[chunk] {:?}  gen={gen_ms}ms  ser={ser_ms}ms", id);
-                                }
+                                sha256: fnv1a_hex(&data),
+                            });
+                            let mut t = timing.lock().unwrap();
+                            t.0 += gen_ms; t.1 += ser_ms; t.2 += 1;
+                            if cfg.verbose {
+                                eprintln!("[chunk] {:?}  gen={gen_ms}ms  ser={ser_ms}ms", id);
                             }
                         }
-                        Err(e) => {
-                            errors.lock().unwrap().push(format!("{:?}: serialise: {e}", id));
-                        }
+                        Err(e) => errors.lock().unwrap().push(format!("{:?}: serialise: {e}", id)),
                     }
                 }
-                Err(e) => {
-                    errors.lock().unwrap().push(format!("{:?}: generate: {e}", id));
-                }
+                Err(e) => errors.lock().unwrap().push(format!("{:?}: generate: {e}", id)),
             }
 
             let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-            // Print rolling rate stats every 50 generated chunks
             if n % 50 == 0 {
                 let elapsed = run_start.elapsed().as_secs_f64();
                 let rate = n as f64 / elapsed * 60.0;
                 let t = timing.lock().unwrap();
-                let (avg_gen, avg_ser) = if t.2 > 0 {
-                    (t.0 / t.2, t.1 / t.2)
-                } else { (0, 0) };
+                let (avg_gen, avg_ser) = if t.2 > 0 { (t.0/t.2, t.1/t.2) } else { (0,0) };
                 eprintln!(
                     "[worldgen] {n}/{total} ({:.1}%)  {rate:.1} chunks/min  avg gen={avg_gen}ms ser={avg_ser}ms",
                     n as f64 / total as f64 * 100.0
                 );
             }
-            if let Some(ref p) = progress {
-                p(n, total, id);
-            }
+            if let Some(ref p) = progress { p(n, total, id); }
         });
     });
 
@@ -320,7 +306,7 @@ pub fn generate_region(
 
     let manifest = RegionManifest {
         format_version: 1,
-        terrain_cache_version: WORLDGEN_CACHE_VERSION as u32,
+        terrain_cache_version: TERRAIN_CACHE_VERSION,
         region: cfg.region.clone(),
         origin_gps: [origin_gps.lat, origin_gps.lon, origin_gps.alt],
         generated_at,
@@ -335,7 +321,7 @@ pub fn generate_region(
         .map_err(|e| format!("manifest write: {e}"))?;
 
     eprintln!(
-        "[worldgen] Done. {} chunks written, {} errors. Manifest: {:?}",
+        "[worldgen] Done. {} chunks in tiles.db, {} errors. Manifest: {:?}",
         manifest.chunk_count, errs.len(), manifest_path
     );
 

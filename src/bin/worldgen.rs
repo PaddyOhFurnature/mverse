@@ -26,6 +26,7 @@ use metaverse_core::{
     coordinates::GPS,
     elevation::{ElevationPipeline, SkadiElevationSource, egm96_undulation},
     terrain::TerrainGenerator,
+    tile_store::TileStore,
     voxel::VoxelCoord,
     worldgen::{RegionBounds, WorldgenConfig, generate_region},
 };
@@ -147,6 +148,13 @@ fn main() {
     let terrain_gen = Arc::new(terrain_gen);
 
     // ── Worldgen config ─────────────────────────────────────────────────────
+    // Open the output TileStore up front so we can report the path clearly.
+    std::fs::create_dir_all(&output_dir).expect("Cannot create output dir");
+    let tile_store = Arc::new(
+        TileStore::open(&output_dir.join("tiles.db"))
+            .expect("Failed to open output TileStore")
+    );
+
     let cfg = WorldgenConfig {
         region: region.clone(),
         output_dir: output_dir.clone(),
@@ -154,10 +162,11 @@ fn main() {
         extra_y_layers: extra_layers,
         report_interval: 100,
         verbose,
+        tile_store: Some(Arc::clone(&tile_store)),
     };
 
     eprintln!("[worldgen] Region: {:?}", region);
-    eprintln!("[worldgen] Output: {:?}", output_dir);
+    eprintln!("[worldgen] Output: {:?}/tiles.db", output_dir);
     eprintln!("[worldgen] Workers: {workers}");
     eprintln!("[worldgen] Extra Y layers: {extra_layers}");
     eprintln!("[worldgen] Bake buildings: {bake_buildings}");

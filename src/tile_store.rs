@@ -46,7 +46,9 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>
 // ── Schema versions ────────────────────────────────────────────────────────────
 pub const OSM_TILE_VERSION:     u32 = 8;
 pub const SRTM_TILE_VERSION:    u32 = 1;
-pub const TERRAIN_TILE_VERSION: u32 = 1;
+/// Must match `TERRAIN_CACHE_VERSION` in chunk_loader.rs.  Bump both together
+/// whenever the terrain binary format changes — the DB wipes all stale chunks on open.
+pub const TERRAIN_TILE_VERSION: u32 = 13;
 
 const CHECKSUM_LEN: usize = 32;
 

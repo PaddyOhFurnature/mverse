@@ -34,10 +34,11 @@
 
 use crate::{
     chunk::{ChunkId, CHUNK_SIZE_X, CHUNK_SIZE_Y},
-    chunk_loader::ChunkLoader,
+    chunk_loader::{ChunkLoader, migrate_flat_terrain_cache},
     coordinates::ECEF,
     renderer::MeshBuffer,
     terrain::{TerrainGenerator, SurfaceCache},
+    tile_store::TileStore,
     user_content::UserContentLayer,
     voxel::Octree,
 };
@@ -199,10 +200,18 @@ impl ChunkStreamer {
         user_content: Arc<Mutex<UserContentLayer>>,
         world_dir: PathBuf,
     ) -> Self {
-        // Create chunk loader with parallel workers (4 threads for 4-core minimum)
-        let num_workers = 4;  // Can make this configurable later
-        let cache_dir = Some(world_dir.join("terrain_cache"));
-        let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers, cache_dir);
+        // Open (or reuse) the TileStore that holds all terrain chunks.
+        // The process-singleton registry means this is safe to call even if the
+        // client has already opened the same tiles.db — the same Arc is returned.
+        let ts = TileStore::open(&world_dir.join("tiles.db"))
+            .expect("Failed to open TileStore for terrain chunks");
+        let ts = Arc::new(ts);
+
+        // One-time migration: import any legacy flat .bin files into the DB.
+        migrate_flat_terrain_cache(&world_dir.join("terrain_cache"), &ts);
+
+        let num_workers = 4;
+        let chunk_loader = ChunkLoader::new(terrain_generator.clone(), num_workers, Some(Arc::clone(&ts)));
         
         Self {
             config,
