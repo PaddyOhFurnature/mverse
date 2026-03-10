@@ -394,6 +394,19 @@ impl ChunkStreamer {
                 self.loaded_chunks.insert(result.chunk_id, chunk);
                 self.newly_loaded_chunks.push(result.chunk_id);
                 self.stats.chunks_loaded_this_frame += 1;
+
+                // Mark the −X and −Z neighbours dirty: we are now their +X / +Z neighbour,
+                // so they can re-mesh with our exact surface_cache instead of the clamping
+                // fallback they used when we weren't loaded yet.
+                let cid = result.chunk_id;
+                for nb_id in [
+                    ChunkId::new(cid.x - 1, cid.y, cid.z),
+                    ChunkId::new(cid.x,     cid.y, cid.z - 1),
+                ] {
+                    if let Some(nb) = self.loaded_chunks.get_mut(&nb_id) {
+                        nb.dirty = true;
+                    }
+                }
                 
                 // Log when chunks complete (for debugging parallel loading)
                 if self.stats.chunks_loaded_this_frame <= 3 {

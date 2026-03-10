@@ -218,7 +218,16 @@ impl ChunkLoader {
     
     /// Derive a SurfaceCache by scanning the octree for the topmost solid voxel per column.
     /// Used when a chunk is loaded from disk cache (no SRTM data available).
-    /// The fractional part is set to 0.5 (midpoint) so interpolation is smooth at height boundaries.
+    ///
+    /// Three cases:
+    /// - Column is all-air              → surface_y = min_v.y - 1.0  (density always < 0, no mesh)
+    /// - Surface somewhere in the chunk  → surface_y = topmost_solid + 0.5  (correct position)
+    /// - Column is all-solid            → surface_y = max_v.y + 0.5  (density always > 0, no phantom surface)
+    ///
+    /// The all-solid case arises for chunks that are fully below the terrain surface (e.g. the
+    /// lower Y layer under a cliff).  Without this fix, surface_y = max_v.y - 0.5 causes the
+    /// smooth MC to draw a phantom horizontal plane at the very top of the chunk — the
+    /// "green cloud" visible inside cliffs and near sea-level terrain.
     fn compute_surface_cache(octree: &Octree, chunk_id: &ChunkId) -> SurfaceCache {
         use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
         let min_v = chunk_id.min_voxel();
@@ -226,14 +235,36 @@ impl ChunkLoader {
         let mut cache = SurfaceCache::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
         for vx in min_v.x..max_v.x {
             for vz in min_v.z..max_v.z {
-                let mut surface_y = min_v.y as f32 - 1.0; // default: below chunk → all air, no phantom surface
+                // Scan top-to-bottom for the first solid voxel.
+                let mut top_vy: Option<i64> = None;
                 for vy in (min_v.y..max_v.y).rev() {
                     let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
                     if mat != MaterialId::AIR && mat != MaterialId::WATER {
-                        surface_y = vy as f32 + 0.5;
+                        top_vy = Some(vy);
                         break;
                     }
                 }
+
+                let surface_y = match top_vy {
+                    None => min_v.y as f32 - 1.0, // all air → density always negative → no mesh
+                    Some(vy) if vy < max_v.y - 1 => vy as f32 + 0.5, // surface below chunk top
+                    Some(_) => {
+                        // Topmost solid is the VERY TOP of the chunk.
+                        // If the entire column is solid (no air anywhere), the terrain extends
+                        // above this chunk → push surface above the chunk so MC sees all-solid
+                        // and draws no phantom surface here.
+                        // If there IS air somewhere below, this is a genuine surface at the top.
+                        let has_air = (min_v.y..max_v.y).any(|y| {
+                            let m = octree.get_voxel(VoxelCoord::new(vx, y, vz));
+                            m == MaterialId::AIR || m == MaterialId::WATER
+                        });
+                        if has_air {
+                            (max_v.y - 1) as f32 + 0.5 // real surface at chunk top
+                        } else {
+                            max_v.y as f32 + 0.5 // all-solid: terrain continues above → no phantom
+                        }
+                    }
+                };
                 cache.insert((vx, vz), surface_y);
             }
         }
