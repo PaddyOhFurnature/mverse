@@ -27,7 +27,7 @@ use crate::chunk_loader::TERRAIN_CACHE_VERSION;
 use crate::coordinates::GPS;
 use crate::voxel::VoxelCoord;
 use crate::terrain::TerrainGenerator;
-use crate::tile_store::TileStore;
+use crate::tile_store::{TileStore, PassId};
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -261,10 +261,10 @@ pub fn generate_region(
             let cz = id.z as i32;
 
             // Resume support: skip chunks already in the DB.
-            if ts.has_terrain(cx, cy, cz) {
+            if ts.has_chunk_pass(cx, cy, cz, PassId::Terrain) {
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(ref p) = progress { p(n, total, id); }
-                if let Some(data) = ts.get_terrain(cx, cy, cz) {
+                if let Some(data) = ts.get_chunk_pass(cx, cy, cz, PassId::Terrain) {
                     results.lock().unwrap().push(ManifestChunk {
                         chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                         size: data.len() as u64,
@@ -292,7 +292,7 @@ pub fn generate_region(
                     match serialise_chunk(&octree) {
                         Ok(data) => {
                             let ser_ms = t_ser.elapsed().as_millis() as u64;
-                            ts.put_terrain(cx, cy, cz, &data);
+                            ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &data);
                             results.lock().unwrap().push(ManifestChunk {
                                 chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                                 size: data.len() as u64,

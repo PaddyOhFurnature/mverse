@@ -50,4 +50,5 @@ pub mod biome;            // Tier 3 biome and substrate classification
 pub mod node_config;    // Unified node configuration — shared by client, server, and relay
 pub mod tile_protocol;  // P2P tile request/response protocol (libp2p request-response)
 pub mod tile_store;     // RocksDB-backed tile cache (OSM, SRTM, terrain)
+pub mod feature_record; // OSM-derived feature records stored alongside chunk passes
 pub mod world_store;    // RocksDB-backed world state (voxel ops, parcels, players)

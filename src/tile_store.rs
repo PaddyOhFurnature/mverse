@@ -50,6 +50,14 @@ pub const SRTM_TILE_VERSION:    u32 = 1;
 /// whenever the terrain binary format changes — the DB wipes all stale chunks on open.
 pub const TERRAIN_TILE_VERSION: u32 = 13;
 
+/// Pass versions — bump ONLY the pass whose algorithm changes.
+/// The TileStore wipes only that pass's data on version mismatch.
+pub const PASS_TERRAIN_VERSION:   u16 = 1;  // SRTM shape (Octree)
+pub const PASS_SUBSTRATE_VERSION: u16 = 1;  // Biome/substrate material layer
+pub const PASS_HYDRO_VERSION:     u16 = 1;  // Rivers, water bodies
+pub const PASS_ROADS_VERSION:     u16 = 0;  // Not yet generated
+pub const PASS_BUILDINGS_VERSION: u16 = 0;  // Not yet generated
+
 const CHECKSUM_LEN: usize = 32;
 
 // ── Column family names ─────────────────────────────────────────────────────────
@@ -57,6 +65,13 @@ const CF_OSM:     &str = "osm";
 const CF_SRTM:    &str = "srtm";
 const CF_TERRAIN: &str = "terrain";
 const CF_META:    &str = "meta";
+
+const CF_PASS_TERRAIN:   &str = "pass_terrain";
+const CF_PASS_SUBSTRATE: &str = "pass_substrate";
+const CF_PASS_HYDRO:     &str = "pass_hydro";
+const CF_PASS_ROADS:     &str = "pass_roads";
+const CF_PASS_BUILDINGS: &str = "pass_buildings";
+const CF_FEATURE_RULES:  &str = "feature_rules";
 
 // ── Key encoding ───────────────────────────────────────────────────────────────
 
@@ -80,12 +95,21 @@ pub fn srtm_key(lat: i32, lon: i32) -> [u8; 4] {
     k
 }
 
-/// Encode terrain chunk coordinates as a 12-byte key.
+/// Encode terrain chunk coordinates as a 12-byte big-endian key.
 pub fn terrain_key(cx: i32, cy: i32, cz: i32) -> [u8; 12] {
     let mut k = [0u8; 12];
     k[0..4].copy_from_slice(&cx.to_be_bytes());
     k[4..8].copy_from_slice(&cy.to_be_bytes());
     k[8..12].copy_from_slice(&cz.to_be_bytes());
+    k
+}
+
+/// Encode chunk coordinates as a 12-byte little-endian key for pass column families.
+fn chunk_key(cx: i32, cy: i32, cz: i32) -> [u8; 12] {
+    let mut k = [0u8; 12];
+    k[0..4].copy_from_slice(&cx.to_le_bytes());
+    k[4..8].copy_from_slice(&cy.to_le_bytes());
+    k[8..12].copy_from_slice(&cz.to_le_bytes());
     k
 }
 
@@ -187,10 +211,16 @@ impl TileStore {
         db_opts.create_missing_column_families(true);
 
         let cf_descs = vec![
-            ColumnFamilyDescriptor::new(CF_OSM,     make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_SRTM,    make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_TERRAIN, make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_META,    meta_opts()),
+            ColumnFamilyDescriptor::new(CF_OSM,          make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_SRTM,         make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_TERRAIN,      make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_META,         meta_opts()),
+            ColumnFamilyDescriptor::new(CF_PASS_TERRAIN,   make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_SUBSTRATE, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_HYDRO,     make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_ROADS,     make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_BUILDINGS, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_FEATURE_RULES,  make_cf_opts(true)),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descs)
@@ -211,6 +241,11 @@ impl TileStore {
         self.check_cf_version("osm_version",     OSM_TILE_VERSION,     CF_OSM)?;
         self.check_cf_version("srtm_version",    SRTM_TILE_VERSION,    CF_SRTM)?;
         self.check_cf_version("terrain_version", TERRAIN_TILE_VERSION, CF_TERRAIN)?;
+        self.check_cf_version("pass_terrain_version",   PASS_TERRAIN_VERSION   as u32, CF_PASS_TERRAIN)?;
+        self.check_cf_version("pass_substrate_version", PASS_SUBSTRATE_VERSION as u32, CF_PASS_SUBSTRATE)?;
+        self.check_cf_version("pass_hydro_version",     PASS_HYDRO_VERSION     as u32, CF_PASS_HYDRO)?;
+        self.check_cf_version("pass_roads_version",     PASS_ROADS_VERSION     as u32, CF_PASS_ROADS)?;
+        self.check_cf_version("pass_buildings_version", PASS_BUILDINGS_VERSION as u32, CF_PASS_BUILDINGS)?;
         Ok(())
     }
 
@@ -354,6 +389,57 @@ impl TileStore {
         self.db.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok().flatten().is_some()
     }
 
+    // ── Pass-based chunk storage ───────────────────────────────────────────────
+
+    /// Get a chunk pass. Returns `None` on miss or version mismatch.
+    /// Data format on disk: `[u16 version LE][payload bytes]`; the version prefix
+    /// is stripped — callers receive only the payload.
+    pub fn get_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId) -> Option<Vec<u8>> {
+        let cf = self.db.db.cf_handle(pass.cf_name())?;
+        let key = chunk_key(cx, cy, cz);
+        let raw = self.db.db.get_cf(&cf, &key).ok()??;
+        if raw.len() < 2 { return None; }
+        let stored_version = u16::from_le_bytes([raw[0], raw[1]]);
+        if stored_version != pass.current_version() { return None; }
+        Some(raw[2..].to_vec())
+    }
+
+    /// Store a chunk pass. Prepends `[u16 version LE]` to the payload before writing.
+    pub fn put_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId, data: &[u8]) {
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return };
+        let key = chunk_key(cx, cy, cz);
+        let mut buf = Vec::with_capacity(2 + data.len());
+        buf.extend_from_slice(&pass.current_version().to_le_bytes());
+        buf.extend_from_slice(data);
+        let _ = self.db.db.put_cf(&cf, &key, &buf);
+    }
+
+    /// Check if a chunk pass exists and is current version.
+    pub fn has_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId) -> bool {
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return false };
+        let key = chunk_key(cx, cy, cz);
+        let Ok(Some(raw)) = self.db.db.get_cf(&cf, &key) else { return false };
+        if raw.len() < 2 { return false }
+        let stored_version = u16::from_le_bytes([raw[0], raw[1]]);
+        stored_version == pass.current_version()
+    }
+
+    /// Delete a specific pass for a chunk (e.g. to force re-generation of just that pass).
+    pub fn delete_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId) {
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return };
+        let key = chunk_key(cx, cy, cz);
+        let _ = self.db.db.delete_cf(&cf, &key);
+    }
+
+    /// Returns which passes are currently stored and current-version for this chunk.
+    pub fn chunk_pass_status(&self, cx: i32, cy: i32, cz: i32) -> Vec<(PassId, bool)> {
+        let passes = [
+            PassId::Terrain, PassId::Substrate, PassId::Hydro,
+            PassId::Roads, PassId::Buildings, PassId::FeatureRules,
+        ];
+        passes.iter().map(|&p| (p, self.has_chunk_pass(cx, cy, cz, p))).collect()
+    }
+
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     /// Instant tile count read from a meta counter (no full scan).
@@ -461,6 +547,43 @@ impl TileStore {
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(1);
         let _ = self.db.db.put_cf(&meta_cf, key.as_bytes(), cur.saturating_sub(1).to_be_bytes());
+    }
+}
+
+// ── PassId ─────────────────────────────────────────────────────────────────────
+
+/// Identifies which generation pass a chunk belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PassId {
+    Terrain,
+    Substrate,
+    Hydro,
+    Roads,
+    Buildings,
+    FeatureRules,
+}
+
+impl PassId {
+    fn cf_name(&self) -> &'static str {
+        match self {
+            PassId::Terrain      => CF_PASS_TERRAIN,
+            PassId::Substrate    => CF_PASS_SUBSTRATE,
+            PassId::Hydro        => CF_PASS_HYDRO,
+            PassId::Roads        => CF_PASS_ROADS,
+            PassId::Buildings    => CF_PASS_BUILDINGS,
+            PassId::FeatureRules => CF_FEATURE_RULES,
+        }
+    }
+
+    pub fn current_version(&self) -> u16 {
+        match self {
+            PassId::Terrain      => PASS_TERRAIN_VERSION,
+            PassId::Substrate    => PASS_SUBSTRATE_VERSION,
+            PassId::Hydro        => PASS_HYDRO_VERSION,
+            PassId::Roads        => PASS_ROADS_VERSION,
+            PassId::Buildings    => PASS_BUILDINGS_VERSION,
+            PassId::FeatureRules => 1,
+        }
     }
 }
 

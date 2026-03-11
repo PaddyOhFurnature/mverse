@@ -13,7 +13,7 @@ use crate::voxel::Octree;
 use crate::terrain::{TerrainGenerator, SurfaceCache};
 use crate::materials::MaterialId;
 use crate::voxel::VoxelCoord;
-use crate::tile_store::TileStore;
+use crate::tile_store::{TileStore, PassId};
 use std::path::Path;
 use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
 use std::thread;
@@ -279,7 +279,7 @@ impl ChunkLoader {
 
     /// Load a chunk octree from the TileStore. Returns None on miss or version mismatch.
     fn load_from_store(ts: &TileStore, chunk_id: &ChunkId) -> Option<Octree> {
-        let data = ts.get_terrain(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32)?;
+        let data = ts.get_chunk_pass(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32, PassId::Terrain)?;
         if data.len() < 4 { return None; }
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
         if version != TERRAIN_CACHE_VERSION { return None; }
@@ -291,7 +291,7 @@ impl ChunkLoader {
         if let Ok(octree_bytes) = octree.to_bytes() {
             let mut data = TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
             data.extend_from_slice(&octree_bytes);
-            ts.put_terrain(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32, &data);
+            ts.put_chunk_pass(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32, PassId::Terrain, &data);
         }
     }
 
@@ -328,7 +328,7 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
         };
 
         // Skip if already in DB (e.g. partial migration from a previous run)
-        if ts.has_terrain(cx, cy, cz) {
+        if ts.has_chunk_pass(cx, cy, cz, PassId::Terrain) {
             let _ = std::fs::remove_file(&path);
             skipped += 1;
             continue;
@@ -339,7 +339,7 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
             if data.len() >= 4 {
                 let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 if version == TERRAIN_CACHE_VERSION {
-                    ts.put_terrain(cx, cy, cz, &data);
+                    ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &data);
                     migrated += 1;
                 }
                 // Stale version: just delete without migrating
