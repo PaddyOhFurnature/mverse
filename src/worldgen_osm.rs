@@ -16,6 +16,7 @@ use crate::chunk::ChunkId;
 use crate::coordinates::GPS;
 use crate::materials::MaterialId;
 use crate::osm::{OsmDiskCache, OsmWater, WaterwayLine};
+use crate::terrain_analysis::TerrainAnalysis;
 use crate::voxel::{Octree, VoxelCoord, WORLD_MIN_METERS};
 
 /// Applies OSM features (waterways, water polygons) to pre-generated terrain chunks.
@@ -23,6 +24,8 @@ pub struct OsmProcessor {
     osm_cache: Arc<OsmDiskCache>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
+    /// Optional terrain analysis for future TWI/slope-aware feature placement.
+    pub analysis: Option<Arc<TerrainAnalysis>>,
 }
 
 impl OsmProcessor {
@@ -30,8 +33,9 @@ impl OsmProcessor {
         osm_cache: Arc<OsmDiskCache>,
         origin_gps: GPS,
         origin_voxel: VoxelCoord,
+        analysis: Option<Arc<TerrainAnalysis>>,
     ) -> Self {
-        Self { osm_cache, origin_gps, origin_voxel }
+        Self { osm_cache, origin_gps, origin_voxel, analysis }
     }
 
     /// Apply all implemented OSM features to a pre-generated chunk.

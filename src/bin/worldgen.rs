@@ -164,6 +164,7 @@ fn main() {
         verbose,
         tile_store: Some(Arc::clone(&tile_store)),
         osm_cache,
+        analysis: None,
     };
 
     eprintln!("[worldgen] Region: {:?}", region);

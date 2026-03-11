@@ -30,6 +30,10 @@ pub struct TerrainGenerator {
     elevation: Arc<RwLock<ElevationPipeline>>,
     origin_gps: GPS,
     origin_voxel: VoxelCoord,
+    /// Optional pre-computed terrain analysis (slope, TWI, TRI, aspect).
+    /// When set, biome classification uses real derived rasters; otherwise
+    /// flat-moderate defaults are used.
+    pub analysis: Option<Arc<crate::terrain_analysis::TerrainAnalysis>>,
 }
 
 impl TerrainGenerator {
@@ -44,6 +48,7 @@ impl TerrainGenerator {
             elevation: Arc::new(RwLock::new(elevation)),
             origin_gps,
             origin_voxel,
+            analysis: None,
         }
     }
     
@@ -57,7 +62,14 @@ impl TerrainGenerator {
             elevation,
             origin_gps,
             origin_voxel,
+            analysis: None,
         }
+    }
+
+    /// Attach a pre-computed terrain analysis for biome-aware material selection.
+    pub fn with_analysis(mut self, a: Arc<crate::terrain_analysis::TerrainAnalysis>) -> Self {
+        self.analysis = Some(a);
+        self
     }
     
     /// Get shared elevation pipeline (for cloning generator)
@@ -265,6 +277,8 @@ impl TerrainGenerator {
         struct ColSample {
             voxel_x: i64,
             voxel_z: i64,
+            lat: f64,
+            lon: f64,
             surface_elevation: f64,
             surface_voxel_y:   i64,
             surface_y_f:       f32,
@@ -309,6 +323,8 @@ impl TerrainGenerator {
 
                 columns.push(ColSample {
                     voxel_x, voxel_z,
+                    lat: sample_gps.lat,
+                    lon: sample_gps.lon,
                     surface_elevation, surface_voxel_y, surface_y_f,
                 });
             }
@@ -321,6 +337,19 @@ impl TerrainGenerator {
             let col_bot = col.surface_voxel_y - BEDROCK_DEPTH;
             let col_top = col.surface_voxel_y;
 
+            let classification = crate::biome::classify_column(
+                col.lat,
+                col.lon,
+                col.surface_elevation as f32,
+                self.analysis.as_deref(),
+                None,  // osm_landuse
+                0.0,   // coastal_dist_m (not yet computed)
+            );
+
+            let surface_mat = surface_material_for(&classification);
+            let subsurface_mat = subsurface_material_for(&classification);
+            let bedrock_mat = bedrock_material_for(&classification);
+
             for voxel_y in col_bot..=col_top {
                 if voxel_y < min_voxel.y || voxel_y >= max_voxel.y {
                     continue;
@@ -329,11 +358,11 @@ impl TerrainGenerator {
                 let depth_below_surface = col.surface_voxel_y - voxel_y;
 
                 let material = if depth_below_surface == 0 {
-                    MaterialId::GRASS
-                } else if depth_below_surface <= 5 {
-                    MaterialId::DIRT
+                    surface_mat
+                } else if depth_below_surface <= classification.soil_depth_voxels as i64 {
+                    subsurface_mat
                 } else {
-                    MaterialId::STONE
+                    bedrock_mat
                 };
 
                 octree.set_voxel(voxel_pos, material);
@@ -398,6 +427,44 @@ impl TerrainGenerator {
         
         Ok(())
     }
+}
+
+// ── Biome-aware material helpers ──────────────────────────────────────────────
+
+fn surface_material_for(c: &crate::biome::ColumnClassification) -> MaterialId {
+    use crate::biome::{Biome, SubstrateType};
+    match c.biome {
+        Biome::Ocean | Biome::Lake | Biome::River => MaterialId::WATER,
+        Biome::Beach => MaterialId::SAND,
+        Biome::Wetland | Biome::RiparianCorridor => MaterialId::GRASS,
+        Biome::Urban => MaterialId::ASPHALT,
+        _ => match c.substrate {
+            SubstrateType::BedRock
+            | SubstrateType::Sandstone
+            | SubstrateType::Granite
+            | SubstrateType::Basalt => MaterialId::STONE,
+            SubstrateType::Sand => MaterialId::SAND,
+            SubstrateType::UrbanFill => MaterialId::ASPHALT,
+            _ => MaterialId::GRASS,
+        },
+    }
+}
+
+fn subsurface_material_for(c: &crate::biome::ColumnClassification) -> MaterialId {
+    use crate::biome::SubstrateType;
+    match c.substrate {
+        SubstrateType::Sand => MaterialId::SAND,
+        SubstrateType::UrbanFill => MaterialId::CONCRETE,
+        SubstrateType::BedRock
+        | SubstrateType::Sandstone
+        | SubstrateType::Granite
+        | SubstrateType::Basalt => MaterialId::STONE,
+        _ => MaterialId::DIRT,
+    }
+}
+
+fn bedrock_material_for(_c: &crate::biome::ColumnClassification) -> MaterialId {
+    MaterialId::STONE
 }
 
 #[cfg(test)]

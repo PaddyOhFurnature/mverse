@@ -45,6 +45,8 @@ pub mod autoupdate;     // Binary auto-update: check manifest, verify, exec-rest
 pub mod worldnet;       // WORLDNET OS — distributed OS layer, address system, pixel renderer
 pub mod osm;            // OpenStreetMap data loading from local PBF
 pub mod worldgen_osm;   // Offline OSM feature baking for worldgen (waterways, etc.)
+pub mod terrain_analysis; // Tier 2 SRTM analysis — slope, TWI, flow, TRI, aspect
+pub mod biome;            // Tier 3 biome and substrate classification
 pub mod node_config;    // Unified node configuration — shared by client, server, and relay
 pub mod tile_protocol;  // P2P tile request/response protocol (libp2p request-response)
 pub mod tile_store;     // RocksDB-backed tile cache (OSM, SRTM, terrain)

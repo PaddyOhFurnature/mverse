@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
+use crate::terrain_analysis::{RegionDem, TerrainAnalysis};
+
 use serde::{Serialize, Deserialize};
 use rayon::prelude::*;
 
@@ -90,6 +92,9 @@ pub struct WorldgenConfig {
     /// OSM cache for applying waterways and water polygons after terrain generation.
     /// When set, an `OsmProcessor` is applied to each chunk after `generate_chunk`.
     pub osm_cache: Option<Arc<crate::osm::OsmDiskCache>>,
+    /// Pre-computed terrain analysis (slope, TWI, flow, TRI, aspect).
+    /// When None, `generate_region` will sample and compute it automatically.
+    pub analysis: Option<Arc<TerrainAnalysis>>,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -215,6 +220,28 @@ pub fn generate_region(
 
     eprintln!("[worldgen] {} chunks to generate → {:?}/tiles.db", total, cfg.output_dir);
 
+    // Compute (or reuse) terrain analysis before entering the parallel loop.
+    let analysis: Option<Arc<TerrainAnalysis>> = if let Some(ref a) = cfg.analysis {
+        Some(Arc::clone(a))
+    } else {
+        let pipeline_arc = terrain_gen.elevation_pipeline();
+        let pipeline = pipeline_arc
+            .read()
+            .map_err(|e| format!("elevation pipeline lock: {e}"))?;
+        let step = 0.0003_f64; // ~30 m
+        let dem = RegionDem::sample_region(
+            &*pipeline,
+            cfg.region.lat_min,
+            cfg.region.lat_max,
+            cfg.region.lon_min,
+            cfg.region.lon_max,
+            step,
+        );
+        drop(pipeline);
+        eprintln!("[worldgen] terrain analysis: computing derived rasters …");
+        Some(Arc::new(TerrainAnalysis::compute(dem)))
+    };
+
     // Build a rayon thread pool with the requested worker count.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(cfg.workers)
@@ -256,6 +283,7 @@ pub fn generate_region(
                             Arc::clone(osm_cache),
                             *origin_gps,
                             *origin_voxel,
+                            analysis.clone(),
                         );
                         processor.apply_to_chunk(id, &mut octree);
                     }
