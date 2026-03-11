@@ -343,7 +343,9 @@ impl TerrainGenerator {
                 col.surface_elevation as f32,
                 self.analysis.as_deref(),
                 None,  // osm_landuse
-                0.0,   // coastal_dist_m (not yet computed)
+                self.analysis.as_ref()
+                    .map(|a| a.coastal_dist_at(col.lat, col.lon))
+                    .unwrap_or(100_000.0),
             );
 
             let surface_mat = surface_material_for(&classification);

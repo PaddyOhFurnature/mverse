@@ -95,6 +95,9 @@ pub struct WorldgenConfig {
     /// Pre-computed terrain analysis (slope, TWI, flow, TRI, aspect).
     /// When None, `generate_region` will sample and compute it automatically.
     pub analysis: Option<Arc<TerrainAnalysis>>,
+    /// Path to a GSHHG binary coastline file (e.g. `gshhs_f.b`).
+    /// When set, coastal distance is computed and fed into biome classification.
+    pub gshhg_path: Option<std::path::PathBuf>,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -239,8 +242,33 @@ pub fn generate_region(
         );
         drop(pipeline);
         eprintln!("[worldgen] terrain analysis: computing derived rasters …");
-        Some(Arc::new(TerrainAnalysis::compute(dem)))
+        let mut analysis = TerrainAnalysis::compute(dem);
+        if let Some(ref gshhg_path) = cfg.gshhg_path {
+            analysis.compute_coastal_dist(gshhg_path);
+        } else {
+            eprintln!("[worldgen] no GSHHG coastline file — coastal substrate disabled (use --coastline)");
+        }
+        Some(Arc::new(analysis))
     };
+
+    // Build river profiles once for the whole region (Tier 4a).
+    // This requires both OSM cache and terrain analysis to be available.
+    let river_profiles: Option<Arc<crate::worldgen_river::RiverProfileCache>> =
+        if let (Some(osm_cache), Some(analysis_arc)) = (&cfg.osm_cache, &analysis) {
+            eprintln!("[worldgen] building river profiles …");
+            let elev_arc = terrain_gen.elevation_pipeline();
+            let cache = crate::worldgen_river::RiverProfileCache::build(
+                cfg.region.lat_min, cfg.region.lat_max,
+                cfg.region.lon_min, cfg.region.lon_max,
+                osm_cache,
+                elev_arc.as_ref(),
+                Some(analysis_arc.as_ref()),
+            );
+            eprintln!("[worldgen] river profiles: {} segments", cache.segments.len());
+            Some(Arc::new(cache))
+        } else {
+            None
+        };
 
     // Build a rayon thread pool with the requested worker count.
     let pool = rayon::ThreadPoolBuilder::new()
@@ -279,12 +307,15 @@ pub fn generate_region(
                 Ok((mut octree, _surface_cache)) => {
                     // Apply OSM waterways/water-polygons when cache is available.
                     if let Some(ref osm_cache) = cfg.osm_cache {
-                        let processor = crate::worldgen_osm::OsmProcessor::new(
+                        let mut processor = crate::worldgen_osm::OsmProcessor::new(
                             Arc::clone(osm_cache),
                             *origin_gps,
                             *origin_voxel,
                             analysis.clone(),
                         );
+                        if let Some(ref rp) = river_profiles {
+                            processor = processor.with_river_profiles(Arc::clone(rp));
+                        }
                         processor.apply_to_chunk(id, &mut octree);
                     }
                     let gen_ms = t_gen.elapsed().as_millis() as u64;

@@ -15,6 +15,7 @@
 ///   --extra-layers <n>       Extra Y chunk layers above surface for tall buildings [default: 1]
 ///   --srtm-dir <dir>         SRTM tile cache directory [default: ./world_data/srtm]
 ///   --osm-cache <dir>        OSM tile cache for waterway carving [default: ./world_data/osm]
+///   --coastline <file>       GSHHG binary coastline file for coastal substrate (e.g. gshhs_f.b)
 ///   --resume                 Skip already-generated chunks (default: enabled)
 
 use std::path::PathBuf;
@@ -42,6 +43,7 @@ fn main() {
     let mut extra_layers  = 2i32; // origin-1 (river), origin (surface), origin+1 (buildings)
     let mut srtm_dir      = PathBuf::from("world_data/srtm");
     let mut osm_cache_dir = PathBuf::from("world_data/osm");
+    let mut gshhg_path: Option<PathBuf> = None;
     let mut verbose = false;
 
     let mut i = 1;
@@ -81,6 +83,10 @@ fn main() {
             "--osm-cache" => {
                 i += 1;
                 osm_cache_dir = PathBuf::from(&args[i]);
+            }
+            "--coastline" => {
+                i += 1;
+                gshhg_path = Some(PathBuf::from(&args[i]));
             }
             "--verbose" | "-v" => {
                 verbose = true;
@@ -165,6 +171,7 @@ fn main() {
         tile_store: Some(Arc::clone(&tile_store)),
         osm_cache,
         analysis: None,
+        gshhg_path,
     };
 
     eprintln!("[worldgen] Region: {:?}", region);
@@ -212,6 +219,7 @@ OPTIONS:
     --extra-layers <n>    Extra Y layers above surface for tall buildings [default: 1]
     --srtm-dir <dir>      SRTM tile cache directory [default: ./world_data/srtm]
     --osm-cache <dir>     OSM tile cache for waterway carving [default: ./world_data/osm]
+    --coastline <file>    GSHHG binary coastline file for coastal substrate (e.g. gshhs_f.b)
     --help                Show this help
 
 EXAMPLES:

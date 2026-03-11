@@ -1,9 +1,11 @@
 //! Tier 2 SRTM terrain analysis — derived rasters from elevation data.
 //!
-//! Computes flow direction (D8), flow accumulation, TWI, aspect, TRI, and slope
-//! from a 2D DEM grid sampled from the elevation pipeline.  Works globally at
-//! SRTM resolution (~30 m); results are later interpolated to voxel scale.
+//! Computes flow direction (D8), flow accumulation, TWI, aspect, TRI, slope,
+//! and coastal distance from a 2D DEM grid sampled from the elevation pipeline.
+//! Works globally at SRTM resolution (~30 m); results are later interpolated
+//! to voxel scale.
 
+use std::io::{self, BufReader, Read};
 use crate::coordinates::GPS;
 use crate::elevation::ElevationPipeline;
 
@@ -126,6 +128,9 @@ pub struct TerrainAnalysis {
     pub tri: Vec<f32>,
     /// Slope: gradient magnitude in degrees
     pub slope_deg: Vec<f32>,
+    /// Distance to nearest coastline in metres.
+    /// Empty when GSHHG data is not provided; `coastal_dist_at` returns 100 000 m.
+    pub coastal_dist: Vec<f32>,
 }
 
 /// Moisture classification derived from TWI.
@@ -295,6 +300,7 @@ impl TerrainAnalysis {
             aspect,
             tri,
             slope_deg,
+            coastal_dist: Vec::new(),
         }
     }
 
@@ -371,4 +377,240 @@ impl TerrainAnalysis {
             _ => MoistureClass::Dry,
         }
     }
+
+    // ── Coastal distance ──────────────────────────────────────────────────────
+
+    /// Compute and store coastal distance from a GSHHG binary coastline file.
+    ///
+    /// Parses level-1 (land/ocean) polygon edges from `gshhg_path`, rasterises
+    /// them onto the DEM grid, then runs a multi-source BFS to produce per-cell
+    /// distances in metres.  Results are capped at `max_dist_m` (use 50 000 for
+    /// normal substrate classification; far-inland cells all get 50 km).
+    ///
+    /// Safe to call multiple times; each call replaces the previous result.
+    pub fn compute_coastal_dist(&mut self, gshhg_path: &std::path::Path) {
+        eprintln!("[terrain_analysis] Computing coastal distance from GSHHG …");
+        let on_coast = rasterise_coastline(&self.dem, gshhg_path);
+        let coastline_cells: usize = on_coast.iter().filter(|&&v| v).count();
+        eprintln!(
+            "[terrain_analysis] Coastline cells rasterised: {} / {}",
+            coastline_cells,
+            self.dem.rows * self.dem.cols,
+        );
+        let cell_size_m = (111_320.0 * self.dem.cell_size_deg) as f32;
+        self.coastal_dist = bfs_coastal_dist(self.dem.rows, self.dem.cols, &on_coast, cell_size_m);
+        eprintln!("[terrain_analysis] Coastal distance raster complete.");
+    }
+
+    /// Distance to the nearest coastline in metres at `(lat, lon)`.
+    ///
+    /// Returns 100 000.0 (100 km) when coastal distance data is not available
+    /// (i.e. `compute_coastal_dist` was never called), making all locations
+    /// "far from coast" — a safe conservative default.
+    pub fn coastal_dist_at(&self, lat: f64, lon: f64) -> f32 {
+        if self.coastal_dist.is_empty() {
+            return 100_000.0;
+        }
+        let (r, c) = self.row_col(lat, lon);
+        self.coastal_dist[self.idx(r, c)]
+    }
+}
+
+// ── GSHHG coastal distance helpers ───────────────────────────────────────────
+
+/// Read a big-endian i32 from a `Read` source.
+fn read_i32_be<R: Read>(r: &mut R) -> io::Result<i32> {
+    let mut buf = [0u8; 4];
+    r.read_exact(&mut buf)?;
+    Ok(i32::from_be_bytes(buf))
+}
+
+/// Skip exactly `n` bytes from a `Read` source.
+fn skip_bytes<R: Read>(r: &mut R, n: usize) -> io::Result<()> {
+    let mut buf = [0u8; 512];
+    let mut remaining = n;
+    while remaining > 0 {
+        let chunk = remaining.min(buf.len());
+        r.read_exact(&mut buf[..chunk])?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+/// Convert GSHHG's 0-360° longitude range to standard -180..180°.
+#[inline]
+fn gshhg_lon(micro_deg: i32) -> f64 {
+    let deg = micro_deg as f64 / 1_000_000.0;
+    if deg > 180.0 { deg - 360.0 } else { deg }
+}
+
+/// Parse all level-1 (ocean/land boundary = coastline) polygon edges from a
+/// GSHHG binary file that intersect the DEM bounding box, and rasterise them
+/// onto a boolean grid aligned to `dem`.
+///
+/// Returns a flat `bool` grid, same row/col layout as `dem.elevations`.
+fn rasterise_coastline(dem: &RegionDem, path: &std::path::Path) -> Vec<bool> {
+    let n = dem.rows * dem.cols;
+    let mut on_coast = vec![false; n];
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[terrain_analysis] Cannot open GSHHG {:?}: {e}", path);
+            return on_coast;
+        }
+    };
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+
+    let mut poly_count = 0usize;
+    let mut seg_count  = 0usize;
+
+    loop {
+        // ── Read 44-byte header (11 × i32 big-endian) ───────────────────────
+        let _id = match read_i32_be(&mut reader) {
+            Ok(v) => v,
+            Err(_) => break, // clean EOF
+        };
+        let n_pts    = read_i32_be(&mut reader).unwrap_or(0);
+        let flag     = read_i32_be(&mut reader).unwrap_or(0);
+        let west_raw = read_i32_be(&mut reader).unwrap_or(0);
+        let east_raw = read_i32_be(&mut reader).unwrap_or(0);
+        let south_us = read_i32_be(&mut reader).unwrap_or(0);
+        let north_us = read_i32_be(&mut reader).unwrap_or(0);
+        // area, area_full, container, ancestor — not needed
+        let _ = skip_bytes(&mut reader, 16);
+
+        let level      = (flag & 0xFF) as u8;
+        let poly_south = south_us as f64 / 1_000_000.0;
+        let poly_north = north_us as f64 / 1_000_000.0;
+        let poly_west  = gshhg_lon(west_raw);
+        let poly_east  = gshhg_lon(east_raw);
+
+        let in_region = level == 1
+            && poly_east  >= dem.lon_min
+            && poly_west  <= dem.lon_max
+            && poly_north >= dem.lat_min
+            && poly_south <= dem.lat_max;
+
+        if !in_region || n_pts <= 0 {
+            let _ = skip_bytes(&mut reader, n_pts as usize * 8);
+            continue;
+        }
+
+        // ── Read polygon points ──────────────────────────────────────────────
+        let mut pts: Vec<(f64, f64)> = Vec::with_capacity(n_pts as usize);
+        for _ in 0..n_pts {
+            let x = read_i32_be(&mut reader).unwrap_or(0);
+            let y = read_i32_be(&mut reader).unwrap_or(0);
+            let lon = gshhg_lon(x);
+            let lat = y as f64 / 1_000_000.0;
+            pts.push((lat, lon));
+        }
+
+        // ── Rasterise each edge onto the DEM grid ────────────────────────────
+        poly_count += 1;
+        for i in 0..pts.len() {
+            let j = (i + 1) % pts.len();
+            seg_count += rasterise_segment(dem, pts[i], pts[j], &mut on_coast);
+        }
+    }
+
+    eprintln!(
+        "[terrain_analysis] GSHHG: parsed {poly_count} level-1 polygons, \
+         rasterised {seg_count} edge segments"
+    );
+    on_coast
+}
+
+/// Rasterise a single great-circle segment `(lat0,lon0)→(lat1,lon1)` onto the
+/// boolean grid using Bresenham's line algorithm in grid-index space.
+/// Returns the number of cells marked.
+fn rasterise_segment(
+    dem: &RegionDem,
+    (lat0, lon0): (f64, f64),
+    (lat1, lon1): (f64, f64),
+    grid: &mut [bool],
+) -> usize {
+    // Convert geographic coords to continuous grid indices.
+    let col_f = |lon: f64| (lon - dem.lon_min) / dem.cell_size_deg;
+    let row_f = |lat: f64| (lat - dem.lat_min) / dem.cell_size_deg;
+
+    let mut c0 = col_f(lon0).round() as i64;
+    let mut r0 = row_f(lat0).round() as i64;
+    let c1     = col_f(lon1).round() as i64;
+    let r1     = row_f(lat1).round() as i64;
+
+    let dc = (c1 - c0).abs();
+    let dr = (r1 - r0).abs();
+    let sc = if c0 < c1 { 1i64 } else { -1i64 };
+    let sr = if r0 < r1 { 1i64 } else { -1i64 };
+    let mut err = dc - dr;
+    let mut marked = 0usize;
+
+    loop {
+        // Mark cell if inside grid bounds.
+        if c0 >= 0 && c0 < dem.cols as i64 && r0 >= 0 && r0 < dem.rows as i64 {
+            let idx = r0 as usize * dem.cols + c0 as usize;
+            if !grid[idx] {
+                grid[idx] = true;
+                marked += 1;
+            }
+        }
+        if c0 == c1 && r0 == r1 { break; }
+        let e2 = 2 * err;
+        if e2 > -dr { err -= dr; c0 += sc; }
+        if e2 <  dc { err += dc; r0 += sr; }
+    }
+    marked
+}
+
+/// Multi-source BFS (4-connected) distance transform from all coastline cells.
+///
+/// Returns a flat `f32` grid where each value is the approximate distance to
+/// the nearest coastline cell in metres (Manhattan metric scaled by
+/// `cell_size_m`).  Cells beyond `max_dist_m` are capped.
+fn bfs_coastal_dist(
+    rows: usize,
+    cols: usize,
+    on_coast: &[bool],
+    cell_size_m: f32,
+) -> Vec<f32> {
+    const MAX_DIST: f32 = 50_000.0; // 50 km cap — beyond this we don't care
+    let n = rows * cols;
+    let mut dist = vec![f32::MAX; n];
+    let mut queue = std::collections::VecDeque::with_capacity(on_coast.iter().filter(|&&v| v).count() * 4);
+
+    // Seed all coastline cells at distance 0.
+    for i in 0..n {
+        if on_coast[i] {
+            dist[i] = 0.0;
+            queue.push_back(i);
+        }
+    }
+
+    // 4-connected BFS: each step adds one `cell_size_m`.
+    const DR: [i32; 4] = [0, 0, 1, -1];
+    const DC: [i32; 4] = [1, -1, 0, 0];
+
+    while let Some(idx) = queue.pop_front() {
+        let cur = dist[idx];
+        if cur >= MAX_DIST { continue; }
+        let r = idx / cols;
+        let c = idx % cols;
+        let nd = cur + cell_size_m;
+        for d in 0..4 {
+            let nr = r as i32 + DR[d];
+            let nc = c as i32 + DC[d];
+            if nr < 0 || nr >= rows as i32 || nc < 0 || nc >= cols as i32 { continue; }
+            let ni = nr as usize * cols + nc as usize;
+            if nd < dist[ni] {
+                dist[ni] = nd;
+                queue.push_back(ni);
+            }
+        }
+    }
+
+    // Cap and replace MAX sentinels.
+    dist.iter_mut().for_each(|v| { if *v == f32::MAX { *v = MAX_DIST; } });
+    dist
 }

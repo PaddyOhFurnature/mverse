@@ -45,6 +45,7 @@ pub mod autoupdate;     // Binary auto-update: check manifest, verify, exec-rest
 pub mod worldnet;       // WORLDNET OS — distributed OS layer, address system, pixel renderer
 pub mod osm;            // OpenStreetMap data loading from local PBF
 pub mod worldgen_osm;   // Offline OSM feature baking for worldgen (waterways, etc.)
+pub mod worldgen_river; // Tier 4a river profile computation (flow direction, width, depth)
 pub mod terrain_analysis; // Tier 2 SRTM analysis — slope, TWI, flow, TRI, aspect
 pub mod biome;            // Tier 3 biome and substrate classification
 pub mod node_config;    // Unified node configuration — shared by client, server, and relay

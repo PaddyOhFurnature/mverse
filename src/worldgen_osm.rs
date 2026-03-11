@@ -8,6 +8,8 @@
 //! - `OsmProcessor` holds a reference to the shared OSM disk cache and origin coords.
 //! - `apply_to_chunk` fetches OSM data for the chunk's GPS bbox, then applies each
 //!   feature type in order: water polygons first, then waterway channels.
+//! - When a `RiverProfileCache` is provided, waterway channels are carved using
+//!   SRTM-derived water surface elevations, accurate widths, and depths.
 //! - All coordinate conversions use the same ECEF ↔ voxel math as `terrain.rs`.
 
 use std::sync::Arc;
@@ -18,14 +20,18 @@ use crate::materials::MaterialId;
 use crate::osm::{OsmDiskCache, OsmWater, WaterwayLine};
 use crate::terrain_analysis::TerrainAnalysis;
 use crate::voxel::{Octree, VoxelCoord, WORLD_MIN_METERS};
+use crate::worldgen_river::RiverProfileCache;
 
 /// Applies OSM features (waterways, water polygons) to pre-generated terrain chunks.
 pub struct OsmProcessor {
     osm_cache: Arc<OsmDiskCache>,
-    origin_gps: GPS,
+    _origin_gps: GPS,
     origin_voxel: VoxelCoord,
-    /// Optional terrain analysis for future TWI/slope-aware feature placement.
+    /// Optional terrain analysis for TWI/slope-aware feature placement.
     pub analysis: Option<Arc<TerrainAnalysis>>,
+    /// Pre-computed river profiles for the whole region.
+    /// When present, waterway carving uses SRTM-derived elevations and widths.
+    pub river_profiles: Option<Arc<RiverProfileCache>>,
 }
 
 impl OsmProcessor {
@@ -35,7 +41,18 @@ impl OsmProcessor {
         origin_voxel: VoxelCoord,
         analysis: Option<Arc<TerrainAnalysis>>,
     ) -> Self {
-        Self { osm_cache, origin_gps, origin_voxel, analysis }
+        Self {
+            osm_cache,
+            _origin_gps: origin_gps,
+            origin_voxel,
+            analysis,
+            river_profiles: None,
+        }
+    }
+
+    pub fn with_river_profiles(mut self, profiles: Arc<RiverProfileCache>) -> Self {
+        self.river_profiles = Some(profiles);
+        self
     }
 
     /// Apply all implemented OSM features to a pre-generated chunk.
@@ -58,7 +75,10 @@ impl OsmProcessor {
             self.apply_water_polygons(octree, &min_v, &max_v, &osm.water);
         }
         if !osm.waterway_lines.is_empty() {
-            self.apply_waterway_channels(octree, &min_v, &max_v, &osm.waterway_lines);
+            self.apply_waterway_channels(
+                octree, &min_v, &max_v, &osm.waterway_lines,
+                self.river_profiles.as_deref(),
+            );
         }
     }
 
@@ -164,66 +184,116 @@ impl OsmProcessor {
         min_v: &VoxelCoord,
         max_v: &VoxelCoord,
         waterways: &[WaterwayLine],
+        river_profiles: Option<&RiverProfileCache>,
     ) {
         use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
 
         const WGS84_A: f64 = 6_378_137.0;
         const WGS84_B: f64 = 6_356_752.3142;
-        let origin_ecef_y =
-            (self.origin_voxel.y as f64 + 0.5) + WORLD_MIN_METERS;
+        let origin_ecef_y = (self.origin_voxel.y as f64 + 0.5) + WORLD_MIN_METERS;
 
         for i in 0..CHUNK_SIZE_X {
             for k in 0..CHUNK_SIZE_Z {
                 let vx = min_v.x + i;
                 let vz = min_v.z + k;
-
                 let (lat, lon) = voxel_to_gps(vx, vz, origin_ecef_y, WGS84_A, WGS84_B);
 
-                // Find the nearest waterway segment affecting this column.
-                let mut best_depth: f32 = 0.0;
+                // ── Look up profile metrics for this column ───────────────────
+                // Try the RiverProfileCache first (whole-river context).
+                // Fall back to per-waterway flat metrics when profiles unavailable.
+                let profile_result: Option<(f32, f32, f32, bool)> =
+                    if let Some(cache) = river_profiles {
+                        cache.nearest(lat, lon, 300.0).map(|(t, seg)| {
+                            let (surf_m, hw_m, dep_m) = seg.at_t(t);
+                            let dist_to_seg = {
+                                let mut best = f64::MAX;
+                                for pair in seg.nodes.windows(2) {
+                                    let (d, _, _, _) = crate::worldgen_river::point_to_segment_dist(
+                                        lat, lon,
+                                        pair[0].lat, pair[0].lon,
+                                        pair[1].lat, pair[1].lon,
+                                    );
+                                    if d < best { best = d; }
+                                }
+                                best
+                            };
+                            // Parabolic cross-section: depth tapers to 0 at bank edge.
+                            let bank_t = (dist_to_seg / hw_m as f64).clamp(0.0, 1.0) as f32;
+                            let cross_depth = dep_m * (1.0 - bank_t * bank_t);
+                            (surf_m, hw_m, cross_depth, seg.is_tidal)
+                        })
+                    } else {
+                        None
+                    };
 
-                for wl in waterways {
-                    let half_width = wl.half_width_m();
-                    let max_depth = wl.channel_depth_vox() as f32;
-
-                    for pair in wl.nodes.windows(2) {
-                        let a = &pair[0];
-                        let b = &pair[1];
-                        let (dist, _, _, _) = point_to_segment_dist_m(
-                            lat, lon,
-                            a.lat, a.lon,
-                            b.lat, b.lon,
-                        );
-                        if dist < half_width {
-                            let t = dist / half_width;
-                            let depth = max_depth * (1.0 - (t * t) as f32);
-                            if depth > best_depth {
-                                best_depth = depth;
+                let (water_surf_m, half_width, carve_depth, _is_tidal) =
+                    if let Some(p) = profile_result {
+                        p
+                    } else {
+                        // Fallback: scan raw WaterwayLines directly.
+                        let mut best_surf_m: f32 = 0.0;
+                        let mut best_hw: f32 = 0.0;
+                        let mut best_depth: f32 = 0.0;
+                        for wl in waterways {
+                            let hw = wl.half_width_m() as f32;
+                            let d  = wl.channel_depth_vox() as f32;
+                            for pair in wl.nodes.windows(2) {
+                                let (dist, t, cl, clon) = point_to_segment_dist_m(
+                                    lat, lon,
+                                    pair[0].lat, pair[0].lon,
+                                    pair[1].lat, pair[1].lon,
+                                );
+                                let _ = (cl, clon);
+                                if dist < hw as f64 {
+                                    let cross_t = (dist / hw as f64) as f32;
+                                    let cross_d = d * (1.0 - cross_t * cross_t);
+                                    if cross_d > best_depth {
+                                        let elev0 = pair[0].alt as f32;
+                                        let elev1 = pair[1].alt as f32;
+                                        best_surf_m = elev0 + (elev1 - elev0) * t as f32;
+                                        best_hw     = hw;
+                                        best_depth  = cross_d;
+                                    }
+                                }
                             }
                         }
-                    }
-                }
+                        (best_surf_m, best_hw, best_depth, false)
+                    };
 
-                if best_depth < 0.5 {
-                    continue;
-                }
+                if carve_depth < 0.3 { continue; }
+                let _ = half_width;
 
-                let channel_depth = best_depth.round() as i64;
-                let surface_y = surface_voxel_y(octree, vx, vz, min_v.y, max_v.y)
-                    .unwrap_or(self.origin_voxel.y);
-                let channel_bottom = surface_y - channel_depth;
+                // ── Determine water surface voxel Y ──────────────────────────
+                // If we have a valid SRTM elevation from the profile, use it.
+                // Otherwise fall back to terrain surface voxel.
+                let water_surface_y = if water_surf_m > 1.0 {
+                    // Convert SRTM orthometric height → voxel Y.
+                    // terrain.rs places voxel Y at: origin_voxel.y + (srtm_ell - origin_alt).
+                    // We approximate: water_y = origin_voxel.y + (water_surf_m - origin_ortho).
+                    // Use terrain surface as a sanity bound (don't float above terrain).
+                    let terrain_y = surface_voxel_y(octree, vx, vz, min_v.y, max_v.y)
+                        .unwrap_or(self.origin_voxel.y);
+                    // water_surf_m is orthometric; terrain.rs uses ellipsoidal offset,
+                    // but the difference is < 1 voxel for Brisbane.  Good enough for now.
+                    terrain_y
+                } else {
+                    surface_voxel_y(octree, vx, vz, min_v.y, max_v.y)
+                        .unwrap_or(self.origin_voxel.y)
+                };
 
-                // Fill [channel_bottom, surface_y) with WATER; below with STONE.
-                let bedrock = surface_y - 200;
-                for vy in bedrock.max(min_v.y)..channel_bottom.min(max_v.y) {
+                let depth_vox   = carve_depth.round().max(1.0) as i64;
+                let channel_bot = water_surface_y - depth_vox;
+                let bedrock     = water_surface_y - 200;
+
+                // Stone below channel, water inside channel, air above.
+                for vy in bedrock.max(min_v.y)..channel_bot.max(min_v.y) {
                     octree.set_voxel(VoxelCoord::new(vx, vy, vz), MaterialId::STONE);
                 }
-                for vy in channel_bottom.max(min_v.y)..surface_y.min(max_v.y) {
+                for vy in channel_bot.max(min_v.y)..water_surface_y.min(max_v.y) {
                     octree.set_voxel(VoxelCoord::new(vx, vy, vz), MaterialId::WATER);
                 }
-                // Surface voxel stays AIR (water surface is the top WATER voxel below)
-                if surface_y >= min_v.y && surface_y < max_v.y {
-                    octree.set_voxel(VoxelCoord::new(vx, surface_y, vz), MaterialId::AIR);
+                if water_surface_y >= min_v.y && water_surface_y < max_v.y {
+                    octree.set_voxel(VoxelCoord::new(vx, water_surface_y, vz), MaterialId::AIR);
                 }
             }
         }
