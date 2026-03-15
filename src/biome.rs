@@ -20,21 +20,21 @@ use crate::terrain_analysis::TerrainAnalysis;
 /// It will be refined when WorldClim raster data becomes available.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ClimateZone {
-    TropicalRainforest,  // Af  — equatorial, always wet
-    TropicalMonsoon,     // Am  — equatorial, monsoon
-    TropicalSavanna,     // Aw  — equatorial, dry winter
-    HotDesert,           // BWh — hot arid
-    ColdDesert,          // BWk — cold arid
-    HotSteppe,           // BSh — hot semi-arid
-    ColdSteppe,          // BSk — cold semi-arid
-    HumidSubtropical,    // Cfa — warm temperate, no dry season, hot summer
-    OceanicMaritime,     // Cfb — warm temperate, no dry season, warm summer
-    MediterraneanHot,    // Csa — warm temperate, dry hot summer
-    MediterraneanWarm,   // Csb — warm temperate, dry warm summer
-    HumidContinental,    // Dfa/Dfb — snow, no dry season
-    SubarcticBoreal,     // Dfc — subarctic
-    Tundra,              // ET  — polar tundra
-    IceCap,              // EF  — polar ice
+    TropicalRainforest, // Af  — equatorial, always wet
+    TropicalMonsoon,    // Am  — equatorial, monsoon
+    TropicalSavanna,    // Aw  — equatorial, dry winter
+    HotDesert,          // BWh — hot arid
+    ColdDesert,         // BWk — cold arid
+    HotSteppe,          // BSh — hot semi-arid
+    ColdSteppe,         // BSk — cold semi-arid
+    HumidSubtropical,   // Cfa — warm temperate, no dry season, hot summer
+    OceanicMaritime,    // Cfb — warm temperate, no dry season, warm summer
+    MediterraneanHot,   // Csa — warm temperate, dry hot summer
+    MediterraneanWarm,  // Csb — warm temperate, dry warm summer
+    HumidContinental,   // Dfa/Dfb — snow, no dry season
+    SubarcticBoreal,    // Dfc — subarctic
+    Tundra,             // ET  — polar tundra
+    IceCap,             // EF  — polar ice
 }
 
 /// Classify a location's Köppen climate zone from latitude and elevation alone.
@@ -49,7 +49,7 @@ pub fn koppen_climate(lat: f64, elevation_m: f32) -> ClimateZone {
     let effective_lat = abs_lat + elev / 150.0;
 
     match effective_lat as u32 {
-        0..=10  => ClimateZone::TropicalRainforest,
+        0..=10 => ClimateZone::TropicalRainforest,
         11..=20 => ClimateZone::TropicalMonsoon,
         21..=25 => ClimateZone::TropicalSavanna,
         26..=35 => ClimateZone::HumidSubtropical,
@@ -58,7 +58,7 @@ pub fn koppen_climate(lat: f64, elevation_m: f32) -> ClimateZone {
         51..=60 => ClimateZone::HumidContinental,
         61..=70 => ClimateZone::SubarcticBoreal,
         71..=80 => ClimateZone::Tundra,
-        _       => ClimateZone::IceCap,
+        _ => ClimateZone::IceCap,
     }
 }
 
@@ -277,7 +277,7 @@ pub fn classify_substrate(
         return match slope_deg as u32 {
             0..=1 => SubstrateType::Silty,    // tidal / lower reach
             2..=4 => SubstrateType::GreyClay, // lowland
-            _     => SubstrateType::GravelBed, // upland / steep
+            _ => SubstrateType::GravelBed,    // upland / steep
         };
     }
 
@@ -301,9 +301,7 @@ pub fn classify_substrate(
             }
         }
 
-        ClimateZone::MediterraneanHot | ClimateZone::MediterraneanWarm => {
-            SubstrateType::Sandstone
-        }
+        ClimateZone::MediterraneanHot | ClimateZone::MediterraneanWarm => SubstrateType::Sandstone,
 
         ClimateZone::OceanicMaritime | ClimateZone::HumidContinental => {
             SubstrateType::TemperateBrown
@@ -358,28 +356,32 @@ pub fn classify_column(
 
     let climate = koppen_climate(lat, elevation_m);
     let biome = classify_biome(
-        lat, lon, elevation_m, slope, twi, tri,
-        coastal_dist_m, osm_landuse, climate,
+        lat,
+        lon,
+        elevation_m,
+        slope,
+        twi,
+        tri,
+        coastal_dist_m,
+        osm_landuse,
+        climate,
     );
-    let substrate = classify_substrate(
-        biome, climate, slope, twi, tri, elevation_m, coastal_dist_m,
-    );
+    let substrate =
+        classify_substrate(biome, climate, slope, twi, tri, elevation_m, coastal_dist_m);
 
     let soil_depth_voxels: u8 = match substrate {
-        SubstrateType::BedRock       => 0,
-        SubstrateType::GravelBed     => 1,
-        SubstrateType::Granite       => 2,
-        SubstrateType::Basalt        => 2,
-        SubstrateType::Sandstone     => 3,
-        SubstrateType::Sand          => 6,
+        SubstrateType::BedRock => 0,
+        SubstrateType::GravelBed => 1,
+        SubstrateType::Granite => 2,
+        SubstrateType::Basalt => 2,
+        SubstrateType::Sandstone => 3,
+        SubstrateType::Sand => 6,
         SubstrateType::TemperateBrown => 6,
-        SubstrateType::RedClay
-        | SubstrateType::GreyClay    => 8,
-        SubstrateType::TropicalRed   => 10,
-        SubstrateType::Silty
-        | SubstrateType::Peat        => 12,
-        SubstrateType::UrbanFill     => 0,
-        SubstrateType::Permafrost    => 0,
+        SubstrateType::RedClay | SubstrateType::GreyClay => 8,
+        SubstrateType::TropicalRed => 10,
+        SubstrateType::Silty | SubstrateType::Peat => 12,
+        SubstrateType::UrbanFill => 0,
+        SubstrateType::Permafrost => 0,
     };
 
     ColumnClassification {

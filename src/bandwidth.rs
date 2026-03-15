@@ -70,11 +70,11 @@ impl BandwidthProfile {
     /// Maximum position update rate (Hz) for this profile.
     pub fn max_position_hz(&self) -> f32 {
         match self {
-            Self::LoRa => 0.0,        // suppressed
+            Self::LoRa => 0.0, // suppressed
             Self::Constrained => 2.0,
             Self::Normal => 10.0,
             Self::LAN => 20.0,
-            Self::Auto => 20.0,       // Auto starts optimistic, degrades on measurement
+            Self::Auto => 20.0, // Auto starts optimistic, degrades on measurement
         }
     }
 
@@ -221,13 +221,21 @@ impl BandwidthManager {
             // Better conditions — require 3 consecutive measurements before upgrading
             self.upgrade_streak += 1;
             if self.upgrade_streak >= 3 {
-                println!("[bandwidth] Upgraded to {} (RTT {:.0}ms)", candidate.name(), median_rtt);
+                println!(
+                    "[bandwidth] Upgraded to {} (RTT {:.0}ms)",
+                    candidate.name(),
+                    median_rtt
+                );
                 self.profile = candidate;
                 self.upgrade_streak = 0;
             }
         } else if candidate_rank > current_rank {
             // Worse conditions — downgrade immediately
-            println!("[bandwidth] Downgraded to {} (RTT {:.0}ms)", candidate.name(), median_rtt);
+            println!(
+                "[bandwidth] Downgraded to {} (RTT {:.0}ms)",
+                candidate.name(),
+                median_rtt
+            );
             self.profile = candidate;
             self.upgrade_streak = 0;
         } else {

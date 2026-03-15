@@ -61,7 +61,7 @@ impl RenderContext {
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: surface_format,
             width: size.width,
             height: size.height,
@@ -221,7 +221,7 @@ impl RenderPipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),  // Re-enabled - terrain works!
+                cull_mode: Some(wgpu::Face::Back), // Re-enabled - terrain works!
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
                 conservative: false,
@@ -256,7 +256,10 @@ impl RenderPipeline {
     }
 
     /// Create depth texture
-    fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Texture {
+    fn create_depth_texture(
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Depth Texture"),
             size: wgpu::Extent3d {
@@ -288,11 +291,19 @@ impl RenderPipeline {
 
     /// Update model matrix uniform
     pub fn update_model(&self, queue: &wgpu::Queue, model_matrix: &glam::Mat4) {
-        queue.write_buffer(&self.model_buffer, 0, bytemuck::cast_slice(model_matrix.as_ref()));
+        queue.write_buffer(
+            &self.model_buffer,
+            0,
+            bytemuck::cast_slice(model_matrix.as_ref()),
+        );
     }
 
     /// Create a bind group for a specific model matrix (for multiple objects)
-    pub fn create_model_bind_group(&self, device: &wgpu::Device, model_matrix: &glam::Mat4) -> (wgpu::Buffer, wgpu::BindGroup) {
+    pub fn create_model_bind_group(
+        &self,
+        device: &wgpu::Device,
+        model_matrix: &glam::Mat4,
+    ) -> (wgpu::Buffer, wgpu::BindGroup) {
         let model_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Model Buffer Instance"),
             contents: bytemuck::cast_slice(model_matrix.as_ref()),
@@ -314,7 +325,9 @@ impl RenderPipeline {
     /// Resize depth texture
     pub fn resize(&mut self, device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) {
         self.depth_texture = Self::create_depth_texture(device, config);
-        self.depth_view = self.depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.depth_view = self
+            .depth_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
     }
 
     /// Begin rendering frame
@@ -357,17 +370,21 @@ impl RenderPipeline {
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.model_bind_group, &[]); // Default identity transform
     }
-    
+
     /// Set a custom model bind group for this object
-    pub fn set_model_bind_group<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>, bind_group: &'a wgpu::BindGroup) {
+    pub fn set_model_bind_group<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+        bind_group: &'a wgpu::BindGroup,
+    ) {
         render_pass.set_bind_group(1, bind_group, &[]);
     }
-    
+
     /// Get pipeline (for direct access when needed)
     pub fn pipeline(&self) -> &wgpu::RenderPipeline {
         &self.pipeline
     }
-    
+
     /// Get camera bind group
     pub fn camera_bind_group(&self) -> &wgpu::BindGroup {
         &self.camera_bind_group
@@ -462,5 +479,134 @@ impl OsmPipeline {
     /// the camera and model bind-groups (groups 0 and 1).
     pub fn set_pipeline<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_pipeline(&self.pipeline);
+    }
+}
+
+/// Render pipeline for animated, semi-transparent water surfaces.
+///
+/// Shares camera (group 0) and model (group 1) bind-group layouts with the
+/// main pipeline. Adds a time uniform (group 2) for ripple animation.
+/// Uses alpha blending with depth testing but no depth writes, so water
+/// is correctly composited on top of terrain without blocking it.
+pub struct WaterPipeline {
+    pipeline: wgpu::RenderPipeline,
+    pub time_buffer: wgpu::Buffer,
+    pub time_bind_group: wgpu::BindGroup,
+}
+
+impl WaterPipeline {
+    pub fn new(
+        context: &RenderContext,
+        camera_layout: &wgpu::BindGroupLayout,
+        model_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let device = &context.device;
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("water_shader.wgsl").into()),
+        });
+
+        // Time uniform buffer (vec4 aligned: time_secs + 3 padding floats)
+        let time_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Water Time Buffer"),
+            contents: bytemuck::cast_slice(&[0.0_f32, 0.0, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let time_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Water Time Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let time_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Time Bind Group"),
+            layout: &time_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: time_buffer.as_entire_binding(),
+            }],
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Water Pipeline Layout"),
+            bind_group_layouts: &[camera_layout, model_layout, &time_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Render Pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: context.config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            time_buffer,
+            time_bind_group,
+        }
+    }
+
+    /// Update animation clock (call every frame with elapsed seconds since start).
+    pub fn update_time(&self, queue: &wgpu::Queue, time_secs: f32) {
+        queue.write_buffer(
+            &self.time_buffer,
+            0,
+            bytemuck::cast_slice(&[time_secs, 0.0_f32, 0.0, 0.0]),
+        );
+    }
+
+    /// Switch the render pass to the water pipeline.
+    /// Caller must re-bind camera (group 0) and model (group 1) after this.
+    pub fn set_pipeline<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(2, &self.time_bind_group, &[]);
     }
 }

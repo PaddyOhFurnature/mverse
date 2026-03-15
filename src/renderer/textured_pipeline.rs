@@ -8,8 +8,8 @@ use wgpu::util::DeviceExt;
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TexturedVertex {
     pub position: [f32; 3],
-    pub normal:   [f32; 3],
-    pub uv:       [f32; 2],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
 }
 
 impl TexturedVertex {
@@ -28,9 +28,9 @@ impl TexturedVertex {
 /// A single loaded GLB model ready for GPU rendering.
 #[allow(dead_code)]
 pub struct GlbModel {
-    vertex_buffer:       wgpu::Buffer,
-    index_buffer:        wgpu::Buffer,
-    pub index_count:     u32,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    pub index_count: u32,
     pub texture_bind_group: wgpu::BindGroup,
     /// True if the model has a real texture or non-white base colour.
     /// False means the texture fell back to a 1×1 white pixel — model
@@ -139,7 +139,10 @@ impl TexturedPipeline {
             cache: None,
         });
 
-        Self { pipeline, texture_bind_group_layout }
+        Self {
+            pipeline,
+            texture_bind_group_layout,
+        }
     }
 
     /// Load a GLB file from disk and upload its first mesh/primitive to the GPU.
@@ -204,7 +207,8 @@ impl TexturedPipeline {
         // the file from disk relative to the GLB's directory so we always get
         // the real pixels — or fall back to solid base_color_factor if missing.
         let pbr = primitive.material().pbr_metallic_roughness();
-        let glb_dir = std::path::Path::new(path).parent()
+        let glb_dir = std::path::Path::new(path)
+            .parent()
             .unwrap_or(std::path::Path::new("."));
 
         let (tex_data, tex_w, tex_h, has_real_texture) =
@@ -224,15 +228,23 @@ impl TexturedPipeline {
                     (rgba_img.into_raw(), w, h, true)
                 } else {
                     let f = pbr.base_color_factor();
-                    let pixel = [(f[0]*255.0) as u8, (f[1]*255.0) as u8,
-                                 (f[2]*255.0) as u8, (f[3]*255.0) as u8];
+                    let pixel = [
+                        (f[0] * 255.0) as u8,
+                        (f[1] * 255.0) as u8,
+                        (f[2] * 255.0) as u8,
+                        (f[3] * 255.0) as u8,
+                    ];
                     let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
                     (pixel.to_vec(), 1u32, 1u32, !is_white)
                 }
             } else {
                 let f = pbr.base_color_factor();
-                let pixel = [(f[0]*255.0) as u8, (f[1]*255.0) as u8,
-                             (f[2]*255.0) as u8, (f[3]*255.0) as u8];
+                let pixel = [
+                    (f[0] * 255.0) as u8,
+                    (f[1] * 255.0) as u8,
+                    (f[2] * 255.0) as u8,
+                    (f[3] * 255.0) as u8,
+                ];
                 let is_white = f[0] > 0.99 && f[1] > 0.99 && f[2] > 0.99;
                 (pixel.to_vec(), 1u32, 1u32, !is_white)
             };
@@ -345,7 +357,11 @@ impl TexturedPipeline {
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("Textured Mesh Tex"),
-                size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: tex_w,
+                    height: tex_h,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -371,8 +387,14 @@ impl TexturedPipeline {
             label: Some("Textured Mesh BG"),
             layout: &self.texture_bind_group_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
             ],
         });
         Some(GlbModel {
@@ -396,11 +418,7 @@ fn image_to_rgba8(img: &gltf::image::Data) -> Vec<u8> {
             .chunks(3)
             .flat_map(|c| [c[0], c[1], c[2], 255u8])
             .collect(),
-        gltf::image::Format::R8 => img
-            .pixels
-            .iter()
-            .flat_map(|&r| [r, r, r, 255u8])
-            .collect(),
+        gltf::image::Format::R8 => img.pixels.iter().flat_map(|&r| [r, r, r, 255u8]).collect(),
         gltf::image::Format::R8G8 => img
             .pixels
             .chunks(2)
@@ -409,7 +427,10 @@ fn image_to_rgba8(img: &gltf::image::Data) -> Vec<u8> {
         gltf::image::Format::R16 => img
             .pixels
             .chunks(2)
-            .flat_map(|c| { let v = c[1]; [v, v, v, 255u8] })
+            .flat_map(|c| {
+                let v = c[1];
+                [v, v, v, 255u8]
+            })
             .collect(),
         gltf::image::Format::R16G16 => img
             .pixels
@@ -433,7 +454,12 @@ fn image_to_rgba8(img: &gltf::image::Data) -> Vec<u8> {
                 let r = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                 let g = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);
                 let b = f32::from_le_bytes([c[8], c[9], c[10], c[11]]);
-                [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, 255u8]
+                [
+                    (r * 255.0) as u8,
+                    (g * 255.0) as u8,
+                    (b * 255.0) as u8,
+                    255u8,
+                ]
             })
             .collect(),
         gltf::image::Format::R32G32B32A32FLOAT => img
@@ -444,7 +470,12 @@ fn image_to_rgba8(img: &gltf::image::Data) -> Vec<u8> {
                 let g = f32::from_le_bytes([c[4], c[5], c[6], c[7]]);
                 let b = f32::from_le_bytes([c[8], c[9], c[10], c[11]]);
                 let a = f32::from_le_bytes([c[12], c[13], c[14], c[15]]);
-                [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8, (a * 255.0) as u8]
+                [
+                    (r * 255.0) as u8,
+                    (g * 255.0) as u8,
+                    (b * 255.0) as u8,
+                    (a * 255.0) as u8,
+                ]
             })
             .collect(),
     };

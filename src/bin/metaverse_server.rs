@@ -22,30 +22,43 @@
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse},
+    routing::{get, post},
+};
+use clap::Parser;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use libp2p::{
-    gossipsub, identify, identity, kad, mdns, relay,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    Multiaddr, PeerId, SwarmBuilder,
-};
+#[cfg(unix)]
+use libc;
 use libp2p::kad::store::{MemoryStore, MemoryStoreConfig};
 use libp2p::request_response::{self, ProtocolSupport};
-use metaverse_core::tile_protocol::{TileCodec, TileRequest, TileResponse, TILE_PROTOCOL};
+use libp2p::{
+    Multiaddr, PeerId, SwarmBuilder, gossipsub, identify, identity, kad, mdns, relay,
+    swarm::{NetworkBehaviour, SwarmEvent},
+};
+use metaverse_core::node_config::NodeConfig as ServerConfig;
+use metaverse_core::tile_protocol::{TILE_PROTOCOL, TileCodec, TileRequest, TileResponse};
+use metaverse_core::web_ui::{DASHBOARD_HTML, NodeStatus, PeerSummary};
+use rand::RngCore;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
 };
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use sysinfo::System;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -54,21 +67,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use clap::Parser;
-use axum::{
-    extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
-    routing::{get, post},
-    Json, Router,
-};
-use metaverse_core::web_ui::{NodeStatus, PeerSummary, DASHBOARD_HTML};
-use metaverse_core::node_config::NodeConfig as ServerConfig;
-use rusqlite::{params, Connection};
-use sha2::{Sha256, Digest};
-use rand::RngCore;
-#[cfg(unix)]
-use libc;
+use sysinfo::System;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 // ServerConfig is now NodeConfig from metaverse_core::node_config (type alias above).
@@ -84,21 +83,33 @@ fn load_config() -> (ServerConfig, Option<String>) {
                 match serde_json::from_str::<ServerConfig>(&text) {
                     Ok(cfg) => return (cfg, None),
                     Err(e) => {
-                        let msg = format!("❌ Config parse error in {} — using defaults: {}", path.display(), e);
+                        let msg = format!(
+                            "❌ Config parse error in {} — using defaults: {}",
+                            path.display(),
+                            e
+                        );
                         eprintln!("{}", msg);
-                        return (metaverse_core::node_config::NodeConfig::server_defaults(), Some(msg));
+                        return (
+                            metaverse_core::node_config::NodeConfig::server_defaults(),
+                            Some(msg),
+                        );
                     }
                 }
             }
         }
     }
-    (metaverse_core::node_config::NodeConfig::server_defaults(), None)
+    (
+        metaverse_core::node_config::NodeConfig::server_defaults(),
+        None,
+    )
 }
 
 fn write_default_config_if_missing() {
     let path = PathBuf::from("server.json");
     if !path.exists() {
-        if let Ok(json) = serde_json::to_string_pretty(&metaverse_core::node_config::NodeConfig::server_defaults()) {
+        if let Ok(json) = serde_json::to_string_pretty(
+            &metaverse_core::node_config::NodeConfig::server_defaults(),
+        ) {
             let _ = std::fs::write(&path, json);
             eprintln!("📝 Created default config at {}", path.display());
         }
@@ -157,19 +168,45 @@ struct Args {
 }
 
 fn apply_cli_overrides(config: &mut ServerConfig, args: &Args) {
-    if let Some(v) = args.port             { config.port = v; }
-    if let Some(v) = args.web_port         { config.web_port = v; }
-    if let Some(ref v) = args.external_addr { config.external_addr = Some(v.clone()); }
-    if let Some(ref v) = args.name          { config.node_name = Some(v.clone()); }
-    if let Some(v) = args.max_circuits     { config.max_circuits = v; }
-    if let Some(v) = args.max_circuit_bytes { config.max_circuit_bytes = v; }
-    if let Some(ref v) = args.world_dir    { config.world_dir = Some(v.clone()); }
-    if let Some(ref v) = args.identity     { config.identity_file = Some(v.clone()); }
-    if args.temp_identity                  { config.temp_identity = true; }
-    if args.no_world                       { config.world_enabled = false; }
-    if args.no_web                         { config.web_enabled = false; }
-    if args.headless                       { config.headless = true; }
-    if !args.peer.is_empty()               { config.peers.extend(args.peer.clone()); }
+    if let Some(v) = args.port {
+        config.port = v;
+    }
+    if let Some(v) = args.web_port {
+        config.web_port = v;
+    }
+    if let Some(ref v) = args.external_addr {
+        config.external_addr = Some(v.clone());
+    }
+    if let Some(ref v) = args.name {
+        config.node_name = Some(v.clone());
+    }
+    if let Some(v) = args.max_circuits {
+        config.max_circuits = v;
+    }
+    if let Some(v) = args.max_circuit_bytes {
+        config.max_circuit_bytes = v;
+    }
+    if let Some(ref v) = args.world_dir {
+        config.world_dir = Some(v.clone());
+    }
+    if let Some(ref v) = args.identity {
+        config.identity_file = Some(v.clone());
+    }
+    if args.temp_identity {
+        config.temp_identity = true;
+    }
+    if args.no_world {
+        config.world_enabled = false;
+    }
+    if args.no_web {
+        config.web_enabled = false;
+    }
+    if args.headless {
+        config.headless = true;
+    }
+    if !args.peer.is_empty() {
+        config.peers.extend(args.peer.clone());
+    }
 }
 
 // ─── Network behaviour ───────────────────────────────────────────────────────
@@ -197,7 +234,11 @@ pub struct PeerInfo {
 }
 
 #[derive(Clone, Debug)]
-struct CircuitInfo { src: PeerId, dst: PeerId, started_at: Instant }
+struct CircuitInfo {
+    src: PeerId,
+    dst: PeerId,
+    started_at: Instant,
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct WorldStats {
@@ -290,13 +331,26 @@ pub struct SharedState {
 impl Default for SharedState {
     fn default() -> Self {
         Self {
-            local_peer_id: String::new(), public_ip: String::new(), uptime_secs: 0,
-            node_name: String::new(), node_type: "server".to_string(),
-            peers: vec![], circuit_count: 0, total_connections: 0,
-            total_reservations: 0, dht_peer_count: 0, key_count: 0,
-            world: WorldStats::default(), net: NetStats::default(),
-            cpu_pct: 0.0, ram_used_mb: 0, ram_total_mb: 0, ram_pct: 0.0,
-            swap_used_mb: 0, swap_total_mb: 0, proc_rss_mb: 0,
+            local_peer_id: String::new(),
+            public_ip: String::new(),
+            uptime_secs: 0,
+            node_name: String::new(),
+            node_type: "server".to_string(),
+            peers: vec![],
+            circuit_count: 0,
+            total_connections: 0,
+            total_reservations: 0,
+            dht_peer_count: 0,
+            key_count: 0,
+            world: WorldStats::default(),
+            net: NetStats::default(),
+            cpu_pct: 0.0,
+            ram_used_mb: 0,
+            ram_total_mb: 0,
+            ram_pct: 0.0,
+            swap_used_mb: 0,
+            swap_total_mb: 0,
+            proc_rss_mb: 0,
             shedding_relay: false,
             relay_port: 4001,
             web_port: 8080,
@@ -382,25 +436,40 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(config: ServerConfig, shared: Arc<RwLock<SharedState>>,
-           local_peer_id: String, public_ip: String,
-           gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
-           swarm_web_rx: tokio::sync::mpsc::Receiver<SwarmAction>,
-           config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>) -> Self {
+    fn new(
+        config: ServerConfig,
+        shared: Arc<RwLock<SharedState>>,
+        local_peer_id: String,
+        public_ip: String,
+        gossip_rx: tokio::sync::mpsc::Receiver<GossipCommand>,
+        swarm_web_rx: tokio::sync::mpsc::Receiver<SwarmAction>,
+        config_reload_rx: tokio::sync::mpsc::Receiver<ServerConfig>,
+    ) -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
         let cpu_pct = sys.global_cpu_usage();
         let ram_used_mb = sys.used_memory() / 1_048_576;
         let ram_total_mb = sys.total_memory() / 1_048_576;
         Self {
-            config, shared, local_peer_id: local_peer_id.clone(), public_ip: public_ip.clone(),
+            config,
+            shared,
+            local_peer_id: local_peer_id.clone(),
+            public_ip: public_ip.clone(),
             start_time: Instant::now(),
             connected_peers: HashMap::new(),
             active_circuits: vec![],
-            total_connections: 0, total_reservations: 0, dht_peer_count: 0,
-            log: VecDeque::new(), should_quit: false,
-            sys, cpu_pct, ram_used_mb, ram_total_mb,
-            swap_used_mb: 0, swap_total_mb: 0, proc_rss_mb: 0,
+            total_connections: 0,
+            total_reservations: 0,
+            dht_peer_count: 0,
+            log: VecDeque::new(),
+            should_quit: false,
+            sys,
+            cpu_pct,
+            ram_used_mb,
+            ram_total_mb,
+            swap_used_mb: 0,
+            swap_total_mb: 0,
+            proc_rss_mb: 0,
             last_sys_refresh: Instant::now(),
             last_debug_log: Instant::now() - Duration::from_secs(3600),
             last_shared_sync: Instant::now(),
@@ -427,10 +496,20 @@ impl AppState {
 
     fn log(&mut self, msg: impl Into<String>) {
         let e = self.start_time.elapsed().as_secs();
-        let entry = format!("{:02}:{:02}:{:02}  {}", e/3600, (e%3600)/60, e%60, msg.into());
+        let entry = format!(
+            "{:02}:{:02}:{:02}  {}",
+            e / 3600,
+            (e % 3600) / 60,
+            e % 60,
+            msg.into()
+        );
         self.log.push_back(entry.clone());
-        while self.log.len() > self.config.ui.max_log_entries { self.log.pop_front(); }
-        if self.config.headless { println!("{}", entry); }
+        while self.log.len() > self.config.ui.max_log_entries {
+            self.log.pop_front();
+        }
+        if self.config.headless {
+            println!("{}", entry);
+        }
     }
 
     /// Rate-limited peer event logging. At most one log entry every 5 seconds;
@@ -452,7 +531,9 @@ impl AppState {
     }
 
     fn refresh_sys(&mut self) {
-        if self.last_sys_refresh.elapsed() < Duration::from_secs(2) { return; }
+        if self.last_sys_refresh.elapsed() < Duration::from_secs(2) {
+            return;
+        }
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.cpu_pct = self.sys.global_cpu_usage();
@@ -481,7 +562,9 @@ impl AppState {
         let ram_thresh = self.config.ram_shed_threshold_pct;
         let ram_pct = if self.ram_total_mb > 0 {
             (self.ram_used_mb as f32 / self.ram_total_mb as f32) * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let over_cpu = cpu_thresh > 0 && self.cpu_pct > cpu_thresh as f32;
         let over_ram = ram_thresh > 0 && ram_pct > ram_thresh as f32;
@@ -501,10 +584,15 @@ impl AppState {
             }
             // Evict the oldest relay circuit whose source peer is not in cooldown
             let now = Instant::now();
-            if let Some(oldest) = self.active_circuits.iter()
-                .filter(|c| self.shed_cooldown.get(&c.src)
-                    .map(|t| now.duration_since(*t) > Duration::from_secs(300))
-                    .unwrap_or(true))
+            if let Some(oldest) = self
+                .active_circuits
+                .iter()
+                .filter(|c| {
+                    self.shed_cooldown
+                        .get(&c.src)
+                        .map(|t| now.duration_since(*t) > Duration::from_secs(300))
+                        .unwrap_or(true)
+                })
                 .min_by_key(|c| c.started_at)
             {
                 let peer = oldest.src;
@@ -516,23 +604,28 @@ impl AppState {
             if self.shedding_relay {
                 self.log(format!(
                     "✅ Load below threshold — CPU={:.0}%/{cpu_thresh}% RAM={:.0}%/{ram_thresh}%",
-                    self.cpu_pct, ram_pct,
-                    cpu_thresh = cpu_thresh, ram_thresh = ram_thresh,
+                    self.cpu_pct,
+                    ram_pct,
+                    cpu_thresh = cpu_thresh,
+                    ram_thresh = ram_thresh,
                 ));
             }
             self.shedding_relay = false;
         }
 
         // Periodic stats every 60s — always logged (not only in debug mode)
-        if self.last_debug_log.elapsed() >= Duration::from_secs(60)
-        {
+        if self.last_debug_log.elapsed() >= Duration::from_secs(60) {
             self.last_debug_log = Instant::now();
             let ram_pct = if self.ram_total_mb > 0 {
                 self.ram_used_mb * 100 / self.ram_total_mb
-            } else { 0 };
+            } else {
+                0
+            };
             let swap_pct = if self.swap_total_mb > 0 {
                 self.swap_used_mb * 100 / self.swap_total_mb
-            } else { 0 };
+            } else {
+                0
+            };
             let msg = format!(
                 "📊 peers={} circuits={} tiles=✅{}❌{} | \
                  proc={}MB sys={}/{}MB({}%) swap={}%  cpu={:.1}%",
@@ -541,7 +634,9 @@ impl AppState {
                 self.tiles_served,
                 self.tiles_not_found,
                 self.proc_rss_mb,
-                self.ram_used_mb, self.ram_total_mb, ram_pct,
+                self.ram_used_mb,
+                self.ram_total_mb,
+                ram_pct,
                 swap_pct,
                 self.cpu_pct,
             );
@@ -556,22 +651,33 @@ impl AppState {
     }
 
     fn sync_shared(&mut self, world: &WorldStats) {
-        if self.last_shared_sync.elapsed() < Duration::from_millis(500) { return; }
-        let ram_pct = if self.ram_total_mb > 0 { (self.ram_used_mb as f32 / self.ram_total_mb as f32) * 100.0 } else { 0.0 };
+        if self.last_shared_sync.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        let ram_pct = if self.ram_total_mb > 0 {
+            (self.ram_used_mb as f32 / self.ram_total_mb as f32) * 100.0
+        } else {
+            0.0
+        };
         let uptime = self.start_time.elapsed().as_secs();
-        let peers: Vec<PeerInfo> = self.connected_peers.iter().map(|(pid, (at, addr, ptype))| {
-            PeerInfo {
+        let peers: Vec<PeerInfo> = self
+            .connected_peers
+            .iter()
+            .map(|(pid, (at, addr, ptype))| PeerInfo {
                 peer_id: short_id(&pid.to_string()),
                 addr: addr.clone(),
                 connected_secs: at.elapsed().as_secs(),
                 peer_type: ptype.clone(),
-            }
-        }).collect();
-        let name = self.config.node_name.clone().unwrap_or_else(|| "server".to_string());
+            })
+            .collect();
+        let name = self
+            .config
+            .node_name
+            .clone()
+            .unwrap_or_else(|| "server".to_string());
         let circuit_count = self.active_circuits.len();
         // Drain pending task-log messages before acquiring write lock (avoids double borrow)
-        let task_log_arc = self.shared.read().ok()
-            .map(|s| Arc::clone(&s.task_log));
+        let task_log_arc = self.shared.read().ok().map(|s| Arc::clone(&s.task_log));
         let pending: Vec<String> = task_log_arc
             .as_ref()
             .and_then(|tl| tl.lock().ok().map(|mut v| v.drain(..).collect()))
@@ -609,11 +715,17 @@ impl AppState {
         self.last_shared_sync = Instant::now();
     }
 
-    fn short(id: &str) -> String { short_id(id) }
+    fn short(id: &str) -> String {
+        short_id(id)
+    }
 }
 
 fn short_id(id: &str) -> String {
-    if id.len() > 12 { format!("…{}", &id[id.len()-10..]) } else { id.to_string() }
+    if id.len() > 12 {
+        format!("…{}", &id[id.len() - 10..])
+    } else {
+        id.to_string()
+    }
 }
 
 /// Returns true if the given multiaddr is worth adding to Kademlia / dialling.
@@ -624,20 +736,36 @@ fn is_kad_routable(addr: &Multiaddr) -> bool {
     for proto in addr.iter() {
         match proto {
             Protocol::Ip4(ip) => {
-                if ip.is_loopback()    { return false; } // 127.x
-                if ip.is_link_local()  { return false; } // 169.254.x
+                if ip.is_loopback() {
+                    return false;
+                } // 127.x
+                if ip.is_link_local() {
+                    return false;
+                } // 169.254.x
                 let o = ip.octets();
-                if o[0] == 172 && o[1] >= 16 && o[1] <= 31 { return false; } // docker / lxc
-                if o[0] == 192 && o[1] == 168 && o[2] == 122 { return false; } // libvirt
-                if o[0] == 10  && o[1] == 0   && o[2] == 2   { return false; } // VirtualBox NAT
+                if o[0] == 172 && o[1] >= 16 && o[1] <= 31 {
+                    return false;
+                } // docker / lxc
+                if o[0] == 192 && o[1] == 168 && o[2] == 122 {
+                    return false;
+                } // libvirt
+                if o[0] == 10 && o[1] == 0 && o[2] == 2 {
+                    return false;
+                } // VirtualBox NAT
             }
             Protocol::Ip6(ip) => {
-                if ip.is_loopback() { return false; }
+                if ip.is_loopback() {
+                    return false;
+                }
             }
             // Server has no QUIC transport — skip QUIC addresses to prevent "unsupported" errors
-            Protocol::Udp(_) | Protocol::QuicV1 | Protocol::Quic => { return false; }
+            Protocol::Udp(_) | Protocol::QuicV1 | Protocol::Quic => {
+                return false;
+            }
             // Circuit relay addresses are ephemeral — not useful for routing table
-            Protocol::P2pCircuit => { return false; }
+            Protocol::P2pCircuit => {
+                return false;
+            }
             _ => {}
         }
     }
@@ -650,7 +778,9 @@ fn world_data_size_mb(world_dir: &std::path::Path) -> f64 {
     let mut total: u64 = 0;
     if let Ok(entries) = std::fs::read_dir(world_dir) {
         for e in entries.flatten() {
-            if let Ok(m) = e.metadata() { total += m.len(); }
+            if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
         }
     }
     total as f64 / 1_048_576.0
@@ -756,7 +886,9 @@ impl KeyDatabase {
         ] {
             let _ = conn.execute(migration, []);
         }
-        Ok(Self { conn: Arc::new(std::sync::Mutex::new(conn)) })
+        Ok(Self {
+            conn: Arc::new(std::sync::Mutex::new(conn)),
+        })
     }
 
     /// Insert or update a key record.
@@ -765,9 +897,13 @@ impl KeyDatabase {
     /// preventing replay of stale records over the wire.
     fn upsert(
         &self,
-        peer_id: &str, record_bytes: &[u8],
-        key_type: &str, display_name: Option<&str>,
-        created_at: i64, updated_at: i64, revoked: bool,
+        peer_id: &str,
+        record_bytes: &[u8],
+        key_type: &str,
+        display_name: Option<&str>,
+        created_at: i64,
+        updated_at: i64,
+        revoked: bool,
     ) {
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
@@ -781,16 +917,27 @@ impl KeyDatabase {
                 updated_at   = excluded.updated_at,
                 revoked      = excluded.revoked
              WHERE excluded.updated_at > key_records.updated_at",
-            params![peer_id, record_bytes, key_type, display_name,
-                    created_at, updated_at, revoked as i32],
+            params![
+                peer_id,
+                record_bytes,
+                key_type,
+                display_name,
+                created_at,
+                updated_at,
+                revoked as i32
+            ],
         );
     }
 
     /// Count stored (non-revoked) records.
     fn count(&self) -> usize {
         let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*) FROM key_records WHERE revoked = 0", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(0) as usize
+        conn.query_row(
+            "SELECT COUNT(*) FROM key_records WHERE revoked = 0",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize
     }
 
     /// List records as JSON objects, optionally filtered by `key_type`.
@@ -801,7 +948,7 @@ impl KeyDatabase {
             if let Some(kt) = key_type_filter {
                 let mut stmt = conn.prepare(
                     "SELECT peer_id, key_type, display_name, created_at, updated_at, revoked
-                     FROM key_records WHERE key_type = ?1 ORDER BY updated_at DESC"
+                     FROM key_records WHERE key_type = ?1 ORDER BY updated_at DESC",
                 )?;
                 for row in stmt.query_map(params![kt], key_record_to_json)?.flatten() {
                     rows.push(row);
@@ -809,7 +956,7 @@ impl KeyDatabase {
             } else {
                 let mut stmt = conn.prepare(
                     "SELECT peer_id, key_type, display_name, created_at, updated_at, revoked
-                     FROM key_records ORDER BY updated_at DESC"
+                     FROM key_records ORDER BY updated_at DESC",
                 )?;
                 for row in stmt.query_map([], key_record_to_json)?.flatten() {
                     rows.push(row);
@@ -828,7 +975,8 @@ impl KeyDatabase {
             "SELECT record_bytes FROM key_records WHERE peer_id = ?1",
             params![peer_id],
             |r| r.get(0),
-        ).ok()
+        )
+        .ok()
     }
 
     /// Get the key_type string for a specific peer (returns None if not found).
@@ -838,7 +986,8 @@ impl KeyDatabase {
             "SELECT key_type FROM key_records WHERE peer_id = ?1",
             params![peer_id],
             |r| r.get(0),
-        ).ok()
+        )
+        .ok()
     }
 
     /// Mark a key as revoked.
@@ -857,7 +1006,9 @@ impl KeyDatabase {
              SET revoked=1, revoked_at=?1, revoked_by=?2, revocation_reason=?3
              WHERE peer_id=?4 AND revoked=0",
             params![revoked_at_ms, revoked_by, reason, peer_id],
-        ).unwrap_or(0) > 0
+        )
+        .unwrap_or(0)
+            > 0
     }
 
     /// Return key records with `updated_at > since_ms`, ordered by `updated_at` ascending,
@@ -915,16 +1066,21 @@ impl KeyDatabase {
             "SELECT last_synced_at FROM server_sync WHERE server_url = ?1",
             params![server_url],
             |r| r.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     }
 
     // ── Key request methods ─────────────────────────────────────────────────
 
     /// Insert a new key upgrade request.
     fn insert_key_request(
-        &self, id: &str, peer_id: &str,
-        requested_type: &str, display_name: Option<&str>,
-        justification: Option<&str>, contact_info: Option<&str>,
+        &self,
+        id: &str,
+        peer_id: &str,
+        requested_type: &str,
+        display_name: Option<&str>,
+        justification: Option<&str>,
+        contact_info: Option<&str>,
         created_at: i64,
     ) {
         let conn = self.conn.lock().unwrap();
@@ -932,7 +1088,15 @@ impl KeyDatabase {
             "INSERT INTO key_requests
              (id, peer_id, requested_type, display_name, justification, contact_info, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, peer_id, requested_type, display_name, justification, contact_info, created_at],
+            params![
+                id,
+                peer_id,
+                requested_type,
+                display_name,
+                justification,
+                contact_info,
+                created_at
+            ],
         );
     }
 
@@ -949,10 +1113,14 @@ impl KeyDatabase {
                                 FROM key_requests WHERE status = ?1 ORDER BY created_at DESC";
             if let Some(st) = status_filter {
                 let mut stmt = conn.prepare(sql_filtered)?;
-                for row in stmt.query_map(params![st], key_request_to_json)?.flatten() { rows.push(row); }
+                for row in stmt.query_map(params![st], key_request_to_json)?.flatten() {
+                    rows.push(row);
+                }
             } else {
                 let mut stmt = conn.prepare(sql)?;
-                for row in stmt.query_map([], key_request_to_json)?.flatten() { rows.push(row); }
+                for row in stmt.query_map([], key_request_to_json)?.flatten() {
+                    rows.push(row);
+                }
             }
             Ok(())
         })();
@@ -969,12 +1137,15 @@ impl KeyDatabase {
              FROM key_requests WHERE id = ?1",
             params![id],
             key_request_to_json,
-        ).ok()
+        )
+        .ok()
     }
 
     /// Update a key request to approved/denied with a countersigned record (or None).
     fn update_key_request_status(
-        &self, id: &str, status: &str,
+        &self,
+        id: &str,
+        status: &str,
         reviewer_note: Option<&str>,
         reviewed_at: i64,
         result_bytes: Option<&[u8]>,
@@ -994,7 +1165,9 @@ impl KeyDatabase {
             "SELECT result_bytes FROM key_requests WHERE id = ?1 AND status = 'approved'",
             params![id],
             |r| r.get(0),
-        ).ok().flatten()
+        )
+        .ok()
+        .flatten()
     }
 
     // ── Meshsite content ──────────────────────────────────────────────────────
@@ -1022,21 +1195,20 @@ impl KeyDatabase {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT id, section, title, body, author, signature, created_at
-             FROM mesh_content WHERE section = ?1 ORDER BY created_at DESC LIMIT 100"
+             FROM mesh_content WHERE section = ?1 ORDER BY created_at DESC LIMIT 100",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
         stmt.query_map(params![section], |row| {
             Ok(metaverse_core::meshsite::ContentItem {
-                id:         row.get(0)?,
-                section:    metaverse_core::meshsite::Section::from_str(
-                                &row.get::<_, String>(1)?
-                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
-                title:      row.get(2)?,
-                body:       row.get(3)?,
-                author:     row.get(4)?,
-                signature:  row.get(5)?,
+                id: row.get(0)?,
+                section: metaverse_core::meshsite::Section::from_str(&row.get::<_, String>(1)?)
+                    .unwrap_or(metaverse_core::meshsite::Section::Forums),
+                title: row.get(2)?,
+                body: row.get(3)?,
+                author: row.get(4)?,
+                signature: row.get(5)?,
                 created_at: row.get::<_, i64>(6)? as u64,
             })
         })
@@ -1052,42 +1224,47 @@ impl KeyDatabase {
             "SELECT id, section, title, body, author, signature, created_at
              FROM mesh_content WHERE id = ?1",
             params![id],
-            |row| Ok(metaverse_core::meshsite::ContentItem {
-                id:         row.get(0)?,
-                section:    metaverse_core::meshsite::Section::from_str(
-                                &row.get::<_, String>(1)?
-                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
-                title:      row.get(2)?,
-                body:       row.get(3)?,
-                author:     row.get(4)?,
-                signature:  row.get(5)?,
-                created_at: row.get::<_, i64>(6)? as u64,
-            }),
-        ).ok()
+            |row| {
+                Ok(metaverse_core::meshsite::ContentItem {
+                    id: row.get(0)?,
+                    section: metaverse_core::meshsite::Section::from_str(&row.get::<_, String>(1)?)
+                        .unwrap_or(metaverse_core::meshsite::Section::Forums),
+                    title: row.get(2)?,
+                    body: row.get(3)?,
+                    author: row.get(4)?,
+                    signature: row.get(5)?,
+                    created_at: row.get::<_, i64>(6)? as u64,
+                })
+            },
+        )
+        .ok()
     }
 
     /// Return content items with `created_at > since_ms`, ordered ascending, up to `limit`.
     ///
     /// Used by `GET /api/v1/sync/content` so peer servers can pull incremental updates.
-    fn list_content_since(&self, since_ms: i64, limit: usize) -> Vec<metaverse_core::meshsite::ContentItem> {
+    fn list_content_since(
+        &self,
+        since_ms: i64,
+        limit: usize,
+    ) -> Vec<metaverse_core::meshsite::ContentItem> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT id, section, title, body, author, signature, created_at
-             FROM mesh_content WHERE created_at > ?1 ORDER BY created_at ASC LIMIT ?2"
+             FROM mesh_content WHERE created_at > ?1 ORDER BY created_at ASC LIMIT ?2",
         ) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
         stmt.query_map(params![since_ms, limit as i64], |row| {
             Ok(metaverse_core::meshsite::ContentItem {
-                id:         row.get(0)?,
-                section:    metaverse_core::meshsite::Section::from_str(
-                                &row.get::<_, String>(1)?
-                            ).unwrap_or(metaverse_core::meshsite::Section::Forums),
-                title:      row.get(2)?,
-                body:       row.get(3)?,
-                author:     row.get(4)?,
-                signature:  row.get(5)?,
+                id: row.get(0)?,
+                section: metaverse_core::meshsite::Section::from_str(&row.get::<_, String>(1)?)
+                    .unwrap_or(metaverse_core::meshsite::Section::Forums),
+                title: row.get(2)?,
+                body: row.get(3)?,
+                author: row.get(4)?,
+                signature: row.get(5)?,
                 created_at: row.get::<_, i64>(6)? as u64,
             })
         })
@@ -1103,7 +1280,8 @@ impl KeyDatabase {
             "SELECT content_last_synced_at FROM server_sync WHERE server_url = ?1",
             params![server_url],
             |r| r.get(0),
-        ).unwrap_or(0)
+        )
+        .unwrap_or(0)
     }
 
     /// Update the content-sync timestamp for a peer server.
@@ -1147,13 +1325,18 @@ impl KeyDatabase {
     fn delete_object(&self, id: &str) -> bool {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM placed_objects WHERE id = ?1", params![id])
-            .unwrap_or(0) > 0
+            .unwrap_or(0)
+            > 0
     }
 
     /// List all placed objects in the given chunk (cx, cz) where chunk coords
     /// are `floor(pos_x / 64)` and `floor(pos_z / 64)`.
-    fn list_objects_in_chunk(&self, cx: i32, cz: i32) -> Vec<metaverse_core::world_objects::PlacedObject> {
-        use metaverse_core::world_objects::{PlacedObject, ObjectType, CHUNK_GRID_M};
+    fn list_objects_in_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> Vec<metaverse_core::world_objects::PlacedObject> {
+        use metaverse_core::world_objects::{CHUNK_GRID_M, ObjectType, PlacedObject};
         let x_min = cx as f64 * CHUNK_GRID_M as f64;
         let x_max = x_min + CHUNK_GRID_M as f64;
         let z_min = cz as f64 * CHUNK_GRID_M as f64;
@@ -1166,30 +1349,42 @@ impl KeyDatabase {
         ) { Ok(s) => s, Err(_) => return vec![] };
         stmt.query_map(params![x_min, x_max, z_min, z_max], |row| {
             Ok(PlacedObject {
-                id:           row.get(0)?,
-                object_type:  ObjectType::from_str(&row.get::<_, String>(1)?),
-                position:     [row.get::<_, f64>(2)? as f32, row.get::<_, f64>(3)? as f32, row.get::<_, f64>(4)? as f32],
-                rotation_y:   row.get::<_, f64>(5)? as f32,
-                scale:        row.get::<_, f64>(6)? as f32,
-                content_key:  row.get(7)?,
-                label:        row.get(8)?,
-                placed_by:    row.get(9)?,
-                placed_at:    row.get::<_, i64>(10)? as u64,
+                id: row.get(0)?,
+                object_type: ObjectType::from_str(&row.get::<_, String>(1)?),
+                position: [
+                    row.get::<_, f64>(2)? as f32,
+                    row.get::<_, f64>(3)? as f32,
+                    row.get::<_, f64>(4)? as f32,
+                ],
+                rotation_y: row.get::<_, f64>(5)? as f32,
+                scale: row.get::<_, f64>(6)? as f32,
+                content_key: row.get(7)?,
+                label: row.get(8)?,
+                placed_by: row.get(9)?,
+                placed_at: row.get::<_, i64>(10)? as u64,
             })
-        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
     }
 
     /// Rebuild and return the `ChunkObjectList` for chunk (cx, cz).
-    fn chunk_object_list(&self, cx: i32, cz: i32) -> metaverse_core::world_objects::ChunkObjectList {
+    fn chunk_object_list(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> metaverse_core::world_objects::ChunkObjectList {
         metaverse_core::world_objects::ChunkObjectList {
-            cx, cz,
+            cx,
+            cz,
             objects: self.list_objects_in_chunk(cx, cz),
         }
     }
 
     /// List every placed object in the database (for admin view).
     fn list_all_objects(&self) -> Vec<metaverse_core::world_objects::PlacedObject> {
-        use metaverse_core::world_objects::{PlacedObject, ObjectType};
+        use metaverse_core::world_objects::{ObjectType, PlacedObject};
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn.prepare(
             "SELECT id,object_type,pos_x,pos_y,pos_z,rotation_y,scale,content_key,label,placed_by,placed_at
@@ -1197,17 +1392,24 @@ impl KeyDatabase {
         ) { Ok(s) => s, Err(_) => return vec![] };
         stmt.query_map([], |row| {
             Ok(PlacedObject {
-                id:           row.get(0)?,
-                object_type:  ObjectType::from_str(&row.get::<_, String>(1)?),
-                position:     [row.get::<_, f64>(2)? as f32, row.get::<_, f64>(3)? as f32, row.get::<_, f64>(4)? as f32],
-                rotation_y:   row.get::<_, f64>(5)? as f32,
-                scale:        row.get::<_, f64>(6)? as f32,
-                content_key:  row.get(7)?,
-                label:        row.get(8)?,
-                placed_by:    row.get(9)?,
-                placed_at:    row.get::<_, i64>(10)? as u64,
+                id: row.get(0)?,
+                object_type: ObjectType::from_str(&row.get::<_, String>(1)?),
+                position: [
+                    row.get::<_, f64>(2)? as f32,
+                    row.get::<_, f64>(3)? as f32,
+                    row.get::<_, f64>(4)? as f32,
+                ],
+                rotation_y: row.get::<_, f64>(5)? as f32,
+                scale: row.get::<_, f64>(6)? as f32,
+                content_key: row.get(7)?,
+                label: row.get(8)?,
+                placed_by: row.get(9)?,
+                placed_at: row.get::<_, i64>(10)? as u64,
             })
-        }).ok().map(|rows| rows.flatten().collect()).unwrap_or_default()
+        })
+        .ok()
+        .map(|rows| rows.flatten().collect())
+        .unwrap_or_default()
     }
 }
 
@@ -1237,8 +1439,6 @@ fn key_record_to_json(row: &rusqlite::Row<'_>) -> Result<serde_json::Value, rusq
     }))
 }
 
-
-
 /// Commands sent from web handlers → event loop to publish via gossipsub.
 pub enum GossipCommand {
     Publish { topic: String, data: Vec<u8> },
@@ -1249,9 +1449,15 @@ pub enum SwarmAction {
     RefreshDhtCount,
     DialPeer(PeerId, Multiaddr),
     SubscribeTopic(String),
-    PublishGossip { topic: String, data: Vec<u8> },
+    PublishGossip {
+        topic: String,
+        data: Vec<u8>,
+    },
     StartProviding(Vec<u8>),
-    PutDhtRecord { key: Vec<u8>, value: Vec<u8> },
+    PutDhtRecord {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
     /// Remove a peer from the Kademlia routing table (used when ephemeral clients disconnect).
     RemoveKadPeer(PeerId),
     /// Disconnect a peer — used by load-shedding to drop the oldest relay circuit.
@@ -1275,36 +1481,64 @@ fn handle_swarm_event(
 ) -> Vec<SwarmAction> {
     let mut actions = vec![];
     match event {
-        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+        SwarmEvent::ConnectionEstablished {
+            peer_id, endpoint, ..
+        } => {
             state.total_connections += 1;
             let addr = endpoint.get_remote_address().to_string();
             // Check blacklist
             let pid_str = peer_id.to_string();
             if state.config.blacklist.contains(&pid_str) {
-                state.log(format!("🚫 Blocked blacklisted peer {}", AppState::short(&pid_str)));
+                state.log(format!(
+                    "🚫 Blocked blacklisted peer {}",
+                    AppState::short(&pid_str)
+                ));
                 return actions; // swarm will still connect; kick needed via dial close
             }
             // Check whitelist
             if !state.config.whitelist.is_empty() && !state.config.whitelist.contains(&pid_str) {
-                state.log(format!("🚫 Rejected non-whitelisted peer {}", AppState::short(&pid_str)));
+                state.log(format!(
+                    "🚫 Rejected non-whitelisted peer {}",
+                    AppState::short(&pid_str)
+                ));
                 return actions;
             }
-            state.connected_peers.insert(peer_id, (Instant::now(), addr.clone(), "unknown".to_string()));
-            state.log_peer_event(format!("🔗 Connected  {} via {}", AppState::short(&pid_str), short_addr(&addr)));
+            state.connected_peers.insert(
+                peer_id,
+                (Instant::now(), addr.clone(), "unknown".to_string()),
+            );
+            state.log_peer_event(format!(
+                "🔗 Connected  {} via {}",
+                AppState::short(&pid_str),
+                short_addr(&addr)
+            ));
         }
-        SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            num_established,
+            cause,
+            ..
+        } => {
             if num_established == 0 {
                 // Remove ephemeral (non-server, non-relay) peers from Kademlia routing table.
                 // Without this, Kademlia spams dial attempts to their stale addresses after disconnect.
-                let ptype = state.connected_peers.get(&peer_id)
+                let ptype = state
+                    .connected_peers
+                    .get(&peer_id)
                     .map(|e| e.2.as_str())
                     .unwrap_or("unknown");
                 if ptype != "server" && ptype != "relay" {
                     actions.push(SwarmAction::RemoveKadPeer(peer_id));
                 }
                 state.connected_peers.remove(&peer_id);
-                let reason = cause.map(|e| format!(" (Connection error: {})", e)).unwrap_or_default();
-                state.log_peer_event(format!("❌ Disconnected {}{}", AppState::short(&peer_id.to_string()), reason));
+                let reason = cause
+                    .map(|e| format!(" (Connection error: {})", e))
+                    .unwrap_or_default();
+                state.log_peer_event(format!(
+                    "❌ Disconnected {}{}",
+                    AppState::short(&peer_id.to_string()),
+                    reason
+                ));
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -1313,7 +1547,11 @@ fn handle_swarm_event(
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             let err_str = error.to_string();
             if let Some(pid) = peer_id {
-                state.log_peer_event(format!("✗  Dial failed  {} — {}", AppState::short(&pid.to_string()), err_str));
+                state.log_peer_event(format!(
+                    "✗  Dial failed  {} — {}",
+                    AppState::short(&pid.to_string()),
+                    err_str
+                ));
                 // If this peer is no longer connected, remove from Kademlia to stop infinite retry.
                 // Kademlia learns peer addresses from connections and retries them after disconnect.
                 if !state.connected_peers.contains_key(&pid) {
@@ -1324,46 +1562,85 @@ fn handle_swarm_event(
         SwarmEvent::Behaviour(ServerBehaviourEvent::Relay(ev)) => match ev {
             relay::Event::ReservationReqAccepted { src_peer_id, .. } => {
                 state.total_reservations += 1;
-                state.log_peer_event(format!("✅ Reservation  {}", AppState::short(&src_peer_id.to_string())));
+                state.log_peer_event(format!(
+                    "✅ Reservation  {}",
+                    AppState::short(&src_peer_id.to_string())
+                ));
             }
             relay::Event::ReservationTimedOut { src_peer_id } => {
-                state.log_peer_event(format!("⏱  Reservation expired  {}", AppState::short(&src_peer_id.to_string())));
+                state.log_peer_event(format!(
+                    "⏱  Reservation expired  {}",
+                    AppState::short(&src_peer_id.to_string())
+                ));
             }
-            relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
+            relay::Event::CircuitReqAccepted {
+                src_peer_id,
+                dst_peer_id,
+            } => {
                 // Load shed: if CPU too high, log but still accept (libp2p handles it)
                 if state.shedding_relay {
-                    state.log(format!("⚠️  Circuit accepted under load  {} → {}",
+                    state.log(format!(
+                        "⚠️  Circuit accepted under load  {} → {}",
                         AppState::short(&src_peer_id.to_string()),
-                        AppState::short(&dst_peer_id.to_string())));
+                        AppState::short(&dst_peer_id.to_string())
+                    ));
                 } else {
-                    state.log_peer_event(format!("🔄 Circuit  {} → {}",
+                    state.log_peer_event(format!(
+                        "🔄 Circuit  {} → {}",
                         AppState::short(&src_peer_id.to_string()),
-                        AppState::short(&dst_peer_id.to_string())));
+                        AppState::short(&dst_peer_id.to_string())
+                    ));
                 }
                 state.active_circuits.push(CircuitInfo {
-                    src: src_peer_id, dst: dst_peer_id, started_at: Instant::now(),
+                    src: src_peer_id,
+                    dst: dst_peer_id,
+                    started_at: Instant::now(),
                 });
             }
-            relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
-                state.active_circuits.retain(|c| !(c.src == src_peer_id && c.dst == dst_peer_id));
-                state.log_peer_event(format!("🔚 Circuit closed  {} → {}",
+            relay::Event::CircuitClosed {
+                src_peer_id,
+                dst_peer_id,
+                ..
+            } => {
+                state
+                    .active_circuits
+                    .retain(|c| !(c.src == src_peer_id && c.dst == dst_peer_id));
+                state.log_peer_event(format!(
+                    "🔚 Circuit closed  {} → {}",
                     AppState::short(&src_peer_id.to_string()),
-                    AppState::short(&dst_peer_id.to_string())));
+                    AppState::short(&dst_peer_id.to_string())
+                ));
             }
             _ => {}
         },
-        SwarmEvent::Behaviour(ServerBehaviourEvent::Identify(
-            identify::Event::Received { peer_id, info, .. }
-        )) => {
+        SwarmEvent::Behaviour(ServerBehaviourEvent::Identify(identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        })) => {
             // Detect peer type from protocol strings — check metaverse-server first because
             // all nodes (clients included) also advertise the relay protocol, so checking
             // for "relay" first would misclassify game clients as relays.
-            let peer_type = if info.protocols.iter().any(|p| p.as_ref().contains("metaverse-server")) {
+            let peer_type = if info
+                .protocols
+                .iter()
+                .any(|p| p.as_ref().contains("metaverse-server"))
+            {
                 "server"
-            } else if info.protocols.iter().any(|p| p.as_ref().contains("metaverse-relay")) {
+            } else if info
+                .protocols
+                .iter()
+                .any(|p| p.as_ref().contains("metaverse-relay"))
+            {
                 "relay"
-            } else if !info.protocols.iter().any(|p| p.as_ref().contains("metaverse"))
-                && info.protocols.iter().any(|p| p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop"))
+            } else if !info
+                .protocols
+                .iter()
+                .any(|p| p.as_ref().contains("metaverse"))
+                && info
+                    .protocols
+                    .iter()
+                    .any(|p| p.as_ref().contains("/libp2p/circuit/relay/0.2.0/hop"))
             {
                 // Peer has no metaverse protocol at all but IS a relay — must be a
                 // standalone relay node (e.g. Protocol Labs bootstrap/relay nodes).
@@ -1387,7 +1664,10 @@ fn handle_swarm_event(
             for (peer_id, addr) in peers {
                 // Only log mDNS for new peers not yet connected
                 if !state.connected_peers.contains_key(&peer_id) {
-                    state.log_peer_event(format!("🔍 mDNS  {}", AppState::short(&peer_id.to_string())));
+                    state.log_peer_event(format!(
+                        "🔍 mDNS  {}",
+                        AppState::short(&peer_id.to_string())
+                    ));
                 }
                 // Dial the peer; Identify will fire and add to Kademlia if they're a server/relay
                 actions.push(SwarmAction::DialPeer(peer_id, addr));
@@ -1403,11 +1683,15 @@ fn handle_swarm_event(
             let topic = message.topic.as_str();
             if topic.contains("state-request") {
                 state.net.state_requests_in += 1;
-                if let Ok(req) = metaverse_core::messages::ChunkStateRequest::from_bytes(&message.data) {
+                if let Ok(req) =
+                    metaverse_core::messages::ChunkStateRequest::from_bytes(&message.data)
+                {
                     state.pending_chunk_requests.push(req);
                 }
             } else if topic == "voxel-ops" || topic.starts_with("voxel-ops-") {
-                if let Ok(op) = bincode::deserialize::<metaverse_core::messages::SignedOperation>(&message.data) {
+                if let Ok(op) =
+                    bincode::deserialize::<metaverse_core::messages::SignedOperation>(&message.data)
+                {
                     state.pending_voxel_ops.push(op);
                 }
             } else if topic == "key-registry" {
@@ -1416,17 +1700,23 @@ fn handle_swarm_event(
                 use metaverse_core::key_registry::KeyRegistryMessage;
                 if let Ok(msg) = bincode::deserialize::<KeyRegistryMessage>(&message.data) {
                     match msg {
-                        KeyRegistryMessage::Publish(r)  => {
+                        KeyRegistryMessage::Publish(r) => {
                             if let Ok(s) = state.shared.read() {
                                 if let Some(ref db) = s.key_db {
                                     if r.verify_self_sig() {
-                                        let peer_id   = r.peer_id.to_string();
-                                        let key_type  = format!("{}", r.key_type);
+                                        let peer_id = r.peer_id.to_string();
+                                        let key_type = format!("{}", r.key_type);
                                         let disp_name = r.display_name.as_deref();
-                                        let bytes     = bincode::serialize(&r).unwrap_or_default();
-                                        db.upsert(&peer_id, &bytes, &key_type, disp_name,
-                                                  r.created_at as i64, r.updated_at as i64,
-                                                  r.revoked);
+                                        let bytes = bincode::serialize(&r).unwrap_or_default();
+                                        db.upsert(
+                                            &peer_id,
+                                            &bytes,
+                                            &key_type,
+                                            disp_name,
+                                            r.created_at as i64,
+                                            r.updated_at as i64,
+                                            r.revoked,
+                                        );
                                     }
                                 }
                             }
@@ -1437,42 +1727,64 @@ fn handle_swarm_event(
                                 if let Some(ref db) = s.key_db {
                                     for rec in &rs {
                                         if rec.verify_self_sig() {
-                                            let peer_id   = rec.peer_id.to_string();
-                                            let key_type  = format!("{}", rec.key_type);
+                                            let peer_id = rec.peer_id.to_string();
+                                            let key_type = format!("{}", rec.key_type);
                                             let disp_name = rec.display_name.as_deref();
-                                            let bytes     = bincode::serialize(rec).unwrap_or_default();
-                                            db.upsert(&peer_id, &bytes, &key_type, disp_name,
-                                                      rec.created_at as i64, rec.updated_at as i64,
-                                                      rec.revoked);
+                                            let bytes = bincode::serialize(rec).unwrap_or_default();
+                                            db.upsert(
+                                                &peer_id,
+                                                &bytes,
+                                                &key_type,
+                                                disp_name,
+                                                rec.created_at as i64,
+                                                rec.updated_at as i64,
+                                                rec.revoked,
+                                            );
                                             stored += 1;
                                         }
                                     }
                                 }
                             }
                             if stored > 0 {
-                                state.log(format!("🔑 Key registry: stored {} record(s) from batch", stored));
+                                state.log(format!(
+                                    "🔑 Key registry: stored {} record(s) from batch",
+                                    stored
+                                ));
                             }
                         }
-                        KeyRegistryMessage::Revocation { target_peer_id_bytes, revoker_peer_id_bytes, reason, revoked_at_ms, .. } => {
+                        KeyRegistryMessage::Revocation {
+                            target_peer_id_bytes,
+                            revoker_peer_id_bytes,
+                            reason,
+                            revoked_at_ms,
+                            ..
+                        } => {
                             // Apply server-side: update SQLite revocation columns.
                             if let (Ok(target_pid), Ok(revoker_pid)) = (
                                 libp2p::PeerId::from_bytes(&target_peer_id_bytes),
                                 libp2p::PeerId::from_bytes(&revoker_peer_id_bytes),
                             ) {
-                                let updated = state.shared.read().ok()
-                                    .and_then(|s| s.key_db.as_ref().map(|db| {
-                                        db.revoke_key_in_db(
-                                            &target_pid.to_string(),
-                                            &revoker_pid.to_string(),
-                                            reason.as_deref(),
-                                            revoked_at_ms as i64,
-                                        )
-                                    }))
+                                let updated = state
+                                    .shared
+                                    .read()
+                                    .ok()
+                                    .and_then(|s| {
+                                        s.key_db.as_ref().map(|db| {
+                                            db.revoke_key_in_db(
+                                                &target_pid.to_string(),
+                                                &revoker_pid.to_string(),
+                                                reason.as_deref(),
+                                                revoked_at_ms as i64,
+                                            )
+                                        })
+                                    })
                                     .unwrap_or(false);
                                 if updated {
-                                    state.log(format!("🔑 [Revocation] Revoked {} (by {})",
+                                    state.log(format!(
+                                        "🔑 [Revocation] Revoked {} (by {})",
                                         short_id(&target_pid.to_string()),
-                                        short_id(&revoker_pid.to_string())));
+                                        short_id(&revoker_pid.to_string())
+                                    ));
                                 }
                             }
                         }
@@ -1480,22 +1792,32 @@ fn handle_swarm_event(
                 }
             } else if topic.starts_with("meshsite/") {
                 // Incoming meshsite content from the mesh — store locally and re-put to DHT.
-                if let Some(item) = metaverse_core::meshsite::ContentItem::from_bytes(&message.data) {
+                if let Some(item) = metaverse_core::meshsite::ContentItem::from_bytes(&message.data)
+                {
                     if item.id_valid() {
                         let (is_new, dht_key, dht_val) = {
                             let s = state.shared.read().ok();
                             let db = s.as_ref().and_then(|s| s.key_db.as_ref());
                             if let Some(db) = db {
                                 let is_new = db.get_content(&item.id).is_none();
-                                if is_new { db.insert_content(&item); }
+                                if is_new {
+                                    db.insert_content(&item);
+                                }
                                 (is_new, item.dht_key(), message.data.clone())
                             } else {
                                 (false, vec![], vec![])
                             }
                         };
                         if is_new {
-                            state.log(format!("◈ [meshsite/{}] stored: {}…", item.section.as_str(), &item.id[..8]));
-                            actions.push(SwarmAction::PutDhtRecord { key: dht_key, value: dht_val });
+                            state.log(format!(
+                                "◈ [meshsite/{}] stored: {}…",
+                                item.section.as_str(),
+                                &item.id[..8]
+                            ));
+                            actions.push(SwarmAction::PutDhtRecord {
+                                key: dht_key,
+                                value: dht_val,
+                            });
                         }
                     }
                 }
@@ -1509,13 +1831,18 @@ fn handle_swarm_event(
         })) => {
             actions.push(SwarmAction::SubscribeTopic(topic.as_str().to_string()));
         }
-        SwarmEvent::Behaviour(ServerBehaviourEvent::Kademlia(
-            kad::Event::RoutingUpdated { peer, .. }
-        )) => {
+        SwarmEvent::Behaviour(ServerBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {
+            peer,
+            ..
+        })) => {
             // Only allow server/relay peers in the routing table.
             // Kademlia auto-adds peers it talks to; remove clients immediately
             // to prevent Kademlia from dialing their private/circuit addresses.
-            let ptype = state.connected_peers.get(&peer).map(|e| e.2.as_str()).unwrap_or("unknown");
+            let ptype = state
+                .connected_peers
+                .get(&peer)
+                .map(|e| e.2.as_str())
+                .unwrap_or("unknown");
             if ptype == "server" || ptype == "relay" {
                 state.dht_peer_count = 0;
                 actions.push(SwarmAction::AddKadAddress(peer, Multiaddr::empty()));
@@ -1524,33 +1851,39 @@ fn handle_swarm_event(
                 actions.push(SwarmAction::RemoveKadPeer(peer));
             }
         }
-        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
-            request_response::Event::Message {
-                peer,
-                message: request_response::Message::Request { request, channel, .. },
-                ..
-            }
-        )) => {
-            let world_dir = state.config.world_dir.clone()
+        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(request_response::Event::Message {
+            peer,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+            ..
+        })) => {
+            let world_dir = state
+                .config
+                .world_dir
+                .clone()
                 .unwrap_or_else(|| "world_data".to_string());
             let tile_desc = match &request {
-                TileRequest::OsmTile { s, w, n, e } => format!("OSM s={s:.2} w={w:.2} n={n:.2} e={e:.2}"),
+                TileRequest::OsmTile { s, w, n, e } => {
+                    format!("OSM s={s:.2} w={w:.2} n={n:.2} e={e:.2}")
+                }
                 TileRequest::ElevationTile { lat, lon } => format!("SRTM lat={lat} lon={lon}"),
                 TileRequest::TerrainChunk { cx, cz } => format!("chunk cx={cx} cz={cz}"),
             };
-            let ts_ref = state.shared.read().ok()
-                .and_then(|s| s.tile_store.clone());
-            let response = serve_tile_request(&request, &world_dir,
-                ts_ref.as_deref());
+            let ts_ref = state.shared.read().ok().and_then(|s| s.tile_store.clone());
+            let response = serve_tile_request(&request, &world_dir, ts_ref.as_deref());
             let found = matches!(response, TileResponse::Found(_));
             if found {
                 state.tiles_served += 1;
             } else {
                 state.tiles_not_found += 1;
                 // Log misses individually — they're less frequent and more actionable
-                state.log(format!("❌ [P2P] {} from {}",
+                state.log(format!(
+                    "❌ [P2P] {} from {}",
                     tile_desc,
-                    AppState::short(&peer.to_string())));
+                    AppState::short(&peer.to_string())
+                ));
             }
             // If server doesn't have it, queue it (and neighbours) for on-demand download
             if !found {
@@ -1572,18 +1905,20 @@ fn handle_swarm_event(
             }
             actions.push(SwarmAction::RespondTile { channel, response });
         }
-        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
-            request_response::Event::Message {
-                message: request_response::Message::Response { request_id, response },
-                ..
-            }
-        )) => {
+        SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(request_response::Event::Message {
+            message:
+                request_response::Message::Response {
+                    request_id,
+                    response,
+                },
+            ..
+        })) => {
             if let Some(tx) = state.pending_tile_requests.remove(&request_id) {
                 let _ = tx.send(response);
             }
         }
         SwarmEvent::Behaviour(ServerBehaviourEvent::TileRr(
-            request_response::Event::OutboundFailure { request_id, .. }
+            request_response::Event::OutboundFailure { request_id, .. },
         )) => {
             if let Some(tx) = state.pending_tile_requests.remove(&request_id) {
                 let _ = tx.send(TileResponse::NotFound);
@@ -1621,16 +1956,34 @@ fn serve_tile_request(
             let cache_dir = PathBuf::from(world_dir).join("elevation_cache");
             let lat_prefix = if *lat >= 0 { 'n' } else { 's' };
             let lon_prefix = if *lon >= 0 { 'e' } else { 'w' };
-            let lat_dir = if *lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-            let lon_dir = if *lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
-                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs());
+            let lat_dir = if *lat >= 0 {
+                format!("N{:02}", lat)
+            } else {
+                format!("S{:02}", lat.unsigned_abs())
+            };
+            let lon_dir = if *lon >= 0 {
+                format!("E{:03}", lon)
+            } else {
+                format!("W{:03}", lon.unsigned_abs())
+            };
+            let tile_name = format!(
+                "srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix,
+                lat.unsigned_abs(),
+                lon_prefix,
+                lon.unsigned_abs()
+            );
             let path = cache_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
             // Also check HGT format (Skadi downloads)
             let hgt_prefix_up: char = if *lat >= 0 { 'N' } else { 'S' };
             let hgt_lon_prefix_up: char = if *lon >= 0 { 'E' } else { 'W' };
-            let hgt_name = format!("{}{:02}{}{:03}.hgt",
-                hgt_prefix_up, lat.unsigned_abs(), hgt_lon_prefix_up, lon.unsigned_abs());
+            let hgt_name = format!(
+                "{}{:02}{}{:03}.hgt",
+                hgt_prefix_up,
+                lat.unsigned_abs(),
+                hgt_lon_prefix_up,
+                lon.unsigned_abs()
+            );
             let hgt_path = cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
             if let Ok(bytes) = std::fs::read(&path) {
                 TileResponse::Found(bytes)
@@ -1663,8 +2016,12 @@ fn apply_swarm_actions(
                 }
             }
             SwarmAction::RefreshDhtCount => {
-                state.dht_peer_count = swarm.behaviour_mut()
-                    .kademlia.kbuckets().map(|b| b.num_entries()).sum();
+                state.dht_peer_count = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .kbuckets()
+                    .map(|b| b.num_entries())
+                    .sum();
             }
             SwarmAction::DialPeer(peer_id, addr) => {
                 if is_kad_routable(&addr) && !swarm.is_connected(&peer_id) {
@@ -1684,7 +2041,11 @@ fn apply_swarm_actions(
             }
             SwarmAction::StartProviding(key) => {
                 use libp2p::kad::RecordKey;
-                if let Err(e) = swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .start_providing(RecordKey::new(&key))
+                {
                     // Only log unexpected errors, not MaxProvidedKeys (handled by config)
                     let msg = format!("{:?}", e);
                     if !msg.contains("MaxProvidedKeys") {
@@ -1693,34 +2054,55 @@ fn apply_swarm_actions(
                 }
             }
             SwarmAction::PutDhtRecord { key, value } => {
-                use libp2p::kad::{Record, RecordKey, Quorum};
+                use libp2p::kad::{Quorum, Record, RecordKey};
                 let record = Record {
                     key: RecordKey::new(&key),
                     value,
                     publisher: None,
                     expires: None,
                 };
-                if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .put_record(record, Quorum::One)
+                {
                     eprintln!("⚠️  [DHT] put_record failed: {:?}", e);
                 }
             }
             SwarmAction::DisconnectPeer(peer_id) => {
                 let _ = swarm.disconnect_peer_id(peer_id);
-                state.log(format!("🔌 [LoadShed] Disconnected {} to relieve load", peer_id));
+                state.log(format!(
+                    "🔌 [LoadShed] Disconnected {} to relieve load",
+                    peer_id
+                ));
             }
-            SwarmAction::TileRequest { peer_id, request, response_tx } => {
-                let id = swarm.behaviour_mut().tile_rr.send_request(&peer_id, request);
+            SwarmAction::TileRequest {
+                peer_id,
+                request,
+                response_tx,
+            } => {
+                let id = swarm
+                    .behaviour_mut()
+                    .tile_rr
+                    .send_request(&peer_id, request);
                 state.pending_tile_requests.insert(id, response_tx);
             }
             SwarmAction::RespondTile { channel, response } => {
-                let _ = swarm.behaviour_mut().tile_rr.send_response(channel, response);
+                let _ = swarm
+                    .behaviour_mut()
+                    .tile_rr
+                    .send_response(channel, response);
             }
         }
     }
 }
 
 fn short_addr(addr: &str) -> String {
-    if addr.len() > 40 { format!("…{}", &addr[addr.len()-38..]) } else { addr.to_string() }
+    if addr.len() > 40 {
+        format!("…{}", &addr[addr.len() - 38..])
+    } else {
+        addr.to_string()
+    }
 }
 
 // ─── TUI: single htop-style dashboard ────────────────────────────────────────
@@ -1731,9 +2113,9 @@ fn draw(frame: &mut Frame, state: &AppState, world: &WorldStats) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Min(6),     // body
-            Constraint::Length(1),  // footer hint
+            Constraint::Length(3), // header
+            Constraint::Min(6),    // body
+            Constraint::Length(1), // footer hint
         ])
         .split(area);
 
@@ -1766,8 +2148,7 @@ fn draw(frame: &mut Frame, state: &AppState, world: &WorldStats) {
         state.public_ip, state.config.web_port,
     );
     frame.render_widget(
-        Paragraph::new(footer)
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
         rows[2],
     );
 }
@@ -1776,16 +2157,30 @@ fn draw_header(frame: &mut Frame, state: &AppState, world: &WorldStats, area: Re
     let e = state.start_time.elapsed().as_secs();
     let name = state.config.node_name.as_deref().unwrap_or("server");
     let short_id = &state.local_peer_id[state.local_peer_id.len().saturating_sub(12)..];
-    let shedding = if state.shedding_relay { "  ⚠️ SHEDDING" } else { "" };
+    let shedding = if state.shedding_relay {
+        "  ⚠️ SHEDDING"
+    } else {
+        ""
+    };
     let text = format!(
         " 🌍 {}  │  {}  │  peers:{}  circuits:{}  chunks:{}  │  ⏱ {:02}h{:02}m{:02}s{}",
-        name, short_id,
-        state.connected_peers.len(), state.active_circuits.len(), world.chunks_loaded,
-        e / 3600, (e % 3600) / 60, e % 60, shedding,
+        name,
+        short_id,
+        state.connected_peers.len(),
+        state.active_circuits.len(),
+        world.chunks_loaded,
+        e / 3600,
+        (e % 3600) / 60,
+        e % 60,
+        shedding,
     );
     frame.render_widget(
         Paragraph::new(text)
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .block(Block::default().borders(Borders::ALL)),
         area,
     );
@@ -1798,47 +2193,92 @@ fn bar(filled: u8, width: u8) -> String {
 
 fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
     let cpu_pct = state.cpu_pct as u8;
-    let ram_pct = if state.ram_total_mb > 0 { (state.ram_used_mb * 100 / state.ram_total_mb) as u8 } else { 0 };
-    let swap_pct = if state.swap_total_mb > 0 { (state.swap_used_mb * 100 / state.swap_total_mb) as u8 } else { 0 };
+    let ram_pct = if state.ram_total_mb > 0 {
+        (state.ram_used_mb * 100 / state.ram_total_mb) as u8
+    } else {
+        0
+    };
+    let swap_pct = if state.swap_total_mb > 0 {
+        (state.swap_used_mb * 100 / state.swap_total_mb) as u8
+    } else {
+        0
+    };
 
-    let cpu_style = if cpu_pct > 80 { Style::default().fg(Color::Red) }
-        else if cpu_pct > 50 { Style::default().fg(Color::Yellow) }
-        else { Style::default().fg(Color::Green) };
-    let ram_style = if ram_pct > 85 { Style::default().fg(Color::Red) }
-        else if ram_pct > 70 { Style::default().fg(Color::Yellow) }
-        else { Style::default().fg(Color::Green) };
-    let swap_style = if swap_pct > 50 { Style::default().fg(Color::Yellow) }
-        else { Style::default().fg(Color::Cyan) };
+    let cpu_style = if cpu_pct > 80 {
+        Style::default().fg(Color::Red)
+    } else if cpu_pct > 50 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let ram_style = if ram_pct > 85 {
+        Style::default().fg(Color::Red)
+    } else if ram_pct > 70 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let swap_style = if swap_pct > 50 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
 
     let disk_pct: u8 = if state.config.max_world_data_gb > 0 {
-        let used_gb = state.shared.read().map(|s| s.world.world_data_mb).unwrap_or(0.0) / 1024.0;
+        let used_gb = state
+            .shared
+            .read()
+            .map(|s| s.world.world_data_mb)
+            .unwrap_or(0.0)
+            / 1024.0;
         ((used_gb / state.config.max_world_data_gb as f64) * 100.0).min(100.0) as u8
-    } else { 0 };
-    let disk_style = if disk_pct > 90 { Style::default().fg(Color::Red) }
-        else if disk_pct > 75 { Style::default().fg(Color::Yellow) }
-        else { Style::default().fg(Color::Cyan) };
+    } else {
+        0
+    };
+    let disk_style = if disk_pct > 90 {
+        Style::default().fg(Color::Red)
+    } else if disk_pct > 75 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Cyan)
+    };
 
     let lines: Vec<Line> = vec![
         Line::from(vec![
             Span::styled(format!("CPU  {} ", bar(cpu_pct, 20)), cpu_style),
-            Span::styled(format!("{:3}%", cpu_pct), cpu_style.add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:3}%", cpu_pct),
+                cpu_style.add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(vec![
             Span::styled(format!("RAM  {} ", bar(ram_pct, 20)), ram_style),
             Span::styled(
-                format!("{:3}%  {}/{} MB (proc {}MB)", ram_pct, state.ram_used_mb, state.ram_total_mb, state.proc_rss_mb),
+                format!(
+                    "{:3}%  {}/{} MB (proc {}MB)",
+                    ram_pct, state.ram_used_mb, state.ram_total_mb, state.proc_rss_mb
+                ),
                 ram_style,
             ),
         ]),
         Line::from(vec![
             Span::styled(format!("SWP  {} ", bar(swap_pct, 20)), swap_style),
-            Span::styled(format!("{:3}%  {}/{} MB", swap_pct, state.swap_used_mb, state.swap_total_mb), swap_style),
+            Span::styled(
+                format!(
+                    "{:3}%  {}/{} MB",
+                    swap_pct, state.swap_used_mb, state.swap_total_mb
+                ),
+                swap_style,
+            ),
         ]),
         Line::from(vec![
             Span::styled(format!("DSK  {} ", bar(disk_pct, 20)), disk_style),
             Span::styled(
                 if state.config.max_world_data_gb > 0 {
-                    format!("{:3}%  {} GB limit", disk_pct, state.config.max_world_data_gb)
+                    format!(
+                        "{:3}%  {} GB limit",
+                        disk_pct, state.config.max_world_data_gb
+                    )
                 } else {
                     "  no limit".to_string()
                 },
@@ -1847,8 +2287,12 @@ fn draw_system(frame: &mut Frame, state: &AppState, area: Rect) {
         ]),
     ];
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().title(" System ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" System ")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1866,8 +2310,12 @@ fn draw_network(frame: &mut Frame, state: &AppState, area: Rect) {
         stat_line("WS port:    ", format!("{}", ws_port)),
     ];
     frame.render_widget(
-        Paragraph::new(items)
-            .block(Block::default().title(" Network ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
+        Paragraph::new(items).block(
+            Block::default()
+                .title(" Network ")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1885,14 +2333,31 @@ fn draw_world(frame: &mut Frame, world: &WorldStats, state: &AppState, area: Rec
         stat_line("Ops merged:    ", format!("{}", world.ops_merged_total)),
         stat_line("Data size:     ", format!("{:.1} MB", world.world_data_mb)),
         stat_line("Last save:     ", save_str),
-        stat_line("Shedding:      ",
-            if world.shedding_chunks { "YES ⚠️".to_string() } else { "No".to_string() }),
-        stat_line("World dir:     ",
-            state.config.world_dir.as_deref().unwrap_or("world_data").to_string()),
+        stat_line(
+            "Shedding:      ",
+            if world.shedding_chunks {
+                "YES ⚠️".to_string()
+            } else {
+                "No".to_string()
+            },
+        ),
+        stat_line(
+            "World dir:     ",
+            state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data")
+                .to_string(),
+        ),
     ];
     frame.render_widget(
-        Paragraph::new(items)
-            .block(Block::default().title(" World ").title_style(Style::default().fg(Color::Green)).borders(Borders::ALL)),
+        Paragraph::new(items).block(
+            Block::default()
+                .title(" World ")
+                .title_style(Style::default().fg(Color::Green))
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1900,15 +2365,28 @@ fn draw_world(frame: &mut Frame, world: &WorldStats, state: &AppState, area: Rec
 fn draw_activity(frame: &mut Frame, state: &AppState, area: Rect) {
     // Show last N log entries — most useful thing on the TUI
     let height = area.height.saturating_sub(2) as usize; // minus border
-    let entries: Vec<Line> = state.log.iter().rev().take(height)
+    let entries: Vec<Line> = state
+        .log
+        .iter()
+        .rev()
+        .take(height)
         .map(|msg| {
-            let style = if msg.contains('✅') || msg.contains("complete") || msg.contains("saved") {
+            let style = if msg.contains('✅') || msg.contains("complete") || msg.contains("saved")
+            {
                 Style::default().fg(Color::Green)
-            } else if msg.contains('❌') || msg.contains("error") || msg.contains("Error") || msg.contains("failed") {
+            } else if msg.contains('❌')
+                || msg.contains("error")
+                || msg.contains("Error")
+                || msg.contains("failed")
+            {
                 Style::default().fg(Color::Red)
             } else if msg.contains('⚠') || msg.contains("warn") {
                 Style::default().fg(Color::Yellow)
-            } else if msg.contains("⬇") || msg.contains("📥") || msg.contains("download") || msg.contains("Download") {
+            } else if msg.contains("⬇")
+                || msg.contains("📥")
+                || msg.contains("download")
+                || msg.contains("Download")
+            {
                 Style::default().fg(Color::Cyan)
             } else {
                 Style::default().fg(Color::Gray)
@@ -1916,11 +2394,18 @@ fn draw_activity(frame: &mut Frame, state: &AppState, area: Rect) {
             Line::from(Span::styled(msg.clone(), style))
         })
         .collect::<Vec<_>>()
-        .into_iter().rev().collect();
+        .into_iter()
+        .rev()
+        .collect();
 
     frame.render_widget(
         Paragraph::new(entries)
-            .block(Block::default().title(" Activity ").title_style(Style::default().fg(Color::Yellow)).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Activity ")
+                    .title_style(Style::default().fg(Color::Yellow))
+                    .borders(Borders::ALL),
+            )
             .wrap(ratatui::widgets::Wrap { trim: true }),
         area,
     );
@@ -1934,9 +2419,13 @@ fn stat_line(label: impl Into<String>, value: impl Into<String>) -> Line<'static
 }
 
 fn fmt_bytes(b: u64) -> String {
-    if b < 1024 { format!("{} B", b) }
-    else if b < 1_048_576 { format!("{:.1} KB", b as f64 / 1024.0) }
-    else { format!("{:.1} MB", b as f64 / 1_048_576.0) }
+    if b < 1024 {
+        format!("{} B", b)
+    } else if b < 1_048_576 {
+        format!("{:.1} KB", b as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", b as f64 / 1_048_576.0)
+    }
 }
 
 // ─── API v1 ──────────────────────────────────────────────────────────────────
@@ -1975,15 +2464,19 @@ fn verify_auth_token(
     headers: &HeaderMap,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
     // Format: "Bearer <peer_id>:<expires_at_ms>:<token_hex>"
-    let raw = headers.get("X-Auth-Token")
+    let raw = headers
+        .get("X-Auth-Token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let bearer = raw.strip_prefix("Bearer ").unwrap_or(raw);
     let parts: Vec<&str> = bearer.splitn(3, ':').collect();
     if parts.len() != 3 {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-            "error": "missing or malformed X-Auth-Token"
-        }))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "missing or malformed X-Auth-Token"
+            })),
+        ));
     }
     let (peer_id, expires_str, provided_token) = (parts[0], parts[1], parts[2]);
     let expires_at_ms: u64 = expires_str.parse().unwrap_or(0);
@@ -1992,15 +2485,21 @@ fn verify_auth_token(
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
     if now_ms > expires_at_ms {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-            "error": "token expired"
-        }))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "token expired"
+            })),
+        ));
     }
     let expected = make_auth_token(&s.server_secret, peer_id, expires_at_ms);
     if expected != provided_token {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-            "error": "invalid token"
-        }))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "invalid token"
+            })),
+        ));
     }
     Ok(peer_id.to_string())
 }
@@ -2027,23 +2526,38 @@ async fn api_v1_post_keys(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    use metaverse_core::identity::KeyRecord;
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use metaverse_core::identity::KeyRecord;
 
     // Parse body — raw bincode or JSON wrapper
     let record_bytes: Vec<u8> = {
-        let ct = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let ct = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
         if ct.contains("application/json") {
             match serde_json::from_slice::<PostKeyBody>(&body) {
                 Ok(j) => match BASE64.decode(&j.record_b64) {
                     Ok(b) => b,
-                    Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                        "error": format!("invalid base64: {}", e)
-                    }))).into_response(),
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({
+                                "error": format!("invalid base64: {}", e)
+                            })),
+                        )
+                            .into_response();
+                    }
                 },
-                Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                    "error": format!("invalid JSON: {}", e)
-                }))).into_response(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("invalid JSON: {}", e)
+                        })),
+                    )
+                        .into_response();
+                }
             }
         } else {
             body.to_vec()
@@ -2053,32 +2567,46 @@ async fn api_v1_post_keys(
     // Deserialise and validate
     let record = match KeyRecord::from_bytes(&record_bytes) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("failed to deserialize KeyRecord: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("failed to deserialize KeyRecord: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
 
     if !record.verify_self_sig() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "self-signature verification failed"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "self-signature verification failed"
+            })),
+        )
+            .into_response();
     }
 
-    let peer_id_str  = record.peer_id.to_string();
+    let peer_id_str = record.peer_id.to_string();
     let key_type_str = format!("{:?}", record.key_type);
     let display_name = record.display_name.clone();
-    let created_at   = record.created_at as i64;
-    let updated_at   = record.updated_at as i64;
-    let revoked      = record.revoked;
+    let created_at = record.created_at as i64;
+    let updated_at = record.updated_at as i64;
+    let revoked = record.revoked;
 
     // Store in SQLite
     {
         let st = s.read().unwrap();
         if let Some(ref db) = st.key_db {
             db.upsert(
-                &peer_id_str, &record_bytes,
-                &key_type_str, display_name.as_deref(),
-                created_at, updated_at, revoked,
+                &peer_id_str,
+                &record_bytes,
+                &key_type_str,
+                display_name.as_deref(),
+                created_at,
+                updated_at,
+                revoked,
             );
         }
         // Broadcast via gossipsub (best-effort — may fail if no peers yet)
@@ -2090,15 +2618,19 @@ async fn api_v1_post_keys(
         }
     }
 
-    (StatusCode::CREATED, Json(serde_json::json!({
-        "accepted": true,
-        "peer_id":      peer_id_str,
-        "key_type":     key_type_str,
-        "display_name": display_name,
-        "created_at":   created_at,
-        "updated_at":   updated_at,
-        "revoked":      revoked,
-    }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "accepted": true,
+            "peer_id":      peer_id_str,
+            "key_type":     key_type_str,
+            "display_name": display_name,
+            "created_at":   created_at,
+            "updated_at":   updated_at,
+            "revoked":      revoked,
+        })),
+    )
+        .into_response()
 }
 
 // ── POST /api/v1/auth/challenge ───────────────────────────────────────────────
@@ -2121,12 +2653,19 @@ async fn api_v1_auth_challenge(
     // Verify the peer has a registered key
     let exists = {
         let st = s.read().unwrap();
-        st.key_db.as_ref().map(|db| db.get_bytes(&req.peer_id).is_some()).unwrap_or(false)
+        st.key_db
+            .as_ref()
+            .map(|db| db.get_bytes(&req.peer_id).is_some())
+            .unwrap_or(false)
     };
     if !exists {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "no key record found for this peer_id — register a key first"
-        }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no key record found for this peer_id — register a key first"
+            })),
+        )
+            .into_response();
     }
 
     // Generate 32-byte nonce
@@ -2178,8 +2717,8 @@ async fn api_v1_auth_verify(
     State(s): State<WebState>,
     Json(req): Json<VerifyRequest>,
 ) -> impl IntoResponse {
-    use ed25519_dalek::{VerifyingKey, Signature};
     use ed25519_dalek::Verifier;
+    use ed25519_dalek::{Signature, VerifyingKey};
     use metaverse_core::identity::KeyRecord;
 
     let now_ms = std::time::SystemTime::now()
@@ -2193,20 +2732,34 @@ async fn api_v1_auth_verify(
         let mut map = st.pending_challenges.lock().unwrap();
         match map.remove(&req.nonce) {
             Some(v) => v,
-            None => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-                "error": "nonce not found or already used"
-            }))).into_response(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "nonce not found or already used"
+                    })),
+                )
+                    .into_response();
+            }
         }
     };
     if now_ms > challenge_expires {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "challenge expired"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "challenge expired"
+            })),
+        )
+            .into_response();
     }
     if stored_peer_id != req.peer_id {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "peer_id mismatch"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "peer_id mismatch"
+            })),
+        )
+            .into_response();
     }
 
     // Fetch the client's KeyRecord to get their public key
@@ -2214,49 +2767,89 @@ async fn api_v1_auth_verify(
         let st = s.read().unwrap();
         match st.key_db.as_ref().and_then(|db| db.get_bytes(&req.peer_id)) {
             Some(b) => b,
-            None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": "no key record found for this peer_id"
-            }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "no key record found for this peer_id"
+                    })),
+                )
+                    .into_response();
+            }
         }
     };
     let record = match KeyRecord::from_bytes(&key_bytes) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("failed to deserialize stored KeyRecord: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to deserialize stored KeyRecord: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Decode the nonce and signature
     let nonce_bytes = match hex::decode(&req.nonce) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("invalid nonce hex: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("invalid nonce hex: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
     let sig_bytes = match hex::decode(&req.signature) {
         Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("invalid signature hex: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("invalid signature hex: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Verify Ed25519 signature
     let vk = match VerifyingKey::from_bytes(&record.public_key) {
         Ok(v) => v,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": "invalid public key in key record"
-        }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "invalid public key in key record"
+                })),
+            )
+                .into_response();
+        }
     };
     let sig = match Signature::from_slice(&sig_bytes) {
         Ok(s) => s,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "invalid signature bytes (must be 64 bytes)"
-        }))).into_response(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid signature bytes (must be 64 bytes)"
+                })),
+            )
+                .into_response();
+        }
     };
     if vk.verify(&nonce_bytes, &sig).is_err() {
-        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({
-            "error": "signature verification failed"
-        }))).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "signature verification failed"
+            })),
+        )
+            .into_response();
     }
 
     // Generate token
@@ -2265,12 +2858,16 @@ async fn api_v1_auth_verify(
     let token_hex = make_auth_token(&server_secret, &req.peer_id, token_expires_at);
     let bearer = format!("{}:{}:{}", req.peer_id, token_expires_at, token_hex);
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "token":      bearer,
-        "peer_id":    req.peer_id,
-        "expires_at": token_expires_at,
-        "ttl_seconds": AUTH_TOKEN_TTL_MS / 1000,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "token":      bearer,
+            "peer_id":    req.peer_id,
+            "expires_at": token_expires_at,
+            "ttl_seconds": AUTH_TOKEN_TTL_MS / 1000,
+        })),
+    )
+        .into_response()
 }
 
 // ─── API v1: key requests ────────────────────────────────────────────────────
@@ -2301,7 +2898,10 @@ async fn api_v1_post_key_request(
     // Peer must have an existing key record
     let exists = {
         let st = s.read().unwrap();
-        st.key_db.as_ref().map(|db| db.get_bytes(&req.peer_id).is_some()).unwrap_or(false)
+        st.key_db
+            .as_ref()
+            .map(|db| db.get_bytes(&req.peer_id).is_some())
+            .unwrap_or(false)
     };
     if !exists {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({
@@ -2311,9 +2911,13 @@ async fn api_v1_post_key_request(
 
     let valid_types = ["Relay", "Server", "Admin", "Business"];
     if !valid_types.contains(&req.requested_type.as_str()) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": "requested_type must be one of: Relay, Server, Admin, Business"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "requested_type must be one of: Relay, Server, Admin, Business"
+            })),
+        )
+            .into_response();
     }
 
     let now_ms = std::time::SystemTime::now()
@@ -2330,7 +2934,9 @@ async fn api_v1_post_key_request(
         let st = s.read().unwrap();
         if let Some(ref db) = st.key_db {
             db.insert_key_request(
-                &id, &req.peer_id, &req.requested_type,
+                &id,
+                &req.peer_id,
+                &req.requested_type,
                 req.display_name.as_deref(),
                 req.justification.as_deref(),
                 req.contact_info.as_deref(),
@@ -2339,14 +2945,18 @@ async fn api_v1_post_key_request(
         }
     }
 
-    (StatusCode::CREATED, Json(serde_json::json!({
-        "id":             id,
-        "peer_id":        req.peer_id,
-        "requested_type": req.requested_type,
-        "status":         "pending",
-        "created_at":     now_ms,
-        "message":        "Request submitted. A server operator will review it.",
-    }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "id":             id,
+            "peer_id":        req.peer_id,
+            "requested_type": req.requested_type,
+            "status":         "pending",
+            "created_at":     now_ms,
+            "message":        "Request submitted. A server operator will review it.",
+        })),
+    )
+        .into_response()
 }
 
 /// GET /api/v1/key-requests — list pending (or all) key requests.
@@ -2359,9 +2969,18 @@ async fn api_v1_list_key_requests(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let st = s.read().unwrap();
-    if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
-    let status_filter = params.get("status").map(|s| s.as_str()).unwrap_or("pending");
-    let rows = st.key_db.as_ref().map(|db| db.list_key_requests(Some(status_filter))).unwrap_or_default();
+    if let Err(e) = verify_auth_token(&st, &headers) {
+        return e.into_response();
+    }
+    let status_filter = params
+        .get("status")
+        .map(|s| s.as_str())
+        .unwrap_or("pending");
+    let rows = st
+        .key_db
+        .as_ref()
+        .map(|db| db.list_key_requests(Some(status_filter)))
+        .unwrap_or_default();
     Json(serde_json::json!({ "requests": rows })).into_response()
 }
 
@@ -2390,7 +3009,9 @@ async fn api_v1_approve_key_request(
     // Auth check
     {
         let st = s.read().unwrap();
-        if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+        if let Err(e) = verify_auth_token(&st, &headers) {
+            return e.into_response();
+        }
     }
 
     let now_ms = std::time::SystemTime::now()
@@ -2403,14 +3024,24 @@ async fn api_v1_approve_key_request(
         let st = s.read().unwrap();
         let req = match st.key_db.as_ref().and_then(|db| db.get_key_request(&id)) {
             Some(r) => r,
-            None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "error": "key request not found"
-            }))).into_response(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "key request not found"
+                    })),
+                )
+                    .into_response();
+            }
         };
         if req["status"] != "pending" {
-            return (StatusCode::CONFLICT, Json(serde_json::json!({
-                "error": format!("request is already {}", req["status"])
-            }))).into_response();
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("request is already {}", req["status"])
+                })),
+            )
+                .into_response();
         }
         (
             req["peer_id"].as_str().unwrap_or("").to_string(),
@@ -2425,32 +3056,52 @@ async fn api_v1_approve_key_request(
     };
     let key_bytes = match key_bytes {
         Some(b) => b,
-        None => return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "applicant's KeyRecord not found"
-        }))).into_response(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "applicant's KeyRecord not found"
+                })),
+            )
+                .into_response();
+        }
     };
 
     let mut record = match KeyRecord::from_bytes(&key_bytes) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("failed to deserialize applicant KeyRecord: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to deserialize applicant KeyRecord: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Map requested_type string → KeyType
     let new_key_type = match req_type.as_str() {
-        "Relay"    => KeyType::Relay,
-        "Server"   => KeyType::Server,
-        "Admin"    => KeyType::Admin,
+        "Relay" => KeyType::Relay,
+        "Server" => KeyType::Server,
+        "Admin" => KeyType::Admin,
         "Business" => KeyType::Business,
-        other => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
-            "error": format!("unknown key type '{}'", other)
-        }))).into_response(),
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("unknown key type '{}'", other)
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Upgrade the key type, apply display name if set, update timestamps
     record.key_type = new_key_type;
-    if let Some(ref dn) = req_display_name { record.display_name = Some(dn.clone()); }
+    if let Some(ref dn) = req_display_name {
+        record.display_name = Some(dn.clone());
+    }
     record.updated_at = now_ms;
     // Set expiry: 1 year from now for infrastructure keys
     record.expires_at = Some(now_ms + 365 * 24 * 60 * 60 * 1_000);
@@ -2464,7 +3115,7 @@ async fn api_v1_approve_key_request(
     }
     // Sign issuer bytes with the server's ed25519 key
     {
-        use ed25519_dalek::{SigningKey, Signer};
+        use ed25519_dalek::{Signer, SigningKey};
         let sk = SigningKey::from_bytes(&server_secret);
         let issuer_bytes = record.canonical_bytes_for_issuer_sig();
         let sig = sk.sign(&issuer_bytes);
@@ -2473,9 +3124,15 @@ async fn api_v1_approve_key_request(
 
     let result_bytes = match record.to_bytes() {
         Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "error": format!("failed to serialize approved KeyRecord: {}", e)
-        }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("failed to serialize approved KeyRecord: {}", e)
+                })),
+            )
+                .into_response();
+        }
     };
 
     // Persist: update request status + upsert upgraded key record + broadcast
@@ -2483,13 +3140,15 @@ async fn api_v1_approve_key_request(
         let st = s.read().unwrap();
         if let Some(ref db) = st.key_db {
             db.update_key_request_status(
-                &id, "approved",
+                &id,
+                "approved",
                 body.reviewer_note.as_deref(),
                 now_ms as i64,
                 Some(&result_bytes),
             );
             db.upsert(
-                &req_peer_id, &result_bytes,
+                &req_peer_id,
+                &result_bytes,
                 &format!("{:?}", record.key_type),
                 record.display_name.as_deref(),
                 record.created_at as i64,
@@ -2508,10 +3167,16 @@ async fn api_v1_approve_key_request(
     // Return the signed .keyrec bytes as octet-stream (operator downloads and gives to relay)
     (
         StatusCode::OK,
-        [("content-type", "application/octet-stream"),
-         ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &req_peer_id[..8]))],
+        [
+            ("content-type", "application/octet-stream"),
+            (
+                "content-disposition",
+                &format!("attachment; filename=\"{}.keyrec\"", &req_peer_id[..8]),
+            ),
+        ],
         result_bytes,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// POST /api/v1/key-requests/{id}/deny — reject a key request.
@@ -2525,7 +3190,9 @@ async fn api_v1_deny_key_request(
 ) -> impl IntoResponse {
     {
         let st = s.read().unwrap();
-        if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+        if let Err(e) = verify_auth_token(&st, &headers) {
+            return e.into_response();
+        }
     }
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2533,15 +3200,28 @@ async fn api_v1_deny_key_request(
         .unwrap_or(0);
     let exists = {
         let st = s.read().unwrap();
-        st.key_db.as_ref().map(|db| db.get_key_request(&id).is_some()).unwrap_or(false)
+        st.key_db
+            .as_ref()
+            .map(|db| db.get_key_request(&id).is_some())
+            .unwrap_or(false)
     };
     if !exists {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "key request not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "key request not found" })),
+        )
+            .into_response();
     }
     {
         let st = s.read().unwrap();
         if let Some(ref db) = st.key_db {
-            db.update_key_request_status(&id, "denied", body.reviewer_note.as_deref(), now_ms as i64, None);
+            db.update_key_request_status(
+                &id,
+                "denied",
+                body.reviewer_note.as_deref(),
+                now_ms as i64,
+                None,
+            );
         }
     }
     Json(serde_json::json!({ "id": id, "status": "denied" })).into_response()
@@ -2557,18 +3237,30 @@ async fn api_v1_download_key_request(
 ) -> impl IntoResponse {
     let result = {
         let st = s.read().unwrap();
-        st.key_db.as_ref().and_then(|db| db.get_key_request_result(&id))
+        st.key_db
+            .as_ref()
+            .and_then(|db| db.get_key_request_result(&id))
     };
     match result {
         Some(bytes) => (
             StatusCode::OK,
-            [("content-type", "application/octet-stream"),
-             ("content-disposition", &format!("attachment; filename=\"{}.keyrec\"", &id[..8.min(id.len())]))],
+            [
+                ("content-type", "application/octet-stream"),
+                (
+                    "content-disposition",
+                    &format!("attachment; filename=\"{}.keyrec\"", &id[..8.min(id.len())]),
+                ),
+            ],
             bytes,
-        ).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "no approved result found for this request ID"
-        }))).into_response(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "no approved result found for this request ID"
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -2596,8 +3288,8 @@ async fn api_v1_revoke_key(
     Path(peer_id_str): Path<String>,
     Json(body): Json<RevokeBody>,
 ) -> impl IntoResponse {
+    use ed25519_dalek::{Signer, SigningKey};
     use metaverse_core::key_registry::{KeyRegistryMessage, revocation_signable_bytes};
-    use ed25519_dalek::{SigningKey, Signer};
 
     let st = s.read().unwrap();
     let auth_peer_id = match verify_auth_token(&st, &headers) {
@@ -2606,22 +3298,34 @@ async fn api_v1_revoke_key(
     };
     let db = match &st.key_db {
         Some(db) => db,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"key registry unavailable"})),
+            )
+                .into_response();
+        }
     };
 
     // Target key must exist
     if db.get_bytes(&peer_id_str).is_none() {
-        return (StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error":"key not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"key not found"})),
+        )
+            .into_response();
     }
 
     // Check authority
     let is_self = auth_peer_id == peer_id_str;
     let is_operator = if !is_self {
-        matches!(db.get_key_type(&auth_peer_id).unwrap_or_default().as_str(),
-            "Admin" | "Server" | "Genesis")
-    } else { false };
+        matches!(
+            db.get_key_type(&auth_peer_id).unwrap_or_default().as_str(),
+            "Admin" | "Server" | "Genesis"
+        )
+    } else {
+        false
+    };
 
     if !is_self && !is_operator {
         return (StatusCode::FORBIDDEN,
@@ -2629,11 +3333,16 @@ async fn api_v1_revoke_key(
     }
 
     let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
 
     if !db.revoke_key_in_db(&peer_id_str, &auth_peer_id, body.reason.as_deref(), now_ms) {
-        return (StatusCode::CONFLICT,
-            Json(serde_json::json!({"error":"already revoked or key not found"}))).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error":"already revoked or key not found"})),
+        )
+            .into_response();
     }
 
     // Build and sign the revocation notice using the server's ed25519 key
@@ -2643,16 +3352,25 @@ async fn api_v1_revoke_key(
     drop(st);
 
     let Ok(target_pid) = peer_id_str.parse::<PeerId>() else {
-        return (StatusCode::OK, Json(serde_json::json!({"revoked":true,"gossip":false}))).into_response();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"revoked":true,"gossip":false})),
+        )
+            .into_response();
     };
     let Ok(revoker_pid) = server_peer_id_str.parse::<PeerId>() else {
-        return (StatusCode::OK, Json(serde_json::json!({"revoked":true,"gossip":false}))).into_response();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"revoked":true,"gossip":false})),
+        )
+            .into_response();
     };
 
     let target_bytes = target_pid.to_bytes();
     let revoker_bytes = revoker_pid.to_bytes();
     let signable = revocation_signable_bytes(
-        &target_bytes, &revoker_bytes,
+        &target_bytes,
+        &revoker_bytes,
         body.reason.as_deref(),
         now_ms as u64,
     );
@@ -2672,14 +3390,21 @@ async fn api_v1_revoke_key(
         tx.try_send(GossipCommand::Publish {
             topic: "key-revocations".to_string(),
             data,
-        }).is_ok()
-    } else { false };
+        })
+        .is_ok()
+    } else {
+        false
+    };
 
-    (StatusCode::OK, Json(serde_json::json!({
-        "revoked": true,
-        "peer_id": peer_id_str,
-        "gossip_broadcast": gossip_sent,
-    }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "revoked": true,
+            "peer_id": peer_id_str,
+            "gossip_broadcast": gossip_sent,
+        })),
+    )
+        .into_response()
 }
 
 // ── GET /api/v1/sync/keys ─────────────────────────────────────────────────────
@@ -2694,14 +3419,24 @@ async fn api_v1_sync_keys(
     State(s): State<WebState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let since: i64 = params.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000).min(5000);
+    let since: i64 = params
+        .get("since")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000)
+        .min(5000);
 
     let st = s.read().unwrap();
     match &st.key_db {
         Some(db) => Json(db.list_since(since, limit)).into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry unavailable"})),
+        )
+            .into_response(),
     }
 }
 
@@ -2715,14 +3450,24 @@ async fn api_v1_sync_content(
     State(s): State<WebState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let since: i64 = params.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
-    let limit: usize = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(1000);
+    let since: i64 = params
+        .get("since")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let limit: usize = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+        .min(1000);
 
     let st = s.read().unwrap();
     match &st.key_db {
         Some(db) => Json(db.list_content_since(since, limit)).into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"key registry unavailable"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry unavailable"})),
+        )
+            .into_response(),
     }
 }
 
@@ -2746,9 +3491,12 @@ async fn api_v1_world_objects_get(
                 // No chunk filter — return all objects (for admin dashboard)
                 Json(db.list_all_objects()).into_response()
             }
-        },
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"registry unavailable"})),
+        )
+            .into_response(),
     }
 }
 
@@ -2763,17 +3511,20 @@ async fn api_v1_world_objects_post(
 ) -> impl IntoResponse {
     // Generate a UUID if the caller didn't supply one
     if obj.id.is_empty() {
-        obj.id = format!("{:016x}{:016x}",
+        obj.id = format!(
+            "{:016x}{:016x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64).unwrap_or(0),
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
             rand_u64(),
         );
     }
     if obj.placed_at == 0 {
         obj.placed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64).unwrap_or(0);
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
     }
 
     let (db, swarm_tx) = {
@@ -2783,8 +3534,13 @@ async fn api_v1_world_objects_post(
 
     let db = match db {
         Some(d) => d,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"registry unavailable"})),
+            )
+                .into_response();
+        }
     };
 
     db.insert_object(&obj);
@@ -2799,9 +3555,13 @@ async fn api_v1_world_objects_post(
         });
     }
 
-    (StatusCode::CREATED, Json(serde_json::json!({
-        "ok": true, "id": obj.id, "cx": cx, "cz": cz
-    }))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "ok": true, "id": obj.id, "cx": cx, "cz": cz
+        })),
+    )
+        .into_response()
 }
 
 /// DELETE /api/v1/world/objects/:id — remove a placed object.
@@ -2815,8 +3575,13 @@ async fn api_v1_world_objects_delete(
     };
     let db = match db {
         Some(d) => d,
-        None => return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"registry unavailable"}))).into_response(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error":"registry unavailable"})),
+            )
+                .into_response();
+        }
     };
 
     // Need to know the chunk before deleting to update DHT record
@@ -2826,11 +3591,16 @@ async fn api_v1_world_objects_delete(
             "SELECT pos_x, pos_z FROM placed_objects WHERE id = ?1",
             params![id],
             |r| Ok((r.get::<_, f64>(0)? as f32, r.get::<_, f64>(1)? as f32)),
-        ).ok()
+        )
+        .ok()
     };
 
     if !db.delete_object(&id) {
-        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error":"not found"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"not found"})),
+        )
+            .into_response();
     }
 
     // Update DHT chunk record
@@ -2845,18 +3615,25 @@ async fn api_v1_world_objects_delete(
         }
     }
 
-    (StatusCode::OK, Json(serde_json::json!({"ok": true, "deleted": id}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"ok": true, "deleted": id})),
+    )
+        .into_response()
 }
 
 /// Tiny non-crypto random u64 for ID generation (xorshift).
 fn rand_u64() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let mut x = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos() as u64).unwrap_or(12345);
-    x ^= x << 13; x ^= x >> 7; x ^= x << 17; x
+    let mut x = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(12345);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
 }
-
-
 
 /// POST /api/config — hot-reload the server configuration.
 ///
@@ -2878,21 +3655,33 @@ async fn api_post_config(
     Json(new_cfg): Json<ServerConfig>,
 ) -> impl IntoResponse {
     let st = s.read().unwrap();
-    if let Err(e) = verify_auth_token(&st, &headers) { return e.into_response(); }
+    if let Err(e) = verify_auth_token(&st, &headers) {
+        return e.into_response();
+    }
     let reload_tx = st.config_reload_tx.clone();
     drop(st);
 
     let Some(tx) = reload_tx else {
-        return (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"config reload channel unavailable"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"config reload channel unavailable"})),
+        )
+            .into_response();
     };
     match tx.try_send(new_cfg) {
-        Ok(_) => (StatusCode::ACCEPTED, Json(serde_json::json!({
-            "status": "accepted",
-            "note": "live fields applied; port/identity changes require restart"
-        }))).into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error":"reload channel full or closed"}))).into_response(),
+        Ok(_) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "accepted",
+                "note": "live fields applied; port/identity changes require restart"
+            })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"reload channel full or closed"})),
+        )
+            .into_response(),
     }
 }
 
@@ -2901,15 +3690,21 @@ async fn api_post_config(
 /// Spawn a background task that listens for SIGHUP and sends reloaded config into the
 /// config_reload channel. On non-Unix platforms, does nothing.
 fn spawn_sighup_handler(state: &AppState) {
-    let reload_tx = state.shared.read().ok()
+    let reload_tx = state
+        .shared
+        .read()
+        .ok()
         .and_then(|s| s.config_reload_tx.clone());
     if let Some(tx) = reload_tx {
         #[cfg(unix)]
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             let mut sig = match signal(SignalKind::hangup()) {
                 Ok(s) => s,
-                Err(e) => { eprintln!("⚠️  SIGHUP handler failed: {e}"); return; }
+                Err(e) => {
+                    eprintln!("⚠️  SIGHUP handler failed: {e}");
+                    return;
+                }
             };
             while sig.recv().await.is_some() {
                 eprintln!("🔄 SIGHUP — reloading config from disk");
@@ -2924,7 +3719,11 @@ fn spawn_sighup_handler(state: &AppState) {
 ///
 /// Called from the event loop on both SIGHUP and `POST /api/config`.
 /// Port/identity changes are logged as warnings but not applied.
-fn apply_config_hot_reload(state: &mut AppState, new_cfg: ServerConfig, world_config: &mut ServerConfig) {
+fn apply_config_hot_reload(
+    state: &mut AppState,
+    new_cfg: ServerConfig,
+    world_config: &mut ServerConfig,
+) {
     let mut changed = vec![];
 
     macro_rules! apply {
@@ -2955,8 +3754,10 @@ fn apply_config_hot_reload(state: &mut AppState, new_cfg: ServerConfig, world_co
 
     // Warn about fields that require restart
     if state.config.port != new_cfg.port {
-        state.log(format!("⚠️  [Config] port change ({} → {}) requires restart — ignored",
-            state.config.port, new_cfg.port));
+        state.log(format!(
+            "⚠️  [Config] port change ({} → {}) requires restart — ignored",
+            state.config.port, new_cfg.port
+        ));
     }
     if state.config.ws_port != new_cfg.ws_port {
         state.log("⚠️  [Config] ws_port change requires restart — ignored".to_string());
@@ -2971,7 +3772,10 @@ fn apply_config_hot_reload(state: &mut AppState, new_cfg: ServerConfig, world_co
     if changed.is_empty() {
         state.log("🔄 [Config] Hot-reload: no live fields changed".to_string());
     } else {
-        state.log(format!("🔄 [Config] Hot-reload applied: {}", changed.join(", ")));
+        state.log(format!(
+            "🔄 [Config] Hot-reload applied: {}",
+            changed.join(", ")
+        ));
     }
 }
 
@@ -2985,11 +3789,13 @@ fn apply_config_hot_reload(state: &mut AppState, new_cfg: ServerConfig, world_co
 ///
 /// This is called at startup and every 10 minutes from the event loop.
 async fn sync_keys_from_servers(state: &AppState) {
-    use metaverse_core::identity::KeyRecord;
     use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+    use metaverse_core::identity::KeyRecord;
 
     let known_servers = state.config.known_servers.clone();
-    if known_servers.is_empty() { return; }
+    if known_servers.is_empty() {
+        return;
+    }
 
     let db = match state.shared.read().ok().and_then(|s| s.key_db.clone()) {
         Some(db) => db,
@@ -3001,22 +3807,37 @@ async fn sync_keys_from_servers(state: &AppState) {
         .build()
     {
         Ok(c) => c,
-        Err(e) => { eprintln!("[ServerSync] Failed to create HTTP client: {}", e); return; }
+        Err(e) => {
+            eprintln!("[ServerSync] Failed to create HTTP client: {}", e);
+            return;
+        }
     };
 
     for server_url in &known_servers {
         let last_synced = db.get_last_synced_at(server_url);
-        let url = format!("{}/api/v1/sync/keys?since={}&limit=1000", server_url, last_synced);
+        let url = format!(
+            "{}/api/v1/sync/keys?since={}&limit=1000",
+            server_url, last_synced
+        );
 
         let response = match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
-            Ok(r) => { eprintln!("[ServerSync] {} returned {}", server_url, r.status()); continue; }
-            Err(e) => { eprintln!("[ServerSync] {} unreachable: {}", server_url, e); continue; }
+            Ok(r) => {
+                eprintln!("[ServerSync] {} returned {}", server_url, r.status());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[ServerSync] {} unreachable: {}", server_url, e);
+                continue;
+            }
         };
 
         let records: Vec<serde_json::Value> = match response.json().await {
             Ok(v) => v,
-            Err(e) => { eprintln!("[ServerSync] {} bad JSON: {}", server_url, e); continue; }
+            Err(e) => {
+                eprintln!("[ServerSync] {} bad JSON: {}", server_url, e);
+                continue;
+            }
         };
 
         let count = records.len();
@@ -3024,23 +3845,42 @@ async fn sync_keys_from_servers(state: &AppState) {
         let mut newest_at: i64 = last_synced;
 
         for rec in &records {
-            let Some(b64) = rec.get("record_b64").and_then(|v| v.as_str()) else { continue };
-            let Ok(bytes) = BASE64.decode(b64) else { continue };
-            let Ok(kr) = KeyRecord::from_bytes(&bytes) else { continue };
-            if !kr.verify_self_sig() { continue; }
+            let Some(b64) = rec.get("record_b64").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Ok(bytes) = BASE64.decode(b64) else {
+                continue;
+            };
+            let Ok(kr) = KeyRecord::from_bytes(&bytes) else {
+                continue;
+            };
+            if !kr.verify_self_sig() {
+                continue;
+            }
             let updated_at = rec.get("updated_at").and_then(|v| v.as_i64()).unwrap_or(0);
-            if updated_at > newest_at { newest_at = updated_at; }
+            if updated_at > newest_at {
+                newest_at = updated_at;
+            }
             let pid = kr.peer_id.to_base58();
             let ktype = format!("{:?}", kr.key_type);
-            db.upsert(&pid, &bytes, &ktype, kr.display_name.as_deref(),
-                kr.created_at as i64, kr.updated_at as i64, kr.revoked);
+            db.upsert(
+                &pid,
+                &bytes,
+                &ktype,
+                kr.display_name.as_deref(),
+                kr.created_at as i64,
+                kr.updated_at as i64,
+                kr.revoked,
+            );
             imported += 1;
         }
 
         if count > 0 {
             db.update_server_sync(server_url, newest_at, imported);
-            eprintln!("[ServerSync] {} — imported {}/{} records (newest_at={})",
-                server_url, imported, count, newest_at);
+            eprintln!(
+                "[ServerSync] {} — imported {}/{} records (newest_at={})",
+                server_url, imported, count, newest_at
+            );
         }
     }
 }
@@ -3052,7 +3892,9 @@ async fn sync_keys_from_servers(state: &AppState) {
 /// `server_sync.content_last_synced_at`.
 async fn sync_content_from_servers(state: &AppState) {
     let known_servers = state.config.known_servers.clone();
-    if known_servers.is_empty() { return; }
+    if known_servers.is_empty() {
+        return;
+    }
 
     let db = match state.shared.read().ok().and_then(|s| s.key_db.clone()) {
         Some(db) => db,
@@ -3064,36 +3906,55 @@ async fn sync_content_from_servers(state: &AppState) {
         .build()
     {
         Ok(c) => c,
-        Err(e) => { eprintln!("[ContentSync] Failed to create HTTP client: {}", e); return; }
+        Err(e) => {
+            eprintln!("[ContentSync] Failed to create HTTP client: {}", e);
+            return;
+        }
     };
 
     for server_url in &known_servers {
         let last_synced = db.get_content_last_synced_at(server_url);
-        let url = format!("{}/api/v1/sync/content?since={}&limit=100", server_url, last_synced);
+        let url = format!(
+            "{}/api/v1/sync/content?since={}&limit=100",
+            server_url, last_synced
+        );
 
         let response = match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
-            Ok(r) => { eprintln!("[ContentSync] {} returned {}", server_url, r.status()); continue; }
-            Err(e) => { eprintln!("[ContentSync] {} unreachable: {}", server_url, e); continue; }
+            Ok(r) => {
+                eprintln!("[ContentSync] {} returned {}", server_url, r.status());
+                continue;
+            }
+            Err(e) => {
+                eprintln!("[ContentSync] {} unreachable: {}", server_url, e);
+                continue;
+            }
         };
 
         let items: Vec<metaverse_core::meshsite::ContentItem> = match response.json().await {
             Ok(v) => v,
-            Err(e) => { eprintln!("[ContentSync] {} bad JSON: {}", server_url, e); continue; }
+            Err(e) => {
+                eprintln!("[ContentSync] {} bad JSON: {}", server_url, e);
+                continue;
+            }
         };
 
         let count = items.len();
         let mut newest_at: i64 = last_synced;
 
         for item in &items {
-            if item.created_at as i64 > newest_at { newest_at = item.created_at as i64; }
+            if item.created_at as i64 > newest_at {
+                newest_at = item.created_at as i64;
+            }
             db.insert_content(item);
         }
 
         if count > 0 {
             db.update_content_sync(server_url, newest_at);
-            eprintln!("[ContentSync] {} — imported {} items (newest_at={})",
-                server_url, count, newest_at);
+            eprintln!(
+                "[ContentSync] {} — imported {} items (newest_at={})",
+                server_url, count, newest_at
+            );
         }
     }
 }
@@ -3106,39 +3967,47 @@ async fn web_root() -> Html<&'static str> {
 
 async fn web_api_status(State(s): State<WebState>) -> impl IntoResponse {
     let st = s.read().unwrap();
-    let _ram_pct = if st.ram_total_mb > 0 { st.ram_used_mb as f32 / st.ram_total_mb as f32 * 100.0 } else { 0.0 };
+    let _ram_pct = if st.ram_total_mb > 0 {
+        st.ram_used_mb as f32 / st.ram_total_mb as f32 * 100.0
+    } else {
+        0.0
+    };
     let status = NodeStatus {
-        node_name:        st.node_name.clone(),
-        node_type:        st.node_type.clone(),
-        version:          st.version.clone(),
-        peer_id:          st.local_peer_id.clone(),
-        public_ip:        st.public_ip.clone(),
-        p2p_port:         st.relay_port,
-        web_port:         st.web_port,
-        uptime_secs:      st.uptime_secs,
-        peers:            st.peers.iter().map(|p| PeerSummary {
-                              peer_id:        p.peer_id.clone(),
-                              peer_type:      p.peer_type.clone(),
-                              addr:           p.addr.clone(),
-                              connected_secs: p.connected_secs,
-                          }).collect(),
-        circuit_count:    st.circuit_count,
+        node_name: st.node_name.clone(),
+        node_type: st.node_type.clone(),
+        version: st.version.clone(),
+        peer_id: st.local_peer_id.clone(),
+        public_ip: st.public_ip.clone(),
+        p2p_port: st.relay_port,
+        web_port: st.web_port,
+        uptime_secs: st.uptime_secs,
+        peers: st
+            .peers
+            .iter()
+            .map(|p| PeerSummary {
+                peer_id: p.peer_id.clone(),
+                peer_type: p.peer_type.clone(),
+                addr: p.addr.clone(),
+                connected_secs: p.connected_secs,
+            })
+            .collect(),
+        circuit_count: st.circuit_count,
         total_connections: st.total_connections,
-        dht_peer_count:   st.dht_peer_count,
-        gossip_msgs_in:   st.net.gossip_msgs_in,
-        gossip_msgs_out:  st.net.gossip_msgs_out,
-        bytes_in:         st.net.bytes_in,
-        bytes_out:        st.net.bytes_out,
-        cpu_pct:          st.cpu_pct,
-        ram_used_mb:      st.ram_used_mb,
-        ram_total_mb:     st.ram_total_mb,
-        shedding:         st.shedding_relay,
+        dht_peer_count: st.dht_peer_count,
+        gossip_msgs_in: st.net.gossip_msgs_in,
+        gossip_msgs_out: st.net.gossip_msgs_out,
+        bytes_in: st.net.bytes_in,
+        bytes_out: st.net.bytes_out,
+        cpu_pct: st.cpu_pct,
+        ram_used_mb: st.ram_used_mb,
+        ram_total_mb: st.ram_total_mb,
+        shedding: st.shedding_relay,
         update_available: st.update_available.clone(),
-        extra:            serde_json::json!({
-                              "key_count": st.key_count,
-                              "world":     serde_json::to_value(&st.world).unwrap_or_default(),
-                              "recent_activity": st.recent_logs.iter().rev().take(12).cloned().collect::<Vec<_>>(),
-                          }),
+        extra: serde_json::json!({
+            "key_count": st.key_count,
+            "world":     serde_json::to_value(&st.world).unwrap_or_default(),
+            "recent_activity": st.recent_logs.iter().rev().take(12).cloned().collect::<Vec<_>>(),
+        }),
     };
     drop(st);
     Json(status)
@@ -3154,8 +4023,14 @@ async fn web_api_config(State(s): State<WebState>) -> impl IntoResponse {
     let st = s.read().unwrap().clone();
     let mut headers = HeaderMap::new();
     headers.insert("Content-Type", "application/json".parse().unwrap());
-    (StatusCode::OK, headers, format!("{{\"node_name\":\"{}\",\"node_type\":\"{}\",\"priority_score\":{},\"version\":\"{}\"}}",
-        st.node_name, st.node_type, 0u32, st.version))
+    (
+        StatusCode::OK,
+        headers,
+        format!(
+            "{{\"node_name\":\"{}\",\"node_type\":\"{}\",\"priority_score\":{},\"version\":\"{}\"}}",
+            st.node_name, st.node_type, 0u32, st.version
+        ),
+    )
 }
 
 async fn web_api_health() -> impl IntoResponse {
@@ -3211,16 +4086,16 @@ async fn web_api_diag_osm(
 async fn admin_tiles_stats(State(s): State<WebState>) -> impl IntoResponse {
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        match ts {
-            Some(t) => serde_json::json!({
-                "osm":     t.osm_count(),
-                "srtm":    t.srtm_count(),
-                "terrain": t.terrain_count(),
-            }),
-            None => serde_json::json!({"error": "tile store not available"}),
-        }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+    let result = tokio::task::spawn_blocking(move || match ts {
+        Some(t) => serde_json::json!({
+            "osm":     t.osm_count(),
+            "srtm":    t.srtm_count(),
+            "terrain": t.terrain_count(),
+        }),
+        None => serde_json::json!({"error": "tile store not available"}),
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result)
 }
 
@@ -3228,19 +4103,19 @@ async fn admin_tiles_stats(State(s): State<WebState>) -> impl IntoResponse {
 async fn admin_tiles_verify(State(s): State<WebState>) -> impl IntoResponse {
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        match ts {
-            Some(t) => {
-                let (osm_ok, osm_corrupt) = t.verify_cf("osm");
-                let (srtm_ok, srtm_corrupt) = t.verify_cf("srtm");
-                serde_json::json!({
-                    "osm":  { "ok": osm_ok,  "corrupt": osm_corrupt },
-                    "srtm": { "ok": srtm_ok, "corrupt": srtm_corrupt },
-                })
-            }
-            None => serde_json::json!({"error": "tile store not available"}),
+    let result = tokio::task::spawn_blocking(move || match ts {
+        Some(t) => {
+            let (osm_ok, osm_corrupt) = t.verify_cf("osm");
+            let (srtm_ok, srtm_corrupt) = t.verify_cf("srtm");
+            serde_json::json!({
+                "osm":  { "ok": osm_ok,  "corrupt": osm_corrupt },
+                "srtm": { "ok": srtm_ok, "corrupt": srtm_corrupt },
+            })
         }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+        None => serde_json::json!({"error": "tile store not available"}),
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result)
 }
 
@@ -3250,20 +4125,24 @@ async fn admin_tiles_purge_cf(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let cf = params.get("cf").cloned().unwrap_or_default();
-    if cf.is_empty() || !["osm","srtm","terrain"].contains(&cf.as_str()) {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "cf must be osm|srtm|terrain"}))).into_response();
+    if cf.is_empty() || !["osm", "srtm", "terrain"].contains(&cf.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "cf must be osm|srtm|terrain"})),
+        )
+            .into_response();
     }
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        match ts {
-            Some(t) => {
-                let _ = t.purge_cf(&cf);
-                serde_json::json!({"purged": cf, "ok": true})
-            }
-            None => serde_json::json!({"error": "tile store not available"}),
+    let result = tokio::task::spawn_blocking(move || match ts {
+        Some(t) => {
+            let _ = t.purge_cf(&cf);
+            serde_json::json!({"purged": cf, "ok": true})
         }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+        None => serde_json::json!({"error": "tile store not available"}),
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result).into_response()
 }
 
@@ -3279,16 +4158,25 @@ async fn admin_tiles_delete_osm(
         params.get("e").and_then(|x| x.parse::<f64>().ok()),
     ) {
         (Some(s), Some(w), Some(n), Some(e)) => (s, w, n, e),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"s,w,n,e required"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"s,w,n,e required"})),
+            )
+                .into_response();
+        }
     };
     let ts = s.read().unwrap().tile_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        match ts {
-            Some(t) => { t.delete_osm(sv, wv, nv, ev); serde_json::json!({"deleted": true}) }
-            None => serde_json::json!({"error": "tile store not available"}),
+    let result = tokio::task::spawn_blocking(move || match ts {
+        Some(t) => {
+            t.delete_osm(sv, wv, nv, ev);
+            serde_json::json!({"deleted": true})
         }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+        None => serde_json::json!({"error": "tile store not available"}),
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result).into_response()
 }
 
@@ -3300,7 +4188,9 @@ async fn admin_world_stats(State(s): State<WebState>) -> impl IntoResponse {
         let ws = ws.or_else(|| {
             let wd = std::path::PathBuf::from(&world_dir);
             let p = wd.join("world.db");
-            metaverse_core::world_store::WorldStore::open(&p, &wd).ok().map(std::sync::Arc::new)
+            metaverse_core::world_store::WorldStore::open(&p, &wd)
+                .ok()
+                .map(std::sync::Arc::new)
         });
         match ws {
             Some(w) => serde_json::json!({
@@ -3310,7 +4200,9 @@ async fn admin_world_stats(State(s): State<WebState>) -> impl IntoResponse {
             }),
             None => serde_json::json!({"error": "world store not available"}),
         }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result)
 }
 
@@ -3325,7 +4217,13 @@ async fn admin_world_ops(
         params.get("cz").and_then(|x| x.parse::<i32>().ok()),
     ) {
         (Some(x), Some(y), Some(z)) => (x, y, z),
-        _ => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"cx,cy,cz required"}))).into_response(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"cx,cy,cz required"})),
+            )
+                .into_response();
+        }
     };
     let ws = s.read().unwrap().world_store.clone();
     let world_dir = s.read().unwrap().world_dir.clone();
@@ -3333,7 +4231,9 @@ async fn admin_world_ops(
         let ws = ws.or_else(|| {
             let wd = std::path::PathBuf::from(&world_dir);
             let p = wd.join("world.db");
-            metaverse_core::world_store::WorldStore::open(&p, &wd).ok().map(std::sync::Arc::new)
+            metaverse_core::world_store::WorldStore::open(&p, &wd)
+                .ok()
+                .map(std::sync::Arc::new)
         });
         match ws {
             Some(w) => {
@@ -3342,7 +4242,9 @@ async fn admin_world_ops(
             }
             None => serde_json::json!({"error": "world store not available"}),
         }
-    }).await.unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
+    })
+    .await
+    .unwrap_or_else(|_| serde_json::json!({"error": "task failed"}));
     Json(result).into_response()
 }
 
@@ -3357,7 +4259,11 @@ async fn web_api_keys(
             let filter = params.get("type").map(|s| s.as_str());
             Json(db.list(filter)).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry not available"})),
+        )
+            .into_response(),
     }
 }
 
@@ -3366,7 +4272,11 @@ async fn web_api_keys_relays(State(s): State<WebState>) -> impl IntoResponse {
     let st = s.read().unwrap();
     match &st.key_db {
         Some(db) => Json(db.list(Some("Relay"))).into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry not available"})),
+        )
+            .into_response(),
     }
 }
 
@@ -3375,7 +4285,11 @@ async fn web_api_keys_servers(State(s): State<WebState>) -> impl IntoResponse {
     let st = s.read().unwrap();
     match &st.key_db {
         Some(db) => Json(db.list(Some("Server"))).into_response(),
-        None => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry not available"})),
+        )
+            .into_response(),
     }
 }
 
@@ -3405,16 +4319,25 @@ async fn web_api_key_by_id(
                             });
                             Json(json).into_response()
                         }
-                        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR,
-                                   Json(serde_json::json!({"error":"failed to deserialise record"}))).into_response(),
+                        Err(_) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error":"failed to deserialise record"})),
+                        )
+                            .into_response(),
                     }
                 }
-                None => (StatusCode::NOT_FOUND,
-                         Json(serde_json::json!({"error":"peer not found"}))).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error":"peer not found"})),
+                )
+                    .into_response(),
             }
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-                 Json(serde_json::json!({"error":"key registry not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"key registry not available"})),
+        )
+            .into_response(),
     }
 }
 
@@ -3429,10 +4352,10 @@ async fn web_api_key_by_id(
 #[derive(serde::Deserialize)]
 struct QuickPost {
     section: String,
-    title:   String,
-    body:    String,
+    title: String,
+    body: String,
     #[serde(default)]
-    author:  String,
+    author: String,
 }
 async fn api_v1_quick_post(
     State(s): State<WebState>,
@@ -3440,17 +4363,26 @@ async fn api_v1_quick_post(
 ) -> impl IntoResponse {
     use metaverse_core::meshsite::{ContentItem, Section, topic_for_section};
 
-    let section = match Section::from_str(&payload.section) {
-        Some(s) => s,
-        None => return (StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error":"unknown section (forums|wiki|marketplace|post)"}))).into_response(),
-    };
+    let section =
+        match Section::from_str(&payload.section) {
+            Some(s) => s,
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"unknown section (forums|wiki|marketplace|post)"})),
+            )
+                .into_response(),
+        };
     if payload.title.is_empty() || payload.body.is_empty() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"title and body required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"title and body required"})),
+        )
+            .into_response();
     }
     let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
     let author = if payload.author.is_empty() {
         s.read().unwrap().local_peer_id.clone()
     } else {
@@ -3469,15 +4401,21 @@ async fn api_v1_quick_post(
     item.id = item.compute_id();
 
     let topic = topic_for_section(&item.section).to_string();
-    let data  = item.to_bytes();
-    let id    = item.id.clone();
+    let data = item.to_bytes();
+    let id = item.id.clone();
     let st = s.read().unwrap();
 
     if let Some(ref tx) = st.gossip_tx {
-        let _ = tx.try_send(GossipCommand::Publish { topic, data: data.clone() });
+        let _ = tx.try_send(GossipCommand::Publish {
+            topic,
+            data: data.clone(),
+        });
     }
     if let Some(ref tx) = st.swarm_tx {
-        let _ = tx.send(SwarmAction::PutDhtRecord { key: item.dht_key(), value: data });
+        let _ = tx.send(SwarmAction::PutDhtRecord {
+            key: item.dht_key(),
+            value: data,
+        });
     }
 
     (StatusCode::CREATED,
@@ -3498,31 +4436,48 @@ async fn api_v1_post_content(
 
     let item = match payload.into_item() {
         Some(i) => i,
-        None => return (StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error":"invalid section or signature hex"}))).into_response(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"invalid section or signature hex"})),
+            )
+                .into_response();
+        }
     };
 
     if !item.id_valid() {
-        return (StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error":"id mismatch — recompute sha256 of canonical fields"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"id mismatch — recompute sha256 of canonical fields"})),
+        )
+            .into_response();
     }
 
     let st = s.read().unwrap();
     let topic = topic_for_section(&item.section).to_string();
-    let data  = item.to_bytes();
-    let id    = item.id.clone();
+    let data = item.to_bytes();
+    let id = item.id.clone();
 
     // Publish to gossipsub — the mesh distributes it; our own handler will store it
     if let Some(ref tx) = st.gossip_tx {
-        let _ = tx.try_send(GossipCommand::Publish { topic, data: data.clone() });
+        let _ = tx.try_send(GossipCommand::Publish {
+            topic,
+            data: data.clone(),
+        });
     }
     // Also put to DHT for offline/late-join persistence
     if let Some(ref tx) = st.swarm_tx {
-        let _ = tx.send(SwarmAction::PutDhtRecord { key: item.dht_key(), value: data });
+        let _ = tx.send(SwarmAction::PutDhtRecord {
+            key: item.dht_key(),
+            value: data,
+        });
     }
 
-    (StatusCode::ACCEPTED,
-     Json(serde_json::json!({"id": id, "status": "published to mesh"}))).into_response()
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"id": id, "status": "published to mesh"})),
+    )
+        .into_response()
 }
 
 /// GET /api/v1/content?section=forums  — list items in a section.
@@ -3530,23 +4485,34 @@ async fn api_v1_list_content(
     State(s): State<WebState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let section = params.get("section").map(|s| s.as_str()).unwrap_or("forums");
+    let section = params
+        .get("section")
+        .map(|s| s.as_str())
+        .unwrap_or("forums");
     let st = s.read().unwrap();
     match &st.key_db {
         Some(db) => {
             let items = db.list_content(section);
-            let json: Vec<_> = items.iter().map(|i| serde_json::json!({
-                "id":         i.id,
-                "section":    i.section.as_str(),
-                "title":      i.title,
-                "body":       i.body,
-                "author":     i.author,
-                "created_at": i.created_at,
-            })).collect();
+            let json: Vec<_> = items
+                .iter()
+                .map(|i| {
+                    serde_json::json!({
+                        "id":         i.id,
+                        "section":    i.section.as_str(),
+                        "title":      i.title,
+                        "body":       i.body,
+                        "author":     i.author,
+                        "created_at": i.created_at,
+                    })
+                })
+                .collect();
             Json(json).into_response()
         }
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"content store not available"})),
+        )
+            .into_response(),
     }
 }
 
@@ -3565,29 +4531,42 @@ async fn api_v1_get_content(
                 "body":       item.body,
                 "author":     item.author,
                 "created_at": item.created_at,
-            })).into_response(),
-            None => (StatusCode::NOT_FOUND,
-                     Json(serde_json::json!({"error":"not found"}))).into_response(),
+            }))
+            .into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":"not found"})),
+            )
+                .into_response(),
         },
-        None => (StatusCode::SERVICE_UNAVAILABLE,
-                 Json(serde_json::json!({"error":"content store not available"}))).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"content store not available"})),
+        )
+            .into_response(),
     }
 }
-
-
 
 // ─── Public IP detection ─────────────────────────────────────────────────────
 
 async fn detect_public_ip() -> String {
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(5)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
         Ok(c) => c,
         Err(_) => return "unknown".to_string(),
     };
-    for url in &["https://api.ipify.org", "https://ipv4.icanhazip.com", "https://checkip.amazonaws.com"] {
+    for url in &[
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ] {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
                 let ip = text.trim().to_string();
-                if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                {
                     return ip;
                 }
             }
@@ -3614,15 +4593,13 @@ struct WorldSystems {
 impl WorldSystems {
     fn new(config: &ServerConfig) -> Option<Self> {
         use metaverse_core::{
-            chunk_manager::ChunkManager,
-            coordinates::GPS,
-            elevation::ElevationPipeline,
-            terrain::TerrainGenerator,
-            user_content::UserContentLayer,
-            voxel::VoxelCoord,
+            chunk_manager::ChunkManager, coordinates::GPS, elevation::ElevationPipeline,
+            terrain::TerrainGenerator, user_content::UserContentLayer, voxel::VoxelCoord,
         };
 
-        let world_dir = config.world_dir.as_deref()
+        let world_dir = config
+            .world_dir
+            .as_deref()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("world_data"));
         std::fs::create_dir_all(&world_dir).ok()?;
@@ -3662,7 +4639,8 @@ impl WorldSystems {
         let origin_ecef = origin_gps.to_ecef();
         let origin_voxel = VoxelCoord::from_ecef(&origin_ecef);
         let elevation = ElevationPipeline::new(); // no API key on server by default
-        let terrain_gen = TerrainGenerator::new(elevation, origin_gps, origin_voxel);
+        let terrain_gen =
+            TerrainGenerator::new(elevation, origin_gps, origin_voxel).without_vegetation();
 
         let chunk_manager = ChunkManager::new(terrain_gen, user_content.lock().unwrap().clone());
 
@@ -3679,7 +4657,11 @@ impl WorldSystems {
     fn tick(&mut self, config: &ServerConfig) {
         // No proactive chunk loading — server only loads chunks on client request.
         let data_mb = world_data_size_mb(&self.world_dir);
-        let max_mb = if config.max_world_data_gb == 0 { f64::INFINITY } else { config.max_world_data_gb as f64 * 1024.0 };
+        let max_mb = if config.max_world_data_gb == 0 {
+            f64::INFINITY
+        } else {
+            config.max_world_data_gb as f64 * 1024.0
+        };
         let shedding = data_mb > max_mb * 0.95;
         let total_ops = self.user_content.lock().unwrap().op_count() as u64;
 
@@ -3696,7 +4678,12 @@ impl WorldSystems {
 
         // Periodic save
         if self.last_save.elapsed().as_secs() >= config.world_save_interval_secs {
-            if let Err(e) = self.user_content.lock().unwrap().save_chunks(&self.world_dir) {
+            if let Err(e) = self
+                .user_content
+                .lock()
+                .unwrap()
+                .save_chunks(&self.world_dir)
+            {
                 eprintln!("⚠️  World save failed: {}", e);
             }
             self.last_save = Instant::now();
@@ -3704,7 +4691,11 @@ impl WorldSystems {
     }
 
     fn shutdown(&mut self) {
-        let _ = self.user_content.lock().unwrap().save_chunks(&self.world_dir);
+        let _ = self
+            .user_content
+            .lock()
+            .unwrap()
+            .save_chunks(&self.world_dir);
     }
 }
 
@@ -3715,8 +4706,8 @@ fn publish_node_capabilities(
     config: &ServerConfig,
     swarm: &mut libp2p::Swarm<ServerBehaviour>,
 ) {
+    use libp2p::kad::{Quorum, Record, RecordKey};
     use metaverse_core::node_capabilities::NodeCapabilities;
-    use libp2p::kad::{Record, RecordKey, Quorum};
 
     let caps = NodeCapabilities::for_server(config.max_world_data_gb as u64, config.always_on);
     let key = NodeCapabilities::dht_key(peer_id_str);
@@ -3727,7 +4718,11 @@ fn publish_node_capabilities(
         publisher: None,
         expires: None,
     };
-    if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+    if let Err(e) = swarm
+        .behaviour_mut()
+        .kademlia
+        .put_record(record, Quorum::One)
+    {
         eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
     }
 }
@@ -3756,12 +4751,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let check = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             metaverse_core::autoupdate::check_for_update(&repo, current),
-        ).await;
+        )
+        .await;
         if let Ok(Some((tag, url, _notes))) = check {
             eprintln!("🔄 Update available: {} — downloading…", tag);
             match metaverse_core::autoupdate::apply_update(&tag, &url).await {
                 Ok(()) => {} // apply_update does not return on success (exec-restart)
-                Err(e) => eprintln!("⚠️  Auto-update failed: {} — continuing with current version", e),
+                Err(e) => eprintln!(
+                    "⚠️  Auto-update failed: {} — continuing with current version",
+                    e
+                ),
             }
         }
     }
@@ -3776,7 +4775,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     {
         use std::io::Write;
-        match std::fs::OpenOptions::new().write(true).open("/proc/self/oom_score_adj") {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .open("/proc/self/oom_score_adj")
+        {
             Ok(mut f) => {
                 if f.write_all(b"-500\n").is_ok() {
                     println!("🛡️  OOM score set to -500 (swap preferred over kill)");
@@ -3787,11 +4789,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Identity
-    let identity_path = config.identity_file.as_ref()
+    let identity_path = config
+        .identity_file
+        .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("server.key"));
     if let Some(parent) = identity_path.parent() {
-        if !parent.as_os_str().is_empty() { std::fs::create_dir_all(parent)?; }
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
     }
 
     let local_key = if config.temp_identity {
@@ -3810,8 +4816,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Public IP
     let public_ip = if let Some(ref addr) = config.external_addr {
-        addr.split('/').find(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
-            .unwrap_or("?").to_string()
+        addr.split('/')
+            .find(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            .unwrap_or("?")
+            .to_string()
     } else {
         print!("🌐 Detecting public IP... ");
         let ip = detect_public_ip().await;
@@ -3826,12 +4834,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut swarm = SwarmBuilder::with_existing_identity(local_key.clone())
         .with_tokio()
-        .with_tcp(libp2p::tcp::Config::default().nodelay(true), libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_tcp(
+            libp2p::tcp::Config::default().nodelay(true),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
         .with_dns()?
         .with_websocket(
             (libp2p::tls::Config::new, libp2p::noise::Config::new),
             libp2p::yamux::Config::default,
-        ).await?
+        )
+        .await?
         .with_behaviour(|key: &identity::Keypair| {
             let peer_id = key.public().to_peer_id();
 
@@ -3841,7 +4854,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut mem_store_cfg = MemoryStoreConfig::default();
             mem_store_cfg.max_provided_keys = 10_000_000; // enough for millions of tiles
             let mut kademlia = kad::Behaviour::with_config(
-                peer_id, MemoryStore::with_config(peer_id, mem_store_cfg), kad_config,
+                peer_id,
+                MemoryStore::with_config(peer_id, mem_store_cfg),
+                kad_config,
             );
             kademlia.set_mode(Some(kad::Mode::Server));
 
@@ -3863,14 +4878,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut gossipsub = gossipsub::Behaviour::new(
                 gossipsub::MessageAuthenticity::Signed(key.clone()),
                 gossipsub_config,
-            ).expect("valid gossipsub");
+            )
+            .expect("valid gossipsub");
 
             // Subscribe to world data topics
             for topic in &[
-                "player-state", "voxel-ops", "chat",
-                "state-request", "state-response",
-                "chunk-terrain", "chunk-manifest",
-                "key-registry", "key-revocations",
+                "player-state",
+                "voxel-ops",
+                "chat",
+                "state-request",
+                "state-response",
+                "chunk-terrain",
+                "chunk-manifest",
+                "key-registry",
+                "key-revocations",
             ] {
                 let t = gossipsub::IdentTopic::new(*topic);
                 let _ = gossipsub.subscribe(&t);
@@ -3888,17 +4909,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .with_max_pending_incoming(Some(30))
                         .with_max_pending_outgoing(Some(30)),
                 ),
-                relay: relay::Behaviour::new(peer_id, relay::Config {
-                    max_reservations: max_circuits,
-                    max_circuits,
-                    max_circuit_duration,
-                    max_circuit_bytes,
-                    ..Default::default()
-                }),
+                relay: relay::Behaviour::new(
+                    peer_id,
+                    relay::Config {
+                        max_reservations: max_circuits,
+                        max_circuits,
+                        max_circuit_duration,
+                        max_circuit_bytes,
+                        ..Default::default()
+                    },
+                ),
                 ping: libp2p::ping::Behaviour::new(
                     libp2p::ping::Config::new()
                         .with_interval(Duration::from_secs(5))
-                        .with_timeout(Duration::from_secs(20))
+                        .with_timeout(Duration::from_secs(20)),
                 ),
                 kademlia,
                 identify,
@@ -3922,17 +4946,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}/ws", ws_port).parse()?)?;
 
     // Add external addresses
-    let ext_tcp = config.external_addr.clone()
+    let ext_tcp = config
+        .external_addr
+        .clone()
         .unwrap_or_else(|| format!("/ip4/{}/tcp/{}", public_ip, config.port));
     let ext_ws = format!("/ip4/{}/tcp/{}/ws", public_ip, ws_port);
-    if let Ok(a) = ext_tcp.parse::<Multiaddr>() { swarm.add_external_address(a); }
-    if let Ok(a) = ext_ws.parse::<Multiaddr>()  { swarm.add_external_address(a); }
+    if let Ok(a) = ext_tcp.parse::<Multiaddr>() {
+        swarm.add_external_address(a);
+    }
+    if let Ok(a) = ext_ws.parse::<Multiaddr>() {
+        swarm.add_external_address(a);
+    }
 
     // Dial peer relays
     for peer_addr in config.peers.clone() {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             if let Some(libp2p::multiaddr::Protocol::P2p(pid)) = addr.iter().last() {
-                swarm.behaviour_mut().kademlia.add_address(&pid, addr.clone());
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&pid, addr.clone());
             }
             match swarm.dial(addr) {
                 Ok(()) => println!("🔗 Dialing peer: {}", peer_addr),
@@ -3940,7 +4973,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
+    if !config.peers.is_empty() {
+        swarm.behaviour_mut().kademlia.bootstrap().ok();
+    }
 
     // Bootstrap from metaverse bootstrap file
     {
@@ -3956,9 +4991,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             http_rendezvous: Vec<String>,
         }
         #[derive(serde::Deserialize, Clone)]
-        struct BootstrapNodeFile { multiaddr: String }
+        struct BootstrapNodeFile {
+            multiaddr: String,
+        }
 
-        let dial_nodes = |nodes: &[BootstrapNodeFile], swarm: &mut libp2p::Swarm<ServerBehaviour>| {
+        let dial_nodes = |nodes: &[BootstrapNodeFile],
+                          swarm: &mut libp2p::Swarm<ServerBehaviour>| {
             for n in nodes {
                 if let Ok(addr) = n.multiaddr.parse::<Multiaddr>() {
                     let _ = swarm.dial(addr);
@@ -3987,7 +5025,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             tokio::spawn(async move {
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
-                    .build().unwrap_or_default();
+                    .build()
+                    .unwrap_or_default();
                 for url in &http_rendezvous_urls {
                     if let Ok(resp) = client.get(url).send().await {
                         if let Ok(text) = resp.text().await {
@@ -4005,7 +5044,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let db_path = PathBuf::from("key_registry.db");
         match KeyDatabase::open(&db_path) {
             Ok(db) => {
-                println!("🗄️  Key registry DB: {} ({} records)", db_path.display(), db.count());
+                println!(
+                    "🗄️  Key registry DB: {} ({} records)",
+                    db_path.display(),
+                    db.count()
+                );
                 Some(db)
             }
             Err(e) => {
@@ -4040,11 +5083,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (config_reload_tx, config_reload_rx) = tokio::sync::mpsc::channel::<ServerConfig>(8);
 
     // Shared state for web server
-    let world_dir_str = config.world_dir.clone().unwrap_or_else(|| "world_data".to_string());
+    let world_dir_str = config
+        .world_dir
+        .clone()
+        .unwrap_or_else(|| "world_data".to_string());
     let shared = Arc::new(RwLock::new(SharedState {
         local_peer_id: local_peer_id.to_string(),
         public_ip: public_ip.clone(),
-        node_name: config.node_name.clone().unwrap_or_else(|| "server".to_string()),
+        node_name: config
+            .node_name
+            .clone()
+            .unwrap_or_else(|| "server".to_string()),
         node_type: config.node_type.clone(),
         relay_port: config.port,
         web_port: config.web_port,
@@ -4088,31 +5137,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .route("/api/v1/keys", post(api_v1_post_keys))
                 .route("/api/v1/auth/challenge", post(api_v1_auth_challenge))
                 .route("/api/v1/auth/verify", post(api_v1_auth_verify))
-                .route("/api/v1/key-requests", post(api_v1_post_key_request).get(api_v1_list_key_requests))
-                .route("/api/v1/key-requests/:id/approve", post(api_v1_approve_key_request))
-                .route("/api/v1/key-requests/:id/deny", post(api_v1_deny_key_request))
-                .route("/api/v1/key-requests/:id/download", get(api_v1_download_key_request))
+                .route(
+                    "/api/v1/key-requests",
+                    post(api_v1_post_key_request).get(api_v1_list_key_requests),
+                )
+                .route(
+                    "/api/v1/key-requests/:id/approve",
+                    post(api_v1_approve_key_request),
+                )
+                .route(
+                    "/api/v1/key-requests/:id/deny",
+                    post(api_v1_deny_key_request),
+                )
+                .route(
+                    "/api/v1/key-requests/:id/download",
+                    get(api_v1_download_key_request),
+                )
                 .route("/api/v1/keys/:peer_id/revoke", post(api_v1_revoke_key))
                 .route("/api/v1/sync/keys", get(api_v1_sync_keys))
                 .route("/api/v1/sync/content", get(api_v1_sync_content))
                 // ── Meshsite content API ───────────────────────────────────
-                .route("/api/v1/content", post(api_v1_post_content).get(api_v1_list_content))
+                .route(
+                    "/api/v1/content",
+                    post(api_v1_post_content).get(api_v1_list_content),
+                )
                 .route("/api/v1/content/post", post(api_v1_quick_post))
                 .route("/api/v1/content/:id", get(api_v1_get_content))
                 // ── World placed objects (modular placement) ───────────────
-                .route("/api/v1/world/objects",
-                    get(api_v1_world_objects_get).post(api_v1_world_objects_post))
-                .route("/api/v1/world/objects/:id", axum::routing::delete(api_v1_world_objects_delete))
+                .route(
+                    "/api/v1/world/objects",
+                    get(api_v1_world_objects_get).post(api_v1_world_objects_post),
+                )
+                .route(
+                    "/api/v1/world/objects/:id",
+                    axum::routing::delete(api_v1_world_objects_delete),
+                )
                 // Config (GET = read, POST = hot-reload)
                 .route("/api/config", get(web_api_config).post(api_post_config))
                 .route("/api/diag/osm", get(web_api_diag_osm))
                 // Admin endpoints — tile cache and world DB management
-                .route("/api/admin/tiles/stats",       get(admin_tiles_stats))
-                .route("/api/admin/tiles/verify",      axum::routing::post(admin_tiles_verify))
-                .route("/api/admin/tiles/purge-cf",    axum::routing::post(admin_tiles_purge_cf))
-                .route("/api/admin/tiles/osm",         axum::routing::delete(admin_tiles_delete_osm))
-                .route("/api/admin/world/stats",       get(admin_world_stats))
-                .route("/api/admin/world/ops",         get(admin_world_ops))
+                .route("/api/admin/tiles/stats", get(admin_tiles_stats))
+                .route(
+                    "/api/admin/tiles/verify",
+                    axum::routing::post(admin_tiles_verify),
+                )
+                .route(
+                    "/api/admin/tiles/purge-cf",
+                    axum::routing::post(admin_tiles_purge_cf),
+                )
+                .route(
+                    "/api/admin/tiles/osm",
+                    axum::routing::delete(admin_tiles_delete_osm),
+                )
+                .route("/api/admin/world/stats", get(admin_world_stats))
+                .route("/api/admin/world/ops", get(admin_world_ops))
                 .with_state(web_shared);
             let bind_addr = format!("{}:{}", web_bind, web_port);
             println!("🌐 Web dashboard: http://{}/", bind_addr);
@@ -4125,7 +5203,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let mut app_state = AppState::new(
-        config, Arc::clone(&shared), local_peer_id.to_string(), public_ip, gossip_rx, swarm_web_rx, config_reload_rx,
+        config,
+        Arc::clone(&shared),
+        local_peer_id.to_string(),
+        public_ip,
+        gossip_rx,
+        swarm_web_rx,
+        config_reload_rx,
     );
 
     // Channel for terrain workers (or future callers) to send tile requests through the swarm.
@@ -4139,18 +5223,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
     app_state.log("✅ Metaverse server started");
     if let Some(ref err) = config_error {
         app_state.log(err.clone());
-        app_state.log("⚠️  Check server.json — strings must be quoted, e.g. \"node_name\": \"MyServer\"".to_string());
+        app_state.log(
+            "⚠️  Check server.json — strings must be quoted, e.g. \"node_name\": \"MyServer\""
+                .to_string(),
+        );
     }
     // Log effective config values so operator can confirm config is being read
-    app_state.log(format!("📋 Config: name={}, world_dir={}, srtm={}, api_key={}",
+    app_state.log(format!(
+        "📋 Config: name={}, world_dir={}, srtm={}, api_key={}",
         app_state.config.node_name.as_deref().unwrap_or("(none)"),
-        app_state.config.world_dir.as_deref().unwrap_or("world_data"),
-        if app_state.config.download_all_srtm { "enabled" } else { "disabled" },
-        if app_state.config.data.opentopography_api_key.is_empty() { "NOT SET" } else { "set" },
+        app_state
+            .config
+            .world_dir
+            .as_deref()
+            .unwrap_or("world_data"),
+        if app_state.config.download_all_srtm {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if app_state.config.data.opentopography_api_key.is_empty() {
+            "NOT SET"
+        } else {
+            "set"
+        },
     ));
     // Create world data directories up front so operators can see where data goes
     let world_data_root = std::path::PathBuf::from(
-        app_state.config.world_dir.as_deref().unwrap_or("world_data")
+        app_state
+            .config
+            .world_dir
+            .as_deref()
+            .unwrap_or("world_data"),
     );
     std::fs::create_dir_all(world_data_root.join("elevation_cache")).ok();
     std::fs::create_dir_all(world_data_root.join("osm")).ok();
@@ -4163,27 +5267,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match metaverse_core::tile_store::TileStore::open(&tiles_db_path) {
         Ok(ts) => {
             let ts = Arc::new(ts);
-            app_state.log(format!("🗄  TileStore opened ({} OSM, {} SRTM tiles)",
-                ts.osm_count(), ts.srtm_count()));
+            app_state.log(format!(
+                "🗄  TileStore opened ({} OSM, {} SRTM tiles)",
+                ts.osm_count(),
+                ts.srtm_count()
+            ));
             // Propagate to SharedState for web handlers
             shared.write().unwrap().tile_store = Some(Arc::clone(&ts));
             // Trigger background cleanup of old flat tile files (OSM .bin, SRTM .hgt/.tif)
             metaverse_core::tile_store::cleanup_old_tile_dir(&world_data_root.join("osm"));
-            metaverse_core::tile_store::cleanup_old_srtm_dir(&world_data_root.join("elevation_cache"));
+            metaverse_core::tile_store::cleanup_old_srtm_dir(
+                &world_data_root.join("elevation_cache"),
+            );
         }
         Err(e) => app_state.log(format!("⚠️  TileStore open failed: {e}")),
     }
     match metaverse_core::world_store::WorldStore::open(&world_db_path, &world_data_root) {
         Ok(ws) => {
             let ws = Arc::new(ws);
-            app_state.log(format!("🗄  WorldStore opened ({} ops, {} parcels)",
-                ws.op_count(), ws.parcel_count()));
+            app_state.log(format!(
+                "🗄  WorldStore opened ({} ops, {} parcels)",
+                ws.op_count(),
+                ws.parcel_count()
+            ));
             shared.write().unwrap().world_store = Some(Arc::clone(&ws));
             // Spawn 100ms flush loop for batched voxel op writes
             let ws_flush = Arc::clone(shared.read().unwrap().world_store.as_ref().unwrap());
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(
-                    tokio::time::Duration::from_millis(100));
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
                 loop {
                     interval.tick().await;
                     let flushed = ws_flush.flush_pending();
@@ -4204,32 +5315,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
             app_state.pending_dht_provide.push(cid.dht_key());
         }
         if count > 0 {
-            app_state.log(format!("📡 Queued DHT announcements for {} chunk(s)", count));
+            app_state.log(format!(
+                "📡 Queued DHT announcements for {} chunk(s)",
+                count
+            ));
         }
     }
     // Queue DHT provider announcements for cached OSM tiles from TileStore
     // Announce at 1°×1° granularity (not per-tile: millions of 0.01° keys would overflow any DHT)
     if let Some(ref ts) = shared.read().unwrap().tile_store {
         let coords = ts.iter_osm_coords();
-        let mut region_keys: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        let mut region_keys: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
         for (s, w, _n, _e) in coords {
             region_keys.insert((s.floor() as i32, w.floor() as i32));
         }
         let tile_count = region_keys.len();
         for (lat, lon) in region_keys {
-            app_state.pending_dht_provide.push(metaverse_core::osm::osm_dht_key(
-                lat as f64, lon as f64, lat as f64 + 1.0, lon as f64 + 1.0,
-            ));
+            app_state
+                .pending_dht_provide
+                .push(metaverse_core::osm::osm_dht_key(
+                    lat as f64,
+                    lon as f64,
+                    lat as f64 + 1.0,
+                    lon as f64 + 1.0,
+                ));
         }
         if tile_count > 0 {
-            app_state.log(format!("📡 Queued DHT announcements for {} OSM region(s)", tile_count));
+            app_state.log(format!(
+                "📡 Queued DHT announcements for {} OSM region(s)",
+                tile_count
+            ));
         }
     }
     // Queue DHT provider announcements for all cached elevation tiles
     {
         let elev_dir = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
-        ).join("elevation_cache");
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
+        )
+        .join("elevation_cache");
         let mut elev_count = 0usize;
         // Structure: elevation_cache/N{lat}/E{lon}/srtm_n{lat}_e{lon}.tif
         if let Ok(lat_dirs) = std::fs::read_dir(&elev_dir) {
@@ -4239,8 +5367,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     n.parse().unwrap_or(i32::MAX)
                 } else if let Some(s) = lat_name.strip_prefix('S') {
                     -(s.parse::<i32>().unwrap_or(i32::MAX))
-                } else { continue };
-                if lat == i32::MAX { continue; }
+                } else {
+                    continue;
+                };
+                if lat == i32::MAX {
+                    continue;
+                }
                 if let Ok(lon_dirs) = std::fs::read_dir(lat_entry.path()) {
                     for lon_entry in lon_dirs.flatten() {
                         let lon_name = lon_entry.file_name().to_string_lossy().to_string();
@@ -4248,39 +5380,67 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             e.parse().unwrap_or(i32::MAX)
                         } else if let Some(w) = lon_name.strip_prefix('W') {
                             -(w.parse::<i32>().unwrap_or(i32::MAX))
-                        } else { continue };
-                        if lon == i32::MAX { continue; }
-                        app_state.pending_dht_provide.push(metaverse_core::elevation::elevation_dht_key(lat, lon));
+                        } else {
+                            continue;
+                        };
+                        if lon == i32::MAX {
+                            continue;
+                        }
+                        app_state
+                            .pending_dht_provide
+                            .push(metaverse_core::elevation::elevation_dht_key(lat, lon));
                         elev_count += 1;
                     }
                 }
             }
         }
         if elev_count > 0 {
-            app_state.log(format!("📡 Queued DHT announcements for {} elevation tile(s)", elev_count));
+            app_state.log(format!(
+                "📡 Queued DHT announcements for {} elevation tile(s)",
+                elev_count
+            ));
         }
     }
     // Bulk download: download_on_start bboxes
     if !app_state.config.download_on_start.is_empty() {
         let bboxes = app_state.config.download_on_start.clone();
         let world_dir_pb = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
         );
         let endpoints = app_state.config.data.overpass_endpoints.clone();
         let elev_api_key = app_state.config.data.opentopography_api_key.clone();
         let prefetch_swarm_tx = shared.read().unwrap().swarm_tx.clone();
         let ts_bulk = shared.read().unwrap().tile_store.clone();
         tokio::spawn(async move {
-            bulk_download_task(bboxes, world_dir_pb, endpoints, elev_api_key, prefetch_swarm_tx, ts_bulk).await;
+            bulk_download_task(
+                bboxes,
+                world_dir_pb,
+                endpoints,
+                elev_api_key,
+                prefetch_swarm_tx,
+                ts_bulk,
+            )
+            .await;
         });
-        app_state.log(format!("📥 Bulk download: {} bbox(es) queued", app_state.config.download_on_start.len()));
+        app_state.log(format!(
+            "📥 Bulk download: {} bbox(es) queued",
+            app_state.config.download_on_start.len()
+        ));
     }
 
     // On-demand SRTM priority downloader — always active so clients can get tiles
     // even when global download hasn't reached that region yet.
     {
         let world_dir_srtm = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
         );
         let api_key = app_state.config.data.opentopography_api_key.clone();
         let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
@@ -4289,7 +5449,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (srtm_prio_tx, srtm_prio_rx) = tokio::sync::mpsc::channel::<(i32, i32)>(512);
         app_state.srtm_priority_tx = Some(srtm_prio_tx);
         tokio::spawn(async move {
-            download_srtm_on_demand_task(world_dir_srtm, api_key, srtm_prio_rx, swarm_tx_srtm, task_log_srtm, ts_srtm).await;
+            download_srtm_on_demand_task(
+                world_dir_srtm,
+                api_key,
+                srtm_prio_rx,
+                swarm_tx_srtm,
+                task_log_srtm,
+                ts_srtm,
+            )
+            .await;
         });
     }
 
@@ -4297,7 +5465,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // the server doesn't have (missing or stale version).  Always active.
     {
         let world_dir_osm = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
         );
         let swarm_tx_osm2 = shared.read().unwrap().swarm_tx.clone();
         let task_log_osm2 = Arc::clone(&shared.read().unwrap().task_log);
@@ -4305,32 +5477,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (osm_prio_tx, osm_prio_rx) = tokio::sync::mpsc::channel::<(f64, f64, f64, f64)>(512);
         app_state.osm_priority_tx = Some(osm_prio_tx);
         tokio::spawn(async move {
-            download_osm_on_demand_task(world_dir_osm, osm_prio_rx, swarm_tx_osm2, task_log_osm2, tile_store_osm).await;
+            download_osm_on_demand_task(
+                world_dir_osm,
+                osm_prio_rx,
+                swarm_tx_osm2,
+                task_log_osm2,
+                tile_store_osm,
+            )
+            .await;
         });
     }
 
     // Global SRTM download
-    if app_state.config.download_all_srtm && !app_state.config.data.opentopography_api_key.is_empty() {
+    if app_state.config.download_all_srtm
+        && !app_state.config.data.opentopography_api_key.is_empty()
+    {
         let world_dir_srtm = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
         );
         let api_key = app_state.config.data.opentopography_api_key.clone();
         let swarm_tx_srtm = shared.read().unwrap().swarm_tx.clone();
         let task_log_srtm = Arc::clone(&shared.read().unwrap().task_log);
         let ts_srtm_all = shared.read().unwrap().tile_store.clone();
         tokio::spawn(async move {
-            download_all_srtm_task(world_dir_srtm, api_key, swarm_tx_srtm, task_log_srtm, ts_srtm_all).await;
+            download_all_srtm_task(
+                world_dir_srtm,
+                api_key,
+                swarm_tx_srtm,
+                task_log_srtm,
+                ts_srtm_all,
+            )
+            .await;
         });
         app_state.log("📥 Global SRTM download started in background".to_string());
     } else if app_state.config.download_all_srtm {
-        app_state.log("⚠️  download_all_srtm=true but opentopography_api_key is not set — skipping".to_string());
+        app_state.log(
+            "⚠️  download_all_srtm=true but opentopography_api_key is not set — skipping"
+                .to_string(),
+        );
     }
 
     // PBF import (explicit path in config)
     if let Some(ref pbf_path) = app_state.config.data.osm_pbf_path.clone() {
         let pbf = std::path::PathBuf::from(pbf_path);
         let world_dir_pbf = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
         );
         let task_log_pbf = Arc::clone(&shared.read().unwrap().task_log);
         let ts_pbf = shared.read().unwrap().tile_store.clone();
@@ -4346,14 +5545,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let conv_lock: Arc<std::sync::Mutex<()>> = Arc::new(std::sync::Mutex::new(()));
     {
         let osm_dir = std::path::PathBuf::from(
-            app_state.config.world_dir.as_deref().unwrap_or("world_data")
-        ).join("osm");
+            app_state
+                .config
+                .world_dir
+                .as_deref()
+                .unwrap_or("world_data"),
+        )
+        .join("osm");
 
         // Count already-ready v7 tiles before triggering any conversion.
-        let ready_tiles = std::fs::read_dir(&osm_dir).ok()
-            .map(|entries| entries.flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("bin"))
-                .count())
+        let ready_tiles = std::fs::read_dir(&osm_dir)
+            .ok()
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("bin"))
+                    .count()
+            })
             .unwrap_or(0);
         app_state.log(format!("🗺  [OSM] {} tile(s) ready in cache", ready_tiles));
 
@@ -4377,24 +5585,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let ts_conv = shared.read().unwrap().tile_store.clone();
             let lock_c = Arc::clone(&conv_lock);
             let n_pbfs = pbfs_to_convert.len();
-            app_state.log(format!("🔄 [OSM] {} PBF file(s) queued for tile conversion (runs in background)", n_pbfs));
+            app_state.log(format!(
+                "🔄 [OSM] {} PBF file(s) queued for tile conversion (runs in background)",
+                n_pbfs
+            ));
             for (_, path) in pbfs_to_convert {
                 let task_log_cc = Arc::clone(&task_log_c);
                 let osm_dir_c = osm_dir.clone();
                 let lock_cc = Arc::clone(&lock_c);
                 let ts_c = ts_conv.clone();
-                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let fname = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 tokio::task::spawn_blocking(move || {
-                    { if let Ok(mut b) = task_log_cc.lock() { b.push(format!("🔄 [OSM] {} — starting tile conversion…", fname)); } }
+                    {
+                        if let Ok(mut b) = task_log_cc.lock() {
+                            b.push(format!("🔄 [OSM] {} — starting tile conversion…", fname));
+                        }
+                    }
                     let _guard = lock_cc.lock().unwrap(); // serialise: only one conversion at a time
                     let result = if let Some(ts) = ts_c {
-                        metaverse_core::osm::import_pbf_with_store(&path, ts, Some(Arc::clone(&task_log_cc)))
+                        metaverse_core::osm::import_pbf_with_store(
+                            &path,
+                            ts,
+                            Some(Arc::clone(&task_log_cc)),
+                        )
                     } else {
-                        metaverse_core::osm::import_pbf_with_log(&path, &osm_dir_c, Arc::clone(&task_log_cc))
+                        metaverse_core::osm::import_pbf_with_log(
+                            &path,
+                            &osm_dir_c,
+                            Arc::clone(&task_log_cc),
+                        )
                     };
                     match result {
-                        Ok(n) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("✅ [OSM] {} — {} new tile(s) written", fname, n)); } }
-                        Err(e) => { if let Ok(mut buf) = task_log_cc.lock() { buf.push(format!("❌ [OSM] {} conversion failed: {}", fname, e)); } }
+                        Ok(n) => {
+                            if let Ok(mut buf) = task_log_cc.lock() {
+                                buf.push(format!("✅ [OSM] {} — {} new tile(s) written", fname, n));
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(mut buf) = task_log_cc.lock() {
+                                buf.push(format!("❌ [OSM] {} conversion failed: {}", fname, e));
+                            }
+                        }
                     }
                 });
             }
@@ -4406,8 +5641,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Geofabrik OSM download — all continents or specific regions
     {
         const ALL_CONTINENTS: &[&str] = &[
-            "africa", "antarctica", "asia", "australia-oceania",
-            "central-america", "europe", "north-america", "south-america",
+            "africa",
+            "antarctica",
+            "asia",
+            "australia-oceania",
+            "central-america",
+            "europe",
+            "north-america",
+            "south-america",
         ];
         let mut regions = app_state.config.osm_download_regions.clone();
         if app_state.config.download_all_osm {
@@ -4419,21 +5660,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         if !regions.is_empty() {
             let world_dir_osm = std::path::PathBuf::from(
-                app_state.config.world_dir.as_deref().unwrap_or("world_data")
+                app_state
+                    .config
+                    .world_dir
+                    .as_deref()
+                    .unwrap_or("world_data"),
             );
             let task_log_osm = Arc::clone(&shared.read().unwrap().task_log);
             let swarm_tx_osm = shared.read().unwrap().swarm_tx.clone();
             let ts_osm = shared.read().unwrap().tile_store.clone();
-            app_state.log(format!("📥 Geofabrik OSM download started for {} region(s)", regions.len()));
+            app_state.log(format!(
+                "📥 Geofabrik OSM download started for {} region(s)",
+                regions.len()
+            ));
             let lock_osm = Arc::clone(&conv_lock);
             tokio::spawn(async move {
-                download_osm_regions_task(regions, world_dir_osm, swarm_tx_osm, task_log_osm, lock_osm, ts_osm).await;
+                download_osm_regions_task(
+                    regions,
+                    world_dir_osm,
+                    swarm_tx_osm,
+                    task_log_osm,
+                    lock_osm,
+                    ts_osm,
+                )
+                .await;
             });
         }
     }
 
     publish_node_capabilities(&local_peer_id.to_string(), &app_state.config, &mut swarm);
-    app_state.log(format!("📡 NodeCapabilities published (tier=server, always_on={})", app_state.config.always_on));
+    app_state.log(format!(
+        "📡 NodeCapabilities published (tier=server, always_on={})",
+        app_state.config.always_on
+    ));
 
     if headless {
         run_headless(swarm, app_state, world, tile_req_rx).await
@@ -4448,7 +5707,11 @@ async fn run_headless(
     mut swarm: libp2p::Swarm<ServerBehaviour>,
     mut state: AppState,
     mut world: Option<WorldSystems>,
-    mut tile_req_rx: tokio::sync::mpsc::Receiver<(PeerId, TileRequest, tokio::sync::oneshot::Sender<TileResponse>)>,
+    mut tile_req_rx: tokio::sync::mpsc::Receiver<(
+        PeerId,
+        TileRequest,
+        tokio::sync::oneshot::Sender<TileResponse>,
+    )>,
 ) -> Result<(), Box<dyn Error>> {
     let mut world_config = state.config.clone();
     let mut world_tick = tokio::time::interval(Duration::from_millis(50));
@@ -4606,16 +5869,25 @@ async fn run_tui(
     mut swarm: libp2p::Swarm<ServerBehaviour>,
     mut state: AppState,
     mut world: Option<WorldSystems>,
-    mut tile_req_rx: tokio::sync::mpsc::Receiver<(PeerId, TileRequest, tokio::sync::oneshot::Sender<TileResponse>)>,
+    mut tile_req_rx: tokio::sync::mpsc::Receiver<(
+        PeerId,
+        TileRequest,
+        tokio::sync::oneshot::Sender<TileResponse>,
+    )>,
 ) -> Result<(), Box<dyn Error>> {
     // Redirect stdout → server.log so worker println! doesn't corrupt the terminal.
     // Ratatui uses stderr, which stays clean.
-    let log_path = state.config.world_dir.as_deref()
+    let log_path = state
+        .config
+        .world_dir
+        .as_deref()
         .map(|d| format!("{}/server.log", d))
         .unwrap_or_else(|| "server.log".to_string());
     {
         let log_file = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&log_path)
+            .create(true)
+            .append(true)
+            .open(&log_path)
             .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
         #[cfg(unix)]
         unsafe {
@@ -4651,16 +5923,20 @@ async fn run_tui(
     {
         let tx = quit_tx.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut s) = signal(SignalKind::terminate()) {
-                if s.recv().await.is_some() { let _ = tx.send(()).await; }
+                if s.recv().await.is_some() {
+                    let _ = tx.send(()).await;
+                }
             }
         });
         let tx = quit_tx.clone();
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
             if let Ok(mut s) = signal(SignalKind::interrupt()) {
-                if s.recv().await.is_some() { let _ = tx.send(()).await; }
+                if s.recv().await.is_some() {
+                    let _ = tx.send(()).await;
+                }
             }
         });
     }
@@ -4837,22 +6113,45 @@ async fn download_srtm_on_demand_task(
 
     while let Some((lat, lon)) = rx.recv().await {
         // SRTM only covers lat -60..60
-        if lat < -60 || lat >= 60 { continue; }
-        if !seen.insert((lat, lon)) { continue; } // already downloaded or in-progress
+        if lat < -60 || lat >= 60 {
+            continue;
+        }
+        if !seen.insert((lat, lon)) {
+            continue;
+        } // already downloaded or in-progress
 
-        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-        let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
-            if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
-            if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
-        let hgt_name = format!("{}{:02}{}{:03}.hgt",
-            if lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
-            if lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
+        let lat_dir = if lat >= 0 {
+            format!("N{:02}", lat)
+        } else {
+            format!("S{:02}", lat.unsigned_abs())
+        };
+        let lon_dir = if lon >= 0 {
+            format!("E{:03}", lon)
+        } else {
+            format!("W{:03}", lon.unsigned_abs())
+        };
+        let tile_name = format!(
+            "srtm_{}{:02}_{}{:03}.tif",
+            if lat >= 0 { 'n' } else { 's' },
+            lat.unsigned_abs(),
+            if lon >= 0 { 'e' } else { 'w' },
+            lon.unsigned_abs()
+        );
+        let hgt_name = format!(
+            "{}{:02}{}{:03}.hgt",
+            if lat >= 0 { 'N' } else { 'S' },
+            lat.unsigned_abs(),
+            if lon >= 0 { 'E' } else { 'W' },
+            lon.unsigned_abs()
+        );
         let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
-        let hgt_path  = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
+        let hgt_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
 
-        let cached_ok = |p: &std::path::Path| p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024;
-        if cached_ok(&tile_path) || cached_ok(&hgt_path) { continue; }
+        let cached_ok =
+            |p: &std::path::Path| p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024;
+        if cached_ok(&tile_path) || cached_ok(&hgt_path) {
+            continue;
+        }
 
         let key_c = api_key.clone();
         let tp = tile_path.clone();
@@ -4925,17 +6224,45 @@ async fn download_srtm_on_demand_task(
 
         match result {
             Ok(Ok(src)) => {
-                tlog!("✅ [SRTM] On-demand: lat={} lon={} via {}", lat, lon, src.name());
+                tlog!(
+                    "✅ [SRTM] On-demand: lat={} lon={} via {}",
+                    lat,
+                    lon,
+                    src.name()
+                );
                 // Store downloaded tile in TileStore for fast serving and P2P distribution
                 if let Some(ref ts) = tile_store {
-                    let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
-                    let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-                    let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-                    let tif_name = format!("srtm_{}{:02}_{}{:03}.tif", ns.to_lowercase().chars().next().unwrap(), lat.unsigned_abs(), ew.to_lowercase().chars().next().unwrap(), lon.unsigned_abs());
-                    let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, lat.unsigned_abs(), ew, lon.unsigned_abs());
+                    let ns = if lat >= 0 { "N" } else { "S" };
+                    let ew = if lon >= 0 { "E" } else { "W" };
+                    let lat_dir = if lat >= 0 {
+                        format!("N{:02}", lat)
+                    } else {
+                        format!("S{:02}", lat.unsigned_abs())
+                    };
+                    let lon_dir = if lon >= 0 {
+                        format!("E{:03}", lon)
+                    } else {
+                        format!("W{:03}", lon.unsigned_abs())
+                    };
+                    let tif_name = format!(
+                        "srtm_{}{:02}_{}{:03}.tif",
+                        ns.to_lowercase().chars().next().unwrap(),
+                        lat.unsigned_abs(),
+                        ew.to_lowercase().chars().next().unwrap(),
+                        lon.unsigned_abs()
+                    );
+                    let hgt_name = format!(
+                        "{}{:02}{}{:03}.hgt",
+                        ns,
+                        lat.unsigned_abs(),
+                        ew,
+                        lon.unsigned_abs()
+                    );
                     let tif_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tif_name);
                     let hgt_path2 = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
-                    if let Ok(bytes) = std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2)) {
+                    if let Ok(bytes) =
+                        std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2))
+                    {
                         ts.put_srtm(lat, lon, &bytes);
                     }
                 }
@@ -4979,36 +6306,66 @@ async fn download_all_srtm_task(
     let mut errors = 0u32;
     let mut processed = 0u32;
 
-    tlog!("📥 [SRTM] Starting global download: {} tiles (lat -60..60, all lon)", total_tiles);
-    tlog!("ℹ️  [SRTM] Sources: OpenTopography (key) → Copernicus DEM AWS → AWS Terrain Tiles (skadi)");
+    tlog!(
+        "📥 [SRTM] Starting global download: {} tiles (lat -60..60, all lon)",
+        total_tiles
+    );
+    tlog!(
+        "ℹ️  [SRTM] Sources: OpenTopography (key) → Copernicus DEM AWS → AWS Terrain Tiles (skadi)"
+    );
 
     let mut opentopo_rate_limited_until: Option<std::time::Instant> = None;
 
     for lat in -60i32..60 {
         for lon in -180i32..180 {
-            let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-            let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
-                if lat >= 0 { 'n' } else { 's' }, lat.unsigned_abs(),
-                if lon >= 0 { 'e' } else { 'w' }, lon.unsigned_abs());
+            let lat_dir = if lat >= 0 {
+                format!("N{:02}", lat)
+            } else {
+                format!("S{:02}", lat.unsigned_abs())
+            };
+            let lon_dir = if lon >= 0 {
+                format!("E{:03}", lon)
+            } else {
+                format!("W{:03}", lon.unsigned_abs())
+            };
+            let tile_name = format!(
+                "srtm_{}{:02}_{}{:03}.tif",
+                if lat >= 0 { 'n' } else { 's' },
+                lat.unsigned_abs(),
+                if lon >= 0 { 'e' } else { 'w' },
+                lon.unsigned_abs()
+            );
             let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tile_name);
             // HGT naming used by Skadi fallback downloads
-            let hgt_name = format!("{}{:02}{}{:03}.hgt",
-                if lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
-                if lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
+            let hgt_name = format!(
+                "{}{:02}{}{:03}.hgt",
+                if lat >= 0 { 'N' } else { 'S' },
+                lat.unsigned_abs(),
+                if lon >= 0 { 'E' } else { 'W' },
+                lon.unsigned_abs()
+            );
             let hgt_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
             processed += 1;
 
             // Skip if any valid cached file exists
-            let cached_ok = |p: &std::path::Path| p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024;
+            let cached_ok = |p: &std::path::Path| {
+                p.exists() && p.metadata().map(|m| m.len()).unwrap_or(0) >= 1024
+            };
             if cached_ok(&tile_path) || cached_ok(&hgt_path) {
-                skipped += 1; continue;
+                skipped += 1;
+                continue;
             }
             // Remove corrupt 0-byte files
-            if tile_path.exists() { let _ = std::fs::remove_file(&tile_path); }
-            if hgt_path.exists() { let _ = std::fs::remove_file(&hgt_path); }
+            if tile_path.exists() {
+                let _ = std::fs::remove_file(&tile_path);
+            }
+            if hgt_path.exists() {
+                let _ = std::fs::remove_file(&hgt_path);
+            }
 
-            let opentopo_ok = !opentopo_rate_limited_until.map(|u| std::time::Instant::now() < u).unwrap_or(false);
+            let opentopo_ok = !opentopo_rate_limited_until
+                .map(|u| std::time::Instant::now() < u)
+                .unwrap_or(false);
             let key_c = api_key.clone();
             let tp = tile_path.clone();
             let hp = hgt_path.clone();
@@ -5109,14 +6466,37 @@ async fn download_all_srtm_task(
                     total += 1;
                     // Store in TileStore for fast P2P serving
                     if let Some(ref ts) = tile_store {
-                        let ns = if lat >= 0 { "N" } else { "S" }; let ew = if lon >= 0 { "E" } else { "W" };
-                        let lat_dir = if lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-                        let lon_dir = if lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-                        let tif_name = format!("srtm_{}{:02}_{}{:03}.tif", ns.to_lowercase().chars().next().unwrap(), lat.unsigned_abs(), ew.to_lowercase().chars().next().unwrap(), lon.unsigned_abs());
-                        let hgt_name = format!("{}{:02}{}{:03}.hgt", ns, lat.unsigned_abs(), ew, lon.unsigned_abs());
+                        let ns = if lat >= 0 { "N" } else { "S" };
+                        let ew = if lon >= 0 { "E" } else { "W" };
+                        let lat_dir = if lat >= 0 {
+                            format!("N{:02}", lat)
+                        } else {
+                            format!("S{:02}", lat.unsigned_abs())
+                        };
+                        let lon_dir = if lon >= 0 {
+                            format!("E{:03}", lon)
+                        } else {
+                            format!("W{:03}", lon.unsigned_abs())
+                        };
+                        let tif_name = format!(
+                            "srtm_{}{:02}_{}{:03}.tif",
+                            ns.to_lowercase().chars().next().unwrap(),
+                            lat.unsigned_abs(),
+                            ew.to_lowercase().chars().next().unwrap(),
+                            lon.unsigned_abs()
+                        );
+                        let hgt_name = format!(
+                            "{}{:02}{}{:03}.hgt",
+                            ns,
+                            lat.unsigned_abs(),
+                            ew,
+                            lon.unsigned_abs()
+                        );
                         let tif_path = elev_dir.join(&lat_dir).join(&lon_dir).join(&tif_name);
                         let hgt_path2 = elev_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
-                        if let Ok(bytes) = std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2)) {
+                        if let Ok(bytes) =
+                            std::fs::read(&tif_path).or_else(|_| std::fs::read(&hgt_path2))
+                        {
                             ts.put_srtm(lat, lon, &bytes);
                         }
                     }
@@ -5130,9 +6510,12 @@ async fn download_all_srtm_task(
                 }
                 Ok(Err(ref e)) if e.starts_with("RATE_LIMITED:") => {
                     let wait_secs = 6 * 3600u64;
-                    tlog!("⏸ [SRTM] OpenTopography rate limited (200 calls/day). Pausing {} h, using free sources meanwhile",
-                        wait_secs / 3600);
-                    opentopo_rate_limited_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(wait_secs));
+                    tlog!(
+                        "⏸ [SRTM] OpenTopography rate limited (200 calls/day). Pausing {} h, using free sources meanwhile",
+                        wait_secs / 3600
+                    );
+                    opentopo_rate_limited_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(wait_secs));
                     errors += 1;
                     // Don't skip tile — next iteration will try Copernicus/Skadi
                     // Re-enqueue this tile by decrementing to re-run: mark as error only
@@ -5165,19 +6548,34 @@ async fn download_all_srtm_task(
             // Progress every latitude row (~1%)
             if processed % 360 == 0 {
                 let pct = processed * 100 / total_tiles;
-                tlog!("📥 [SRTM] {}% ({}/{}) — {} downloaded, {} cached, {} ocean/void",
-                    pct, processed, total_tiles, total, skipped, errors);
+                tlog!(
+                    "📥 [SRTM] {}% ({}/{}) — {} downloaded, {} cached, {} ocean/void",
+                    pct,
+                    processed,
+                    total_tiles,
+                    total,
+                    skipped,
+                    errors
+                );
             }
             // Small delay between tiles (free sources are unlimited but be polite)
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
-    tlog!("✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void",
-        total, skipped, errors);
+    tlog!(
+        "✅ [SRTM] Complete: {} downloaded, {} already cached, {} ocean/void",
+        total,
+        skipped,
+        errors
+    );
 }
 
 #[derive(Debug)]
-enum SrtmSource { OpenTopography, Copernicus, Skadi }
+enum SrtmSource {
+    OpenTopography,
+    Copernicus,
+    Skadi,
+}
 impl SrtmSource {
     fn name(&self) -> &'static str {
         match self {
@@ -5207,7 +6605,8 @@ async fn import_pbf_task(
         } else {
             metaverse_core::osm::import_pbf_with_log(&pbf_path, &osm_dir, log_c)
         }
-    }).await;
+    })
+    .await;
     match result {
         Ok(Ok(n)) => tlog!("✅ [PBF] Import complete: {} OSM tiles written", n),
         Ok(Err(e)) => tlog!("❌ [PBF] Import failed: {}", e),
@@ -5239,14 +6638,25 @@ async fn download_osm_regions_task(
         .build()
     {
         Ok(c) => c,
-        Err(e) => { tlog!("❌ [OSM] Failed to build HTTP client: {}", e); return; }
+        Err(e) => {
+            tlog!("❌ [OSM] Failed to build HTTP client: {}", e);
+            return;
+        }
     };
 
-    tlog!("📥 [OSM] Starting Geofabrik download for {} region(s)", regions.len());
+    tlog!(
+        "📥 [OSM] Starting Geofabrik download for {} region(s)",
+        regions.len()
+    );
 
     for region in &regions {
         // slug = last path component, e.g. "europe/germany" → "germany"
-        let slug = region.trim_matches('/').split('/').last().unwrap_or(region.as_str()).to_string();
+        let slug = region
+            .trim_matches('/')
+            .split('/')
+            .last()
+            .unwrap_or(region.as_str())
+            .to_string();
         let filename = format!("{}-latest.osm.pbf", slug);
         let dest = osm_dir.join(&filename);
 
@@ -5255,95 +6665,172 @@ async fn download_osm_regions_task(
         if dest.exists() {
             if let Ok(meta) = std::fs::metadata(&dest) {
                 if meta.len() > 1_000_000 {
-                    tlog!("⏭ [OSM] {} already exists ({:.1} MB), skipping",
-                        filename, meta.len() as f64 / 1_048_576.0);
+                    tlog!(
+                        "⏭ [OSM] {} already exists ({:.1} MB), skipping",
+                        filename,
+                        meta.len() as f64 / 1_048_576.0
+                    );
                     continue;
                 }
             }
             let _ = std::fs::remove_file(&dest);
         }
 
-        let url = format!("https://download.geofabrik.de/{}-latest.osm.pbf", region.trim_matches('/'));
+        let url = format!(
+            "https://download.geofabrik.de/{}-latest.osm.pbf",
+            region.trim_matches('/')
+        );
 
         // Check for a partial .tmp file to resume from
         let tmp = dest.with_extension("pbf.tmp");
-        let resume_offset: u64 = tokio::fs::metadata(&tmp).await.map(|m| m.len()).unwrap_or(0);
+        let resume_offset: u64 = tokio::fs::metadata(&tmp)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         let req = if resume_offset > 0 {
-            tlog!("⬇ [OSM] {} — resuming from {:.1} MB…", filename, resume_offset as f64 / 1_048_576.0);
-            client.get(&url).header("Range", format!("bytes={}-", resume_offset))
+            tlog!(
+                "⬇ [OSM] {} — resuming from {:.1} MB…",
+                filename,
+                resume_offset as f64 / 1_048_576.0
+            );
+            client
+                .get(&url)
+                .header("Range", format!("bytes={}-", resume_offset))
         } else {
             client.get(&url)
         };
 
         match req.send().await {
-            Err(e) => { tlog!("❌ [OSM] {} — request failed: {}", region, e); continue; }
+            Err(e) => {
+                tlog!("❌ [OSM] {} — request failed: {}", region, e);
+                continue;
+            }
             Ok(resp) if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE => {
                 // 416: range is beyond EOF — .tmp is already the full file
-                tlog!("✅ [OSM] {} — download complete (already full), converting…", filename);
+                tlog!(
+                    "✅ [OSM] {} — download complete (already full), converting…",
+                    filename
+                );
                 if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
                     tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
                 } else {
-                    let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
-                    let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
+                    let dest_c = dest.clone();
+                    let osm_dir_c = osm_dir.clone();
+                    let task_log_c = Arc::clone(&task_log);
+                    let swarm_tx_c = swarm_tx.clone();
                     let lock_c = Arc::clone(&conv_lock);
                     let ts_c = tile_store.clone();
                     tokio::task::spawn_blocking(move || {
                         let _guard = lock_c.lock().unwrap();
                         macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
                         let result = if let Some(ts) = ts_c {
-                            metaverse_core::osm::import_pbf_with_store(&dest_c, ts, Some(Arc::clone(&task_log_c)))
+                            metaverse_core::osm::import_pbf_with_store(
+                                &dest_c,
+                                ts,
+                                Some(Arc::clone(&task_log_c)),
+                            )
                         } else {
-                            metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c))
+                            metaverse_core::osm::import_pbf_with_log(
+                                &dest_c,
+                                &osm_dir_c,
+                                Arc::clone(&task_log_c),
+                            )
                         };
                         match result {
-                            Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
-                                if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
+                            Ok(n) => {
+                                tlog2!(
+                                    "✅ [OSM] {} → {} tiles",
+                                    dest_c.file_name().unwrap_or_default().to_string_lossy(),
+                                    n
+                                );
+                                if let Some(tx) = swarm_tx_c {
+                                    let _ = tx.blocking_send(SwarmAction::StartProviding(
+                                        b"osm_tiles_updated".to_vec(),
+                                    ));
+                                }
+                            }
                             Err(e) => tlog2!("❌ [OSM] conversion failed: {}", e),
                         }
                     });
                 }
                 continue;
             }
-            Ok(resp) if !resp.status().is_success() && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT => {
-                tlog!("❌ [OSM] {} — HTTP {}", region, resp.status()); continue;
+            Ok(resp)
+                if !resp.status().is_success()
+                    && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT =>
+            {
+                tlog!("❌ [OSM] {} — HTTP {}", region, resp.status());
+                continue;
             }
             Ok(resp) => {
                 let content_len = resp.content_length().unwrap_or(0);
-                let total_est = if resume_offset > 0 { resume_offset + content_len } else { content_len };
-                tlog!("⬇ [OSM] {} — streaming{}…", filename,
-                    if total_est > 0 { format!(" ({:.1} MB total)", total_est as f64 / 1_048_576.0) } else { String::new() });
+                let total_est = if resume_offset > 0 {
+                    resume_offset + content_len
+                } else {
+                    content_len
+                };
+                tlog!(
+                    "⬇ [OSM] {} — streaming{}…",
+                    filename,
+                    if total_est > 0 {
+                        format!(" ({:.1} MB total)", total_est as f64 / 1_048_576.0)
+                    } else {
+                        String::new()
+                    }
+                );
 
                 // Open for append if resuming, otherwise create fresh
                 let mut file = if resume_offset > 0 {
                     match tokio::fs::OpenOptions::new().append(true).open(&tmp).await {
                         Ok(f) => f,
-                        Err(e) => { tlog!("❌ [OSM] {} — open for resume failed: {}", filename, e); continue; }
+                        Err(e) => {
+                            tlog!("❌ [OSM] {} — open for resume failed: {}", filename, e);
+                            continue;
+                        }
                     }
                 } else {
                     match tokio::fs::File::create(&tmp).await {
                         Ok(f) => f,
-                        Err(e) => { tlog!("❌ [OSM] {} — create tmp failed: {}", filename, e); continue; }
+                        Err(e) => {
+                            tlog!("❌ [OSM] {} — create tmp failed: {}", filename, e);
+                            continue;
+                        }
                     }
                 };
 
-                use tokio::io::AsyncWriteExt;
                 use futures::StreamExt as _;
+                use tokio::io::AsyncWriteExt;
                 let mut stream = resp.bytes_stream();
                 let mut written: u64 = resume_offset; // count total bytes including resumed portion
                 let mut last_log = resume_offset;
                 let mut ok = true;
                 while let Some(chunk) = stream.next().await {
                     match chunk {
-                        Err(e) => { tlog!("❌ [OSM] {} — stream error at {:.1} MB: {}", filename, written as f64 / 1_048_576.0, e); ok = false; break; }
+                        Err(e) => {
+                            tlog!(
+                                "❌ [OSM] {} — stream error at {:.1} MB: {}",
+                                filename,
+                                written as f64 / 1_048_576.0,
+                                e
+                            );
+                            ok = false;
+                            break;
+                        }
                         Ok(b) => {
                             if let Err(e) = file.write_all(&b).await {
-                                tlog!("❌ [OSM] {} — write error: {}", filename, e); ok = false; break;
+                                tlog!("❌ [OSM] {} — write error: {}", filename, e);
+                                ok = false;
+                                break;
                             }
                             written += b.len() as u64;
                             if written - last_log >= 100 * 1_048_576 {
                                 last_log = written;
-                                tlog!("⬇ [OSM] {} — {:.1} MB written…", filename, written as f64 / 1_048_576.0);
+                                tlog!(
+                                    "⬇ [OSM] {} — {:.1} MB written…",
+                                    filename,
+                                    written as f64 / 1_048_576.0
+                                );
                             }
                         }
                     }
@@ -5353,30 +6840,62 @@ async fn download_osm_regions_task(
                     if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
                         tlog!("❌ [OSM] {} — rename failed: {}", filename, e);
                     } else {
-                        tlog!("✅ [OSM] {} complete ({:.1} MB) — starting tile conversion…", filename, written as f64 / 1_048_576.0);
-                        let dest_c = dest.clone(); let osm_dir_c = osm_dir.clone();
-                        let task_log_c = Arc::clone(&task_log); let swarm_tx_c = swarm_tx.clone();
+                        tlog!(
+                            "✅ [OSM] {} complete ({:.1} MB) — starting tile conversion…",
+                            filename,
+                            written as f64 / 1_048_576.0
+                        );
+                        let dest_c = dest.clone();
+                        let osm_dir_c = osm_dir.clone();
+                        let task_log_c = Arc::clone(&task_log);
+                        let swarm_tx_c = swarm_tx.clone();
                         let lock_c = Arc::clone(&conv_lock);
                         let ts_c = tile_store.clone();
                         tokio::task::spawn_blocking(move || {
                             let _guard = lock_c.lock().unwrap();
                             macro_rules! tlog2 { ($($a:tt)*) => {{ if let Ok(mut b) = task_log_c.lock() { b.push(format!($($a)*)); } }}; }
                             let result = if let Some(ts) = ts_c {
-                                metaverse_core::osm::import_pbf_with_store(&dest_c, ts, Some(Arc::clone(&task_log_c)))
+                                metaverse_core::osm::import_pbf_with_store(
+                                    &dest_c,
+                                    ts,
+                                    Some(Arc::clone(&task_log_c)),
+                                )
                             } else {
-                                metaverse_core::osm::import_pbf_with_log(&dest_c, &osm_dir_c, Arc::clone(&task_log_c))
+                                metaverse_core::osm::import_pbf_with_log(
+                                    &dest_c,
+                                    &osm_dir_c,
+                                    Arc::clone(&task_log_c),
+                                )
                             };
                             match result {
-                                Ok(n) => { tlog2!("✅ [OSM] {} → {} tiles", dest_c.file_name().unwrap_or_default().to_string_lossy(), n);
-                                    if let Some(tx) = swarm_tx_c { let _ = tx.blocking_send(SwarmAction::StartProviding(b"osm_tiles_updated".to_vec())); } }
-                                Err(e) => tlog2!("❌ [OSM] {} conversion failed: {}", dest_c.file_name().unwrap_or_default().to_string_lossy(), e),
+                                Ok(n) => {
+                                    tlog2!(
+                                        "✅ [OSM] {} → {} tiles",
+                                        dest_c.file_name().unwrap_or_default().to_string_lossy(),
+                                        n
+                                    );
+                                    if let Some(tx) = swarm_tx_c {
+                                        let _ = tx.blocking_send(SwarmAction::StartProviding(
+                                            b"osm_tiles_updated".to_vec(),
+                                        ));
+                                    }
+                                }
+                                Err(e) => tlog2!(
+                                    "❌ [OSM] {} conversion failed: {}",
+                                    dest_c.file_name().unwrap_or_default().to_string_lossy(),
+                                    e
+                                ),
                             }
                         });
                     }
                 } else {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    if !ok { /* error already logged */ } else {
-                        tlog!("❌ [OSM] {} — response too small, invalid region?", filename);
+                    if !ok { /* error already logged */
+                    } else {
+                        tlog!(
+                            "❌ [OSM] {} — response too small, invalid region?",
+                            filename
+                        );
                     }
                 }
             }
@@ -5417,12 +6936,12 @@ async fn bulk_download_task(
                 let (s, w, n, e) = (lat, lon, lat + tile, lon + tile);
                 if !osm_cache.exists(s, w, n, e) {
                     let ep = overpass_endpoints.clone();
-                    let cache_ref = metaverse_core::osm::OsmDiskCache::from_arc(
-                        osm_cache.tile_store_arc()
-                    );
+                    let cache_ref =
+                        metaverse_core::osm::OsmDiskCache::from_arc(osm_cache.tile_store_arc());
                     let _ = tokio::task::spawn_blocking(move || {
                         metaverse_core::osm::fetch_osm_with_cache(s, w, n, e, &cache_ref, &ep)
-                    }).await;
+                    })
+                    .await;
                     tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 }
                 if let Some(ref tx) = swarm_tx {
@@ -5442,23 +6961,39 @@ async fn bulk_download_task(
             let lon_hi = bbox.east.ceil() as i32;
             for lat_tile in lat_lo..lat_hi {
                 for lon_tile in lon_lo..lon_hi {
-                    let lat_dir = if lat_tile >= 0 { format!("N{:02}", lat_tile) } else { format!("S{:02}", lat_tile.unsigned_abs()) };
-                    let lon_dir = if lon_tile >= 0 { format!("E{:03}", lon_tile) } else { format!("W{:03}", lon_tile.unsigned_abs()) };
-                    let tile_path = elev_dir.join(&lat_dir).join(&lon_dir)
-                        .join(format!("srtm_n{:02}_e{:03}.tif", lat_tile.unsigned_abs(), lon_tile.unsigned_abs()));
+                    let lat_dir = if lat_tile >= 0 {
+                        format!("N{:02}", lat_tile)
+                    } else {
+                        format!("S{:02}", lat_tile.unsigned_abs())
+                    };
+                    let lon_dir = if lon_tile >= 0 {
+                        format!("E{:03}", lon_tile)
+                    } else {
+                        format!("W{:03}", lon_tile.unsigned_abs())
+                    };
+                    let tile_path = elev_dir.join(&lat_dir).join(&lon_dir).join(format!(
+                        "srtm_n{:02}_e{:03}.tif",
+                        lat_tile.unsigned_abs(),
+                        lon_tile.unsigned_abs()
+                    ));
                     if !tile_path.exists() {
                         let key_c = opentopo_api_key.clone();
                         let cache_c = elev_dir.clone();
                         let lat_f = lat_tile as f64 + 0.5;
                         let lon_f = lon_tile as f64 + 0.5;
                         let _ = tokio::task::spawn_blocking(move || {
-                            let src = metaverse_core::elevation::OpenTopographySource::new(key_c, cache_c);
+                            let src = metaverse_core::elevation::OpenTopographySource::new(
+                                key_c, cache_c,
+                            );
                             let gps = metaverse_core::coordinates::GPS::new(lat_f, lon_f, 0.0);
                             src.query(&gps)
-                        }).await;
+                        })
+                        .await;
                         if tile_path.exists() {
                             if let Some(ref tx) = swarm_tx {
-                                let key = metaverse_core::elevation::elevation_dht_key(lat_tile, lon_tile);
+                                let key = metaverse_core::elevation::elevation_dht_key(
+                                    lat_tile, lon_tile,
+                                );
                                 let _ = tx.send(SwarmAction::StartProviding(key)).await;
                             }
                         }
@@ -5498,24 +7033,37 @@ async fn download_osm_on_demand_task(
 
     while let Some((s, w, n, e)) = rx.recv().await {
         let key_i = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
-        if !seen.insert(key_i) { continue; } // already in-flight
+        if !seen.insert(key_i) {
+            continue;
+        } // already in-flight
 
         // Fast check: skip if already cached
-        if osm_cache.exists(s, w, n, e) { seen.remove(&key_i); continue; }
+        if osm_cache.exists(s, w, n, e) {
+            seen.remove(&key_i);
+            continue;
+        }
 
         tlog!("📥 [OSM] On-demand fetch: s={:.4} w={:.4}", s, w);
         let endpoints: Vec<String> = metaverse_core::osm::OVERPASS_ENDPOINTS
-            .iter().map(|x| x.to_string()).collect();
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
         let cache_ref = metaverse_core::osm::OsmDiskCache::from_arc(osm_cache.tile_store_arc());
 
         let result = tokio::task::spawn_blocking(move || {
             metaverse_core::osm::fetch_osm_with_cache(s, w, n, e, &cache_ref, &endpoints)
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(Ok(ref data)) if !data.is_empty() => {
-                tlog!("✅ [OSM] On-demand cached: s={:.4} w={:.4} (b:{} r:{})", s, w,
-                    data.buildings.len(), data.roads.len());
+                tlog!(
+                    "✅ [OSM] On-demand cached: s={:.4} w={:.4} (b:{} r:{})",
+                    s,
+                    w,
+                    data.buildings.len(),
+                    data.roads.len()
+                );
                 if let Some(ref tx) = swarm_tx {
                     let key = metaverse_core::osm::osm_dht_key(s, w, n, e);
                     let _ = tx.send(SwarmAction::StartProviding(key)).await;

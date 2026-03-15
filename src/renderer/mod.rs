@@ -8,7 +8,7 @@ mod pipeline;
 mod textured_pipeline;
 
 pub use camera::Camera;
-pub use pipeline::{OsmPipeline, RenderContext, RenderPipeline};
+pub use pipeline::{OsmPipeline, RenderContext, RenderPipeline, WaterPipeline};
 pub use textured_pipeline::{GlbModel, TexturedPipeline, TexturedVertex};
 
 use crate::mesh::Mesh;
@@ -32,6 +32,8 @@ impl MeshBuffer {
             .map(|v| Vertex {
                 position: [v.position.x, v.position.y, v.position.z],
                 normal: [v.normal.x, v.normal.y, v.normal.z],
+                color: [v.color.x, v.color.y, v.color.z],
+                _pad: 0.0,
             })
             .collect();
 
@@ -75,11 +77,13 @@ impl MeshBuffer {
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+    color: [f32; 3],
+    _pad: f32, // align to 16 bytes
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+    const ATTRIBS: [wgpu::VertexAttribute; 3] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -115,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_vertex_size() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 24); // 3 floats + 3 floats
+        assert_eq!(std::mem::size_of::<Vertex>(), 32); // 3+3+3 floats + 1 pad
     }
 
     #[test]

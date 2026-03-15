@@ -49,11 +49,11 @@ pub struct RoomTemplate {
     /// Number of rows.
     pub rows: usize,
     /// Background colour (RGBA).
-    pub bg:     [u8; 4],
+    pub bg: [u8; 4],
     /// Primary text colour.
-    pub text:   [u8; 4],
+    pub text: [u8; 4],
     /// Metadata text colour (author, date, etc.).
-    pub meta:   [u8; 4],
+    pub meta: [u8; 4],
     /// Accent / title colour.
     pub accent: [u8; 4],
 }
@@ -63,31 +63,35 @@ impl RoomTemplate {
     pub fn for_section(section: &Section) -> Self {
         match section {
             Section::Forums => Self {
-                cols: 1, rows: 1,
-                bg:     [10, 14, 20, 255],
-                text:   [210, 220, 235, 255],
-                meta:   [90, 105, 130, 255],
+                cols: 1,
+                rows: 1,
+                bg: [10, 14, 20, 255],
+                text: [210, 220, 235, 255],
+                meta: [90, 105, 130, 255],
                 accent: [88, 166, 255, 255],
             },
             Section::Wiki => Self {
-                cols: 1, rows: 1,
-                bg:     [10, 18, 12, 255],
-                text:   [205, 235, 210, 255],
-                meta:   [80, 115, 85, 255],
+                cols: 1,
+                rows: 1,
+                bg: [10, 18, 12, 255],
+                text: [205, 235, 210, 255],
+                meta: [80, 115, 85, 255],
                 accent: [72, 200, 100, 255],
             },
             Section::Marketplace => Self {
-                cols: 1, rows: 1,
-                bg:     [20, 12, 26, 255],
-                text:   [230, 218, 242, 255],
-                meta:   [110, 88, 130, 255],
+                cols: 1,
+                rows: 1,
+                bg: [20, 12, 26, 255],
+                text: [230, 218, 242, 255],
+                meta: [110, 88, 130, 255],
                 accent: [195, 120, 255, 255],
             },
             Section::Post => Self {
-                cols: 1, rows: 1,
-                bg:     [20, 16, 8, 255],
-                text:   [238, 230, 210, 255],
-                meta:   [120, 108, 78, 255],
+                cols: 1,
+                rows: 1,
+                bg: [20, 16, 8, 255],
+                text: [238, 230, 210, 255],
+                meta: [120, 108, 78, 255],
                 accent: [255, 195, 70, 255],
             },
         }
@@ -119,18 +123,24 @@ impl RoomTemplate {
         // When facing `outward_normal`, right = forward × world_up.
         let world_up = Vec3::Y;
         let right = outward_normal.cross(world_up);
-        let right = if right.length_squared() > 0.001 { right.normalize() } else { Vec3::X };
+        let right = if right.length_squared() > 0.001 {
+            right.normalize()
+        } else {
+            Vec3::X
+        };
         let up = world_up;
         // Billboard normal points inward so the player walking in sees the front face.
         let billboard_normal = inward;
 
         // Compute total grid dimensions
-        let total_w = self.cols as f32 * BILLBOARD_W + (self.cols.saturating_sub(1)) as f32 * BB_GAP_H;
-        let total_h = self.rows as f32 * BILLBOARD_H + (self.rows.saturating_sub(1)) as f32 * BB_GAP_V;
+        let total_w =
+            self.cols as f32 * BILLBOARD_W + (self.cols.saturating_sub(1)) as f32 * BB_GAP_H;
+        let total_h =
+            self.rows as f32 * BILLBOARD_H + (self.rows.saturating_sub(1)) as f32 * BB_GAP_V;
 
         // Top-left slot position (relative to wall centre)
         let start_x = -(total_w * 0.5) + BILLBOARD_W * 0.5;
-        let start_y =  (total_h * 0.5) - BILLBOARD_H * 0.5 + EYE_LEVEL_Y;
+        let start_y = (total_h * 0.5) - BILLBOARD_H * 0.5 + EYE_LEVEL_Y;
 
         let mut out = Vec::new();
         for row in 0..self.rows {
@@ -151,8 +161,8 @@ impl RoomTemplate {
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct BillboardVertex {
     position: [f32; 3],
-    normal:   [f32; 3],
-    uv:       [f32; 2],
+    normal: [f32; 3],
+    uv: [f32; 2],
 }
 
 impl BillboardVertex {
@@ -172,67 +182,98 @@ impl BillboardVertex {
 
 /// A single GPU-resident textured billboard quad.
 pub struct GpuBillboard {
-    vertex_buf:           wgpu::Buffer,
-    index_buf:            wgpu::Buffer,
-    model_bind_group:     wgpu::BindGroup,
-    texture_bind_group:   wgpu::BindGroup,
-    texture:              wgpu::Texture,
-    tex_w:                u32,
-    tex_h:                u32,
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    model_bind_group: wgpu::BindGroup,
+    texture_bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    tex_w: u32,
+    tex_h: u32,
 }
 
 impl GpuBillboard {
     fn new(
-        device:      &wgpu::Device,
-        queue:       &wgpu::Queue,
-        center:      Vec3,
-        normal:      Vec3,
-        right:       Vec3,
-        up:          Vec3,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        center: Vec3,
+        normal: Vec3,
+        right: Vec3,
+        up: Vec3,
         rgba_pixels: &[u8],
-        model_bgl:   &wgpu::BindGroupLayout,
-        tex_bgl:     &wgpu::BindGroupLayout,
-        sampler:     &wgpu::Sampler,
+        model_bgl: &wgpu::BindGroupLayout,
+        tex_bgl: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
     ) -> Self {
-        Self::new_sized(device, queue, center, normal, right, up,
-            rgba_pixels, TEX_W, TEX_H, BILLBOARD_W, BILLBOARD_H,
-            model_bgl, tex_bgl, sampler)
+        Self::new_sized(
+            device,
+            queue,
+            center,
+            normal,
+            right,
+            up,
+            rgba_pixels,
+            TEX_W,
+            TEX_H,
+            BILLBOARD_W,
+            BILLBOARD_H,
+            model_bgl,
+            tex_bgl,
+            sampler,
+        )
     }
 
     fn new_sized(
-        device:      &wgpu::Device,
-        queue:       &wgpu::Queue,
-        center:      Vec3,
-        normal:      Vec3,
-        right:       Vec3,
-        up:          Vec3,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        center: Vec3,
+        normal: Vec3,
+        right: Vec3,
+        up: Vec3,
         rgba_pixels: &[u8],
-        tex_w:       u32,
-        tex_h:       u32,
-        phys_w:      f32,
-        phys_h:      f32,
-        model_bgl:   &wgpu::BindGroupLayout,
-        tex_bgl:     &wgpu::BindGroupLayout,
-        sampler:     &wgpu::Sampler,
+        tex_w: u32,
+        tex_h: u32,
+        phys_w: f32,
+        phys_h: f32,
+        model_bgl: &wgpu::BindGroupLayout,
+        tex_bgl: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
     ) -> Self {
         let hw = phys_w * 0.5;
         let hh = phys_h * 0.5;
-        let n  = normal.to_array();
+        let n = normal.to_array();
 
         let verts = [
-            BillboardVertex { position: (center - right*hw - up*hh).to_array(), normal: n, uv: [0.0, 1.0] },
-            BillboardVertex { position: (center + right*hw - up*hh).to_array(), normal: n, uv: [1.0, 1.0] },
-            BillboardVertex { position: (center + right*hw + up*hh).to_array(), normal: n, uv: [1.0, 0.0] },
-            BillboardVertex { position: (center - right*hw + up*hh).to_array(), normal: n, uv: [0.0, 0.0] },
+            BillboardVertex {
+                position: (center - right * hw - up * hh).to_array(),
+                normal: n,
+                uv: [0.0, 1.0],
+            },
+            BillboardVertex {
+                position: (center + right * hw - up * hh).to_array(),
+                normal: n,
+                uv: [1.0, 1.0],
+            },
+            BillboardVertex {
+                position: (center + right * hw + up * hh).to_array(),
+                normal: n,
+                uv: [1.0, 0.0],
+            },
+            BillboardVertex {
+                position: (center - right * hw + up * hh).to_array(),
+                normal: n,
+                uv: [0.0, 0.0],
+            },
         ];
         let indices: [u16; 6] = [0, 1, 2, 0, 2, 3];
 
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("BB VB"), contents: bytemuck::cast_slice(&verts),
+            label: Some("BB VB"),
+            contents: bytemuck::cast_slice(&verts),
             usage: wgpu::BufferUsages::VERTEX,
         });
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("BB IB"), contents: bytemuck::cast_slice(&indices),
+            label: Some("BB IB"),
+            contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -244,15 +285,23 @@ impl GpuBillboard {
         });
         let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: model_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: model_buf.as_entire_binding(),
+            }],
             label: Some("BB Model BG"),
         });
 
         // Texture
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("BB Tex"),
-            size: wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
+            size: wgpu::Extent3d {
+                width: tex_w,
+                height: tex_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
@@ -260,8 +309,10 @@ impl GpuBillboard {
         });
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             rgba_pixels,
             wgpu::TexelCopyBufferLayout {
@@ -269,28 +320,48 @@ impl GpuBillboard {
                 bytes_per_row: Some(tex_w * 4),
                 rows_per_image: Some(tex_h),
             },
-            wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: tex_w,
+                height: tex_h,
+                depth_or_array_layers: 1,
+            },
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
             ],
             label: Some("BB Tex BG"),
         });
 
-        Self { vertex_buf, index_buf, model_bind_group, texture_bind_group, texture, tex_w, tex_h }
+        Self {
+            vertex_buf,
+            index_buf,
+            model_bind_group,
+            texture_bind_group,
+            texture,
+            tex_w,
+            tex_h,
+        }
     }
 
     /// Upload new RGBA pixels to the existing texture (same dimensions).
     pub fn update_texture(&self, queue: &wgpu::Queue, rgba_pixels: &[u8]) {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
             },
             rgba_pixels,
             wgpu::TexelCopyBufferLayout {
@@ -298,7 +369,11 @@ impl GpuBillboard {
                 bytes_per_row: Some(self.tex_w * 4),
                 rows_per_image: Some(self.tex_h),
             },
-            wgpu::Extent3d { width: self.tex_w, height: self.tex_h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.tex_w,
+                height: self.tex_h,
+                depth_or_array_layers: 1,
+            },
         );
     }
 
@@ -327,18 +402,18 @@ impl ModuleBillboards {
     ///
     /// `items` is ordered newest-first. Slots with no item show a placeholder.
     pub fn build(
-        device:         &wgpu::Device,
-        queue:          &wgpu::Queue,
-        pipeline:       &BillboardPipeline,
-        section:        Section,
-        items:          &[ContentItem],
-        room_center:    Vec3,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &BillboardPipeline,
+        section: Section,
+        items: &[ContentItem],
+        room_center: Vec3,
         outward_normal: Vec3,
     ) -> Self {
-        let template   = RoomTemplate::for_section(&section);
+        let template = RoomTemplate::for_section(&section);
         let transforms = template.billboard_transforms(room_center, outward_normal);
 
-        let mut billboards  = Vec::with_capacity(transforms.len());
+        let mut billboards = Vec::with_capacity(transforms.len());
         let mut content_ids = Vec::with_capacity(transforms.len());
 
         for (slot, (center, normal, right, up)) in transforms.iter().enumerate() {
@@ -349,8 +424,12 @@ impl ModuleBillboards {
             };
             let id = items.get(slot).map(|i| i.id.clone()).unwrap_or_default();
             billboards.push(GpuBillboard::new(
-                device, queue,
-                *center, *normal, *right, *up,
+                device,
+                queue,
+                *center,
+                *normal,
+                *right,
+                *up,
                 &rgba,
                 &pipeline.model_bgl,
                 &pipeline.texture_bgl,
@@ -359,7 +438,11 @@ impl ModuleBillboards {
             content_ids.push(id);
         }
 
-        Self { section, billboards, content_ids }
+        Self {
+            section,
+            billboards,
+            content_ids,
+        }
     }
 
     /// Render all billboards. Call between `begin_render()` and end of render pass.
@@ -392,12 +475,12 @@ impl ModuleBillboards {
 ///   Group 1: per-billboard model matrix (identity — position baked into verts)
 ///   Group 2: texture + sampler
 pub struct BillboardPipeline {
-    pipeline:    wgpu::RenderPipeline,
-    cam_buf:     wgpu::Buffer,
-    cam_bg:      wgpu::BindGroup,
-    model_bgl:   wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    cam_buf: wgpu::Buffer,
+    cam_bg: wgpu::BindGroup,
+    model_bgl: wgpu::BindGroupLayout,
     texture_bgl: wgpu::BindGroupLayout,
-    sampler:     wgpu::Sampler,
+    sampler: wgpu::Sampler,
 }
 
 impl BillboardPipeline {
@@ -428,7 +511,10 @@ impl BillboardPipeline {
         });
         let cam_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &cam_bgl,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: cam_buf.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cam_buf.as_entire_binding(),
+            }],
             label: Some("BB Cam BG"),
         });
 
@@ -529,7 +615,14 @@ impl BillboardPipeline {
             ..Default::default()
         });
 
-        Self { pipeline, cam_buf, cam_bg, model_bgl, texture_bgl, sampler }
+        Self {
+            pipeline,
+            cam_buf,
+            cam_bg,
+            model_bgl,
+            texture_bgl,
+            sampler,
+        }
     }
 
     /// Write the current camera view-projection matrix to the billboard camera buffer.
@@ -601,31 +694,35 @@ impl TerminalScreen {
     /// Build the terminal screen at the given kiosk position.
     /// Renders as a vertical screen on the player-facing side of the kiosk,
     /// centred at eye level (1.4m), 0.85m wide × 0.65m tall.
-    pub fn new(
-        context:   &RenderContext,
-        pipeline:  &BillboardPipeline,
-        kiosk_pos: Vec3,
-    ) -> Self {
-        use crate::worldnet::{WORLDNET_W, WORLDNET_H};
+    pub fn new(context: &RenderContext, pipeline: &BillboardPipeline, kiosk_pos: Vec3) -> Self {
+        use crate::worldnet::{WORLDNET_H, WORLDNET_W};
         // Front face of screen housing: z = kiosk_pos.z - 0.35 (sd=0.35), offset 0.01 to clear mesh
         let center = Vec3::new(
             kiosk_pos.x,
-            kiosk_pos.y + 1.4,       // eye level
-            kiosk_pos.z - 0.34,      // just in front of kiosk front face
+            kiosk_pos.y + 1.4,  // eye level
+            kiosk_pos.z - 0.34, // just in front of kiosk front face
         );
-        let normal = Vec3::Z;        // facing +Z = toward approaching player
-        let right  = Vec3::X;        // texture right = +X
-        let up     = Vec3::Y;        // texture up = up
+        let normal = Vec3::Z; // facing +Z = toward approaching player
+        let right = Vec3::X; // texture right = +X
+        let up = Vec3::Y; // texture up = up
 
         let blank = vec![12u8, 14, 20, 255].repeat((WORLDNET_W * WORLDNET_H) as usize);
 
         let quad = GpuBillboard::new_sized(
-            &context.device, &context.queue,
-            center, normal, right, up,
+            &context.device,
+            &context.queue,
+            center,
+            normal,
+            right,
+            up,
             &blank,
-            WORLDNET_W, WORLDNET_H,
-            0.85, 0.65,   // physical: 0.85m wide × 0.65m tall
-            &pipeline.model_bgl, &pipeline.texture_bgl, &pipeline.sampler,
+            WORLDNET_W,
+            WORLDNET_H,
+            0.85,
+            0.65, // physical: 0.85m wide × 0.65m tall
+            &pipeline.model_bgl,
+            &pipeline.texture_bgl,
+            &pipeline.sampler,
         );
         Self { quad }
     }
@@ -657,12 +754,31 @@ pub fn render_item_to_rgba(item: &ContentItem, tmpl: &RoomTemplate) -> Vec<u8> {
 
     // Title (scale 3 → 24px tall glyphs)
     let ts = 3usize;
-    draw_text_wrapped(&mut px, w, h, &item.title, 8, 10, tmpl.accent, ts, (w - 16) / (8 * ts + ts));
+    draw_text_wrapped(
+        &mut px,
+        w,
+        h,
+        &item.title,
+        8,
+        10,
+        tmpl.accent,
+        ts,
+        (w - 16) / (8 * ts + ts),
+    );
 
     // Author line (scale 2 → 16px tall)
     let ms = 2usize;
     let author_str = format!("by {}", truncate_str(&item.author, 26));
-    draw_text(&mut px, w, h, &author_str, 8, 10 + 8 * ts + ts + 6, tmpl.meta, ms);
+    draw_text(
+        &mut px,
+        w,
+        h,
+        &author_str,
+        8,
+        10 + 8 * ts + ts + 6,
+        tmpl.meta,
+        ms,
+    );
 
     // Separator
     let sep_y = 10 + 8 * ts + ts + 6 + 8 * ms + 5;
@@ -685,13 +801,13 @@ pub fn render_empty_slot(tmpl: &RoomTemplate) -> Vec<u8> {
     fill_rect(&mut px, w, 0, 0, w, h, tmpl.bg);
 
     // Dim border
-    for x in 2..w-2 {
+    for x in 2..w - 2 {
         fill_rect_alpha(&mut px, w, x, 2, 1, 1, tmpl.accent, 35);
-        fill_rect_alpha(&mut px, w, x, h-3, 1, 1, tmpl.accent, 35);
+        fill_rect_alpha(&mut px, w, x, h - 3, 1, 1, tmpl.accent, 35);
     }
-    for y in 2..h-2 {
+    for y in 2..h - 2 {
         fill_rect_alpha(&mut px, w, 2, y, 1, 1, tmpl.accent, 35);
-        fill_rect_alpha(&mut px, w, w-3, y, 1, 1, tmpl.accent, 35);
+        fill_rect_alpha(&mut px, w, w - 3, y, 1, 1, tmpl.accent, 35);
     }
 
     let msg = "[ empty ]";
@@ -707,7 +823,7 @@ pub fn render_empty_slot(tmpl: &RoomTemplate) -> Vec<u8> {
 fn set_pixel(px: &mut [u8], w: usize, x: usize, y: usize, rgba: [u8; 4]) {
     let i = (y * w + x) * 4;
     if i + 3 < px.len() {
-        px[i..i+4].copy_from_slice(&rgba);
+        px[i..i + 4].copy_from_slice(&rgba);
     }
 }
 
@@ -719,7 +835,16 @@ fn fill_rect(px: &mut [u8], w: usize, x0: usize, y0: usize, rw: usize, rh: usize
     }
 }
 
-fn fill_rect_alpha(px: &mut [u8], w: usize, x0: usize, y0: usize, rw: usize, rh: usize, rgb: [u8; 4], alpha: u8) {
+fn fill_rect_alpha(
+    px: &mut [u8],
+    w: usize,
+    x0: usize,
+    y0: usize,
+    rw: usize,
+    rh: usize,
+    rgb: [u8; 4],
+    alpha: u8,
+) {
     let mut c = rgb;
     c[3] = alpha;
     fill_rect(px, w, x0, y0, rw, rh, c);
@@ -727,20 +852,36 @@ fn fill_rect_alpha(px: &mut [u8], w: usize, x0: usize, y0: usize, rw: usize, rh:
 
 // ── Text rendering ────────────────────────────────────────────────────────────
 
-fn draw_text(px: &mut [u8], w: usize, h: usize, text: &str, ox: usize, oy: usize, color: [u8; 4], scale: usize) {
+fn draw_text(
+    px: &mut [u8],
+    w: usize,
+    h: usize,
+    text: &str,
+    ox: usize,
+    oy: usize,
+    color: [u8; 4],
+    scale: usize,
+) {
     let advance = 8 * scale + (scale / 2).max(1);
     let mut cx = ox;
     for ch in text.chars() {
-        if cx + 8 * scale > w { break; }
+        if cx + 8 * scale > w {
+            break;
+        }
         draw_glyph(px, w, h, ch, cx, oy, color, scale);
         cx += advance;
     }
 }
 
 fn draw_text_wrapped(
-    px: &mut [u8], w: usize, h: usize,
-    text: &str, ox: usize, oy: usize,
-    color: [u8; 4], scale: usize,
+    px: &mut [u8],
+    w: usize,
+    h: usize,
+    text: &str,
+    ox: usize,
+    oy: usize,
+    color: [u8; 4],
+    scale: usize,
     chars_per_line: usize,
 ) {
     let line_h = 8 * scale + scale + 2;
@@ -756,9 +897,13 @@ fn draw_text_wrapped(
             line.clear();
             line_y += line_h;
             lines_drawn += 1;
-            if lines_drawn >= max_lines || line_y + 8 * scale > h { return; }
+            if lines_drawn >= max_lines || line_y + 8 * scale > h {
+                return;
+            }
         }
-        if !line.is_empty() { line.push(' '); }
+        if !line.is_empty() {
+            line.push(' ');
+        }
         line.push_str(word);
     }
     if !line.is_empty() && line_y + 8 * scale <= h {
@@ -766,7 +911,16 @@ fn draw_text_wrapped(
     }
 }
 
-fn draw_glyph(px: &mut [u8], w: usize, h: usize, ch: char, ox: usize, oy: usize, color: [u8; 4], scale: usize) {
+fn draw_glyph(
+    px: &mut [u8],
+    w: usize,
+    h: usize,
+    ch: char,
+    ox: usize,
+    oy: usize,
+    color: [u8; 4],
+    scale: usize,
+) {
     let glyph = get_glyph(ch);
     for row in 0..8usize {
         let byte = glyph[row];

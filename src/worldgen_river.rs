@@ -11,8 +11,6 @@
 //! `OsmProcessor::apply_waterway_channels` to replace the flat-uniform
 //! placeholder with physically grounded carving.
 
-use std::sync::Arc;
-
 use crate::coordinates::GPS;
 use crate::elevation::ElevationPipeline;
 use crate::osm::{OsmDiskCache, WaterwayLine};
@@ -72,14 +70,19 @@ impl RiverProfileCache {
     /// Scans every 0.01° OSM tile that overlaps `[lat_min..lat_max] × [lon_min..lon_max]`,
     /// then computes a `SegmentProfile` for each unique waterway line found.
     pub fn build(
-        lat_min: f64, lat_max: f64,
-        lon_min: f64, lon_max: f64,
+        lat_min: f64,
+        lat_max: f64,
+        lon_min: f64,
+        lon_max: f64,
         osm_cache: &OsmDiskCache,
         elevation: &std::sync::RwLock<ElevationPipeline>,
         analysis: Option<&TerrainAnalysis>,
     ) -> Self {
         let lines = collect_waterway_lines(lat_min, lat_max, lon_min, lon_max, osm_cache);
-        eprintln!("[river] collected {} waterway lines for region", lines.len());
+        eprintln!(
+            "[river] collected {} waterway lines for region",
+            lines.len()
+        );
 
         let elev_guard = elevation.read().expect("elevation lock");
         let segments = lines
@@ -94,26 +97,26 @@ impl RiverProfileCache {
     /// given GPS location.  `t` is the fractional position along the segment.
     ///
     /// Returns `None` when the location is more than `max_search_m` metres from any segment.
-    pub fn nearest(
-        &self,
-        lat: f64, lon: f64,
-        max_search_m: f64,
-    ) -> Option<(f64, &SegmentProfile)> {
-        let mut best_dist  = max_search_m;
-        let mut best_t     = 0.0f64;
+    pub fn nearest(&self, lat: f64, lon: f64, max_search_m: f64) -> Option<(f64, &SegmentProfile)> {
+        let mut best_dist = max_search_m;
+        let mut best_t = 0.0f64;
         let mut best_seg: Option<&SegmentProfile> = None;
 
         for seg in &self.segments {
-            for pair in seg.nodes.windows(2) {
+            let seg_count = (seg.nodes.len().saturating_sub(1)).max(1) as f64;
+            for (seg_idx, pair) in seg.nodes.windows(2).enumerate() {
                 let (dist, t, _, _) = point_to_segment_dist(
-                    lat, lon,
-                    pair[0].lat, pair[0].lon,
-                    pair[1].lat, pair[1].lon,
+                    lat,
+                    lon,
+                    pair[0].lat,
+                    pair[0].lon,
+                    pair[1].lat,
+                    pair[1].lon,
                 );
                 if dist < best_dist {
                     best_dist = dist;
-                    best_t    = t;
-                    best_seg  = Some(seg);
+                    best_t = (seg_idx as f64 + t) / seg_count;
+                    best_seg = Some(seg);
                 }
             }
         }
@@ -127,8 +130,10 @@ impl RiverProfileCache {
 /// Scan all OSM tiles covering `[lat_min..lat_max] × [lon_min..lon_max]` and
 /// return deduplicated waterway lines.
 fn collect_waterway_lines(
-    lat_min: f64, lat_max: f64,
-    lon_min: f64, lon_max: f64,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
     cache: &OsmDiskCache,
 ) -> Vec<WaterwayLine> {
     let s_tiles = (lat_min / TILE_SIZE).floor() as i64;
@@ -150,7 +155,9 @@ fn collect_waterway_lines(
             if let Some(osm) = cache.load(tile_s, tile_w, tile_n, tile_e) {
                 for wl in osm.waterway_lines {
                     // Skip lines with fewer than 2 nodes.
-                    if wl.nodes.len() < 2 { continue; }
+                    if wl.nodes.len() < 2 {
+                        continue;
+                    }
                     // Dedup: key on first node snapped to 5 dp.
                     let key = snap_key(wl.nodes[0].lat, wl.nodes[0].lon);
                     if seen.insert(key) {
@@ -165,7 +172,10 @@ fn collect_waterway_lines(
 
 #[inline]
 fn snap_key(lat: f64, lon: f64) -> (i64, i64) {
-    ((lat * 100_000.0).round() as i64, (lon * 100_000.0).round() as i64)
+    (
+        (lat * 100_000.0).round() as i64,
+        (lon * 100_000.0).round() as i64,
+    )
 }
 
 // ── Profile computation ───────────────────────────────────────────────────────
@@ -179,18 +189,27 @@ fn build_segment_profile(
     analysis: Option<&TerrainAnalysis>,
 ) -> Option<SegmentProfile> {
     let n = wl.nodes.len();
-    if n < 2 { return None; }
+    if n < 2 {
+        return None;
+    }
 
     // ── Sample SRTM elevation at each node ───────────────────────────────────
-    let mut elev_m: Vec<f32> = wl.nodes.iter().map(|gps| {
-        elevation.query(gps).map(|e| e.meters as f32).unwrap_or(0.0)
-    }).collect();
+    let mut elev_m: Vec<f32> = wl
+        .nodes
+        .iter()
+        .map(|gps| {
+            elevation
+                .query_with_fill(gps)
+                .map(|e| e.meters as f32)
+                .unwrap_or(0.0)
+        })
+        .collect();
 
     // ── Determine flow direction: orient nodes upstream → downstream ──────────
     // River flows from high to low.  Compare average of first quarter vs last quarter.
     let q = (n / 4).max(1);
     let elev_first: f32 = elev_m[..q].iter().sum::<f32>() / q as f32;
-    let elev_last:  f32 = elev_m[n-q..].iter().sum::<f32>() / q as f32;
+    let elev_last: f32 = elev_m[n - q..].iter().sum::<f32>() / q as f32;
 
     if elev_first < elev_last {
         // First end is lower → reverse so that node[0] is the source (upstream).
@@ -209,8 +228,10 @@ fn build_segment_profile(
     let mut cum_dist_m = vec![0.0f64; n];
     for i in 1..n {
         let d = haversine_m(
-            wl.nodes[i-1].lat, wl.nodes[i-1].lon,
-            wl.nodes[i].lat,   wl.nodes[i].lon,
+            wl.nodes[i - 1].lat,
+            wl.nodes[i - 1].lon,
+            wl.nodes[i].lat,
+            wl.nodes[i].lon,
         );
         cum_dist_m[i] = cum_dist_m[i - 1] + d;
     }
@@ -219,12 +240,12 @@ fn build_segment_profile(
     // ── Tidal zone detection ──────────────────────────────────────────────────
     // Tidal if: mouth elevation ≤ 5 m AND coastal dist < 15 km AND overall
     // gradient < 0.01% (flat).
-    let mouth_elev   = elev_m[n - 1];
+    let mouth_elev = elev_m[n - 1];
     let overall_drop = (elev_m[0] - mouth_elev).max(0.0) as f64;
     let gradient_pct = overall_drop / total_len * 100.0;
-    let mouth_coastal = analysis.map(|a| {
-        a.coastal_dist_at(wl.nodes[n-1].lat, wl.nodes[n-1].lon)
-    }).unwrap_or(100_000.0);
+    let mouth_coastal = analysis
+        .map(|a| a.coastal_dist_at(wl.nodes[n - 1].lat, wl.nodes[n - 1].lon))
+        .unwrap_or(100_000.0);
 
     let is_tidal = mouth_elev < 5.0
         && gradient_pct < 0.01
@@ -236,23 +257,25 @@ fn build_segment_profile(
     let (base_half_w, base_depth_m) = type_base_metrics(&wl.waterway_type);
 
     let mut half_width_m = Vec::with_capacity(n);
-    let mut depth_m      = Vec::with_capacity(n);
+    let mut depth_m = Vec::with_capacity(n);
 
     // Flow-accumulation proxy: use TWI if available, else estimate from
     // downstream fraction (water gets wider/deeper towards the mouth).
     for i in 0..n {
         let frac = (cum_dist_m[i] / total_len) as f32; // 0 = source, 1 = mouth
-        let twi  = analysis.map(|a| a.twi_at(wl.nodes[i].lat, wl.nodes[i].lon))
-                           .unwrap_or(6.0);
+        let twi = analysis
+            .map(|a| a.twi_at(wl.nodes[i].lat, wl.nodes[i].lon))
+            .unwrap_or(6.0);
 
         // Width: grows downstream; TWI-boosted in valley floors.
-        let twi_factor  = (twi / 8.0).clamp(0.5, 3.0) as f32;
+        let twi_factor = (twi / 8.0).clamp(0.5, 3.0) as f32;
         let dist_factor = 1.0 + 2.0 * frac; // 1× at source, 3× at mouth
         let hw = base_half_w * twi_factor * dist_factor;
 
         // Depth: grows downstream more slowly; capped by reasonable limits.
-        let slope_deg = analysis.map(|a| a.slope_at(wl.nodes[i].lat, wl.nodes[i].lon))
-                                .unwrap_or(2.0);
+        let slope_deg = analysis
+            .map(|a| a.slope_at(wl.nodes[i].lat, wl.nodes[i].lon))
+            .unwrap_or(2.0);
         // Steep gradient → shallower (cascade); flat → deeper (wide lazy river).
         let slope_factor = (1.0 - (slope_deg / 30.0).clamp(0.0, 0.9)) as f32;
         let d = base_depth_m * (1.0 + 1.5 * frac) * slope_factor;
@@ -277,12 +300,12 @@ fn build_segment_profile(
 /// Base (half_width_m, depth_m) for each OSM waterway type at the source end.
 fn type_base_metrics(wtype: &str) -> (f32, f32) {
     match wtype {
-        "river"  => (8.0, 2.0),
-        "canal"  => (6.0, 2.5),
+        "river" => (8.0, 2.0),
+        "canal" => (6.0, 2.5),
         "stream" => (2.0, 0.8),
-        "drain"  => (1.5, 0.6),
-        "ditch"  => (0.8, 0.4),
-        _        => (1.0, 0.5),
+        "drain" => (1.5, 0.6),
+        "ditch" => (0.8, 0.4),
+        _ => (1.0, 0.5),
     }
 }
 
@@ -302,9 +325,12 @@ pub fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
 ///
 /// Returns `(distance_m, t_along_segment [0,1], closest_lat, closest_lon)`.
 pub fn point_to_segment_dist(
-    lat: f64, lon: f64,
-    a_lat: f64, a_lon: f64,
-    b_lat: f64, b_lon: f64,
+    lat: f64,
+    lon: f64,
+    a_lat: f64,
+    a_lon: f64,
+    b_lat: f64,
+    b_lon: f64,
 ) -> (f64, f64, f64, f64) {
     let cos_lat = lat.to_radians().cos();
     let sx = 111_320.0_f64;
@@ -327,4 +353,44 @@ pub fn point_to_segment_dist(
     let c_lat = a_lat + (b_lat - a_lat) * t;
     let c_lon = a_lon + (b_lon - a_lon) * t;
     (dist, t, c_lat, c_lon)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RiverProfileCache, SegmentProfile};
+    use crate::coordinates::GPS;
+
+    #[test]
+    fn nearest_returns_global_fraction_along_segment() {
+        let seg = SegmentProfile {
+            nodes: vec![
+                GPS::new(0.0, 0.0, 0.0),
+                GPS::new(0.0, 0.001, 0.0),
+                GPS::new(0.0, 0.002, 0.0),
+                GPS::new(0.0, 0.003, 0.0),
+            ],
+            water_surface_m: vec![100.0, 90.0, 80.0, 70.0],
+            half_width_m: vec![1.0, 2.0, 3.0, 4.0],
+            depth_m: vec![0.5, 1.0, 1.5, 2.0],
+            is_tidal: false,
+            waterway_type: "river".into(),
+        };
+        let cache = RiverProfileCache {
+            segments: vec![seg],
+        };
+
+        let (t, seg) = cache.nearest(0.0, 0.0024, 1000.0).expect("nearest");
+        let (surface_m, half_width_m, depth_m) = seg.at_t(t);
+
+        assert!(t > 0.7 && t < 0.85, "unexpected t={t}");
+        assert!(
+            surface_m < 80.0 && surface_m > 70.0,
+            "unexpected surface={surface_m}"
+        );
+        assert!(
+            half_width_m > 3.0 && half_width_m < 4.0,
+            "unexpected width={half_width_m}"
+        );
+        assert!(depth_m > 1.5 && depth_m < 2.0, "unexpected depth={depth_m}");
+    }
 }

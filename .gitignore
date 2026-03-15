@@ -1,51 +1,18 @@
-/target
-**/*.rs.bk
-*.pdb
-.DS_Store
-
-# Archive and deploy (removed, kept locally only)
-archive/
-deploy/
-
-# World data directories (per-identity storage)
+target/
 world_data/
-world_data_*/
-
-# Terrain cache
-elevation_cache/
-*.tif
-*.hgt
-
-# Cache directories
-.metaverse/cache/
-
-# SSH/SCP targets
-portable@*
-
-# Debug/test files
-*.log
-debug_*
-test_*
-
-# Screenshots
-screenshot/*.png
-!screenshot/.gitkeep
-
-# Docs, config, CI, test files — kept locally only
-.cargo/
-.github/
+screenshot/
 docs/
-tests/
-
-# Built binaries — distributed via GitHub Releases
-/bin/metaworld_alpha
-/bin/metaverse-relay
-/bin/metaverse-server
-/bin/worldgen
-/bin/server.log
-/bin/osm_index
-/bin/metaworld_debug.log
-/bin/world_data
-
-# Runtime caches / generated files — not source, lives locally
+scripts/
+assets/
+examples/
+/bin/
+bootstrap.json
 bootstrap_cache.json
+identity.key
+identity.keyrec
+server.key
+key_cache/
+key_registry.db
+*.log
+metaworld_debug.log
+.DS_Store

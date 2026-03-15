@@ -54,23 +54,25 @@ use crate::{
     identity::Identity,
     key_registry::{KeyRegistry, KeyRegistryMessage, revocation_signable_bytes},
     messages::{
-        Action, ChatMessage, ChunkStateRequest, ChunkStateResponse, ChunkTerrainData, ChunkManifest,
-        CompactPlayerState, LamportClock, Material, MovementMode, PlayerStateMessage,
-        PlayerSessionRecord, SignedOperation, VoxelOperation, MessageError,
+        Action, ChatMessage, ChunkManifest, ChunkStateRequest, ChunkStateResponse,
+        ChunkTerrainData, CompactPlayerState, LamportClock, Material, MessageError, MovementMode,
+        PlayerSessionRecord, PlayerStateMessage, SignedOperation, VoxelOperation,
     },
-    network::{NetworkCommand, NetworkEvent, NetworkNode, NetworkError},
-    permissions::{action_to_class, check_key_level_permission, PermissionConfig, PermissionResult},
-    player_state::PlayerStateManager,
-    spatial_sharding::{SpatialSharding, SpatialConfig},
-    voxel::{Octree, VoxelCoord},
+    network::{NetworkCommand, NetworkError, NetworkEvent, NetworkNode},
+    permissions::{
+        PermissionConfig, PermissionResult, action_to_class, check_key_level_permission,
+    },
     physics::PhysicsWorld,
+    player_state::PlayerStateManager,
+    spatial_sharding::{SpatialConfig, SpatialSharding},
+    voxel::{Octree, VoxelCoord},
 };
+use crossbeam::channel::{self, Receiver, Sender};
 use libp2p::PeerId;
-use crossbeam::channel::{self, Sender, Receiver};
+use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use sha2::{Sha256, Digest as _};
 
 /// Lightweight handle that terrain workers can use to request tiles from DHT peers.
 /// Clone-cheap (Arc inside). Can be used from sync (rayon) threads — blocks with timeout.
@@ -80,7 +82,8 @@ pub struct TileFetcher {
     /// All connected peers — any of them may have tiles cached.
     tile_peers: Arc<std::sync::Mutex<Vec<PeerId>>>,
     /// Tiles to fetch in the background when no peer has them.
-    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
+    idle_queue:
+        Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
     /// Elevation tiles confirmed absent on ALL peers — skip P2P until they're announced.
     /// Shared across all TileFetcher clones (and P2PElevationSource instances).
     failed_elev: Arc<std::sync::Mutex<std::collections::HashSet<(i32, i32)>>>,
@@ -99,24 +102,40 @@ impl TileFetcher {
         }
 
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
-        if peers.is_empty() { return None; }
-        println!("📡 [P2P] Requesting OSM tile s={s:.2} w={w:.2} n={n:.2} e={e:.2} from {} peer(s)", peers.len());
+        if peers.is_empty() {
+            return None;
+        }
+        println!(
+            "📡 [P2P] Requesting OSM tile s={s:.2} w={w:.2} n={n:.2} e={e:.2} from {} peer(s)",
+            peers.len()
+        );
         for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
-            if self.cmd_tx.send(NetworkCommand::RequestTile {
-                peer_id: *peer,
-                request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
-                response_tx: tx,
-            }).is_err() { continue; }
+            if self
+                .cmd_tx
+                .send(NetworkCommand::RequestTile {
+                    peer_id: *peer,
+                    request: crate::tile_protocol::TileRequest::OsmTile { s, w, n, e },
+                    response_tx: tx,
+                })
+                .is_err()
+            {
+                continue;
+            }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
                 Ok(crate::tile_protocol::TileResponse::Found(bytes)) => {
-                    println!("✅ [P2P] Got OSM tile s={s:.2} w={w:.2} ({} bytes) from peer", bytes.len());
+                    println!(
+                        "✅ [P2P] Got OSM tile s={s:.2} w={w:.2} ({} bytes) from peer",
+                        bytes.len()
+                    );
                     return Some(bytes);
                 }
                 _ => continue,
             }
         }
-        println!("⚠️ [P2P] OSM tile s={s:.2} w={w:.2} not found on any peer — skipping P2P for this tile");
+        println!(
+            "⚠️ [P2P] OSM tile s={s:.2} w={w:.2} not found on any peer — skipping P2P for this tile"
+        );
         if let Ok(mut set) = self.failed_osm.lock() {
             set.insert(osm_key);
         }
@@ -134,7 +153,9 @@ impl TileFetcher {
     /// Non-blocking — fire and forget.
     pub fn announce_osm(&self, s: f64, w: f64, n: f64, e: f64) {
         let osm_key = ((s * 1000.0).round() as i64, (w * 1000.0).round() as i64);
-        if let Ok(mut set) = self.failed_osm.lock() { set.remove(&osm_key); }
+        if let Ok(mut set) = self.failed_osm.lock() {
+            set.remove(&osm_key);
+        }
         let key = crate::osm::osm_dht_key(s, w, n, e);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -148,24 +169,40 @@ impl TileFetcher {
         }
 
         let peers: Vec<PeerId> = self.tile_peers.lock().ok()?.clone();
-        if peers.is_empty() { return None; }
-        println!("📡 [P2P] Requesting SRTM tile lat={lat} lon={lon} from {} peer(s)", peers.len());
+        if peers.is_empty() {
+            return None;
+        }
+        println!(
+            "📡 [P2P] Requesting SRTM tile lat={lat} lon={lon} from {} peer(s)",
+            peers.len()
+        );
         for peer in &peers {
             let (tx, rx) = crossbeam::channel::bounded(1);
-            if self.cmd_tx.send(NetworkCommand::RequestTile {
-                peer_id: *peer,
-                request: crate::tile_protocol::TileRequest::ElevationTile { lat, lon },
-                response_tx: tx,
-            }).is_err() { continue; }
+            if self
+                .cmd_tx
+                .send(NetworkCommand::RequestTile {
+                    peer_id: *peer,
+                    request: crate::tile_protocol::TileRequest::ElevationTile { lat, lon },
+                    response_tx: tx,
+                })
+                .is_err()
+            {
+                continue;
+            }
             match rx.recv_timeout(std::time::Duration::from_secs(3)) {
                 Ok(crate::tile_protocol::TileResponse::Found(bytes)) => {
-                    println!("✅ [P2P] Got SRTM tile lat={lat} lon={lon} ({} bytes) from peer", bytes.len());
+                    println!(
+                        "✅ [P2P] Got SRTM tile lat={lat} lon={lon} ({} bytes) from peer",
+                        bytes.len()
+                    );
                     return Some(bytes);
                 }
                 _ => continue,
             }
         }
-        println!("⚠️ [P2P] SRTM tile lat={lat} lon={lon} not found on any peer — skipping P2P for this tile");
+        println!(
+            "⚠️ [P2P] SRTM tile lat={lat} lon={lon} not found on any peer — skipping P2P for this tile"
+        );
         if let Ok(mut set) = self.failed_elev.lock() {
             set.insert((lat, lon));
         }
@@ -181,7 +218,9 @@ impl TileFetcher {
     /// Announce to the DHT that this node now has an elevation tile cached.
     /// Also clears the failed-tile record so peers can request it from us.
     pub fn announce_elevation(&self, lat: i32, lon: i32) {
-        if let Ok(mut set) = self.failed_elev.lock() { set.remove(&(lat, lon)); }
+        if let Ok(mut set) = self.failed_elev.lock() {
+            set.remove(&(lat, lon));
+        }
         let key = crate::elevation::elevation_dht_key(lat, lon);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -195,25 +234,25 @@ pub type Result<T> = std::result::Result<T, MultiplayerError>;
 pub enum MultiplayerError {
     #[error("Network error: {0}")]
     Network(#[from] NetworkError),
-    
+
     #[error("Message error: {0}")]
     Message(#[from] MessageError),
-    
+
     #[error("Serialization error: {0}")]
     SerializationError(String),
-    
+
     #[error("Invalid signature from peer {0}")]
     InvalidSignature(PeerId),
-    
+
     #[error("Malicious peer {0} exceeded reputation threshold")]
     MaliciousPeer(PeerId),
-    
+
     #[error("Invalid multiaddr: {0}")]
     InvalidMultiaddr(String),
-    
+
     #[error("Runtime error: {0}")]
     RuntimeError(String),
-    
+
     #[error("Channel send error")]
     ChannelSendError,
 }
@@ -248,43 +287,43 @@ const MAX_INVALID_SIGNATURES: usize = 5;
 pub struct MultiplayerSystem {
     /// Channel to send commands to background network thread
     cmd_tx: Sender<NetworkCommand>,
-    
+
     /// Channel to receive events from background network thread
     event_rx: Receiver<NetworkEvent>,
-    
+
     /// Our cryptographic identity
     identity: Identity,
-    
+
     /// Local peer ID (cached for convenience)
     local_peer_id: PeerId,
-    
+
     /// Remote player state manager (interpolation, jitter buffer)
     remote_players: PlayerStateManager,
-    
+
     /// Spatial sharding for intelligent peer selection and bandwidth optimization
     spatial_sharding: Option<SpatialSharding>,
-    
+
     /// Local player position (for spatial sharding distance calculations)
     local_position: ECEF,
-    
+
     /// Lamport clock for causal ordering (kept for backwards compat)
     clock: LamportClock,
-    
+
     /// Vector clock for proper CRDT causality
     vector_clock: crate::vector_clock::VectorClock,
-    
+
     /// Deduplication set for voxel operations (by operation ID)
     voxel_op_seen: HashSet<[u8; 64]>, // Store signature as ID
-    
+
     /// Pending voxel operations to be applied to world
     pending_ops: Vec<SignedOperation>,
-    
+
     /// Pending state synchronization operations (from ChunkStateResponse)
     pending_state_ops: Vec<SignedOperation>,
-    
+
     /// Pending state requests from peers
     pending_state_requests: Vec<(PeerId, ChunkStateRequest)>,
-    
+
     /// Peers we've requested state from (to avoid duplicate requests)
     state_requested_from: HashSet<PeerId>,
 
@@ -299,13 +338,13 @@ pub struct MultiplayerSystem {
 
     /// DHT provider results — (dht_key, providers) from GetProviders queries
     pending_chunk_providers: Vec<(Vec<u8>, Vec<PeerId>)>,
-    
+
     /// Peer reputation tracking (invalid signatures count)
     peer_reputation: HashMap<PeerId, usize>,
-    
+
     /// Blocked peers (too many invalid signatures)
     blocked_peers: HashSet<PeerId>,
-    
+
     /// Timer for keepalive player state broadcasts (500ms)
     last_state_broadcast: Instant,
 
@@ -332,7 +371,7 @@ pub struct MultiplayerSystem {
 
     /// P2P identity registry — cached KeyRecords for all known peers
     pub key_registry: KeyRegistry,
-    
+
     /// Permission configuration — controls what is checked on incoming ops
     pub perm_config: PermissionConfig,
 
@@ -364,7 +403,20 @@ pub struct MultiplayerSystem {
 
     /// Local cache of placed world objects, keyed by chunk (cx, cz).
     /// Populated from DHT `GetRecord("world/chunk/{cx}/{cz}")` responses.
-    pub world_objects_cache: std::collections::HashMap<(i32, i32), Vec<crate::world_objects::PlacedObject>>,
+    pub world_objects_cache:
+        std::collections::HashMap<(i32, i32), Vec<crate::world_objects::PlacedObject>>,
+
+    /// Chunks for which world-object inference has been run this session.
+    /// Prevents redundant re-inference when chunks are unloaded and reloaded.
+    inferred_chunks: std::collections::HashSet<(i32, i32)>,
+
+    /// Admin overrides for inferred objects, keyed by chunk (cx, cz).
+    /// Populated from DHT `GetRecord("world/overrides/{cx}/{cz}")` responses.
+    object_overrides_cache:
+        std::collections::HashMap<(i32, i32), crate::world_objects::ChunkOverrideList>,
+
+    /// Chunks whose override list arrived from DHT after inference — need GPU refresh.
+    pub pending_override_refreshes: Vec<(i32, i32)>,
 
     /// Statistics
     stats: MultiplayerStats,
@@ -373,7 +425,8 @@ pub struct MultiplayerSystem {
     tile_peers: Arc<std::sync::Mutex<Vec<PeerId>>>,
 
     /// Tiles queued for background download.
-    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
+    idle_queue:
+        Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
 
     /// Elevation tiles confirmed absent on all current peers (shared with all TileFetcher clones).
     failed_elev: Arc<std::sync::Mutex<std::collections::HashSet<(i32, i32)>>>,
@@ -423,22 +476,29 @@ impl MultiplayerSystem {
         // Capacity of 1000 provides back-pressure if game loop falls behind
         let (cmd_tx, cmd_rx) = channel::bounded(1000);
         let (event_tx, event_rx) = channel::bounded(1000);
-        
+
         let identity_clone = identity.clone();
         let local_peer_id = *identity.peer_id();
-        
+
         // Create bounded channels for command/event passing
         // Capacity of 1000 provides back-pressure if game loop falls behind
         let world_data_dir = std::path::PathBuf::from("./world_data");
         let world_data_dir_clone = world_data_dir.clone();
-        let idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>> =
-            Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+        let idle_queue: Arc<
+            std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>,
+        > = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let idle_queue_for_net = Arc::clone(&idle_queue);
         let idle_queue_for_downloader = Arc::clone(&idle_queue);
 
         // Spawn background thread with tokio runtime
         std::thread::spawn(move || {
-            run_network_thread(identity_clone, cmd_rx, event_tx, world_data_dir_clone, idle_queue_for_net);
+            run_network_thread(
+                identity_clone,
+                cmd_rx,
+                event_tx,
+                world_data_dir_clone,
+                idle_queue_for_net,
+            );
         });
 
         let s = Self {
@@ -484,6 +544,9 @@ impl MultiplayerSystem {
             pending_revocations: Vec::new(),
             content_cache: std::collections::HashMap::new(),
             world_objects_cache: std::collections::HashMap::new(),
+            inferred_chunks: std::collections::HashSet::new(),
+            object_overrides_cache: std::collections::HashMap::new(),
+            pending_override_refreshes: Vec::new(),
             stats: MultiplayerStats::default(),
             tile_peers: Arc::new(std::sync::Mutex::new(Vec::new())),
             idle_queue,
@@ -499,7 +562,7 @@ impl MultiplayerSystem {
         });
         Ok(s)
     }
-    
+
     /// Create a new multiplayer system (deprecated - use new_with_runtime)
     ///
     /// **WARNING:** This method is deprecated and will be removed.
@@ -513,32 +576,36 @@ impl MultiplayerSystem {
         // This implementation is now broken due to mDNS tokio requirements
         // Keeping it for compatibility but marking as deprecated
         Err(MultiplayerError::RuntimeError(
-            "new() is deprecated - use new_with_runtime() instead".into()
+            "new() is deprecated - use new_with_runtime() instead".into(),
         ))
     }
-    
+
     /// Start listening on the given address
     /// Start listening on an address
     pub fn listen_on(&self, addr: &str) -> Result<()> {
-        self.cmd_tx.send(NetworkCommand::Listen {
-            multiaddr: addr.to_string(),
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        self.cmd_tx
+            .send(NetworkCommand::Listen {
+                multiaddr: addr.to_string(),
+            })
+            .map_err(|_| MultiplayerError::ChannelSendError)?;
         Ok(())
     }
-    
+
     /// Connect to a specific peer
     pub fn dial(&self, addr: &str) -> Result<()> {
-        self.cmd_tx.send(NetworkCommand::Dial {
-            address: addr.to_string(),
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
+        self.cmd_tx
+            .send(NetworkCommand::Dial {
+                address: addr.to_string(),
+            })
+            .map_err(|_| MultiplayerError::ChannelSendError)?;
         Ok(())
     }
-    
+
     /// Get our PeerId
     pub fn peer_id(&self) -> PeerId {
         self.local_peer_id
     }
-    
+
     /// Update multiplayer system - call this every frame
     ///
     /// Processes network events, updates remote player interpolation,
@@ -552,18 +619,18 @@ impl MultiplayerSystem {
                 eprintln!("Error handling network event: {}", e);
             }
         }
-        
+
         if event_count > 0 {
             println!("🔄 Processed {} network events", event_count);
         }
-        
+
         // Update remote player interpolation
         self.remote_players.update_interpolation();
-        
+
         // Clean up stale players
         self.remote_players.remove_stale_players();
     }
-    
+
     /// Broadcast player state using delta suppression.
     ///
     /// Only transmits when:
@@ -636,9 +703,11 @@ impl MultiplayerSystem {
                 let mut all_topics = new_topics;
                 all_topics.extend(player_topics);
 
-                self.cmd_tx.send(NetworkCommand::SubscribeBulk {
-                    topics: all_topics.clone(),
-                }).map_err(|_| MultiplayerError::ChannelSendError)?;
+                self.cmd_tx
+                    .send(NetworkCommand::SubscribeBulk {
+                        topics: all_topics.clone(),
+                    })
+                    .map_err(|_| MultiplayerError::ChannelSendError)?;
 
                 println!("   ✅ Subscribed to {} regional topics", all_topics.len());
             }
@@ -677,30 +746,41 @@ impl MultiplayerSystem {
         };
 
         if use_compact {
-            self.cmd_tx.send(NetworkCommand::Publish { topic: pub_topic, data })
+            self.cmd_tx
+                .send(NetworkCommand::Publish {
+                    topic: pub_topic,
+                    data,
+                })
                 .map_err(|_| MultiplayerError::ChannelSendError)?;
         } else {
             // Full message: publish on per-chunk AOI topic when subscribed, else regional/global
             let topic = chunk_player_topic(&ChunkId::from_ecef(&position));
             if self.subscribed_chunk_topics.contains(&topic) {
-                self.cmd_tx.send(NetworkCommand::Publish { topic, data })
+                self.cmd_tx
+                    .send(NetworkCommand::Publish { topic, data })
                     .map_err(|_| MultiplayerError::ChannelSendError)?;
             } else if let Some(ref sharding) = self.spatial_sharding {
                 let fallback = sharding.get_publish_topic("player-state");
-                self.cmd_tx.send(NetworkCommand::Publish { topic: fallback, data })
+                self.cmd_tx
+                    .send(NetworkCommand::Publish {
+                        topic: fallback,
+                        data,
+                    })
                     .map_err(|_| MultiplayerError::ChannelSendError)?;
             } else {
-                self.cmd_tx.send(NetworkCommand::Publish {
-                    topic: TOPIC_PLAYER_STATE.to_string(),
-                    data,
-                }).map_err(|_| MultiplayerError::ChannelSendError)?;
+                self.cmd_tx
+                    .send(NetworkCommand::Publish {
+                        topic: TOPIC_PLAYER_STATE.to_string(),
+                        data,
+                    })
+                    .map_err(|_| MultiplayerError::ChannelSendError)?;
             }
         }
 
         self.stats.player_states_sent += 1;
         Ok(())
     }
-    
+
     /// Broadcast a voxel operation (dig or place)
     pub fn broadcast_voxel_operation(
         &mut self,
@@ -710,7 +790,7 @@ impl MultiplayerSystem {
         // Increment clocks
         let timestamp = self.clock.tick();
         self.vector_clock.increment(self.local_peer_id);
-        
+
         // Create and sign operation
         let mut op = SignedOperation::new(
             Action::SetVoxel { coord, material },
@@ -736,34 +816,40 @@ impl MultiplayerSystem {
             } else {
                 TOPIC_VOXEL_OPS.to_string()
             };
-            
-            if self.cmd_tx.send(NetworkCommand::Publish { topic, data }).is_ok() {
+
+            if self
+                .cmd_tx
+                .send(NetworkCommand::Publish { topic, data })
+                .is_ok()
+            {
                 self.stats.voxel_ops_sent += 1;
             }
         }
 
         Ok(op)
     }
-    
+
     /// Send a chat message
     pub fn send_chat(&mut self, text: String) -> Result<()> {
         let timestamp = self.clock.tick();
         let msg = ChatMessage::new(self.local_peer_id, text, timestamp);
-        
+
         let data = msg.to_bytes()?;
-        self.cmd_tx.send(NetworkCommand::Publish {
-            topic: TOPIC_CHAT.to_string(),
-            data,
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
-        
+        self.cmd_tx
+            .send(NetworkCommand::Publish {
+                topic: TOPIC_CHAT.to_string(),
+                data,
+            })
+            .map_err(|_| MultiplayerError::ChannelSendError)?;
+
         Ok(())
     }
-    
+
     /// Get iterator over remote players
     pub fn remote_players(&self) -> impl Iterator<Item = &crate::player_state::NetworkedPlayer> {
         self.remote_players.players()
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> &MultiplayerStats {
         &self.stats
@@ -786,11 +872,21 @@ impl MultiplayerSystem {
             desired.insert(chunk_voxel_topic(id));
         }
 
-        let to_add: Vec<String> = desired.difference(&self.subscribed_chunk_topics).cloned().collect();
-        let to_remove: Vec<String> = self.subscribed_chunk_topics.difference(&desired).cloned().collect();
+        let to_add: Vec<String> = desired
+            .difference(&self.subscribed_chunk_topics)
+            .cloned()
+            .collect();
+        let to_remove: Vec<String> = self
+            .subscribed_chunk_topics
+            .difference(&desired)
+            .cloned()
+            .collect();
 
         if !to_add.is_empty() {
-            self.cmd_tx.send(NetworkCommand::SubscribeBulk { topics: to_add.clone() })
+            self.cmd_tx
+                .send(NetworkCommand::SubscribeBulk {
+                    topics: to_add.clone(),
+                })
                 .map_err(|_| MultiplayerError::ChannelSendError)?;
             for t in &to_add {
                 self.subscribed_chunk_topics.insert(t.clone());
@@ -798,7 +894,10 @@ impl MultiplayerSystem {
         }
 
         if !to_remove.is_empty() {
-            self.cmd_tx.send(NetworkCommand::UnsubscribeBulk { topics: to_remove.clone() })
+            self.cmd_tx
+                .send(NetworkCommand::UnsubscribeBulk {
+                    topics: to_remove.clone(),
+                })
                 .map_err(|_| MultiplayerError::ChannelSendError)?;
             for t in &to_remove {
                 self.subscribed_chunk_topics.remove(t);
@@ -807,7 +906,7 @@ impl MultiplayerSystem {
 
         Ok(())
     }
-    
+
     /// Enable spatial sharding with custom configuration
     ///
     /// Spatial sharding implements hierarchical peer selection for planet-scale P2P:
@@ -819,7 +918,7 @@ impl MultiplayerSystem {
     /// # Example
     /// ```no_run
     /// use metaverse_core::spatial_sharding::SpatialConfig;
-    /// 
+    ///
     /// mp.enable_spatial_sharding_with_config(SpatialConfig {
     ///     redundancy_target: 10, // 10 copies per operation
     ///     tier1_radius_m: 100.0,
@@ -833,7 +932,7 @@ impl MultiplayerSystem {
         self.spatial_sharding = Some(SpatialSharding::new(self.local_position, config));
         println!("✨ Spatial sharding enabled with custom config");
     }
-    
+
     /// Enable spatial sharding with default configuration
     ///
     /// Default configuration:
@@ -846,18 +945,18 @@ impl MultiplayerSystem {
         self.spatial_sharding = Some(SpatialSharding::new_default(self.local_position));
         println!("✨ Spatial sharding enabled with default config");
     }
-    
+
     /// Disable spatial sharding (back to broadcast-all mode)
     pub fn disable_spatial_sharding(&mut self) {
         self.spatial_sharding = None;
         println!("📡 Spatial sharding disabled - using broadcast mode");
     }
-    
+
     /// Check if spatial sharding is enabled
     pub fn is_spatial_sharding_enabled(&self) -> bool {
         self.spatial_sharding.is_some()
     }
-    
+
     /// Get spatial sharding statistics (if enabled)
     ///
     /// Returns information about peer distribution across tiers:
@@ -869,7 +968,7 @@ impl MultiplayerSystem {
     pub fn get_spatial_stats(&self) -> Option<crate::spatial_sharding::SpatialStats> {
         self.spatial_sharding.as_ref().map(|s| s.stats())
     }
-    
+
     /// Update spatial sharding configuration at runtime
     pub fn update_spatial_config(&mut self, config: SpatialConfig) {
         if let Some(ref mut sharding) = self.spatial_sharding {
@@ -877,18 +976,22 @@ impl MultiplayerSystem {
             println!("🔧 Spatial sharding configuration updated");
         }
     }
-    
+
     /// Handle incoming network event
     fn handle_network_event(&mut self, event: NetworkEvent) -> Result<()> {
         match event {
-            NetworkEvent::Message { peer_id, topic, data } => {
+            NetworkEvent::Message {
+                peer_id,
+                topic,
+                data,
+            } => {
                 self.stats.messages_received += 1;
-                
+
                 // Ignore messages from blocked peers
                 if self.blocked_peers.contains(&peer_id) {
                     return Ok(());
                 }
-                
+
                 match topic.as_str() {
                     TOPIC_PLAYER_STATE => self.handle_player_state(peer_id, &data)?,
                     TOPIC_VOXEL_OPS => self.handle_voxel_operation(peer_id, &data)?,
@@ -899,15 +1002,21 @@ impl MultiplayerSystem {
                     TOPIC_CHUNK_MANIFEST => self.handle_chunk_manifest(peer_id, &data)?,
                     TOPIC_KEY_REGISTRY => self.handle_key_registry(peer_id, &data),
                     TOPIC_KEY_REVOCATIONS => self.handle_key_revocation(peer_id, &data),
-                    TOPIC_PLAYER_STATE_COMPACT => self.handle_compact_player_state(peer_id, &data)?,
+                    TOPIC_PLAYER_STATE_COMPACT => {
+                        self.handle_compact_player_state(peer_id, &data)?
+                    }
                     // Handle regional topics (e.g., "player-state-L3-x0042-y-0015")
-                    t if t.starts_with("player-state") => self.handle_player_state(peer_id, &data)?,
-                    t if t.starts_with("voxel-ops") => self.handle_voxel_operation(peer_id, &data)?,
+                    t if t.starts_with("player-state") => {
+                        self.handle_player_state(peer_id, &data)?
+                    }
+                    t if t.starts_with("voxel-ops") => {
+                        self.handle_voxel_operation(peer_id, &data)?
+                    }
                     t if t.starts_with("meshsite/") => self.handle_meshsite_content(&data),
                     _ => {}
                 }
             }
-            
+
             NetworkEvent::PeerConnected { peer_id, address } => {
                 println!("🔗 Peer connected: {} @ {}", peer_id, address);
                 self.connected_peers.insert(peer_id);
@@ -917,8 +1026,12 @@ impl MultiplayerSystem {
                         peers.push(peer_id);
                         // New peer may have tiles previous peers didn't — clear failed sets
                         // so terrain workers will re-try P2P for any tile that failed before.
-                        if let Ok(mut f) = self.failed_elev.lock() { f.clear(); }
-                        if let Ok(mut f) = self.failed_osm.lock() { f.clear(); }
+                        if let Ok(mut f) = self.failed_elev.lock() {
+                            f.clear();
+                        }
+                        if let Ok(mut f) = self.failed_osm.lock() {
+                            f.clear();
+                        }
                     }
                 }
                 if !self.state_requested_from.contains(&peer_id) {
@@ -927,12 +1040,12 @@ impl MultiplayerSystem {
                 // Publish our own KeyRecord so the new peer can recognise us
                 self.publish_own_key_record();
             }
-            
+
             NetworkEvent::PeerDisconnected { peer_id } => {
                 println!("💔 Peer disconnected: {}", peer_id);
                 self.remote_players.remove_player(&peer_id);
                 self.connected_peers.remove(&peer_id);
-                
+
                 // Remove from spatial sharding
                 if let Some(ref mut sharding) = self.spatial_sharding {
                     sharding.remove_peer(&peer_id);
@@ -943,7 +1056,7 @@ impl MultiplayerSystem {
                     servers.retain(|p| p != &peer_id);
                 }
             }
-            
+
             NetworkEvent::PeerDiscovered { peer_id } => {
                 println!("🔍 Peer discovered: {}", peer_id);
                 self.connected_peers.insert(peer_id);
@@ -951,38 +1064,49 @@ impl MultiplayerSystem {
                     self.peers_needing_sync.push(peer_id);
                 }
             }
-            
+
             NetworkEvent::ListeningOn { address } => {
                 println!("👂 Listening on: {}", address);
             }
-            
+
             NetworkEvent::TopicSubscribed { topic } => {
                 println!("📻 Subscribed to topic: {}", topic);
             }
-            
+
             NetworkEvent::TopicUnsubscribed { topic } => {
                 println!("📴 Unsubscribed from topic: {}", topic);
             }
-            
-            NetworkEvent::NatStatusChanged { old_status, new_status, external_address } => {
+
+            NetworkEvent::NatStatusChanged {
+                old_status,
+                new_status,
+                external_address,
+            } => {
                 println!("🔍 NAT status: {} → {}", old_status, new_status);
                 if let Some(addr) = external_address {
                     println!("   External address: {}", addr);
                 }
             }
-            
-            NetworkEvent::ConnectionUpgraded { peer_id, from_relay } => {
+
+            NetworkEvent::ConnectionUpgraded {
+                peer_id,
+                from_relay,
+            } => {
                 if from_relay {
                     println!("⚡ Direct P2P connection established with: {}", peer_id);
                 }
             }
             NetworkEvent::DirectConnectionUpgraded { peer_id } => {
-                println!("⚡ [DCUtR] Hole punch succeeded — now direct with: {}", peer_id);
+                println!(
+                    "⚡ [DCUtR] Hole punch succeeded — now direct with: {}",
+                    peer_id
+                );
             }
             // These events are generated locally (not from the network thread) — no-op here.
             NetworkEvent::KeyRevoked { .. } | NetworkEvent::SessionIdAssigned { .. } => {}
             NetworkEvent::ChunkProvidersFound { key, providers } => {
-                self.pending_chunk_providers.push((key.clone(), providers.clone()));
+                self.pending_chunk_providers
+                    .push((key.clone(), providers.clone()));
             }
             NetworkEvent::DhtRecordFound { key, value } => {
                 // trying the session namespace key first, then falling back to KeyRecord.
@@ -991,20 +1115,31 @@ impl MultiplayerSystem {
                     // This is our own session record — offer it to the game loop
                     match PlayerSessionRecord::from_bytes(&value) {
                         Ok(rec) if rec.verify() => {
-                            println!("📍 [Session] Found last session: pos [{:.1},{:.1},{:.1}] logged out {}s ago",
-                                rec.position[0], rec.position[1], rec.position[2],
+                            println!(
+                                "📍 [Session] Found last session: pos [{:.1},{:.1},{:.1}] logged out {}s ago",
+                                rec.position[0],
+                                rec.position[1],
+                                rec.position[2],
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_millis() as u64)
                                     .unwrap_or(0)
-                                    .saturating_sub(rec.logged_out_at) / 1000);
+                                    .saturating_sub(rec.logged_out_at)
+                                    / 1000
+                            );
                             self.pending_session_record = Some(rec);
                         }
-                        Ok(_)  => eprintln!("📍 [Session] Session record signature invalid — ignoring"),
-                        Err(e) => eprintln!("📍 [Session] Failed to deserialize session record: {}", e),
+                        Ok(_) => {
+                            eprintln!("📍 [Session] Session record signature invalid — ignoring")
+                        }
+                        Err(e) => {
+                            eprintln!("📍 [Session] Failed to deserialize session record: {}", e)
+                        }
                     }
                 } else if key.starts_with(b"caps/") {
-                    if let Some(_caps) = crate::node_capabilities::NodeCapabilities::from_bytes(&value) {
+                    if let Some(_caps) =
+                        crate::node_capabilities::NodeCapabilities::from_bytes(&value)
+                    {
                         if let Ok(key_str) = std::str::from_utf8(&key) {
                             if let Some(peer_id_str) = key_str.strip_prefix("caps/") {
                                 if let Ok(peer_id) = peer_id_str.parse::<PeerId>() {
@@ -1023,22 +1158,57 @@ impl MultiplayerSystem {
                         Ok(record) => {
                             let peer_id = record.peer_id;
                             match self.key_registry.apply_update(record) {
-                                Ok(true)  => println!("🔑 [DHT] Updated KeyRecord for {} from DHT", peer_id),
-                                Ok(false) => {}  // already had this record
-                                Err(e)    => eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e),
+                                Ok(true) => {
+                                    println!("🔑 [DHT] Updated KeyRecord for {} from DHT", peer_id)
+                                }
+                                Ok(false) => {} // already had this record
+                                Err(e) => {
+                                    eprintln!("🔑 [DHT] Rejected DHT record for {}: {}", peer_id, e)
+                                }
                             }
                         }
                         Err(_) => {
-                            // Not a KeyRecord — try as a world chunk object list
-                            if let Some(chunk_list) = crate::world_objects::ChunkObjectList::from_bytes(&value) {
+                            // Inference status key: world/inferred/{cx}/{cz}
+                            if key.starts_with(b"world/inferred/") {
+                                if let Ok(s) = std::str::from_utf8(&key) {
+                                    let parts: Vec<&str> = s.split('/').collect();
+                                    if parts.len() == 4 {
+                                        if let (Ok(cx), Ok(cz)) =
+                                            (parts[2].parse::<i32>(), parts[3].parse::<i32>())
+                                        {
+                                            self.inferred_chunks.insert((cx, cz));
+                                        }
+                                    }
+                                }
+                            // Override list key: world/overrides/{cx}/{cz}
+                            } else if key.starts_with(b"world/overrides/") {
+                                if let Some(list) =
+                                    crate::world_objects::ChunkOverrideList::from_bytes(&value)
+                                {
+                                    if !list.overrides.is_empty() {
+                                        println!(
+                                            "🔧 [DHT] Loaded {} overrides for chunk ({},{})",
+                                            list.overrides.len(),
+                                            list.cx,
+                                            list.cz
+                                        );
+                                        self.pending_override_refreshes.push((list.cx, list.cz));
+                                        self.object_overrides_cache
+                                            .insert((list.cx, list.cz), list);
+                                    }
+                                }
+                            // World chunk object list
+                            } else if let Some(chunk_list) =
+                                crate::world_objects::ChunkObjectList::from_bytes(&value)
+                            {
                                 let count = chunk_list.objects.len();
-                                self.world_objects_cache.insert(
-                                    (chunk_list.cx, chunk_list.cz),
-                                    chunk_list.objects,
-                                );
+                                self.world_objects_cache
+                                    .insert((chunk_list.cx, chunk_list.cz), chunk_list.objects);
                                 if count > 0 {
-                                    println!("🗺️  [DHT] Loaded {} world objects for chunk ({},{})",
-                                        count, chunk_list.cx, chunk_list.cz);
+                                    println!(
+                                        "🗺️  [DHT] Loaded {} world objects for chunk ({},{})",
+                                        count, chunk_list.cx, chunk_list.cz
+                                    );
                                 }
                             }
                         }
@@ -1046,17 +1216,19 @@ impl MultiplayerSystem {
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle incoming player state message
     fn handle_player_state(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let msg = PlayerStateMessage::from_bytes(data)?;
-        
-        println!("📥 Received player state from {}: pos=({:.1}, {:.1}, {:.1})", 
-            peer_id, msg.position.x, msg.position.y, msg.position.z);
-        
+
+        println!(
+            "📥 Received player state from {}: pos=({:.1}, {:.1}, {:.1})",
+            peer_id, msg.position.x, msg.position.y, msg.position.z
+        );
+
         // Assign a session ID on first contact — used by compact hot-path messages.
         if !self.session_ids.contains_key(&peer_id) {
             let sid = self.assign_session_id(peer_id);
@@ -1065,22 +1237,25 @@ impl MultiplayerSystem {
 
         // Update Lamport clock
         self.clock.receive(msg.timestamp);
-        
+
         // Update remote player (manager handles deduplication and filtering)
         self.remote_players.handle_message(msg.clone());
         self.stats.player_states_received += 1;
-        
+
         // Update spatial sharding with peer position
         if let Some(ref mut sharding) = self.spatial_sharding {
             // Assume regular players, not relay nodes (can add relay detection later)
             sharding.update_peer(peer_id, msg.position, false);
         }
-        
-        println!("   Total remote players tracked: {}", self.remote_players.player_count());
-        
+
+        println!(
+            "   Total remote players tracked: {}",
+            self.remote_players.player_count()
+        );
+
         Ok(())
     }
-    
+
     /// Handle incoming voxel operation with CRDT merge and signature verification
     fn handle_voxel_operation(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         // Try new SignedOperation format first; fall back to legacy VoxelOperation
@@ -1097,7 +1272,10 @@ impl MultiplayerSystem {
                     SignedOperation::from(legacy)
                 }
                 Err(e) => {
-                    eprintln!("⚠️  [VoxelOp] Failed to deserialize from {}: {}", peer_id, e);
+                    eprintln!(
+                        "⚠️  [VoxelOp] Failed to deserialize from {}: {}",
+                        peer_id, e
+                    );
                     return Ok(());
                 }
             }
@@ -1105,8 +1283,14 @@ impl MultiplayerSystem {
 
         let ecef = op.coord().map(|c| c.to_ecef());
         if let Some(ecef) = ecef {
-            println!("🔨 Received voxel op from {}: {:?} at ecef=({:.1},{:.1},{:.1})",
-                peer_id, op.action.name(), ecef.x, ecef.y, ecef.z);
+            println!(
+                "🔨 Received voxel op from {}: {:?} at ecef=({:.1},{:.1},{:.1})",
+                peer_id,
+                op.action.name(),
+                ecef.x,
+                ecef.y,
+                ecef.z
+            );
         }
 
         // Deduplication
@@ -1116,7 +1300,10 @@ impl MultiplayerSystem {
 
         // Author sanity check
         if op.author != peer_id {
-            eprintln!("⚠️  [VoxelOp] Author mismatch: claimed {}, received from {}", op.author, peer_id);
+            eprintln!(
+                "⚠️  [VoxelOp] Author mismatch: claimed {}, received from {}",
+                op.author, peer_id
+            );
             self.stats.voxel_ops_rejected += 1;
             return Ok(());
         }
@@ -1155,20 +1342,24 @@ impl MultiplayerSystem {
 
         Ok(())
     }
-    
+
     /// Handle incoming chat message
     fn handle_chat(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
         let msg = ChatMessage::from_bytes(data)?;
-        
+
         // Update Lamport clock
         self.clock.receive(msg.timestamp);
-        
+
         // Display in console (game can hook this later)
-        println!("💬 {}: {}", msg.author.to_string().chars().take(8).collect::<String>(), msg.text);
-        
+        println!(
+            "💬 {}: {}",
+            msg.author.to_string().chars().take(8).collect::<String>(),
+            msg.text
+        );
+
         Ok(())
     }
-    
+
     /// Handle incoming chunk state request
     ///
     /// Peer is requesting our operations for specific chunks. Queue the request
@@ -1176,16 +1367,19 @@ impl MultiplayerSystem {
     fn handle_state_request(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let request = ChunkStateRequest::from_bytes(data)
             .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
-        
-        println!("📨 Received state request from {} for {} chunks",
-            peer_id, request.chunk_ids.len());
-        
+
+        println!(
+            "📨 Received state request from {} for {} chunks",
+            peer_id,
+            request.chunk_ids.len()
+        );
+
         // Queue for game loop to handle (needs ChunkManager access)
         self.pending_state_requests.push((peer_id, request));
-        
+
         Ok(())
     }
-    
+
     /// Handle incoming chunk state response
     ///
     /// We requested chunk state and received operations. Queue them for
@@ -1193,15 +1387,19 @@ impl MultiplayerSystem {
     fn handle_state_response(&mut self, peer_id: PeerId, data: &[u8]) -> Result<()> {
         let response = ChunkStateResponse::from_bytes(data)
             .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
-        
+
         let op_count = response.operation_count();
-        
-        println!("📦 Received state response from {} with {} operations across {} chunks",
-            peer_id, op_count, response.operations.len());
-        
+
+        println!(
+            "📦 Received state response from {} with {} operations across {} chunks",
+            peer_id,
+            op_count,
+            response.operations.len()
+        );
+
         // Merge vector clocks for causality tracking
         self.vector_clock.merge(&response.responder_clock);
-        
+
         // Flatten operations from all chunks into pending queue
         for (_chunk_id, ops) in response.operations {
             for op in ops {
@@ -1234,14 +1432,17 @@ impl MultiplayerSystem {
                 self.stats.state_ops_received += 1;
             }
         }
-        
+
         self.stats.state_responses_received += 1;
-        
-        println!("   Queued {} new operations for application", self.pending_state_ops.len());
-        
+
+        println!(
+            "   Queued {} new operations for application",
+            self.pending_state_ops.len()
+        );
+
         Ok(())
     }
-    
+
     /// Check whether the local player's key is allowed to perform an action.
     ///
     /// Call this before creating and broadcasting a local operation.
@@ -1251,7 +1452,7 @@ impl MultiplayerSystem {
         let class = action_to_class(action);
         crate::permissions::check_record_permission(&record, class, &self.perm_config)
     }
-    
+
     /// Apply a received voxel operation to the octree with CRDT merge
     ///
     /// Returns true if operation was applied (won the CRDT merge),
@@ -1274,18 +1475,18 @@ impl MultiplayerSystem {
                 octree.set_voxel(coord, material.to_material_id());
             }
         }
-        
+
         self.stats.voxel_ops_applied += 1;
         true
     }
-    
+
     /// Get all pending voxel operations and clear the queue
     ///
     /// Call this in your game loop to process received operations.
     pub fn take_pending_operations(&mut self) -> Vec<SignedOperation> {
         std::mem::take(&mut self.pending_ops)
     }
-    
+
     /// Take pending state synchronization operations
     ///
     /// Returns operations received from ChunkStateResponse messages.
@@ -1295,7 +1496,7 @@ impl MultiplayerSystem {
     pub fn take_pending_state_operations(&mut self) -> Vec<SignedOperation> {
         std::mem::take(&mut self.pending_state_ops)
     }
-    
+
     /// Get pending state requests from peers.
     ///
     /// Game loop should call this, filter operations using ChunkManager,
@@ -1309,7 +1510,7 @@ impl MultiplayerSystem {
     pub fn take_peers_needing_sync(&mut self) -> Vec<PeerId> {
         std::mem::take(&mut self.peers_needing_sync)
     }
-    
+
     /// Send chunk state response to a peer.
     ///
     /// Called by game loop after filtering operations using ChunkManager.
@@ -1325,42 +1526,42 @@ impl MultiplayerSystem {
     /// # Returns
     /// Number of messages sent
     pub fn send_chunk_state_response(
-        &mut self, 
-        operations_by_chunk: HashMap<ChunkId, Vec<SignedOperation>>
+        &mut self,
+        operations_by_chunk: HashMap<ChunkId, Vec<SignedOperation>>,
     ) -> Result<usize> {
         if operations_by_chunk.is_empty() {
             return Ok(0); // Nothing to send
         }
-        
+
         let total_ops: usize = operations_by_chunk.values().map(|v| v.len()).sum();
-        
+
         // Adaptive chunking based on operation count
         const OPS_PER_CHUNK: usize = 100; // ~10-20 KB per message with binary encoding
-        
+
         if total_ops <= OPS_PER_CHUNK {
             // Small response - send in one message
-            let response = ChunkStateResponse::new(
-                operations_by_chunk,
-                self.vector_clock.clone()
-            );
-            let bytes = response.to_bytes()
+            let response = ChunkStateResponse::new(operations_by_chunk, self.vector_clock.clone());
+            let bytes = response
+                .to_bytes()
                 .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
-            
-            self.cmd_tx.send(NetworkCommand::Publish {
-                topic: TOPIC_STATE_RESPONSE.to_string(),
-                data: bytes,
-            }).map_err(|_| MultiplayerError::ChannelSendError)?;
-            
+
+            self.cmd_tx
+                .send(NetworkCommand::Publish {
+                    topic: TOPIC_STATE_RESPONSE.to_string(),
+                    data: bytes,
+                })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
+
             self.stats.state_responses_received += 1;
             return Ok(1);
         }
-        
+
         // Large response - chunk it
         let response_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_micros() as u64;
-        
+
         // Flatten operations into single vec for chunking
         let mut all_ops: Vec<(ChunkId, SignedOperation)> = Vec::new();
         for (chunk_id, ops) in operations_by_chunk {
@@ -1368,22 +1569,25 @@ impl MultiplayerSystem {
                 all_ops.push((chunk_id, op));
             }
         }
-        
+
         let chunks: Vec<_> = all_ops.chunks(OPS_PER_CHUNK).collect();
         let total_chunks = chunks.len() as u32;
-        
-        println!("   📦 Chunking {} ops into {} messages ({} ops/msg)", 
-            total_ops, total_chunks, OPS_PER_CHUNK);
-        
+
+        println!(
+            "   📦 Chunking {} ops into {} messages ({} ops/msg)",
+            total_ops, total_chunks, OPS_PER_CHUNK
+        );
+
         for (i, chunk) in chunks.iter().enumerate() {
             // Rebuild operations_by_chunk for this chunk
             let mut chunk_ops: HashMap<ChunkId, Vec<SignedOperation>> = HashMap::new();
             for (chunk_id, op) in chunk.iter() {
-                chunk_ops.entry(*chunk_id)
+                chunk_ops
+                    .entry(*chunk_id)
                     .or_insert_with(Vec::new)
                     .push(op.clone());
             }
-            
+
             let response = ChunkStateResponse::new_chunked(
                 chunk_ops,
                 self.vector_clock.clone(),
@@ -1391,34 +1595,49 @@ impl MultiplayerSystem {
                 total_chunks,
                 response_id,
             );
-            
-            let bytes = response.to_bytes()
+
+            let bytes = response
+                .to_bytes()
                 .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
-            
-            self.cmd_tx.send(NetworkCommand::Publish {
-                topic: TOPIC_STATE_RESPONSE.to_string(),
-                data: bytes,
-            }).map_err(|_| MultiplayerError::ChannelSendError)?;
+
+            self.cmd_tx
+                .send(NetworkCommand::Publish {
+                    topic: TOPIC_STATE_RESPONSE.to_string(),
+                    data: bytes,
+                })
+                .map_err(|_| MultiplayerError::ChannelSendError)?;
         }
-        
+
         self.stats.state_responses_received += total_chunks as u64;
         Ok(total_chunks as usize)
     }
-    
+
     /// Broadcast chunk terrain (raw octree bytes + timestamp) to all peers.
     /// Peers only apply this if the received timestamp is newer than what they have.
-    pub fn broadcast_chunk_terrain(&mut self, chunk_id: ChunkId, octree_bytes: Vec<u8>, last_modified: u64) -> Result<()> {
+    pub fn broadcast_chunk_terrain(
+        &mut self,
+        chunk_id: ChunkId,
+        octree_bytes: Vec<u8>,
+        last_modified: u64,
+    ) -> Result<()> {
         // Bandwidth gate: suppress terrain transfers on constrained/LoRa links
         if !self.bandwidth.should_send_terrain() {
             return Ok(());
         }
-        let data = ChunkTerrainData { chunk_id, octree_bytes, last_modified };
+        let data = ChunkTerrainData {
+            chunk_id,
+            octree_bytes,
+            last_modified,
+        };
         let bytes = data.to_bytes()?;
         if let Err(e) = self.cmd_tx.send(NetworkCommand::Publish {
             topic: TOPIC_CHUNK_TERRAIN.to_string(),
             data: bytes,
         }) {
-            eprintln!("⚠️ [TERRAIN SYNC] Failed to broadcast chunk {:?}: {}", chunk_id, e);
+            eprintln!(
+                "⚠️ [TERRAIN SYNC] Failed to broadcast chunk {:?}: {}",
+                chunk_id, e
+            );
         }
         Ok(())
     }
@@ -1426,9 +1645,17 @@ impl MultiplayerSystem {
     /// Receive handler for chunk-terrain gossipsub messages.
     fn handle_chunk_terrain(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
         let terrain_data = ChunkTerrainData::from_bytes(data)?;
-        println!("📦 [TERRAIN SYNC] Received terrain for chunk {:?} ({} bytes, t={})",
-            terrain_data.chunk_id, terrain_data.octree_bytes.len(), terrain_data.last_modified);
-        self.pending_chunk_terrain.push((terrain_data.chunk_id, terrain_data.octree_bytes, terrain_data.last_modified));
+        println!(
+            "📦 [TERRAIN SYNC] Received terrain for chunk {:?} ({} bytes, t={})",
+            terrain_data.chunk_id,
+            terrain_data.octree_bytes.len(),
+            terrain_data.last_modified
+        );
+        self.pending_chunk_terrain.push((
+            terrain_data.chunk_id,
+            terrain_data.octree_bytes,
+            terrain_data.last_modified,
+        ));
         Ok(())
     }
 
@@ -1455,7 +1682,10 @@ impl MultiplayerSystem {
     /// Queues manifest for the game loop to process (it has access to chunk_streamer).
     fn handle_chunk_manifest(&mut self, _peer_id: PeerId, data: &[u8]) -> Result<()> {
         let manifest = ChunkManifest::from_bytes(data)?;
-        println!("📋 [TERRAIN SYNC] Received manifest with {} entries", manifest.entries.len());
+        println!(
+            "📋 [TERRAIN SYNC] Received manifest with {} entries",
+            manifest.entries.len()
+        );
         self.pending_chunk_manifests.push(manifest.entries);
         Ok(())
     }
@@ -1469,7 +1699,10 @@ impl MultiplayerSystem {
         let msg: KeyRegistryMessage = match bincode::deserialize(data) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("🔑 [KeyRegistry] Failed to deserialize message from {}: {}", peer_id, e);
+                eprintln!(
+                    "🔑 [KeyRegistry] Failed to deserialize message from {}: {}",
+                    peer_id, e
+                );
                 return;
             }
         };
@@ -1484,9 +1717,9 @@ impl MultiplayerSystem {
         };
         for record in records {
             match self.key_registry.apply_update(record) {
-                Ok(true)  => {} // accepted new/updated record — no log spam
+                Ok(true) => {}  // accepted new/updated record — no log spam
                 Ok(false) => {} // idempotent re-insert
-                Err(e)    => eprintln!("🔑 [KeyRegistry] Rejected record from {}: {}", peer_id, e),
+                Err(e) => eprintln!("🔑 [KeyRegistry] Rejected record from {}: {}", peer_id, e),
             }
         }
     }
@@ -1497,22 +1730,39 @@ impl MultiplayerSystem {
     /// revoker has authority (Admin/Server/Genesis/Relay or self-revocation), then
     /// calls `KeyRegistry::mark_revoked()` and emits a `NetworkEvent::KeyRevoked`.
     fn handle_key_revocation(&mut self, peer_id: PeerId, data: &[u8]) {
-        use ed25519_dalek::{VerifyingKey, Signature as DalekSig, Verifier};
+        use ed25519_dalek::{Signature as DalekSig, Verifier, VerifyingKey};
 
         let msg: KeyRegistryMessage = match bincode::deserialize(data) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("🔑 [KeyRevocations] Failed to deserialize from {}: {}", peer_id, e);
+                eprintln!(
+                    "🔑 [KeyRevocations] Failed to deserialize from {}: {}",
+                    peer_id, e
+                );
                 return;
             }
         };
         let (target_bytes, revoker_bytes, reason, revoked_at_ms, sig, revoker_pub) = match msg {
             KeyRegistryMessage::Revocation {
-                target_peer_id_bytes, revoker_peer_id_bytes,
-                reason, revoked_at_ms, sig, revoker_public_key,
-            } => (target_peer_id_bytes, revoker_peer_id_bytes, reason, revoked_at_ms, sig, revoker_public_key),
+                target_peer_id_bytes,
+                revoker_peer_id_bytes,
+                reason,
+                revoked_at_ms,
+                sig,
+                revoker_public_key,
+            } => (
+                target_peer_id_bytes,
+                revoker_peer_id_bytes,
+                reason,
+                revoked_at_ms,
+                sig,
+                revoker_public_key,
+            ),
             _ => {
-                eprintln!("🔑 [KeyRevocations] Unexpected message type on revocations topic from {}", peer_id);
+                eprintln!(
+                    "🔑 [KeyRevocations] Unexpected message type on revocations topic from {}",
+                    peer_id
+                );
                 return;
             }
         };
@@ -1521,11 +1771,19 @@ impl MultiplayerSystem {
         let vk = match VerifyingKey::from_bytes(&revoker_pub) {
             Ok(v) => v,
             Err(_) => {
-                eprintln!("🔑 [KeyRevocations] Invalid revoker public key from {}", peer_id);
+                eprintln!(
+                    "🔑 [KeyRevocations] Invalid revoker public key from {}",
+                    peer_id
+                );
                 return;
             }
         };
-        let signable = revocation_signable_bytes(&target_bytes, &revoker_bytes, reason.as_deref(), revoked_at_ms);
+        let signable = revocation_signable_bytes(
+            &target_bytes,
+            &revoker_bytes,
+            reason.as_deref(),
+            revoked_at_ms,
+        );
         let signature = DalekSig::from_bytes(&sig);
         if vk.verify(&signable, &signature).is_err() {
             eprintln!("🔑 [KeyRevocations] Invalid signature from {}", peer_id);
@@ -1538,7 +1796,10 @@ impl MultiplayerSystem {
             return;
         };
         let Ok(revoker_peer_id) = PeerId::from_bytes(&revoker_bytes) else {
-            eprintln!("🔑 [KeyRevocations] Invalid revoker PeerId from {}", peer_id);
+            eprintln!(
+                "🔑 [KeyRevocations] Invalid revoker PeerId from {}",
+                peer_id
+            );
             return;
         };
 
@@ -1547,16 +1808,29 @@ impl MultiplayerSystem {
         let has_authority = is_self_revoke || {
             use crate::identity::KeyType;
             let ktype = self.key_registry.get_or_default(revoker_peer_id).key_type;
-            matches!(ktype, KeyType::Admin | KeyType::Server | KeyType::Genesis | KeyType::Relay)
+            matches!(
+                ktype,
+                KeyType::Admin | KeyType::Server | KeyType::Genesis | KeyType::Relay
+            )
         };
         if !has_authority {
-            eprintln!("🔑 [KeyRevocations] Revoker {} has no authority to revoke {}", revoker_peer_id, target_peer_id);
+            eprintln!(
+                "🔑 [KeyRevocations] Revoker {} has no authority to revoke {}",
+                revoker_peer_id, target_peer_id
+            );
             return;
         }
 
-        if self.key_registry.mark_revoked(&target_peer_id, &revoker_peer_id, reason, revoked_at_ms) {
-            println!("🔑 [KeyRevocations] Revoked key for {} (by {})", target_peer_id, revoker_peer_id);
-            self.pending_revocations.push((target_peer_id, revoker_peer_id));
+        if self
+            .key_registry
+            .mark_revoked(&target_peer_id, &revoker_peer_id, reason, revoked_at_ms)
+        {
+            println!(
+                "🔑 [KeyRevocations] Revoked key for {} (by {})",
+                target_peer_id, revoker_peer_id
+            );
+            self.pending_revocations
+                .push((target_peer_id, revoker_peer_id));
         }
     }
 
@@ -1636,7 +1910,12 @@ impl MultiplayerSystem {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u32;
-        let compact = CompactPlayerState { session_id, position, rotation, timestamp_ms: now_ms };
+        let compact = CompactPlayerState {
+            session_id,
+            position,
+            rotation,
+            timestamp_ms: now_ms,
+        };
         let Ok(data) = compact.to_bytes() else { return };
         let _ = self.cmd_tx.send(NetworkCommand::Publish {
             topic: TOPIC_PLAYER_STATE_COMPACT.to_string(),
@@ -1658,7 +1937,11 @@ impl MultiplayerSystem {
                 // know to apply Guest-level permissions.
                 self.identity.create_key_record(
                     crate::identity::KeyType::Guest,
-                    None, None, None, None, None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
             }
         };
@@ -1684,9 +1967,9 @@ impl MultiplayerSystem {
                     key: dht_key.clone(),
                     value: record_bytes,
                 });
-                let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey {
-                    key: dht_key,
-                });
+                let _ = self
+                    .cmd_tx
+                    .send(NetworkCommand::StartProvidingKey { key: dht_key });
             }
         }
     }
@@ -1713,7 +1996,10 @@ impl MultiplayerSystem {
         use crate::node_capabilities::NodeCapabilities;
         let caps = NodeCapabilities::for_client(storage_budget_gb);
         let key = NodeCapabilities::dht_key(&self.local_peer_id.to_string());
-        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key, value: caps.to_bytes() });
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+            key,
+            value: caps.to_bytes(),
+        });
     }
 
     /// Returns a lightweight tile fetcher handle that terrain workers can use.
@@ -1761,8 +2047,12 @@ impl MultiplayerSystem {
                     n.parse().unwrap_or(i32::MAX)
                 } else if let Some(s) = lat_name.strip_prefix('S') {
                     -(s.parse::<i32>().unwrap_or(i32::MAX))
-                } else { continue };
-                if lat == i32::MAX { continue; }
+                } else {
+                    continue;
+                };
+                if lat == i32::MAX {
+                    continue;
+                }
                 if let Ok(lon_dirs) = std::fs::read_dir(lat_dir.path()) {
                     for lon_dir in lon_dirs.flatten() {
                         let lon_name = lon_dir.file_name().to_string_lossy().to_string();
@@ -1770,8 +2060,12 @@ impl MultiplayerSystem {
                             e.parse().unwrap_or(i32::MAX)
                         } else if let Some(w) = lon_name.strip_prefix('W') {
                             -(w.parse::<i32>().unwrap_or(i32::MAX))
-                        } else { continue };
-                        if lon == i32::MAX { continue; }
+                        } else {
+                            continue;
+                        };
+                        if lon == i32::MAX {
+                            continue;
+                        }
                         self.announce_elevation_tile(lat, lon);
                     }
                 }
@@ -1787,26 +2081,34 @@ impl MultiplayerSystem {
     /// Each receiver stores it locally and re-puts it into the DHT.
     pub fn publish_content(&mut self, item: &crate::meshsite::ContentItem) {
         use crate::meshsite::topic_for_section;
-        let topic  = topic_for_section(&item.section).to_string();
-        let data   = item.to_bytes();
-        let dht_k  = item.dht_key();
-        let dht_v  = data.clone();
+        let topic = topic_for_section(&item.section).to_string();
+        let data = item.to_bytes();
+        let dht_k = item.dht_key();
+        let dht_v = data.clone();
         // Gossip so live peers receive it immediately
         let _ = self.cmd_tx.send(NetworkCommand::Publish { topic, data });
         // DHT put for offline persistence / late-joiners
-        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord { key: dht_k, value: dht_v });
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+            key: dht_k,
+            value: dht_v,
+        });
         // Add to local cache immediately so the poster sees it without network roundtrip
         let section = item.section.as_str().to_string();
         let cache = self.content_cache.entry(section).or_default();
         if !cache.iter().any(|c| c.id == item.id) {
             cache.insert(0, item.clone());
-            if cache.len() > 200 { cache.truncate(200); }
+            if cache.len() > 200 {
+                cache.truncate(200);
+            }
         }
     }
 
     /// Return cached content for a section, newest-first.
     pub fn get_content(&self, section: &str) -> &[crate::meshsite::ContentItem] {
-        self.content_cache.get(section).map(|v| v.as_slice()).unwrap_or(&[])
+        self.content_cache
+            .get(section)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Inject content items directly into the cache (e.g. from a server HTTP fetch).
@@ -1822,7 +2124,9 @@ impl MultiplayerSystem {
         // Sort each section newest-first
         for cache in self.content_cache.values_mut() {
             cache.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-            if cache.len() > 200 { cache.truncate(200); }
+            if cache.len() > 200 {
+                cache.truncate(200);
+            }
         }
     }
 
@@ -1849,12 +2153,24 @@ impl MultiplayerSystem {
 
     /// Return cached placed objects for a chunk (if available).
     pub fn get_world_objects(&self, cx: i32, cz: i32) -> &[crate::world_objects::PlacedObject] {
-        self.world_objects_cache.get(&(cx, cz)).map(|v| v.as_slice()).unwrap_or(&[])
+        self.world_objects_cache
+            .get(&(cx, cz))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Return all cached placed objects across all loaded chunks.
     pub fn all_world_objects(&self) -> impl Iterator<Item = &crate::world_objects::PlacedObject> {
         self.world_objects_cache.values().flat_map(|v| v.iter())
+    }
+
+    /// Return all object overrides across all chunks: iterator of (chunk, &[ObjectOverride]).
+    pub fn all_object_overrides(
+        &self,
+    ) -> impl Iterator<Item = ((i32, i32), &[crate::world_objects::ObjectOverride])> {
+        self.object_overrides_cache
+            .iter()
+            .map(|(&chunk, list)| (chunk, list.overrides.as_slice()))
     }
 
     /// Insert an inferred object into the cache without overwriting existing DHT objects.
@@ -1866,6 +2182,106 @@ impl MultiplayerSystem {
         if !bucket.iter().any(|o| o.id == obj.id) {
             bucket.push(obj);
         }
+    }
+
+    // ── Inference status ──────────────────────────────────────────────────────
+
+    /// True if this chunk has already been inferred this session (or a status
+    /// record was received from another peer via DHT).
+    pub fn is_chunk_inferred(&self, cx: i32, cz: i32) -> bool {
+        self.inferred_chunks.contains(&(cx, cz))
+    }
+
+    /// Record that this chunk has been inferred and broadcast the status to the DHT.
+    /// Subsequent calls to `is_chunk_inferred` return `true` immediately.
+    pub fn mark_chunk_inferred(&mut self, cx: i32, cz: i32) {
+        self.inferred_chunks.insert((cx, cz));
+        let key = crate::world_objects::inference_status_key(cx, cz);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let _ = self.cmd_tx.send(NetworkCommand::PutDhtRecord {
+            key,
+            value: ts.to_le_bytes().to_vec(),
+        });
+    }
+
+    /// Request the inference status for a chunk from the DHT.
+    /// If another peer has already inferred this chunk the result will arrive
+    /// asynchronously and set `is_chunk_inferred` to true.
+    pub fn request_inference_status(&self, cx: i32, cz: i32) {
+        let key = crate::world_objects::inference_status_key(cx, cz);
+        let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
+    }
+
+    // ── Object overrides ──────────────────────────────────────────────────────
+
+    /// Fetch admin overrides for a chunk from the DHT (async — result arrives later).
+    pub fn fetch_object_overrides_for_chunk(&self, cx: i32, cz: i32) {
+        let key = crate::world_objects::chunk_override_key(cx, cz);
+        let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
+    }
+
+    /// Return cached overrides for a chunk (empty slice if none loaded yet).
+    pub fn get_object_overrides(
+        &self,
+        cx: i32,
+        cz: i32,
+    ) -> &[crate::world_objects::ObjectOverride] {
+        self.object_overrides_cache
+            .get(&(cx, cz))
+            .map(|l| l.overrides.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Submit a signed admin override for an inferred object.
+    ///
+    /// Signs with the local identity, merges into the local cache, writes the
+    /// updated chunk override list to the DHT, and gossips the change.
+    pub fn submit_object_override(
+        &mut self,
+        target_id: &str,
+        chunk_cx: i32,
+        chunk_cz: i32,
+        action: crate::world_objects::OverrideAction,
+    ) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut ov = crate::world_objects::ObjectOverride {
+            target_id: target_id.to_string(),
+            action,
+            author_peer: self.local_peer_id.to_string(),
+            public_key: self.identity.verifying_key().to_bytes(),
+            timestamp: ts,
+            signature: [0u8; 64],
+        };
+        ov.sign(self.identity.signing_key());
+
+        let list = self
+            .object_overrides_cache
+            .entry((chunk_cx, chunk_cz))
+            .or_insert_with(|| crate::world_objects::ChunkOverrideList {
+                cx: chunk_cx,
+                cz: chunk_cz,
+                overrides: Vec::new(),
+            });
+        list.upsert(ov);
+
+        let key = crate::world_objects::chunk_override_key(chunk_cx, chunk_cz);
+        let value = list.to_bytes();
+        let _ = self
+            .cmd_tx
+            .send(NetworkCommand::PutDhtRecord { key, value });
+
+        self.pending_override_refreshes.push((chunk_cx, chunk_cz));
+        println!(
+            "🔧 [Override] Submitted override for '{}' in chunk ({},{})",
+            target_id, chunk_cx, chunk_cz
+        );
     }
 
     /// Handle an incoming meshsite content message from gossipsub.
@@ -1999,7 +2415,10 @@ impl MultiplayerSystem {
             });
         }
         if !chunk_ids.is_empty() {
-            println!("🔍 [DHT] Querying providers for {} missing chunk(s)", chunk_ids.len());
+            println!(
+                "🔍 [DHT] Querying providers for {} missing chunk(s)",
+                chunk_ids.len()
+            );
         }
     }
 
@@ -2042,56 +2461,65 @@ impl MultiplayerSystem {
         if chunk_ids.is_empty() {
             return Ok(()); // No chunks to request
         }
-        
+
         let request = ChunkStateRequest::new(chunk_ids.clone(), self.vector_clock.clone());
-        let data = request.to_bytes()
+        let data = request
+            .to_bytes()
             .map_err(|e| MultiplayerError::SerializationError(e.to_string()))?;
-        
+
         // Broadcast request to all connected peers
-        self.cmd_tx.send(NetworkCommand::Publish {
-            topic: TOPIC_STATE_REQUEST.to_string(),
-            data,
-        }).map_err(|_| MultiplayerError::ChannelSendError)?;
-        
+        self.cmd_tx
+            .send(NetworkCommand::Publish {
+                topic: TOPIC_STATE_REQUEST.to_string(),
+                data,
+            })
+            .map_err(|_| MultiplayerError::ChannelSendError)?;
+
         // Mark all connected peers as requested
         for peer_id in &self.connected_peers {
             self.state_requested_from.insert(*peer_id);
         }
-        
+
         self.stats.state_requests_sent += 1;
-        
-        println!("📡 Requested state for {} chunks from {} peers", 
-            chunk_ids.len(), self.connected_peers.len());
-        
+
+        println!(
+            "📡 Requested state for {} chunks from {} peers",
+            chunk_ids.len(),
+            self.connected_peers.len()
+        );
+
         Ok(())
     }
-    
+
     /// Check if there are new peers we should request state from
     ///
     /// Returns true if there are peers we haven't requested state from yet.
     /// Game loop should call request_chunk_state() when this returns true.
     pub fn has_new_peers(&self) -> bool {
-        self.connected_peers.iter().any(|p| !self.state_requested_from.contains(p))
+        self.connected_peers
+            .iter()
+            .any(|p| !self.state_requested_from.contains(p))
     }
-    
+
     /// Get list of peers we haven't requested state from
     pub fn get_new_peers(&self) -> Vec<PeerId> {
-        self.connected_peers.iter()
+        self.connected_peers
+            .iter()
             .filter(|p| !self.state_requested_from.contains(p))
             .copied()
             .collect()
     }
-    
+
     /// Get list of connected peers
     pub fn connected_peers(&self) -> &HashSet<PeerId> {
         &self.connected_peers
     }
-    
+
     /// Check if there are pending operations
     pub fn has_pending_operations(&self) -> bool {
         !self.pending_ops.is_empty()
     }
-    
+
     /// Get number of connected peers
     pub fn peer_count(&self) -> usize {
         self.remote_players.player_count()
@@ -2101,7 +2529,7 @@ impl MultiplayerSystem {
     pub fn is_connected_peer(&self, peer_id: &PeerId) -> bool {
         self.connected_peers.contains(peer_id)
     }
-    
+
     /// Check if a peer is blocked
     pub fn is_peer_blocked(&self, peer_id: &PeerId) -> bool {
         self.blocked_peers.contains(peer_id)
@@ -2136,14 +2564,16 @@ fn run_network_thread(
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
     world_data_dir: std::path::PathBuf,
-    idle_queue: Arc<std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>>,
+    idle_queue: Arc<
+        std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>,
+    >,
 ) {
     // Create tokio runtime in this thread
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("Failed to create tokio runtime");
-    
+
     // Run the network loop
     rt.block_on(async {
         // Create network node asynchronously (mDNS needs tokio context)
@@ -2160,7 +2590,7 @@ fn run_network_thread(
                 return;
             }
         };
-        
+
         // Subscribe to topics
         println!("🔧 [Network Thread] Subscribing to topics...");
         if let Err(e) = network.subscribe(TOPIC_PLAYER_STATE) {
@@ -2226,7 +2656,7 @@ fn run_network_thread(
                 println!("📻 Subscribed to topic: {}", topic);
             }
         }
-        
+
         println!("🔍 Network thread started - polling for mDNS and connections...");
         println!("🔧 [Network Thread] About to enter tokio::select! loop...");
 
@@ -2246,14 +2676,17 @@ fn run_network_thread(
         let mut last_reconnect = tokio::time::Instant::now();
         // Queue for retrying failed publishes (voxel ops that failed due to no mesh peers)
         let mut publish_retry_queue: Vec<(String, Vec<u8>, tokio::time::Instant)> = Vec::new();
-        
+
         // Main loop: process commands and poll network
         loop {
             heartbeat_counter += 1;
             if heartbeat_counter % 6000 == 0 {
-                println!("💓 [Network Thread] Heartbeat {} - loop is alive", heartbeat_counter / 6000);
+                println!(
+                    "💓 [Network Thread] Heartbeat {} - loop is alive",
+                    heartbeat_counter / 6000
+                );
             }
-            
+
             // Process ALL pending commands first (drain the channel)
             while let Ok(cmd) = cmd_rx.try_recv() {
                 match cmd {
@@ -2299,11 +2732,22 @@ fn run_network_thread(
                             Err(e) => {
                                 let e_str = e.to_string();
                                 // Queue voxel ops for retry - they're one-shot and must not be lost
-                                if topic == "voxel-ops" && 
-                                   (e_str.contains("InsufficientPeers") || e_str.contains("NoPeers")) {
-                                    println!("⚠️  [NETWORK] voxel-op publish failed ({}), queuing retry", e_str);
-                                    publish_retry_queue.push((topic, data, tokio::time::Instant::now()));
-                                } else if !e_str.contains("NoPeers") && !e_str.contains("AllQueuesFull") {
+                                if topic == "voxel-ops"
+                                    && (e_str.contains("InsufficientPeers")
+                                        || e_str.contains("NoPeers"))
+                                {
+                                    println!(
+                                        "⚠️  [NETWORK] voxel-op publish failed ({}), queuing retry",
+                                        e_str
+                                    );
+                                    publish_retry_queue.push((
+                                        topic,
+                                        data,
+                                        tokio::time::Instant::now(),
+                                    ));
+                                } else if !e_str.contains("NoPeers")
+                                    && !e_str.contains("AllQueuesFull")
+                                {
                                     // AllQueuesFull is transient gossipsub congestion — not an error
                                     eprintln!("Failed to publish to {}: {}", topic, e_str);
                                 }
@@ -2329,7 +2773,11 @@ fn run_network_thread(
                     NetworkCommand::DialPeer { peer_id } => {
                         network.dial_peer_id(peer_id);
                     }
-                    NetworkCommand::RequestTile { peer_id, request, response_tx } => {
+                    NetworkCommand::RequestTile {
+                        peer_id,
+                        request,
+                        response_tx,
+                    } => {
                         network.request_tile(peer_id, request, response_tx);
                     }
                     NetworkCommand::QueueIdleFetch { request } => {
@@ -2337,7 +2785,7 @@ fn run_network_thread(
                     }
                 }
             }
-            
+
             // Now poll the network for events
             while let Some(event) = network.poll() {
                 match &event {
@@ -2354,7 +2802,7 @@ fn run_network_thread(
                     }
                     _ => {}
                 }
-                
+
                 let _ = event_tx.try_send(event);
             }
 
@@ -2366,8 +2814,15 @@ fn run_network_thread(
             let time_since_peer = last_peer_seen.elapsed().as_secs();
             let time_since_reconnect = last_reconnect.elapsed().as_secs();
             let reconnect_interval = if no_relay_peers { 10 } else { 60 };
-            if no_game_peers && no_relay_peers && time_since_peer > 5 && time_since_reconnect > reconnect_interval {
-                println!("🔄 [Network] Fully isolated for {}s, reconnecting...", time_since_peer);
+            if no_game_peers
+                && no_relay_peers
+                && time_since_peer > 5
+                && time_since_reconnect > reconnect_interval
+            {
+                println!(
+                    "🔄 [Network] Fully isolated for {}s, reconnecting...",
+                    time_since_peer
+                );
                 network.connect_to_bootstrap().await;
                 last_reconnect = tokio::time::Instant::now();
             }
@@ -2386,13 +2841,15 @@ fn run_network_thread(
                 let to_retry: Vec<_> = publish_retry_queue.drain(..).collect();
                 for (topic, data, queued_at) in to_retry {
                     match network.publish(&topic, data.clone()) {
-                        Ok(()) => println!("✅ [NETWORK] Retried voxel-op delivered after {}ms",
-                            now.duration_since(queued_at).as_millis()),
+                        Ok(()) => println!(
+                            "✅ [NETWORK] Retried voxel-op delivered after {}ms",
+                            now.duration_since(queued_at).as_millis()
+                        ),
                         Err(_) => publish_retry_queue.push((topic, data, queued_at)), // keep retrying
                     }
                 }
             }
-            
+
             // Small sleep to avoid busy-waiting
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
@@ -2432,7 +2889,10 @@ fn idle_downloader_thread(
         let task = {
             let mut q = match queue.lock() {
                 Ok(q) => q,
-                Err(_) => { std::thread::sleep(std::time::Duration::from_secs(1)); continue; }
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    continue;
+                }
             };
             q.pop_front()
         };
@@ -2445,18 +2905,29 @@ fn idle_downloader_thread(
                 if osm_cache.load(s, w, n, e).is_none() {
                     // Not in DB — fetch from Overpass, save via OsmDiskCache → TileStore
                     let endpoints: Vec<String> = crate::osm::OVERPASS_ENDPOINTS
-                        .iter().map(|s| s.to_string()).collect();
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
                     match crate::osm::fetch_osm_for_bounds(s, w, n, e, &osm_dir, &endpoints) {
                         Ok(data) if !data.is_empty() => {
                             let key = crate::osm::osm_dht_key(s, w, n, e);
                             let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
-                            println!("📥 [Idle] OSM tile downloaded and announced: {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                            println!(
+                                "📥 [Idle] OSM tile downloaded and announced: {:.4},{:.4}→{:.4},{:.4}",
+                                s, w, n, e
+                            );
                         }
                         Ok(_) => {
-                            println!("⚠️ [Idle] OSM tile returned empty data for {:.4},{:.4}→{:.4},{:.4}", s, w, n, e);
+                            println!(
+                                "⚠️ [Idle] OSM tile returned empty data for {:.4},{:.4}→{:.4},{:.4}",
+                                s, w, n, e
+                            );
                         }
                         Err(e) => {
-                            println!("❌ [Idle] OSM tile fetch failed {:.4},{:.4}→{:.4},{:.4}: {}", s, w, n, e, e);
+                            println!(
+                                "❌ [Idle] OSM tile fetch failed {:.4},{:.4}→{:.4},{:.4}: {}",
+                                s, w, n, e, e
+                            );
                         }
                     }
                 }
@@ -2466,18 +2937,29 @@ fn idle_downloader_thread(
                 let tile_path = elev_dir
                     .join(format!("N{:02}", lat.unsigned_abs()))
                     .join(format!("E{:03}", lon.unsigned_abs()))
-                    .join(format!("srtm_n{:02}_e{:03}.tif", lat.unsigned_abs(), lon.unsigned_abs()));
+                    .join(format!(
+                        "srtm_n{:02}_e{:03}.tif",
+                        lat.unsigned_abs(),
+                        lon.unsigned_abs()
+                    ));
                 if !tile_path.exists() {
                     let api_key = std::env::var("OPENTOPOGRAPHY_API_KEY").unwrap_or_default();
                     if !api_key.is_empty() {
                         use crate::elevation::ElevationSource as _;
                         let src = crate::elevation::OpenTopographySource::new(api_key, elev_dir);
-                        let gps = crate::coordinates::GPS { lat: lat as f64 + 0.5, lon: lon as f64 + 0.5, alt: 0.0 };
+                        let gps = crate::coordinates::GPS {
+                            lat: lat as f64 + 0.5,
+                            lon: lon as f64 + 0.5,
+                            alt: 0.0,
+                        };
                         let _ = src.query(&gps);
                         if tile_path.exists() {
                             let key = crate::elevation::elevation_dht_key(lat, lon);
                             let _ = cmd_tx.send(NetworkCommand::StartProvidingKey { key });
-                            println!("📥 [Idle] Elevation tile cached and announced: N{} E{}", lat, lon);
+                            println!(
+                                "📥 [Idle] Elevation tile cached and announced: N{} E{}",
+                                lat, lon
+                            );
                         }
                     }
                 }
@@ -2492,7 +2974,7 @@ fn idle_downloader_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_multiplayer_system_creation() {
         let identity = Identity::generate();
@@ -2501,22 +2983,22 @@ mod tests {
         // Give background thread time to initialize
         std::thread::sleep(Duration::from_millis(100));
     }
-    
+
     #[test]
     fn test_voxel_op_deduplication() {
         let identity = Identity::generate();
         let mut mp = MultiplayerSystem::new_with_runtime(identity.clone()).unwrap();
-        
+
         // Give background thread time to initialize
         std::thread::sleep(Duration::from_millis(100));
-        
+
         let coord = VoxelCoord::new(0, 0, 0);
         let material = Material::Stone;
-        
+
         // Send operation twice
         let op1 = mp.broadcast_voxel_operation(coord, material).unwrap();
         let result = mp.broadcast_voxel_operation(coord, material).unwrap();
-        
+
         // Should be deduplicated (both have same signature after seeing first)
         assert!(mp.voxel_op_seen.contains(&op1.signature));
         assert_eq!(mp.stats.voxel_ops_sent, 2); // Both were sent

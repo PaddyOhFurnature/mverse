@@ -15,13 +15,11 @@
 /// 3. Feed into `world_inference` → `InferredObject` list
 /// 4. Object elevation = terrain height at that GPS (queried from ElevationPipeline)
 /// 5. Objects placed ON terrain surface as PlacedObjects, NOT voxelized
-
 use crate::coordinates::GPS;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -44,33 +42,32 @@ pub enum RoadType {
 impl RoadType {
     pub fn from_highway_tag(tag: &str) -> Self {
         match tag {
-            "motorway" | "motorway_link"        => Self::Motorway,
-            "trunk" | "trunk_link"              => Self::Trunk,
-            "primary" | "primary_link"          => Self::Primary,
-            "secondary" | "secondary_link"      => Self::Secondary,
-            "tertiary" | "tertiary_link"        => Self::Tertiary,
-            "residential" | "living_street"
-            | "unclassified"                    => Self::Residential,
-            "service"                           => Self::Service,
-            "footway" | "path" | "pedestrian"   => Self::Path,
-            "cycleway"                          => Self::Cycleway,
-            other                               => Self::Other(other.to_string()),
+            "motorway" | "motorway_link" => Self::Motorway,
+            "trunk" | "trunk_link" => Self::Trunk,
+            "primary" | "primary_link" => Self::Primary,
+            "secondary" | "secondary_link" => Self::Secondary,
+            "tertiary" | "tertiary_link" => Self::Tertiary,
+            "residential" | "living_street" | "unclassified" => Self::Residential,
+            "service" => Self::Service,
+            "footway" | "path" | "pedestrian" => Self::Path,
+            "cycleway" => Self::Cycleway,
+            other => Self::Other(other.to_string()),
         }
     }
 
     /// Nominal carriageway width in metres.
     pub fn width_m(&self) -> f64 {
         match self {
-            Self::Motorway    => 12.0,
-            Self::Trunk       => 10.0,
-            Self::Primary     => 8.0,
-            Self::Secondary   => 7.0,
-            Self::Tertiary    => 6.0,
+            Self::Motorway => 12.0,
+            Self::Trunk => 10.0,
+            Self::Primary => 8.0,
+            Self::Secondary => 7.0,
+            Self::Tertiary => 6.0,
             Self::Residential => 6.0,
-            Self::Service     => 4.0,
-            Self::Path        => 2.0,
-            Self::Cycleway    => 2.0,
-            Self::Other(_)    => 5.0,
+            Self::Service => 4.0,
+            Self::Path => 2.0,
+            Self::Cycleway => 2.0,
+            Self::Other(_) => 5.0,
         }
     }
 
@@ -97,7 +94,9 @@ impl OsmBuilding {
     /// Centroid GPS position.
     pub fn centroid(&self) -> GPS {
         let n = self.polygon.len() as f64;
-        if n == 0.0 { return GPS::new(0.0, 0.0, 0.0); }
+        if n == 0.0 {
+            return GPS::new(0.0, 0.0, 0.0);
+        }
         let lat = self.polygon.iter().map(|g| g.lat).sum::<f64>() / n;
         let lon = self.polygon.iter().map(|g| g.lon).sum::<f64>() / n;
         GPS::new(lat, lon, 0.0)
@@ -145,21 +144,21 @@ impl WaterwayLine {
     /// Half-width of the waterway in metres, based on OSM type.
     pub fn half_width_m(&self) -> f64 {
         match self.waterway_type.as_str() {
-            "river"  => 12.0,
-            "canal"  => 6.0,
+            "river" => 12.0,
+            "canal" => 6.0,
             "stream" => 3.0,
-            "drain"  => 2.0,
-            _        => 1.5,
+            "drain" => 2.0,
+            _ => 1.5,
         }
     }
     /// Channel depth in voxels.
     pub fn channel_depth_vox(&self) -> i64 {
         match self.waterway_type.as_str() {
-            "river"  => 5,
-            "canal"  => 4,
+            "river" => 5,
+            "canal" => 4,
             "stream" => 3,
-            "drain"  => 2,
-            _        => 2,
+            "drain" => 2,
+            _ => 2,
         }
     }
 }
@@ -178,7 +177,7 @@ pub struct OsmAmenity {
     pub osm_id: u64,
     pub lat: f64,
     pub lon: f64,
-    pub amenity: String,    // "bench", "waste_basket", "traffic_signals", etc.
+    pub amenity: String, // "bench", "waste_basket", "traffic_signals", etc.
     pub name: Option<String>,
 }
 
@@ -201,10 +200,64 @@ pub struct OsmLandArea {
     pub polygon: Vec<GPS>,
     pub name: Option<String>,
     pub area_type: String, // "forest", "wood", "farmland", "residential", "industrial", "commercial",
-                           // "grass", "meadow", "scrub", "heath", "orchard", "vineyard", "cemetery",
-                           // "military", "quarry", "beach", "sand", "bare_rock", "cliff", "wetland",
-                           // "glacier", "pitch", "golf_course", "playground", "stadium", "sports_centre", etc.
-    pub category: String,  // "landuse", "natural", "leisure", "tourism"
+    // "grass", "meadow", "scrub", "heath", "orchard", "vineyard", "cemetery",
+    // "military", "quarry", "beach", "sand", "bare_rock", "cliff", "wetland",
+    // "glacier", "pitch", "golf_course", "playground", "stadium", "sports_centre", etc.
+    pub category: String, // "landuse", "natural", "leisure", "tourism"
+}
+
+/// A generic OSM way with all its tags preserved — used as a catch-all for any feature
+/// type not explicitly handled by the typed structs above.  Stored alongside typed
+/// data so future worldgen passes can query arbitrary tag combinations without
+/// needing to re-run the PBF importer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericOsmWay {
+    pub osm_id: u64,
+    /// True when first == last node (closed polygon); false = open line.
+    pub is_closed: bool,
+    pub coords: Vec<GPS>,
+    /// All OSM tags from the source way, sorted by key for deterministic serialization.
+    pub tags: Vec<(String, String)>,
+}
+
+impl GenericOsmWay {
+    /// Return the value of `key`, or `None` if not present.
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.tags
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// A generic OSM node with all its tags preserved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenericOsmNode {
+    pub osm_id: u64,
+    pub lat: f64,
+    pub lon: f64,
+    /// All OSM tags from the source node, sorted by key.
+    pub tags: Vec<(String, String)>,
+}
+
+impl GenericOsmNode {
+    pub fn tag(&self, key: &str) -> Option<&str> {
+        self.tags
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// A dam wall from OSM (`waterway=dam`).
+/// Nodes trace the dam crest from one bank to the other.
+/// The reservoir is upstream; the downstream face drops steeply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OsmDam {
+    pub osm_id: u64,
+    /// Nodes tracing the dam crest line.
+    pub nodes: Vec<GPS>,
+    pub name: Option<String>,
 }
 
 /// A barrier from OSM (walls, fences, hedges).
@@ -219,9 +272,9 @@ pub struct OsmBarrier {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsmPower {
     pub osm_id: u64,
-    pub nodes: Vec<GPS>,   // line nodes or single point (tower/pole)
+    pub nodes: Vec<GPS>,    // line nodes or single point (tower/pole)
     pub power_type: String, // "line", "cable", "tower", "pole", "substation", "plant"
-    pub lat: f64,  // for nodes/points (tower, pole) — 0 for ways
+    pub lat: f64,           // for nodes/points (tower, pole) — 0 for ways
     pub lon: f64,
 }
 
@@ -229,8 +282,8 @@ pub struct OsmPower {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsmAeroway {
     pub osm_id: u64,
-    pub polygon: Vec<GPS>,  // area features
-    pub nodes: Vec<GPS>,    // line features (runway centreline, taxiway)
+    pub polygon: Vec<GPS>,    // area features
+    pub nodes: Vec<GPS>,      // line features (runway centreline, taxiway)
     pub aeroway_type: String, // "aerodrome", "runway", "taxiway", "apron", "hangar", "terminal", "helipad"
     pub name: Option<String>,
     pub is_area: bool,
@@ -259,6 +312,17 @@ pub struct OsmData {
     #[serde(default)]
     pub aeroways: Vec<OsmAeroway>,
     pub amenities: Vec<OsmAmenity>,
+    /// Dam walls (`waterway=dam`).  Used to detect reservoir water surface elevations.
+    #[serde(default)]
+    pub dams: Vec<OsmDam>,
+    /// Catch-all for ALL other OSM way features (man_made, tourism, historic, amenity
+    /// areas, addr:*, etc.) with every tag preserved.  Query with `extra_ways_by_tag`.
+    /// Populated on import; never needs re-import to access new feature types.
+    #[serde(default)]
+    pub extra_ways: Vec<GenericOsmWay>,
+    /// Catch-all for ALL other OSM node features with every tag preserved.
+    #[serde(default)]
+    pub extra_nodes: Vec<GenericOsmNode>,
 }
 
 impl OsmData {
@@ -274,6 +338,41 @@ impl OsmData {
             && self.power.is_empty()
             && self.aeroways.is_empty()
             && self.amenities.is_empty()
+            && self.dams.is_empty()
+            && self.extra_ways.is_empty()
+            && self.extra_nodes.is_empty()
+    }
+
+    /// Iterate over `extra_ways` that have the given tag key=value pair.
+    /// Example: `data.extra_ways_by_tag("man_made", "pier")` or
+    ///          `data.extra_ways_by_tag("tourism", "camp_site")`.
+    pub fn extra_ways_by_tag<'a>(
+        &'a self,
+        key: &'a str,
+        value: &'a str,
+    ) -> impl Iterator<Item = &'a GenericOsmWay> {
+        self.extra_ways
+            .iter()
+            .filter(move |w| w.tag(key) == Some(value))
+    }
+
+    /// Iterate over `extra_nodes` that have the given tag key=value pair.
+    pub fn extra_nodes_by_tag<'a>(
+        &'a self,
+        key: &'a str,
+        value: &'a str,
+    ) -> impl Iterator<Item = &'a GenericOsmNode> {
+        self.extra_nodes
+            .iter()
+            .filter(move |n| n.tag(key) == Some(value))
+    }
+
+    /// Convenience: get a single tag value from any extra_way matching the first tag filter.
+    pub fn extra_ways_with_key<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> impl Iterator<Item = &'a GenericOsmWay> {
+        self.extra_ways.iter().filter(move |w| w.tag(key).is_some())
     }
 }
 
@@ -307,9 +406,13 @@ pub const OVERPASS_ENDPOINTS: &[&str] = &[
 /// Fetch features in a bounding box from Overpass API.
 /// Query is intentionally minimal — buildings and main roads only.
 /// Water / parks / amenities are skipped to keep each packet small.
-pub fn query_overpass(south: f64, west: f64, north: f64, east: f64, endpoints: &[String])
-    -> Result<String, String>
-{
+pub fn query_overpass(
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
+    endpoints: &[String],
+) -> Result<String, String> {
     wait_global_cooldown();
 
     // Water queries use an expanded bbox (buf=0.005°) so large river/bay polygons whose
@@ -339,8 +442,14 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64, endpoints: &
           way[\"natural\"~\"^(wood|scrub|heath|grassland|beach|sand|bare_rock|cliff|wetland|glacier)$\"]({ws},{ww},{wn},{we});\
           way[\"leisure\"~\"^(pitch|golf_course|playground|stadium|sports_centre|marina|swimming_pool)$\"]({s},{w},{n},{e});\
         );\nout body;\n>;\nout skel qt;",
-        s = south, w = west, n = north, e = east,
-        ws = ws, ww = ww, wn = wn, we = we,
+        s = south,
+        w = west,
+        n = north,
+        e = east,
+        ws = ws,
+        ww = ww,
+        wn = wn,
+        we = we,
     );
 
     let client = reqwest::blocking::Client::builder()
@@ -357,10 +466,7 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64, endpoints: &
 
     let mut last_err = String::new();
     for endpoint in &effective {
-        let result = client
-            .post(*endpoint)
-            .body(query.clone())
-            .send();
+        let result = client.post(*endpoint).body(query.clone()).send();
         match result {
             Ok(resp) if resp.status().is_success() => {
                 return resp.text().map_err(|e| e.to_string());
@@ -380,26 +486,27 @@ pub fn query_overpass(south: f64, west: f64, north: f64, east: f64, endpoints: &
 
 /// Parse a raw Overpass JSON response into `OsmData`.
 pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
-    let v: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let v: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
 
-    let elements = v["elements"].as_array()
-        .ok_or("Missing 'elements' array")?;
+    let elements = v["elements"].as_array().ok_or("Missing 'elements' array")?;
 
     // Pass 1: build node id → GPS and way id → node list
     let mut node_map: std::collections::HashMap<u64, GPS> = std::collections::HashMap::new();
-    let mut way_nodes_map: std::collections::HashMap<u64, Vec<u64>> = std::collections::HashMap::new();
+    let mut way_nodes_map: std::collections::HashMap<u64, Vec<u64>> =
+        std::collections::HashMap::new();
     for elem in elements {
         match elem["type"].as_str() {
             Some("node") => {
-                let id  = elem["id"].as_u64().unwrap_or(0);
+                let id = elem["id"].as_u64().unwrap_or(0);
                 let lat = elem["lat"].as_f64().unwrap_or(0.0);
                 let lon = elem["lon"].as_f64().unwrap_or(0.0);
                 node_map.insert(id, GPS::new(lat, lon, 0.0));
             }
             Some("way") => {
                 let id = elem["id"].as_u64().unwrap_or(0);
-                let node_ids: Vec<u64> = elem["nodes"].as_array()
+                let node_ids: Vec<u64> = elem["nodes"]
+                    .as_array()
                     .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
                     .unwrap_or_default();
                 way_nodes_map.insert(id, node_ids);
@@ -423,7 +530,8 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                     let lon = elem["lon"].as_f64().unwrap_or(0.0);
                     data.amenities.push(OsmAmenity {
                         osm_id: id,
-                        lat, lon,
+                        lat,
+                        lon,
                         amenity: amenity.to_string(),
                         name: tags["name"].as_str().map(|s| s.to_string()),
                     });
@@ -433,27 +541,35 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                         let lat = elem["lat"].as_f64().unwrap_or(0.0);
                         let lon = elem["lon"].as_f64().unwrap_or(0.0);
                         data.power.push(OsmPower {
-                            osm_id: id, nodes: vec![], power_type: ptype.to_string(), lat, lon,
+                            osm_id: id,
+                            nodes: vec![],
+                            power_type: ptype.to_string(),
+                            lat,
+                            lon,
                         });
                     }
                 }
             }
             "way" => {
                 let node_ids = way_nodes_map.get(&id).cloned().unwrap_or_default();
-                let nodes: Vec<GPS> = node_ids.iter()
+                let nodes: Vec<GPS> = node_ids
+                    .iter()
                     .filter_map(|nid| node_map.get(nid).copied())
                     .collect();
 
                 if tags["building"].as_str().is_some() {
-                    let height_m = tags["height"].as_str()
+                    let height_m = tags["height"]
+                        .as_str()
                         .and_then(|h| h.trim_end_matches('m').trim().parse::<f64>().ok())
                         .unwrap_or_else(|| {
-                            let levels = tags["building:levels"].as_str()
+                            let levels = tags["building:levels"]
+                                .as_str()
                                 .and_then(|l| l.parse::<f64>().ok())
                                 .unwrap_or(2.0);
                             levels * 3.0
                         });
-                    let levels = tags["building:levels"].as_str()
+                    let levels = tags["building:levels"]
+                        .as_str()
                         .and_then(|l| l.parse::<u8>().ok())
                         .unwrap_or(2);
                     data.buildings.push(OsmBuilding {
@@ -471,7 +587,8 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                         name: tags["name"].as_str().map(|s| s.to_string()),
                         is_bridge: tags["bridge"].as_str() == Some("yes"),
                         is_tunnel: tags["tunnel"].as_str() == Some("yes"),
-                        layer: tags["layer"].as_str()
+                        layer: tags["layer"]
+                            .as_str()
                             .and_then(|l| l.parse::<i8>().ok())
                             .unwrap_or(0),
                     });
@@ -489,7 +606,8 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                             polygon: nodes,
                             holes: vec![],
                             name: tags["name"].as_str().map(|s| s.to_string()),
-                            water_type: tags["water"].as_str()
+                            water_type: tags["water"]
+                                .as_str()
                                 .or(tags["waterway"].as_str())
                                 .or(tags["natural"].as_str())
                                 .unwrap_or("water")
@@ -500,7 +618,9 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                         let wtype = tags["waterway"].as_str().unwrap_or("stream").to_string();
                         let wname = tags["name"].as_str().map(|s| s.to_string());
                         data.waterway_lines.push(WaterwayLine {
-                            nodes, waterway_type: wtype, name: wname,
+                            nodes,
+                            waterway_type: wtype,
+                            name: wname,
                         });
                     }
                 } else if tags["leisure"].as_str() == Some("park") {
@@ -511,52 +631,96 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                     });
                 } else if let Some(rtype) = tags["railway"].as_str() {
                     data.railways.push(OsmRailway {
-                        osm_id: id, nodes,
+                        osm_id: id,
+                        nodes,
                         railway_type: rtype.to_string(),
                         name: tags["name"].as_str().map(|s| s.to_string()),
                         is_bridge: tags["bridge"].as_str().map(|s| s != "no").unwrap_or(false),
                         is_tunnel: tags["tunnel"].as_str().map(|s| s != "no").unwrap_or(false),
-                        layer: tags["layer"].as_str().and_then(|l| l.parse().ok()).unwrap_or(0),
+                        layer: tags["layer"]
+                            .as_str()
+                            .and_then(|l| l.parse().ok())
+                            .unwrap_or(0),
                     });
                 } else if let Some(btype) = tags["barrier"].as_str() {
                     data.barriers.push(OsmBarrier {
-                        osm_id: id, nodes, barrier_type: btype.to_string(),
+                        osm_id: id,
+                        nodes,
+                        barrier_type: btype.to_string(),
                     });
                 } else if let Some(ptype) = tags["power"].as_str() {
                     data.power.push(OsmPower {
-                        osm_id: id, nodes, power_type: ptype.to_string(), lat: 0.0, lon: 0.0,
+                        osm_id: id,
+                        nodes,
+                        power_type: ptype.to_string(),
+                        lat: 0.0,
+                        lon: 0.0,
                     });
                 } else if let Some(atype) = tags["aeroway"].as_str() {
                     let is_closed = !nodes.is_empty()
-                        && nodes.first().map(|p| (p.lat, p.lon)) == nodes.last().map(|p| (p.lat, p.lon));
+                        && nodes.first().map(|p| (p.lat, p.lon))
+                            == nodes.last().map(|p| (p.lat, p.lon));
                     let is_area = is_closed;
-                    let (polygon, line_nodes) = if is_area { (nodes, vec![]) } else { (vec![], nodes) };
+                    let (polygon, line_nodes) = if is_area {
+                        (nodes, vec![])
+                    } else {
+                        (vec![], nodes)
+                    };
                     data.aeroways.push(OsmAeroway {
-                        osm_id: id, polygon, nodes: line_nodes,
+                        osm_id: id,
+                        polygon,
+                        nodes: line_nodes,
                         aeroway_type: atype.to_string(),
                         name: tags["name"].as_str().map(|s| s.to_string()),
                         is_area,
                     });
                 } else if let Some(luse) = tags["landuse"].as_str() {
                     data.land_areas.push(OsmLandArea {
-                        osm_id: id, polygon: nodes,
+                        osm_id: id,
+                        polygon: nodes,
                         name: tags["name"].as_str().map(|s| s.to_string()),
-                        area_type: luse.to_string(), category: "landuse".to_string(),
+                        area_type: luse.to_string(),
+                        category: "landuse".to_string(),
                     });
                 } else if let Some(nat) = tags["natural"].as_str() {
-                    if matches!(nat, "wood" | "scrub" | "heath" | "grassland" | "beach" | "sand" | "bare_rock" | "cliff" | "wetland" | "glacier") {
+                    if matches!(
+                        nat,
+                        "wood"
+                            | "scrub"
+                            | "heath"
+                            | "grassland"
+                            | "beach"
+                            | "sand"
+                            | "bare_rock"
+                            | "cliff"
+                            | "wetland"
+                            | "glacier"
+                    ) {
                         data.land_areas.push(OsmLandArea {
-                            osm_id: id, polygon: nodes,
+                            osm_id: id,
+                            polygon: nodes,
                             name: tags["name"].as_str().map(|s| s.to_string()),
-                            area_type: nat.to_string(), category: "natural".to_string(),
+                            area_type: nat.to_string(),
+                            category: "natural".to_string(),
                         });
                     }
                 } else if let Some(leis) = tags["leisure"].as_str() {
-                    if matches!(leis, "pitch" | "golf_course" | "playground" | "stadium" | "sports_centre" | "marina" | "swimming_pool") {
+                    if matches!(
+                        leis,
+                        "pitch"
+                            | "golf_course"
+                            | "playground"
+                            | "stadium"
+                            | "sports_centre"
+                            | "marina"
+                            | "swimming_pool"
+                    ) {
                         data.land_areas.push(OsmLandArea {
-                            osm_id: id, polygon: nodes,
+                            osm_id: id,
+                            polygon: nodes,
                             name: tags["name"].as_str().map(|s| s.to_string()),
-                            area_type: leis.to_string(), category: "leisure".to_string(),
+                            area_type: leis.to_string(),
+                            category: "leisure".to_string(),
                         });
                     }
                 }
@@ -577,10 +741,13 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                     let mut holes: Vec<Vec<GPS>> = Vec::new();
                     for member in members {
                         let role = member["role"].as_str().unwrap_or("");
-                        if role != "outer" && role != "inner" { continue; }
+                        if role != "outer" && role != "inner" {
+                            continue;
+                        }
                         if let Some(way_id) = member["ref"].as_u64() {
                             if let Some(nids) = way_nodes_map.get(&way_id) {
-                                let pts: Vec<GPS> = nids.iter()
+                                let pts: Vec<GPS> = nids
+                                    .iter()
                                     .filter_map(|nid| node_map.get(nid).copied())
                                     .collect();
                                 if pts.len() >= 3 {
@@ -601,7 +768,8 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
                             polygon,
                             holes,
                             name: tags["name"].as_str().map(|s| s.to_string()),
-                            water_type: tags["water"].as_str()
+                            water_type: tags["water"]
+                                .as_str()
                                 .or(tags["waterway"].as_str())
                                 .unwrap_or("water")
                                 .to_string(),
@@ -619,15 +787,19 @@ pub fn parse_overpass_json(json_str: &str) -> Result<OsmData, String> {
 /// Stitch multiple ordered way chains into a single closed polygon ring.
 /// Ways are chained end-to-start; if needed a way is reversed to connect.
 fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
-    if ways.is_empty() { return vec![]; }
+    if ways.is_empty() {
+        return vec![];
+    }
     let mut ring = ways[0].clone();
     for next_way in ways.into_iter().skip(1) {
-        if next_way.is_empty() { continue; }
+        if next_way.is_empty() {
+            continue;
+        }
         let tail = ring.last().unwrap();
         let head = &next_way[0];
         let head_rev = next_way.last().unwrap();
         let dist_head = (tail.lat - head.lat).abs() + (tail.lon - head.lon).abs();
-        let dist_rev  = (tail.lat - head_rev.lat).abs() + (tail.lon - head_rev.lon).abs();
+        let dist_rev = (tail.lat - head_rev.lat).abs() + (tail.lon - head_rev.lon).abs();
         if dist_rev < dist_head {
             ring.extend(next_way.into_iter().rev().skip(1));
         } else {
@@ -651,11 +823,14 @@ impl OsmDiskCache {
     pub fn new(dir: &Path) -> Self {
         // Derive tiles.db path from the osm subdir: world_data/osm → world_data/tiles.db
         let db_path = dir.parent().unwrap_or(dir).join("tiles.db");
-        let store = crate::tile_store::TileStore::open(&db_path)
-            .unwrap_or_else(|e| panic!("OsmDiskCache: failed to open TileStore at {db_path:?}: {e}"));
+        let store = crate::tile_store::TileStore::open(&db_path).unwrap_or_else(|e| {
+            panic!("OsmDiskCache: failed to open TileStore at {db_path:?}: {e}")
+        });
         // Trigger cleanup of any old flat .bin files in the osm dir
         crate::tile_store::cleanup_old_tile_dir(dir);
-        Self { store: std::sync::Arc::new(store) }
+        Self {
+            store: std::sync::Arc::new(store),
+        }
     }
 
     /// Construct from an already-open TileStore — no second DB open, no LOCK conflict.
@@ -718,7 +893,10 @@ pub fn sha2_stable_hash(data: &[u8]) -> Vec<u8> {
 /// Default: return empty (use heuristics) if no local tile cache.
 /// This avoids blocking the game thread on 30s network timeouts.
 pub fn fetch_osm_for_bounds(
-    south: f64, west: f64, north: f64, east: f64,
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
     cache_dir: &Path,
     overpass_endpoints: &[String],
 ) -> Result<OsmData, String> {
@@ -729,7 +907,10 @@ pub fn fetch_osm_for_bounds(
 /// Same as `fetch_osm_for_bounds` but uses a pre-opened OsmDiskCache.
 /// Use this in contexts where the TileStore is already open (avoids LOCK conflict).
 pub fn fetch_osm_with_cache(
-    south: f64, west: f64, north: f64, east: f64,
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
     cache: &OsmDiskCache,
     overpass_endpoints: &[String],
 ) -> Result<OsmData, String> {
@@ -738,8 +919,8 @@ pub fn fetch_osm_with_cache(
         return Ok(cached);
     }
 
-    let use_overpass = !overpass_endpoints.is_empty()
-        || std::env::var("METAVERSE_OVERPASS").as_deref() == Ok("1");
+    let use_overpass =
+        !overpass_endpoints.is_empty() || std::env::var("METAVERSE_OVERPASS").as_deref() == Ok("1");
     if !use_overpass {
         return Err("no local tile (place PBF at world_data/map.osm.pbf)".into());
     }
@@ -752,11 +933,19 @@ pub fn fetch_osm_with_cache(
         overpass_endpoints
     };
 
-    println!("🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…", south, west, north, east);
+    println!(
+        "🗺️  Fetching OSM ({:.4},{:.4})→({:.4},{:.4})…",
+        south, west, north, east
+    );
     let json = query_overpass(south, west, north, east, endpoints)?;
     let data = parse_overpass_json(&json)?;
     if !data.is_empty() {
-        println!("   b:{} r:{} a:{}", data.buildings.len(), data.roads.len(), data.amenities.len());
+        println!(
+            "   b:{} r:{} a:{}",
+            data.buildings.len(),
+            data.roads.len(),
+            data.amenities.len()
+        );
     }
     cache.save(south, west, north, east, &data);
     Ok(data)
@@ -779,12 +968,20 @@ pub fn fetch_osm_with_cache(
 /// neighbouring tiles (N/S/E/W). Buildings/roads/parks are NOT merged (they are
 /// duplicated across tiles already and the primary tile is sufficient).
 pub fn fetch_osm_for_chunk(
-    chunk_lat_min: f64, chunk_lat_max: f64,
-    chunk_lon_min: f64, chunk_lon_max: f64,
+    chunk_lat_min: f64,
+    chunk_lat_max: f64,
+    chunk_lon_min: f64,
+    chunk_lon_max: f64,
     cache_dir: &Path,
 ) -> OsmData {
     let cache = OsmDiskCache::new(cache_dir);
-    fetch_osm_for_chunk_with_cache(chunk_lat_min, chunk_lat_max, chunk_lon_min, chunk_lon_max, &cache)
+    fetch_osm_for_chunk_with_cache(
+        chunk_lat_min,
+        chunk_lat_max,
+        chunk_lon_min,
+        chunk_lon_max,
+        &cache,
+    )
 }
 
 /// Same as `fetch_osm_for_chunk` but reuses a pre-opened `OsmDiskCache`.
@@ -794,8 +991,10 @@ pub fn fetch_osm_for_chunk(
 /// (~50–200 ms) and causes LOCK contention under concurrent threads.
 /// Open the cache once at startup and pass it here.
 pub fn fetch_osm_for_chunk_with_cache(
-    chunk_lat_min: f64, chunk_lat_max: f64,
-    chunk_lon_min: f64, chunk_lon_max: f64,
+    chunk_lat_min: f64,
+    chunk_lat_max: f64,
+    chunk_lon_min: f64,
+    chunk_lon_max: f64,
     cache: &OsmDiskCache,
 ) -> OsmData {
     // Snap the chunk centre to the nearest 0.01° tile
@@ -831,14 +1030,14 @@ pub fn fetch_osm_for_chunk_with_cache(
     // Large river/bay polygons are stored in whichever tile captured them; they
     // may extend far across tile boundaries so neighbouring tiles must be checked.
     let neighbour_offsets: [(f64, f64); 8] = [
-        (-tile_size,  0.0),        // south
-        ( tile_size,  0.0),        // north
-        ( 0.0,       -tile_size),  // west
-        ( 0.0,        tile_size),  // east
-        (-tile_size, -tile_size),  // SW
-        (-tile_size,  tile_size),  // SE
-        ( tile_size, -tile_size),  // NW
-        ( tile_size,  tile_size),  // NE
+        (-tile_size, 0.0),        // south
+        (tile_size, 0.0),         // north
+        (0.0, -tile_size),        // west
+        (0.0, tile_size),         // east
+        (-tile_size, -tile_size), // SW
+        (-tile_size, tile_size),  // SE
+        (tile_size, -tile_size),  // NW
+        (tile_size, tile_size),   // NE
     ];
     for (dlat, dlon) in neighbour_offsets {
         let ns = tile_s + dlat;
@@ -847,16 +1046,19 @@ pub fn fetch_osm_for_chunk_with_cache(
         let ne = nw + tile_size;
         if let Ok(nb_tile) = fetch_osm_with_cache(ns, nw, nn, ne, cache, &[]) {
             let poly_intersects = |pts: &[crate::coordinates::GPS]| -> bool {
-                if pts.iter().any(|p| p.lat >= lat_min && p.lat <= lat_max
-                                  && p.lon >= lon_min && p.lon <= lon_max) {
+                if pts.iter().any(|p| {
+                    p.lat >= lat_min && p.lat <= lat_max && p.lon >= lon_min && p.lon <= lon_max
+                }) {
                     return true;
                 }
                 let p_lat_min = pts.iter().map(|p| p.lat).fold(f64::INFINITY, f64::min);
                 let p_lat_max = pts.iter().map(|p| p.lat).fold(f64::NEG_INFINITY, f64::max);
                 let p_lon_min = pts.iter().map(|p| p.lon).fold(f64::INFINITY, f64::min);
                 let p_lon_max = pts.iter().map(|p| p.lon).fold(f64::NEG_INFINITY, f64::max);
-                p_lat_min <= lat_max && p_lat_max >= lat_min
-                    && p_lon_min <= lon_max && p_lon_max >= lon_min
+                p_lat_min <= lat_max
+                    && p_lat_max >= lat_min
+                    && p_lon_min <= lon_max
+                    && p_lon_max >= lon_min
             };
             for w in nb_tile.water {
                 // Skip if already present (matched by osm_id)
@@ -891,34 +1093,45 @@ pub fn fetch_osm_for_chunk_with_cache(
 ///   4. From that layer pick left bank (max perp) and right bank (min perp).
 ///   5. Return [left_up, right_up, right_down, left_down] as a convex bridge quad.
 pub fn find_gap_bridge_polygon(
-    chunk_lat_min: f64, chunk_lat_max: f64,
-    chunk_lon_min: f64, chunk_lon_max: f64,
+    chunk_lat_min: f64,
+    chunk_lat_max: f64,
+    chunk_lon_min: f64,
+    chunk_lon_max: f64,
     waterway_lines: &[WaterwayLine],
     cache_dir: &std::path::Path,
 ) -> Option<Vec<GPS>> {
-    if waterway_lines.is_empty() { return None; }
+    if waterway_lines.is_empty() {
+        return None;
+    }
 
     let tile_size = 0.01_f64;
     let chunk_lat_centre = (chunk_lat_min + chunk_lat_max) * 0.5;
     let chunk_lon_centre = (chunk_lon_min + chunk_lon_max) * 0.5;
 
     // Find dominant river direction from all centreline points (first→last overall vector)
-    let all_pts: Vec<GPS> = waterway_lines.iter().flat_map(|l| l.nodes.iter().cloned()).collect();
-    if all_pts.len() < 2 { return None; }
+    let all_pts: Vec<GPS> = waterway_lines
+        .iter()
+        .flat_map(|l| l.nodes.iter().cloned())
+        .collect();
+    if all_pts.len() < 2 {
+        return None;
+    }
     let first = &all_pts[0];
-    let last  = &all_pts[all_pts.len() - 1];
+    let last = &all_pts[all_pts.len() - 1];
     let dlat = last.lat - first.lat;
     let dlon = last.lon - first.lon;
-    let len  = (dlat * dlat + dlon * dlon).sqrt();
-    if len < 1e-10 { return None; }
+    let len = (dlat * dlat + dlon * dlon).sqrt();
+    if len < 1e-10 {
+        return None;
+    }
 
-    let dir_lat  =  dlat / len;   // unit vector along river
-    let dir_lon  =  dlon / len;
-    let perp_lat = -dir_lon;      // unit vector perpendicular (cross-river)
-    let perp_lon =  dir_lat;
+    let dir_lat = dlat / len; // unit vector along river
+    let dir_lon = dlon / len;
+    let perp_lat = -dir_lon; // unit vector perpendicular (cross-river)
+    let perp_lon = dir_lat;
 
     let project_along = |lat: f64, lon: f64| lat * dir_lat + lon * dir_lon;
-    let project_perp  = |lat: f64, lon: f64| lat * perp_lat + lon * perp_lon;
+    let project_perp = |lat: f64, lon: f64| lat * perp_lat + lon * perp_lon;
     let chunk_proj = project_along(chunk_lat_centre, chunk_lon_centre);
 
     // Walk tiles in one river direction until polygon water found.
@@ -936,52 +1149,65 @@ pub fn find_gap_bridge_polygon(
             let check_lon = chunk_lon_centre + dir_lon * offset * dir_sign;
             let snapped_s = (check_lat / tile_size).floor() * tile_size;
             let snapped_w = (check_lon / tile_size).floor() * tile_size;
-            let tile_key  = (
+            let tile_key = (
                 (snapped_s / tile_size).round() as i64,
                 (snapped_w / tile_size).round() as i64,
             );
-            if !seen.insert(tile_key) { continue; }   // already tried this tile
+            if !seen.insert(tile_key) {
+                continue;
+            } // already tried this tile
 
             if let Ok(tile_data) = fetch_osm_for_bounds(
-                snapped_s, snapped_w,
-                snapped_s + tile_size, snapped_w + tile_size,
-                cache_dir, &[],
+                snapped_s,
+                snapped_w,
+                snapped_s + tile_size,
+                snapped_w + tile_size,
+                cache_dir,
+                &[],
             ) {
-                if tile_data.water.is_empty() { continue; }
+                if tile_data.water.is_empty() {
+                    continue;
+                }
 
                 // Collect all polygon points from this tile
-                let poly_pts: Vec<GPS> = tile_data.water.iter()
+                let poly_pts: Vec<GPS> = tile_data
+                    .water
+                    .iter()
                     .flat_map(|w| w.polygon.iter().cloned())
                     .collect();
-                if poly_pts.is_empty() { continue; }
+                if poly_pts.is_empty() {
+                    continue;
+                }
 
                 // Find the gap-facing boundary layer:
                 // the cluster of points whose along-river projection is closest to the gap chunk.
-                let min_dist = poly_pts.iter()
+                let min_dist = poly_pts
+                    .iter()
                     .map(|p| (project_along(p.lat, p.lon) - chunk_proj).abs())
                     .fold(f64::INFINITY, f64::min);
 
                 // Keep all points within one tile-width of the closest group
-                let boundary_pts: Vec<&GPS> = poly_pts.iter()
+                let boundary_pts: Vec<&GPS> = poly_pts
+                    .iter()
                     .filter(|p| {
                         (project_along(p.lat, p.lon) - chunk_proj).abs() <= min_dist + tile_size
                     })
                     .collect();
-                if boundary_pts.is_empty() { continue; }
+                if boundary_pts.is_empty() {
+                    continue;
+                }
 
                 // Left bank = max perpendicular projection, right bank = min
-                let left = boundary_pts.iter()
-                    .max_by(|a, b|
-                        project_perp(a.lat, a.lon)
-                            .partial_cmp(&project_perp(b.lat, b.lon))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    )?;
-                let right = boundary_pts.iter()
-                    .min_by(|a, b|
-                        project_perp(a.lat, a.lon)
-                            .partial_cmp(&project_perp(b.lat, b.lon))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    )?;
+                let left = boundary_pts.iter().max_by(|a, b| {
+                    project_perp(a.lat, a.lon)
+                        .partial_cmp(&project_perp(b.lat, b.lon))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })?;
+                let right = boundary_pts.iter().min_by(|a, b| {
+                    project_perp(a.lat, a.lon)
+                        .partial_cmp(&project_perp(b.lat, b.lon))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })?;
 
                 return Some((**left, **right));
             }
@@ -989,8 +1215,8 @@ pub fn find_gap_bridge_polygon(
         None
     };
 
-    let (left_a, right_a) = find_bracket(-1.0)?;  // ⟦ — upstream bracket
-    let (left_b, right_b) = find_bracket( 1.0)?;  // ⟧ — downstream bracket
+    let (left_a, right_a) = find_bracket(-1.0)?; // ⟦ — upstream bracket
+    let (left_b, right_b) = find_bracket(1.0)?; // ⟧ — downstream bracket
 
     // Bridge polygon: four corners in winding order for a valid PIP test
     Some(vec![left_a, right_a, right_b, left_b])
@@ -999,7 +1225,9 @@ pub fn find_gap_bridge_polygon(
 /// Ray-casting point-in-polygon test for GPS coordinates.
 pub fn point_in_polygon(lat: f64, lon: f64, polygon: &[crate::coordinates::GPS]) -> bool {
     let n = polygon.len();
-    if n < 3 { return false; }
+    if n < 3 {
+        return false;
+    }
     let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
@@ -1034,7 +1262,8 @@ pub fn point_near_waterway_line(lat: f64, lon: f64, line: &[GPS], hw: f64) -> bo
         // squared distance from (lat,lon) to segment AB
         let dist2 = if len2 < 1e-14 {
             // degenerate segment — just check distance to point A
-            let ex = lat - ax; let ey = lon - ay;
+            let ex = lat - ax;
+            let ey = lon - ay;
             ex * ex + ey * ey
         } else {
             let t = ((lat - ax) * dx + (lon - ay) * dy) / len2;
@@ -1043,20 +1272,22 @@ pub fn point_near_waterway_line(lat: f64, lon: f64, line: &[GPS], hw: f64) -> bo
             let py = ay + t * dy - lon;
             px * px + py * py
         };
-        if dist2 <= hw2 { return true; }
+        if dist2 <= hw2 {
+            return true;
+        }
     }
     false
 }
 
-
 fn clip_osm_to_bounds(
     data: OsmData,
-    lat_min: f64, lat_max: f64,
-    lon_min: f64, lon_max: f64,
+    lat_min: f64,
+    lat_max: f64,
+    lon_min: f64,
+    lon_max: f64,
 ) -> OsmData {
-    let in_box = |lat: f64, lon: f64| {
-        lat >= lat_min && lat <= lat_max && lon >= lon_min && lon <= lon_max
-    };
+    let in_box =
+        |lat: f64, lon: f64| lat >= lat_min && lat <= lat_max && lon >= lon_min && lon <= lon_max;
 
     // A polygon/bbox intersects our box if any vertex is inside, OR the polygon
     // bbox overlaps ours (handles large river polygons that fully cover the chunk).
@@ -1073,54 +1304,108 @@ fn clip_osm_to_bounds(
     };
 
     OsmData {
-        buildings: data.buildings.into_iter().filter(|b| {
-            let c = b.centroid();
-            in_box(c.lat, c.lon)
-        }).collect(),
+        buildings: data
+            .buildings
+            .into_iter()
+            .filter(|b| {
+                let c = b.centroid();
+                in_box(c.lat, c.lon)
+            })
+            .collect(),
 
-        roads: data.roads.into_iter().filter(|r| {
-            r.nodes.iter().any(|n| in_box(n.lat, n.lon))
-        }).collect(),
+        roads: data
+            .roads
+            .into_iter()
+            .filter(|r| r.nodes.iter().any(|n| in_box(n.lat, n.lon)))
+            .collect(),
 
-        railways: data.railways.into_iter().filter(|r| {
-            r.nodes.iter().any(|n| in_box(n.lat, n.lon))
-        }).collect(),
+        railways: data
+            .railways
+            .into_iter()
+            .filter(|r| r.nodes.iter().any(|n| in_box(n.lat, n.lon)))
+            .collect(),
 
         // Water: include full polygon (unclipped) for any polygon whose bbox overlaps.
         // Clipping vertices breaks point_in_polygon tests (open polygon = wrong results).
         // Water is now rendered as voxels, so polygon vertex count per-chunk doesn't matter.
-        water: data.water.into_iter().filter(|w| {
-            poly_intersects(&w.polygon)
-        }).collect(),
+        water: data
+            .water
+            .into_iter()
+            .filter(|w| poly_intersects(&w.polygon))
+            .collect(),
 
         // Waterway centrelines: keep any that have at least one node near the chunk.
-        waterway_lines: data.waterway_lines.into_iter().filter(|wl| {
-            poly_intersects(&wl.nodes)
-        }).collect(),
+        waterway_lines: data
+            .waterway_lines
+            .into_iter()
+            .filter(|wl| poly_intersects(&wl.nodes))
+            .collect(),
 
-        parks: data.parks.into_iter().filter(|p| {
-            poly_intersects(&p.polygon)
-        }).collect(),
+        parks: data
+            .parks
+            .into_iter()
+            .filter(|p| poly_intersects(&p.polygon))
+            .collect(),
 
-        land_areas: data.land_areas.into_iter().filter(|a| {
-            poly_intersects(&a.polygon)
-        }).collect(),
+        land_areas: data
+            .land_areas
+            .into_iter()
+            .filter(|a| poly_intersects(&a.polygon))
+            .collect(),
 
-        barriers: data.barriers.into_iter().filter(|b| {
-            b.nodes.iter().any(|n| in_box(n.lat, n.lon))
-        }).collect(),
+        barriers: data
+            .barriers
+            .into_iter()
+            .filter(|b| b.nodes.iter().any(|n| in_box(n.lat, n.lon)))
+            .collect(),
 
-        power: data.power.into_iter().filter(|p| {
-            if p.nodes.is_empty() { in_box(p.lat, p.lon) } else { p.nodes.iter().any(|n| in_box(n.lat, n.lon)) }
-        }).collect(),
+        power: data
+            .power
+            .into_iter()
+            .filter(|p| {
+                if p.nodes.is_empty() {
+                    in_box(p.lat, p.lon)
+                } else {
+                    p.nodes.iter().any(|n| in_box(n.lat, n.lon))
+                }
+            })
+            .collect(),
 
-        aeroways: data.aeroways.into_iter().filter(|a| {
-            if a.is_area { poly_intersects(&a.polygon) } else { a.nodes.iter().any(|n| in_box(n.lat, n.lon)) }
-        }).collect(),
+        aeroways: data
+            .aeroways
+            .into_iter()
+            .filter(|a| {
+                if a.is_area {
+                    poly_intersects(&a.polygon)
+                } else {
+                    a.nodes.iter().any(|n| in_box(n.lat, n.lon))
+                }
+            })
+            .collect(),
 
-        amenities: data.amenities.into_iter().filter(|a| {
-            in_box(a.lat, a.lon)
-        }).collect(),
+        amenities: data
+            .amenities
+            .into_iter()
+            .filter(|a| in_box(a.lat, a.lon))
+            .collect(),
+
+        dams: data
+            .dams
+            .into_iter()
+            .filter(|d| d.nodes.iter().any(|n| in_box(n.lat, n.lon)))
+            .collect(),
+
+        extra_ways: data
+            .extra_ways
+            .into_iter()
+            .filter(|w| w.coords.iter().any(|n| in_box(n.lat, n.lon)))
+            .collect(),
+
+        extra_nodes: data
+            .extra_nodes
+            .into_iter()
+            .filter(|n| in_box(n.lat, n.lon))
+            .collect(),
     }
 }
 
@@ -1174,20 +1459,27 @@ fn import_pbf_to_cache_inner(
     cache: &OsmDiskCache,
     progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Result<usize, String> {
+    use osmpbfreader::{OsmObj, OsmPbfReader};
     use std::collections::HashMap;
-    use osmpbfreader::{OsmPbfReader, OsmObj};
 
     const TILE_SIZE: f64 = 0.01;
     const FLUSH_THRESHOLD: usize = 2_000_000; // flush tile accumulator every 2M pushed features
 
-    fn snap(v: f64) -> f64 { (v / TILE_SIZE).floor() * TILE_SIZE }
+    fn snap(v: f64) -> f64 {
+        (v / TILE_SIZE).floor() * TILE_SIZE
+    }
 
     fn tile_key(lat: f64, lon: f64) -> (i64, i64) {
-        ((snap(lat) / TILE_SIZE).round() as i64, (snap(lon) / TILE_SIZE).round() as i64)
+        (
+            (snap(lat) / TILE_SIZE).round() as i64,
+            (snap(lon) / TILE_SIZE).round() as i64,
+        )
     }
 
     fn bbox_tile_keys(coords: &[(f64, f64)]) -> Vec<(i64, i64)> {
-        if coords.is_empty() { return vec![]; }
+        if coords.is_empty() {
+            return vec![];
+        }
         let min_lat = coords.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
         let max_lat = coords.iter().map(|c| c.0).fold(f64::NEG_INFINITY, f64::max);
         let min_lon = coords.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
@@ -1208,11 +1500,20 @@ fn import_pbf_to_cache_inner(
     }
 
     fn to_gps(coords: &[(f64, f64)]) -> Vec<crate::coordinates::GPS> {
-        coords.iter().map(|&(lat, lon)| crate::coordinates::GPS::new(lat, lon, 0.0)).collect()
+        coords
+            .iter()
+            .map(|&(lat, lon)| crate::coordinates::GPS::new(lat, lon, 0.0))
+            .collect()
     }
 
-    let fname = pbf_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-    let file_mb = std::fs::metadata(pbf_path).map(|m| m.len() / 1_048_576).unwrap_or(0);
+    let fname = pbf_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let file_mb = std::fs::metadata(pbf_path)
+        .map(|m| m.len() / 1_048_576)
+        .unwrap_or(0);
 
     macro_rules! plog {
         ($($arg:tt)*) => {{
@@ -1230,21 +1531,24 @@ fn import_pbf_to_cache_inner(
     let mut skipped = 0usize;
 
     // Flush accumulated tiles to disk and clear the accumulator.
-    let flush = |tiles: &mut HashMap<(i64,i64), OsmData>, written: &mut usize, skipped: &mut usize| {
-        for ((s_i, w_i), data) in tiles.drain() {
-            if data.is_empty() { continue; }
-            let s = s_i as f64 * TILE_SIZE;
-            let w_coord = w_i as f64 * TILE_SIZE;
-            let n = s + TILE_SIZE;
-            let e = w_coord + TILE_SIZE;
-            if !cache.exists(s, w_coord, n, e) {
-                cache.save(s, w_coord, n, e, &data);
-                *written += 1;
-            } else {
-                *skipped += 1;
+    let flush =
+        |tiles: &mut HashMap<(i64, i64), OsmData>, written: &mut usize, skipped: &mut usize| {
+            for ((s_i, w_i), data) in tiles.drain() {
+                if data.is_empty() {
+                    continue;
+                }
+                let s = s_i as f64 * TILE_SIZE;
+                let w_coord = w_i as f64 * TILE_SIZE;
+                let n = s + TILE_SIZE;
+                let e = w_coord + TILE_SIZE;
+                if !cache.exists(s, w_coord, n, e) {
+                    cache.save(s, w_coord, n, e, &data);
+                    *written += 1;
+                } else {
+                    *skipped += 1;
+                }
             }
-        }
-    };
+        };
 
     // ── PASS 1: collect only the node IDs referenced by ways we care about ──────
     // Use a HashSet to deduplicate on insert (avoids collecting duplicates then sorting).
@@ -1264,15 +1568,30 @@ fn import_pbf_to_cache_inner(
                     || w.tags.contains_key("barrier")
                     || w.tags.contains_key("power")
                     || w.tags.contains_key("aeroway")
+                    || w.tags.contains_key("man_made")
+                    || w.tags.contains_key("tourism")
+                    || w.tags.contains_key("historic")
+                    || w.tags.contains_key("amenity")
+                    || w.tags.contains_key("military")
+                    || w.tags.contains_key("healthcare")
+                    || w.tags.contains_key("public_transport")
+                    || w.tags.contains_key("addr:housenumber")
+                    || w.tags.contains_key("place")
                 {
-                    for nr in &w.nodes { ids.insert(nr.0); }
+                    for nr in &w.nodes {
+                        ids.insert(nr.0);
+                    }
                 }
             }
         }
         ids
     };
 
-    plog!("🔄 [OSM] {} — pass 1 done ({} relevant node IDs). Starting pass 2…", fname, needed_ids.len());
+    plog!(
+        "🔄 [OSM] {} — pass 1 done ({} relevant node IDs). Starting pass 2…",
+        fname,
+        needed_ids.len()
+    );
 
     // ── PASS 2a: load only needed node coords into a sorted Vec; also collect point features ──
     // Vec<(id, lat, lon)> sorted by id uses ~3x less RAM than HashMap<i64,(f32,f32)>
@@ -1291,7 +1610,9 @@ fn import_pbf_to_cache_inner(
                     if let Some(amenity) = n.tags.get("amenity") {
                         let tk = tile_key(n.lat(), n.lon());
                         tiles.entry(tk).or_default().amenities.push(OsmAmenity {
-                            osm_id: n.id.0 as u64, lat: n.lat(), lon: n.lon(),
+                            osm_id: n.id.0 as u64,
+                            lat: n.lat(),
+                            lon: n.lon(),
                             amenity: amenity.as_str().to_string(),
                             name: n.tags.get("name").map(|s| s.to_string()),
                         });
@@ -1302,15 +1623,64 @@ fn import_pbf_to_cache_inner(
                         if matches!(ptype, "tower" | "pole") {
                             let tk = tile_key(n.lat(), n.lon());
                             tiles.entry(tk).or_default().power.push(OsmPower {
-                                osm_id: n.id.0 as u64, nodes: vec![],
-                                power_type: ptype.to_string(), lat: n.lat(), lon: n.lon(),
+                                osm_id: n.id.0 as u64,
+                                nodes: vec![],
+                                power_type: ptype.to_string(),
+                                lat: n.lat(),
+                                lon: n.lon(),
                             });
                             total_pushed += 1;
                         }
                     }
+                    // Generic node catch-all: tourism, historic, natural=peak/cave_entrance,
+                    // man_made, place, healthcare, military, emergency POI nodes.
+                    if n.tags.contains_key("tourism")
+                        || n.tags.contains_key("historic")
+                        || n.tags.contains_key("man_made")
+                        || n.tags.contains_key("place")
+                        || n.tags.contains_key("healthcare")
+                        || n.tags.contains_key("military")
+                        || n.tags.contains_key("emergency")
+                        || n.tags.contains_key("shop")
+                        || n.tags.contains_key("office")
+                        || (n
+                            .tags
+                            .get("natural")
+                            .map(|v| {
+                                matches!(
+                                    v.as_str(),
+                                    "peak" | "volcano" | "cave_entrance" | "spring" | "waterfall"
+                                )
+                            })
+                            .unwrap_or(false))
+                    {
+                        let tk = tile_key(n.lat(), n.lon());
+                        let mut tags: Vec<(String, String)> = n
+                            .tags
+                            .iter()
+                            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+                            .collect();
+                        tags.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        tiles
+                            .entry(tk)
+                            .or_default()
+                            .extra_nodes
+                            .push(GenericOsmNode {
+                                osm_id: n.id.0 as u64,
+                                lat: n.lat(),
+                                lon: n.lon(),
+                                tags,
+                            });
+                        total_pushed += 1;
+                    }
                     if total_pushed >= FLUSH_THRESHOLD {
                         flush(&mut tiles, &mut written, &mut skipped);
-                        plog!("🔄 [OSM] {} — pass 2 nodes: {} new tiles ({} already current)…", fname, written, skipped);
+                        plog!(
+                            "🔄 [OSM] {} — pass 2 nodes: {} new tiles ({} already current)…",
+                            fname,
+                            written,
+                            skipped
+                        );
                         total_pushed = 0;
                     }
                 }
@@ -1324,7 +1694,8 @@ fn import_pbf_to_cache_inner(
 
     // Lookup helper: binary search into sorted node_coords.
     let lookup = |id: i64| -> Option<(f64, f64)> {
-        node_coords.binary_search_by_key(&id, |t| t.0)
+        node_coords
+            .binary_search_by_key(&id, |t| t.0)
             .ok()
             .map(|i| (node_coords[i].1 as f64, node_coords[i].2 as f64))
     };
@@ -1340,84 +1711,174 @@ fn import_pbf_to_cache_inner(
 
                 OsmObj::Way(w) => {
                     // Resolve node coords (f32 → f64 for GPS)
-                    let coords: Vec<(f64, f64)> = w.nodes.iter()
-                        .filter_map(|id| lookup(id.0))
-                        .collect();
-                    if coords.len() < 2 { continue; }
+                    let coords: Vec<(f64, f64)> =
+                        w.nodes.iter().filter_map(|id| lookup(id.0)).collect();
+                    if coords.len() < 2 {
+                        continue;
+                    }
 
                     let tks = bbox_tile_keys(&coords);
-                    if tks.is_empty() { continue; }
+                    if tks.is_empty() {
+                        continue;
+                    }
                     let gps = to_gps(&coords);
                     let n_tiles = tks.len();
 
                     if w.tags.contains_key("building") {
-                        let btype = w.tags.get("building").map(|s| s.as_str()).unwrap_or("yes").to_string();
-                        let levels: u8 = w.tags.get("building:levels").and_then(|s| s.parse().ok()).unwrap_or(2);
+                        let btype = w
+                            .tags
+                            .get("building")
+                            .map(|s| s.as_str())
+                            .unwrap_or("yes")
+                            .to_string();
+                        let levels: u8 = w
+                            .tags
+                            .get("building:levels")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(2);
                         let height_m = levels as f64 * 3.0;
                         for tk in tks {
                             tiles.entry(tk).or_default().buildings.push(OsmBuilding {
-                                osm_id: w.id.0 as u64, polygon: gps.clone(),
-                                height_m, building_type: btype.clone(), levels,
+                                osm_id: w.id.0 as u64,
+                                polygon: gps.clone(),
+                                height_m,
+                                building_type: btype.clone(),
+                                levels,
                             });
                         }
                     } else if let Some(highway) = w.tags.get("highway") {
                         let hval = highway.as_str();
-                        if !matches!(hval,
-                            "motorway" | "motorway_link" | "trunk" | "trunk_link" |
-                            "primary" | "primary_link" | "secondary" | "secondary_link" |
-                            "tertiary" | "tertiary_link" | "residential" | "living_street" |
-                            "unclassified" | "service" | "footway" | "path" | "pedestrian" | "cycleway"
-                        ) { continue; }
+                        if !matches!(
+                            hval,
+                            "motorway"
+                                | "motorway_link"
+                                | "trunk"
+                                | "trunk_link"
+                                | "primary"
+                                | "primary_link"
+                                | "secondary"
+                                | "secondary_link"
+                                | "tertiary"
+                                | "tertiary_link"
+                                | "residential"
+                                | "living_street"
+                                | "unclassified"
+                                | "service"
+                                | "footway"
+                                | "path"
+                                | "pedestrian"
+                                | "cycleway"
+                        ) {
+                            continue;
+                        }
                         let name = w.tags.get("name").map(|s| s.to_string());
                         let is_bridge = w.tags.get("bridge").map(|s| s != "no").unwrap_or(false);
                         let is_tunnel = w.tags.get("tunnel").map(|s| s != "no").unwrap_or(false);
-                        let layer: i8 = w.tags.get("layer").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let layer: i8 = w
+                            .tags
+                            .get("layer")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
                         let road_type = RoadType::from_highway_tag(hval);
                         for tk in tks {
                             tiles.entry(tk).or_default().roads.push(OsmRoad {
-                                osm_id: w.id.0 as u64, nodes: gps.clone(), road_type: road_type.clone(),
-                                name: name.clone(), is_bridge, is_tunnel, layer,
+                                osm_id: w.id.0 as u64,
+                                nodes: gps.clone(),
+                                road_type: road_type.clone(),
+                                name: name.clone(),
+                                is_bridge,
+                                is_tunnel,
+                                layer,
                             });
                         }
                     } else if let Some(natural) = w.tags.get("natural") {
                         let nval = natural.as_str();
                         if nval == "water" || nval == "riverbank" {
                             let name = w.tags.get("name").map(|s| s.to_string());
+                            // Prefer the `water=` subtag (e.g. "reservoir", "lake") over the
+                            // generic "water" value so downstream code can distinguish reservoirs.
+                            let water_type = w
+                                .tags
+                                .get("water")
+                                .map(|s| s.as_str())
+                                .unwrap_or(nval)
+                                .to_string();
                             for tk in tks {
                                 tiles.entry(tk).or_default().water.push(OsmWater {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(), holes: vec![],
-                                    name: name.clone(), water_type: nval.to_string(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    holes: vec![],
+                                    name: name.clone(),
+                                    water_type: water_type.clone(),
                                 });
                             }
-                        } else if matches!(nval, "wood" | "scrub" | "heath" | "grassland" | "beach" | "sand" | "bare_rock" | "cliff" | "wetland" | "glacier") {
+                        } else if matches!(
+                            nval,
+                            "wood"
+                                | "scrub"
+                                | "heath"
+                                | "grassland"
+                                | "beach"
+                                | "sand"
+                                | "bare_rock"
+                                | "cliff"
+                                | "wetland"
+                                | "glacier"
+                        ) {
                             let name = w.tags.get("name").map(|s| s.to_string());
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().land_areas.push(OsmLandArea {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(),
-                                    name: name.clone(), area_type: nval.to_string(), category: "natural".to_string(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    name: name.clone(),
+                                    area_type: nval.to_string(),
+                                    category: "natural".to_string(),
                                 });
                             }
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     } else if let Some(waterway) = w.tags.get("waterway") {
                         let wval = waterway.as_str();
-                        if !matches!(wval, "river" | "canal" | "stream" | "drain") { continue; }
+                        if wval == "dam" {
+                            // Dam wall — capture as OsmDam
+                            let name = w.tags.get("name").map(|s| s.to_string());
+                            for tk in tks {
+                                tiles.entry(tk).or_default().dams.push(OsmDam {
+                                    osm_id: w.id.0 as u64,
+                                    nodes: gps.clone(),
+                                    name: name.clone(),
+                                });
+                            }
+                            continue;
+                        }
+                        if !matches!(wval, "river" | "canal" | "stream" | "drain") {
+                            continue;
+                        }
                         let closed = coords.first() == coords.last() && coords.len() > 3;
                         if closed {
                             let name = w.tags.get("name").map(|s| s.to_string());
                             for tk in tks {
                                 tiles.entry(tk).or_default().water.push(OsmWater {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(), holes: vec![],
-                                    name: name.clone(), water_type: wval.to_string(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    holes: vec![],
+                                    name: name.clone(),
+                                    water_type: wval.to_string(),
                                 });
                             }
                         } else {
                             let wname = w.tags.get("name").map(|s| s.to_string());
                             for tk in tks {
-                                tiles.entry(tk).or_default().waterway_lines.push(WaterwayLine {
-                                    nodes: gps.clone(),
-                                    waterway_type: wval.to_string(),
-                                    name: wname.clone(),
-                                });
+                                tiles
+                                    .entry(tk)
+                                    .or_default()
+                                    .waterway_lines
+                                    .push(WaterwayLine {
+                                        nodes: gps.clone(),
+                                        waterway_type: wval.to_string(),
+                                        name: wname.clone(),
+                                    });
                             }
                         }
                     } else if let Some(leisure) = w.tags.get("leisure") {
@@ -1426,21 +1887,40 @@ fn import_pbf_to_cache_inner(
                         if lval == "park" {
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().parks.push(OsmPark {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(), name: name.clone(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    name: name.clone(),
                                 });
                                 tiles.entry(*tk).or_default().land_areas.push(OsmLandArea {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(),
-                                    name: name.clone(), area_type: "park".to_string(), category: "leisure".to_string(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    name: name.clone(),
+                                    area_type: "park".to_string(),
+                                    category: "leisure".to_string(),
                                 });
                             }
-                        } else if matches!(lval, "pitch" | "golf_course" | "playground" | "stadium" | "sports_centre" | "marina" | "swimming_pool") {
+                        } else if matches!(
+                            lval,
+                            "pitch"
+                                | "golf_course"
+                                | "playground"
+                                | "stadium"
+                                | "sports_centre"
+                                | "marina"
+                                | "swimming_pool"
+                        ) {
                             for tk in tks {
                                 tiles.entry(tk).or_default().land_areas.push(OsmLandArea {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(),
-                                    name: name.clone(), area_type: lval.to_string(), category: "leisure".to_string(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    name: name.clone(),
+                                    area_type: lval.to_string(),
+                                    category: "leisure".to_string(),
                                 });
                             }
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     } else if let Some(landuse) = w.tags.get("landuse") {
                         let lval = landuse.as_str();
                         let name = w.tags.get("name").map(|s| s.to_string());
@@ -1448,64 +1928,137 @@ fn import_pbf_to_cache_inner(
                         if is_grass {
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().parks.push(OsmPark {
-                                    osm_id: w.id.0 as u64, polygon: gps.clone(), name: name.clone(),
+                                    osm_id: w.id.0 as u64,
+                                    polygon: gps.clone(),
+                                    name: name.clone(),
                                 });
                             }
                         }
                         for tk in tks {
                             tiles.entry(tk).or_default().land_areas.push(OsmLandArea {
-                                osm_id: w.id.0 as u64, polygon: gps.clone(),
-                                name: name.clone(), area_type: lval.to_string(), category: "landuse".to_string(),
+                                osm_id: w.id.0 as u64,
+                                polygon: gps.clone(),
+                                name: name.clone(),
+                                area_type: lval.to_string(),
+                                category: "landuse".to_string(),
                             });
                         }
                     } else if let Some(railway) = w.tags.get("railway") {
                         let name = w.tags.get("name").map(|s| s.to_string());
                         let is_bridge = w.tags.get("bridge").map(|s| s != "no").unwrap_or(false);
                         let is_tunnel = w.tags.get("tunnel").map(|s| s != "no").unwrap_or(false);
-                        let layer: i8 = w.tags.get("layer").and_then(|s| s.parse().ok()).unwrap_or(0);
+                        let layer: i8 = w
+                            .tags
+                            .get("layer")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
                         let rtype = railway.as_str().to_string();
                         for tk in tks {
                             tiles.entry(tk).or_default().railways.push(OsmRailway {
-                                osm_id: w.id.0 as u64, nodes: gps.clone(), railway_type: rtype.clone(),
-                                name: name.clone(), is_bridge, is_tunnel, layer,
+                                osm_id: w.id.0 as u64,
+                                nodes: gps.clone(),
+                                railway_type: rtype.clone(),
+                                name: name.clone(),
+                                is_bridge,
+                                is_tunnel,
+                                layer,
                             });
                         }
                     } else if let Some(barrier) = w.tags.get("barrier") {
                         let btype = barrier.as_str();
-                        if !matches!(btype, "wall" | "fence" | "hedge" | "retaining_wall" | "guard_rail" | "city_wall") { continue; }
+                        if !matches!(
+                            btype,
+                            "wall"
+                                | "fence"
+                                | "hedge"
+                                | "retaining_wall"
+                                | "guard_rail"
+                                | "city_wall"
+                        ) {
+                            continue;
+                        }
                         let btype = btype.to_string();
                         for tk in tks {
                             tiles.entry(tk).or_default().barriers.push(OsmBarrier {
-                                osm_id: w.id.0 as u64, nodes: gps.clone(), barrier_type: btype.clone(),
+                                osm_id: w.id.0 as u64,
+                                nodes: gps.clone(),
+                                barrier_type: btype.clone(),
                             });
                         }
                     } else if let Some(power) = w.tags.get("power") {
                         let ptype = power.as_str();
-                        if !matches!(ptype, "line" | "cable" | "minor_line") { continue; }
+                        if !matches!(ptype, "line" | "cable" | "minor_line") {
+                            continue;
+                        }
                         let ptype = ptype.to_string();
                         for tk in tks {
                             tiles.entry(tk).or_default().power.push(OsmPower {
-                                osm_id: w.id.0 as u64, nodes: gps.clone(),
-                                power_type: ptype.clone(), lat: 0.0, lon: 0.0,
+                                osm_id: w.id.0 as u64,
+                                nodes: gps.clone(),
+                                power_type: ptype.clone(),
+                                lat: 0.0,
+                                lon: 0.0,
                             });
                         }
                     } else if let Some(aeroway) = w.tags.get("aeroway") {
                         let atype = aeroway.as_str().to_string();
                         let name = w.tags.get("name").map(|s| s.to_string());
                         let is_closed = coords.len() > 3 && coords.first() == coords.last();
-                        let (polygon, nodes) = if is_closed { (gps.clone(), vec![]) } else { (vec![], gps.clone()) };
+                        let (polygon, nodes) = if is_closed {
+                            (gps.clone(), vec![])
+                        } else {
+                            (vec![], gps.clone())
+                        };
                         for tk in tks {
                             tiles.entry(tk).or_default().aeroways.push(OsmAeroway {
-                                osm_id: w.id.0 as u64, polygon: polygon.clone(), nodes: nodes.clone(),
-                                aeroway_type: atype.clone(), name: name.clone(), is_area: is_closed,
+                                osm_id: w.id.0 as u64,
+                                polygon: polygon.clone(),
+                                nodes: nodes.clone(),
+                                aeroway_type: atype.clone(),
+                                name: name.clone(),
+                                is_area: is_closed,
                             });
                         }
-                    } else { continue; }
+                    } else if w.tags.contains_key("man_made")
+                        || w.tags.contains_key("tourism")
+                        || w.tags.contains_key("historic")
+                        || w.tags.contains_key("amenity")
+                        || w.tags.contains_key("military")
+                        || w.tags.contains_key("healthcare")
+                        || w.tags.contains_key("public_transport")
+                        || w.tags.contains_key("addr:housenumber")
+                        || w.tags.contains_key("place")
+                    {
+                        // Generic catch-all: store every tag so future worldgen passes
+                        // can query any feature type without re-importing.
+                        let is_closed = coords.len() > 2 && coords.first() == coords.last();
+                        let mut tags: Vec<(String, String)> = w
+                            .tags
+                            .iter()
+                            .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
+                            .collect();
+                        tags.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        for tk in tks {
+                            tiles.entry(tk).or_default().extra_ways.push(GenericOsmWay {
+                                osm_id: w.id.0 as u64,
+                                is_closed,
+                                coords: gps.clone(),
+                                tags: tags.clone(),
+                            });
+                        }
+                    } else {
+                        continue;
+                    }
 
                     total_pushed += n_tiles;
                     if total_pushed >= FLUSH_THRESHOLD {
                         flush(&mut tiles, &mut written, &mut skipped);
-                        plog!("🔄 [OSM] {} — pass 2 ways: {} new tiles ({} already current)…", fname, written, skipped);
+                        plog!(
+                            "🔄 [OSM] {} — pass 2 ways: {} new tiles ({} already current)…",
+                            fname,
+                            written,
+                            skipped
+                        );
                         total_pushed = 0;
                     }
                 }
@@ -1516,6 +2069,11 @@ fn import_pbf_to_cache_inner(
     }
 
     flush(&mut tiles, &mut written, &mut skipped);
-    plog!("✅ [OSM] {} — done: {} new tiles written, {} already current", fname, written, skipped);
+    plog!(
+        "✅ [OSM] {} — done: {} new tiles written, {} already current",
+        fname,
+        written,
+        skipped
+    );
     Ok(written)
 }

@@ -9,7 +9,9 @@ fn main() {
     let centre_lat: f64 = -27.463675;
     let centre_lon: f64 = 153.035645;
     let radius: f64 = std::env::var("PREFETCH_RADIUS_DEG")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(0.05); // ~5.5 km
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.05); // ~5.5 km
 
     let tile = 0.01_f64;
     let osm_dir = std::path::Path::new("world_data/osm");
@@ -17,24 +19,26 @@ fn main() {
 
     let lat0 = (((centre_lat - radius) / tile).floor() * tile * 10000.0).round() / 10000.0;
     let lon0 = (((centre_lon - radius) / tile).floor() * tile * 10000.0).round() / 10000.0;
-    let lat1 = (((centre_lat + radius) / tile).ceil()  * tile * 10000.0).round() / 10000.0;
-    let lon1 = (((centre_lon + radius) / tile).ceil()  * tile * 10000.0).round() / 10000.0;
+    let lat1 = (((centre_lat + radius) / tile).ceil() * tile * 10000.0).round() / 10000.0;
+    let lon1 = (((centre_lon + radius) / tile).ceil() * tile * 10000.0).round() / 10000.0;
 
     let lat_n = ((lat1 - lat0) / tile).round() as usize;
     let lon_n = ((lon1 - lon0) / tile).round() as usize;
     let total = lat_n * lon_n;
 
-    println!("Prefetching {} OSM tiles for Brisbane ({:.3}..{:.3}, {:.3}..{:.3})…",
-        total, lat0, lat1, lon0, lon1);
+    println!(
+        "Prefetching {} OSM tiles for Brisbane ({:.3}..{:.3}, {:.3}..{:.3})…",
+        total, lat0, lat1, lon0, lon1
+    );
 
     let mut n_fetched = 0usize;
-    let mut n_cached  = 0usize;
-    let mut n_failed  = 0usize;
+    let mut n_cached = 0usize;
+    let mut n_failed = 0usize;
 
     for i in 0..lat_n {
         for j in 0..lon_n {
-            let s = (( lat0 + i as f64 * tile) * 10000.0).round() / 10000.0;
-            let w = (( lon0 + j as f64 * tile) * 10000.0).round() / 10000.0;
+            let s = ((lat0 + i as f64 * tile) * 10000.0).round() / 10000.0;
+            let w = ((lon0 + j as f64 * tile) * 10000.0).round() / 10000.0;
             let n = ((s + tile) * 10000.0).round() / 10000.0;
             let e = ((w + tile) * 10000.0).round() / 10000.0;
 
@@ -47,8 +51,12 @@ fn main() {
                         println!("(empty tile)");
                         n_cached += 1;
                     } else {
-                        println!("✓  b:{} r:{} w:{}", data.buildings.len(),
-                            data.roads.len(), data.water.len());
+                        println!(
+                            "✓  b:{} r:{} w:{}",
+                            data.buildings.len(),
+                            data.roads.len(),
+                            data.water.len()
+                        );
                         n_fetched += 1;
                     }
                 }
@@ -61,8 +69,10 @@ fn main() {
     }
 
     println!();
-    println!("Done: {} fetched/cached, {} already fresh, {} failed",
-        n_fetched, n_cached, n_failed);
+    println!(
+        "Done: {} fetched/cached, {} already fresh, {} failed",
+        n_fetched, n_cached, n_failed
+    );
     if n_failed > 0 {
         println!("⚠  Re-run to retry failed tiles (Overpass may have rate-limited).");
     }

@@ -9,29 +9,28 @@
 //!
 //! Keybindings: [m] Main  [l] Log  [h] Help  [q] Quit
 
+use clap::Parser;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use libp2p::{
-    identify, identity, kad, mdns, relay,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    Multiaddr, PeerId, SwarmBuilder,
-};
-use libp2p::kad::store::MemoryStore;
 use hex;
+use libp2p::kad::store::MemoryStore;
+use libp2p::{
+    Multiaddr, PeerId, SwarmBuilder, identify, identity, kad, mdns, relay,
+    swarm::{NetworkBehaviour, SwarmEvent},
+};
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Wrap},
-    Frame, Terminal,
 };
 use serde_json;
-use sysinfo::System;
 use std::{
     collections::{HashMap, VecDeque},
     error::Error,
@@ -39,10 +38,10 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
-use clap::Parser;
+use sysinfo::System;
 
+use metaverse_core::node_config::NodeConfig as RelayConfig;
 use metaverse_core::web_ui::{NodeStatus, PeerSummary, SharedStatus, build_base_router};
-use metaverse_core::node_config::{NodeConfig as RelayConfig};
 
 // ─── Config type alias ────────────────────────────────────────────────────────
 
@@ -61,7 +60,9 @@ fn load_config() -> RelayConfig {
 fn write_default_config_if_missing() {
     let path = std::path::PathBuf::from("relay.json");
     if !path.exists() {
-        if let Ok(json) = serde_json::to_string_pretty(&metaverse_core::node_config::NodeConfig::relay_defaults()) {
+        if let Ok(json) =
+            serde_json::to_string_pretty(&metaverse_core::node_config::NodeConfig::relay_defaults())
+        {
             std::fs::write(&path, json).ok();
         }
     }
@@ -107,16 +108,36 @@ struct Args {
 }
 
 fn apply_cli_overrides(config: &mut RelayConfig, args: &Args) {
-    if let Some(v) = args.port                 { config.port = v; }
-    if let Some(ref v) = args.external_addr    { config.external_addr = Some(v.clone()); }
-    if let Some(v) = args.max_circuits         { config.max_circuits = v; }
-    if let Some(v) = args.max_circuit_duration { config.max_circuit_duration_secs = v; }
-    if let Some(v) = args.max_circuit_bytes    { config.max_circuit_bytes = v; }
-    if !args.peer.is_empty()                   { config.peers.extend(args.peer.iter().cloned()); }
-    if args.headless                            { config.headless = true; }
-    if args.no_web                             { config.web_enabled = false; }
-    if let Some(v) = args.web_port             { config.web_port = v; }
-    if let Some(ref v) = args.name             { config.node_name = Some(v.clone()); }
+    if let Some(v) = args.port {
+        config.port = v;
+    }
+    if let Some(ref v) = args.external_addr {
+        config.external_addr = Some(v.clone());
+    }
+    if let Some(v) = args.max_circuits {
+        config.max_circuits = v;
+    }
+    if let Some(v) = args.max_circuit_duration {
+        config.max_circuit_duration_secs = v;
+    }
+    if let Some(v) = args.max_circuit_bytes {
+        config.max_circuit_bytes = v;
+    }
+    if !args.peer.is_empty() {
+        config.peers.extend(args.peer.iter().cloned());
+    }
+    if args.headless {
+        config.headless = true;
+    }
+    if args.no_web {
+        config.web_enabled = false;
+    }
+    if let Some(v) = args.web_port {
+        config.web_port = v;
+    }
+    if let Some(ref v) = args.name {
+        config.node_name = Some(v.clone());
+    }
 }
 
 // ─── Network behaviour ───────────────────────────────────────────────────────
@@ -133,13 +154,25 @@ struct RelayBehaviour {
 // ─── App state ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct PeerInfo { peer_id: PeerId, connected_at: Instant, addr: String }
+struct PeerInfo {
+    peer_id: PeerId,
+    connected_at: Instant,
+    addr: String,
+}
 
 #[derive(Clone)]
-struct CircuitInfo { src: PeerId, dst: PeerId, started_at: Instant }
+struct CircuitInfo {
+    src: PeerId,
+    dst: PeerId,
+    started_at: Instant,
+}
 
 #[derive(PartialEq, Clone)]
-enum Tab { Main, Log, Help }
+enum Tab {
+    Main,
+    Log,
+    Help,
+}
 
 struct AppState {
     config: RelayConfig,
@@ -169,23 +202,42 @@ impl AppState {
         let ram_used_mb = sys.used_memory() / 1_048_576;
         let ram_total_mb = sys.total_memory() / 1_048_576;
         Self {
-            config, local_peer_id, public_ip,
+            config,
+            local_peer_id,
+            public_ip,
             start_time: Instant::now(),
             connected_peers: HashMap::new(),
             active_circuits: vec![],
-            total_connections: 0, total_reservations: 0, dht_peer_count: 0,
-            log: VecDeque::new(), tab: Tab::Main, should_quit: false,
-            sys, cpu_pct, ram_used_mb, ram_total_mb,
+            total_connections: 0,
+            total_reservations: 0,
+            dht_peer_count: 0,
+            log: VecDeque::new(),
+            tab: Tab::Main,
+            should_quit: false,
+            sys,
+            cpu_pct,
+            ram_used_mb,
+            ram_total_mb,
             last_sys_refresh: Instant::now(),
         }
     }
 
     fn push_log(&mut self, msg: String) {
         let e = self.start_time.elapsed().as_secs();
-        let entry = format!("{:02}:{:02}:{:02} {}", e/3600, (e%3600)/60, e%60, msg);
+        let entry = format!(
+            "{:02}:{:02}:{:02} {}",
+            e / 3600,
+            (e % 3600) / 60,
+            e % 60,
+            msg
+        );
         self.log.push_back(entry.clone());
-        while self.log.len() > self.config.ui.max_log_entries { self.log.pop_front(); }
-        if self.config.headless { println!("{}", entry); }
+        while self.log.len() > self.config.ui.max_log_entries {
+            self.log.pop_front();
+        }
+        if self.config.headless {
+            println!("{}", entry);
+        }
     }
 
     fn refresh_sys(&mut self) {
@@ -200,29 +252,62 @@ impl AppState {
     }
 
     fn short(id: &str) -> String {
-        if id.len() > 12 { format!("…{}", &id[id.len()-10..]) } else { id.to_string() }
+        if id.len() > 12 {
+            format!("…{}", &id[id.len() - 10..])
+        } else {
+            id.to_string()
+        }
     }
 }
 
 // ─── Swarm event handler ─────────────────────────────────────────────────────
 
-enum SwarmAction { AddKadAddress(PeerId, Multiaddr), RefreshDhtCount, DialPeer(PeerId, Multiaddr) }
+enum SwarmAction {
+    AddKadAddress(PeerId, Multiaddr),
+    RefreshDhtCount,
+    DialPeer(PeerId, Multiaddr),
+}
 
-fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppState) -> Vec<SwarmAction> {
+fn handle_swarm_event(
+    event: SwarmEvent<RelayBehaviourEvent>,
+    state: &mut AppState,
+) -> Vec<SwarmAction> {
     let mut actions = vec![];
     match event {
-        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+        SwarmEvent::ConnectionEstablished {
+            peer_id, endpoint, ..
+        } => {
             state.total_connections += 1;
             let addr = endpoint.get_remote_address().to_string();
-            state.connected_peers.insert(peer_id, PeerInfo { peer_id, connected_at: Instant::now(), addr: addr.clone() });
-            state.push_log(format!("🔗 Connected: {} via {}", AppState::short(&peer_id.to_string()), addr));
+            state.connected_peers.insert(
+                peer_id,
+                PeerInfo {
+                    peer_id,
+                    connected_at: Instant::now(),
+                    addr: addr.clone(),
+                },
+            );
+            state.push_log(format!(
+                "🔗 Connected: {} via {}",
+                AppState::short(&peer_id.to_string()),
+                addr
+            ));
         }
-        SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            num_established,
+            cause,
+            ..
+        } => {
             if num_established == 0 {
                 state.connected_peers.remove(&peer_id);
                 let r = cause.map(|e| e.to_string()).unwrap_or_default();
                 let r = if r.len() > 50 { r[..50].to_string() } else { r };
-                state.push_log(format!("❌ Disconnected: {} {}", AppState::short(&peer_id.to_string()), r));
+                state.push_log(format!(
+                    "❌ Disconnected: {} {}",
+                    AppState::short(&peer_id.to_string()),
+                    r
+                ));
             }
         }
         SwarmEvent::NewListenAddr { address, .. } => {
@@ -231,23 +316,56 @@ fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppSta
         SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(ev)) => match ev {
             relay::Event::ReservationReqAccepted { src_peer_id, .. } => {
                 state.total_reservations += 1;
-                state.push_log(format!("✅ Reservation: {}", AppState::short(&src_peer_id.to_string())));
+                state.push_log(format!(
+                    "✅ Reservation: {}",
+                    AppState::short(&src_peer_id.to_string())
+                ));
             }
             relay::Event::ReservationTimedOut { src_peer_id } => {
-                state.push_log(format!("⏱️  Expired: {}", AppState::short(&src_peer_id.to_string())));
+                state.push_log(format!(
+                    "⏱️  Expired: {}",
+                    AppState::short(&src_peer_id.to_string())
+                ));
             }
-            relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
-                state.active_circuits.push(CircuitInfo { src: src_peer_id, dst: dst_peer_id, started_at: Instant::now() });
-                state.push_log(format!("🔄 Circuit: {} → {}", AppState::short(&src_peer_id.to_string()), AppState::short(&dst_peer_id.to_string())));
+            relay::Event::CircuitReqAccepted {
+                src_peer_id,
+                dst_peer_id,
+            } => {
+                state.active_circuits.push(CircuitInfo {
+                    src: src_peer_id,
+                    dst: dst_peer_id,
+                    started_at: Instant::now(),
+                });
+                state.push_log(format!(
+                    "🔄 Circuit: {} → {}",
+                    AppState::short(&src_peer_id.to_string()),
+                    AppState::short(&dst_peer_id.to_string())
+                ));
             }
-            relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
-                state.active_circuits.retain(|c| !(c.src == src_peer_id && c.dst == dst_peer_id));
-                state.push_log(format!("🔚 Circuit closed: {} → {}", AppState::short(&src_peer_id.to_string()), AppState::short(&dst_peer_id.to_string())));
+            relay::Event::CircuitClosed {
+                src_peer_id,
+                dst_peer_id,
+                ..
+            } => {
+                state
+                    .active_circuits
+                    .retain(|c| !(c.src == src_peer_id && c.dst == dst_peer_id));
+                state.push_log(format!(
+                    "🔚 Circuit closed: {} → {}",
+                    AppState::short(&src_peer_id.to_string()),
+                    AppState::short(&dst_peer_id.to_string())
+                ));
             }
             _ => {}
         },
-        SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
-            for addr in info.listen_addrs { actions.push(SwarmAction::AddKadAddress(peer_id, addr)); }
+        SwarmEvent::Behaviour(RelayBehaviourEvent::Identify(identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        })) => {
+            for addr in info.listen_addrs {
+                actions.push(SwarmAction::AddKadAddress(peer_id, addr));
+            }
             actions.push(SwarmAction::RefreshDhtCount);
         }
         SwarmEvent::Behaviour(RelayBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
@@ -261,14 +379,23 @@ fn handle_swarm_event(event: SwarmEvent<RelayBehaviourEvent>, state: &mut AppSta
     actions
 }
 
-fn apply_swarm_actions(actions: Vec<SwarmAction>, state: &mut AppState, swarm: &mut libp2p::Swarm<RelayBehaviour>) {
+fn apply_swarm_actions(
+    actions: Vec<SwarmAction>,
+    state: &mut AppState,
+    swarm: &mut libp2p::Swarm<RelayBehaviour>,
+) {
     for action in actions {
         match action {
             SwarmAction::AddKadAddress(peer_id, addr) => {
                 swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
             }
             SwarmAction::RefreshDhtCount => {
-                state.dht_peer_count = swarm.behaviour_mut().kademlia.kbuckets().map(|b| b.num_entries()).sum();
+                state.dht_peer_count = swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .kbuckets()
+                    .map(|b| b.num_entries())
+                    .sum();
             }
             SwarmAction::DialPeer(peer_id, addr) => {
                 if !swarm.is_connected(&peer_id) {
@@ -284,7 +411,7 @@ fn apply_swarm_actions(actions: Vec<SwarmAction>, state: &mut AppState, swarm: &
 fn draw(frame: &mut Frame, state: &AppState) {
     match state.tab {
         Tab::Main => draw_main(frame, state),
-        Tab::Log  => draw_log_full(frame, state),
+        Tab::Log => draw_log_full(frame, state),
         Tab::Help => draw_help(frame, state),
     }
 }
@@ -293,7 +420,12 @@ fn draw_main(frame: &mut Frame, state: &AppState) {
     let area = frame.area();
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(8), Constraint::Length(7), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(7),
+            Constraint::Length(1),
+        ])
         .split(area);
 
     draw_header(frame, state, outer[0]);
@@ -320,55 +452,107 @@ fn draw_header(frame: &mut Frame, state: &AppState, area: Rect) {
     let name = state.config.node_name.as_deref().unwrap_or("relay");
     let text = format!(
         " 🌐 {}  │  {}:{}  │  {}  │  ⏱ {:02}h{:02}m{:02}s  │  peers: {}  circuits: {} ",
-        name, state.public_ip, state.config.port, AppState::short(&state.local_peer_id),
-        e/3600, (e%3600)/60, e%60,
-        state.connected_peers.len(), state.active_circuits.len()
+        name,
+        state.public_ip,
+        state.config.port,
+        AppState::short(&state.local_peer_id),
+        e / 3600,
+        (e % 3600) / 60,
+        e % 60,
+        state.connected_peers.len(),
+        state.active_circuits.len()
     );
     frame.render_widget(
         Paragraph::new(text)
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .block(Block::default().borders(Borders::ALL)),
         area,
     );
 }
 
 fn draw_peers(frame: &mut Frame, state: &AppState, area: Rect) {
-    let rows: Vec<Row> = state.connected_peers.values().map(|p| {
-        let age = p.connected_at.elapsed().as_secs();
-        let age_s = if age < 60 { format!("{}s", age) } else { format!("{}m", age/60) };
-        let addr = if p.addr.len() > 32 { format!("…{}", &p.addr[p.addr.len()-30..]) } else { p.addr.clone() };
-        Row::new(vec![
-            Cell::from(AppState::short(&p.peer_id.to_string())).style(Style::default().fg(Color::Green)),
-            Cell::from(addr).style(Style::default().fg(Color::DarkGray)),
-            Cell::from(age_s).style(Style::default().fg(Color::Yellow)),
-        ])
-    }).collect();
+    let rows: Vec<Row> = state
+        .connected_peers
+        .values()
+        .map(|p| {
+            let age = p.connected_at.elapsed().as_secs();
+            let age_s = if age < 60 {
+                format!("{}s", age)
+            } else {
+                format!("{}m", age / 60)
+            };
+            let addr = if p.addr.len() > 32 {
+                format!("…{}", &p.addr[p.addr.len() - 30..])
+            } else {
+                p.addr.clone()
+            };
+            Row::new(vec![
+                Cell::from(AppState::short(&p.peer_id.to_string()))
+                    .style(Style::default().fg(Color::Green)),
+                Cell::from(addr).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(age_s).style(Style::default().fg(Color::Yellow)),
+            ])
+        })
+        .collect();
     frame.render_widget(
-        Table::new(rows, [Constraint::Min(14), Constraint::Min(28), Constraint::Length(6)])
-            .header(Row::new(["Peer", "Address", "Age"])
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
-            .block(Block::default()
+        Table::new(
+            rows,
+            [
+                Constraint::Min(14),
+                Constraint::Min(28),
+                Constraint::Length(6),
+            ],
+        )
+        .header(
+            Row::new(["Peer", "Address", "Age"]).style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(
+            Block::default()
                 .title(format!(" Connected ({}) ", state.connected_peers.len()))
                 .title_style(Style::default().fg(Color::Cyan))
-                .borders(Borders::ALL)),
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
 
 fn draw_circuits(frame: &mut Frame, state: &AppState, area: Rect) {
-    let items: Vec<ListItem> = state.active_circuits.iter().map(|c| {
-        ListItem::new(Line::from(vec![
-            Span::styled(AppState::short(&c.src.to_string()), Style::default().fg(Color::Green)),
-            Span::raw(" → "),
-            Span::styled(AppState::short(&c.dst.to_string()), Style::default().fg(Color::Blue)),
-            Span::styled(format!(" {}s", c.started_at.elapsed().as_secs()), Style::default().fg(Color::DarkGray)),
-        ]))
-    }).collect();
+    let items: Vec<ListItem> = state
+        .active_circuits
+        .iter()
+        .map(|c| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    AppState::short(&c.src.to_string()),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" → "),
+                Span::styled(
+                    AppState::short(&c.dst.to_string()),
+                    Style::default().fg(Color::Blue),
+                ),
+                Span::styled(
+                    format!(" {}s", c.started_at.elapsed().as_secs()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
     frame.render_widget(
-        List::new(items).block(Block::default()
-            .title(format!(" Circuits ({}) ", state.active_circuits.len()))
-            .title_style(Style::default().fg(Color::Cyan))
-            .borders(Borders::ALL)),
+        List::new(items).block(
+            Block::default()
+                .title(format!(" Circuits ({}) ", state.active_circuits.len()))
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -379,32 +563,66 @@ fn draw_stats(frame: &mut Frame, state: &AppState, area: Rect) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
-    frame.render_widget(Paragraph::new(vec![
-        stat_line("Conns total: ", &format!("{}", state.total_connections)),
-        stat_line("Reservations:", &format!("{}", state.total_reservations)),
-        stat_line("DHT peers:   ", &format!("{}", state.dht_peer_count)),
-        stat_line("Peer relays: ", &format!("{}", state.config.peers.len())),
-    ]).block(Block::default().title(" Network ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
-    halves[0]);
+    frame.render_widget(
+        Paragraph::new(vec![
+            stat_line("Conns total: ", &format!("{}", state.total_connections)),
+            stat_line("Reservations:", &format!("{}", state.total_reservations)),
+            stat_line("DHT peers:   ", &format!("{}", state.dht_peer_count)),
+            stat_line("Peer relays: ", &format!("{}", state.config.peers.len())),
+        ])
+        .block(
+            Block::default()
+                .title(" Network ")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
+        halves[0],
+    );
 
-    frame.render_widget(Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("CPU:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.1}%", state.cpu_pct), cpu_color(state.cpu_pct)),
-        ]),
-        stat_line("RAM:  ", &format!("{}/{}MB", state.ram_used_mb, state.ram_total_mb)),
-        stat_line("Port: ", &format!("{}  WS:{}", state.config.port, state.config.port+5000)),
-        stat_line("Limit:", &format!("{} circuits", state.config.max_circuits)),
-    ]).block(Block::default().title(" System ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL)),
-    halves[1]);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("CPU:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.1}%", state.cpu_pct), cpu_color(state.cpu_pct)),
+            ]),
+            stat_line(
+                "RAM:  ",
+                &format!("{}/{}MB", state.ram_used_mb, state.ram_total_mb),
+            ),
+            stat_line(
+                "Port: ",
+                &format!("{}  WS:{}", state.config.port, state.config.port + 5000),
+            ),
+            stat_line("Limit:", &format!("{} circuits", state.config.max_circuits)),
+        ])
+        .block(
+            Block::default()
+                .title(" System ")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        ),
+        halves[1],
+    );
 }
 
 fn draw_log_tail(frame: &mut Frame, state: &AppState, area: Rect) {
     let h = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = state.log.iter().rev().take(h).rev().map(|e| log_style(e)).collect();
+    let lines: Vec<Line> = state
+        .log
+        .iter()
+        .rev()
+        .take(h)
+        .rev()
+        .map(|e| log_style(e))
+        .collect();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title(" Log [l] ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Log [l] ")
+                    .title_style(Style::default().fg(Color::Cyan))
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -417,10 +635,22 @@ fn draw_log_full(frame: &mut Frame, state: &AppState) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
     let h = parts[0].height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = state.log.iter().rev().take(h).rev().map(|e| log_style(e)).collect();
+    let lines: Vec<Line> = state
+        .log
+        .iter()
+        .rev()
+        .take(h)
+        .rev()
+        .map(|e| log_style(e))
+        .collect();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title(" Full Log ").title_style(Style::default().fg(Color::Cyan)).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(" Full Log ")
+                    .title_style(Style::default().fg(Color::Cyan))
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         parts[0],
     );
@@ -435,30 +665,50 @@ fn draw_help(frame: &mut Frame, state: &AppState) {
         .split(area);
     let cfg = PathBuf::from("relay.json");
     let lines = vec![
-        Line::from(Span::styled(" Metaverse Relay — Help ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " Metaverse Relay — Help ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
-        Line::from(Span::styled(" Keys", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " Keys",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from("  m / Esc    Main dashboard"),
         Line::from("  l          Full log"),
         Line::from("  h          This help"),
         Line::from("  q / Ctrl+C  Quit"),
         Line::from(""),
-        Line::from(Span::styled(" Config file (edit + restart to apply)", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " Config file (edit + restart to apply)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(format!("  {}", cfg.display())),
         Line::from("  port, external_addr, max_circuits, max_circuit_duration, max_circuit_bytes,"),
         Line::from("  peers[], blacklist[], whitelist[], priority_peers[], node_name, headless,"),
         Line::from("  ui { show_cpu, show_ram, show_dht, refresh_ms, max_log_entries }"),
         Line::from(""),
-        Line::from(Span::styled(" CLI flags (override config)", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " CLI flags (override config)",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from("  --port N             TCP port (WebSocket = N+5000)"),
         Line::from("  --peer MULTIADDR     Peer with another relay at startup"),
         Line::from("  --headless           Plain log output, no TUI"),
         Line::from("  --name NAME          Node display name"),
         Line::from("  --max-circuits N     Circuit limit"),
         Line::from(""),
-        Line::from(Span::styled(" This node", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            " This node",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(format!("  Peer ID: {}", state.local_peer_id)),
-        Line::from(format!("  Public:  {}:{}", state.public_ip, state.config.port)),
+        Line::from(format!(
+            "  Public:  {}:{}",
+            state.public_ip, state.config.port
+        )),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -470,12 +720,20 @@ fn draw_help(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_hints(frame: &mut Frame, area: Rect) {
-    frame.render_widget(Paragraph::new(Line::from(vec![
-        Span::styled(" [m]", Style::default().fg(Color::Yellow)), Span::raw(" Main  "),
-        Span::styled("[l]", Style::default().fg(Color::Yellow)), Span::raw(" Log  "),
-        Span::styled("[h]", Style::default().fg(Color::Yellow)), Span::raw(" Help  "),
-        Span::styled("[q]", Style::default().fg(Color::Red)), Span::raw(" Quit"),
-    ])).style(Style::default().fg(Color::DarkGray)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" [m]", Style::default().fg(Color::Yellow)),
+            Span::raw(" Main  "),
+            Span::styled("[l]", Style::default().fg(Color::Yellow)),
+            Span::raw(" Log  "),
+            Span::styled("[h]", Style::default().fg(Color::Yellow)),
+            Span::raw(" Help  "),
+            Span::styled("[q]", Style::default().fg(Color::Red)),
+            Span::raw(" Quit"),
+        ]))
+        .style(Style::default().fg(Color::DarkGray)),
+        area,
+    );
 }
 
 fn stat_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
@@ -486,30 +744,49 @@ fn stat_line<'a>(label: &'a str, value: &'a str) -> Line<'a> {
 }
 
 fn log_style<'a>(line: &'a str) -> Line<'a> {
-    let color = if line.contains("✅") || line.contains("Reservation") { Color::Green }
-        else if line.contains("❌") || line.contains("Disconnected") { Color::Red }
-        else if line.contains("🔄") || line.contains("Circuit") { Color::Blue }
-        else if line.contains("🔗") || line.contains("Connected") { Color::Cyan }
-        else if line.contains("⏱") { Color::Yellow }
-        else { Color::DarkGray };
+    let color = if line.contains("✅") || line.contains("Reservation") {
+        Color::Green
+    } else if line.contains("❌") || line.contains("Disconnected") {
+        Color::Red
+    } else if line.contains("🔄") || line.contains("Circuit") {
+        Color::Blue
+    } else if line.contains("🔗") || line.contains("Connected") {
+        Color::Cyan
+    } else if line.contains("⏱") {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     Line::from(Span::styled(line, Style::default().fg(color)))
 }
 
 fn cpu_color(pct: f32) -> Style {
-    if pct > 80.0 { Style::default().fg(Color::Red) }
-    else if pct > 50.0 { Style::default().fg(Color::Yellow) }
-    else { Style::default().fg(Color::Green) }
+    if pct > 80.0 {
+        Style::default().fg(Color::Red)
+    } else if pct > 50.0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
+    }
 }
 
 // ─── Public IP detection ─────────────────────────────────────────────────────
 
 async fn detect_public_ip() -> Option<String> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().ok()?;
-    for url in &["https://api.ipify.org", "https://ipv4.icanhazip.com", "https://checkip.amazonaws.com"] {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    for url in &[
+        "https://api.ipify.org",
+        "https://ipv4.icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ] {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
                 let ip = text.trim().to_string();
-                if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                if ip.split('.').count() == 4 && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                {
                     return Some(ip);
                 }
             }
@@ -525,12 +802,21 @@ fn publish_relay_capabilities(
     config: &RelayConfig,
     swarm: &mut libp2p::Swarm<RelayBehaviour>,
 ) {
+    use libp2p::kad::{Quorum, Record, RecordKey};
     use metaverse_core::node_capabilities::NodeCapabilities;
-    use libp2p::kad::{Record, RecordKey, Quorum};
     let caps = NodeCapabilities::for_relay(config.always_on);
     let key = NodeCapabilities::dht_key(peer_id_str);
-    let record = Record { key: RecordKey::new(&key), value: caps.to_bytes(), publisher: None, expires: None };
-    if let Err(e) = swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+    let record = Record {
+        key: RecordKey::new(&key),
+        value: caps.to_bytes(),
+        publisher: None,
+        expires: None,
+    };
+    if let Err(e) = swarm
+        .behaviour_mut()
+        .kademlia
+        .put_record(record, Quorum::One)
+    {
         eprintln!("⚠️  [DHT] NodeCapabilities publish failed: {:?}", e);
     }
 }
@@ -551,7 +837,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let check = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             metaverse_core::autoupdate::check_for_update(&repo, current),
-        ).await;
+        )
+        .await;
         if let Ok(Some((tag, url, _notes))) = check {
             eprintln!("🔄 Update available: {} — downloading…", tag);
             match metaverse_core::autoupdate::apply_update(&tag, &url).await {
@@ -560,7 +847,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-
 
     // ── --init-key: generate/show relay identity then exit ───────────────────
     if args.init_key {
@@ -591,7 +877,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("  Public key (hex): {}", pub_key_hex);
         println!("  Key file:        {}", key_path.display());
         if keyrec_path.exists() {
-            println!("  Key record (.keyrec): {} ✅ (already issued)", keyrec_path.display());
+            println!(
+                "  Key record (.keyrec): {} ✅ (already issued)",
+                keyrec_path.display()
+            );
         } else {
             println!("  Key record (.keyrec): NOT YET ISSUED");
         }
@@ -624,10 +913,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Public IP
     let public_ip = if let Some(ref addr) = config.external_addr {
-        addr.split('/').find(|s| s.parse::<std::net::Ipv4Addr>().is_ok()).unwrap_or("?").to_string()
+        addr.split('/')
+            .find(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+            .unwrap_or("?")
+            .to_string()
     } else {
         print!("🌐 Detecting public IP... ");
-        let ip = detect_public_ip().await.unwrap_or_else(|| "unknown".to_string());
+        let ip = detect_public_ip()
+            .await
+            .unwrap_or_else(|| "unknown".to_string());
         println!("{}", ip);
         ip
     };
@@ -638,28 +932,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let max_circuit_bytes = config.max_circuit_bytes;
     let mut swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
-        .with_tcp(libp2p::tcp::Config::default(), libp2p::noise::Config::new, libp2p::yamux::Config::default)?
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
         .with_dns()?
-        .with_websocket((libp2p::tls::Config::new, libp2p::noise::Config::new), libp2p::yamux::Config::default)
+        .with_websocket(
+            (libp2p::tls::Config::new, libp2p::noise::Config::new),
+            libp2p::yamux::Config::default,
+        )
         .await?
         .with_behaviour(|key: &identity::Keypair| {
             let peer_id = key.public().to_peer_id();
             let mut kad_config = kad::Config::default();
             kad_config.set_query_timeout(Duration::from_secs(60));
-            let mut kademlia = kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
+            let mut kademlia =
+                kad::Behaviour::with_config(peer_id, MemoryStore::new(peer_id), kad_config);
             kademlia.set_mode(Some(kad::Mode::Server));
             let identify = identify::Behaviour::new(
                 identify::Config::new("/metaverse-relay/1.0.0".to_string(), key.public())
                     .with_push_listen_addr_updates(true),
             );
             Ok(RelayBehaviour {
-                relay: relay::Behaviour::new(peer_id, relay::Config {
-                    max_reservations: max_circuits,
-                    max_circuits,
-                    max_circuit_duration,
-                    max_circuit_bytes,
-                    ..Default::default()
-                }),
+                relay: relay::Behaviour::new(
+                    peer_id,
+                    relay::Config {
+                        max_reservations: max_circuits,
+                        max_circuits,
+                        max_circuit_duration,
+                        max_circuit_bytes,
+                        ..Default::default()
+                    },
+                ),
                 ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
                 kademlia,
                 identify,
@@ -674,17 +979,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", config.port).parse()?)?;
     swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}/ws", ws_port).parse()?)?;
 
-    let ext_tcp = config.external_addr.clone()
+    let ext_tcp = config
+        .external_addr
+        .clone()
         .unwrap_or_else(|| format!("/ip4/{}/tcp/{}", public_ip, config.port));
     let ext_ws = format!("/ip4/{}/tcp/{}/ws", public_ip, ws_port);
-    if let Ok(a) = ext_tcp.parse() { swarm.add_external_address(a); }
-    if let Ok(a) = ext_ws.parse()  { swarm.add_external_address(a); }
+    if let Ok(a) = ext_tcp.parse() {
+        swarm.add_external_address(a);
+    }
+    if let Ok(a) = ext_ws.parse() {
+        swarm.add_external_address(a);
+    }
 
     // Dial peer relays from config
     for peer_addr in config.peers.clone() {
         if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
             if let Some(libp2p::multiaddr::Protocol::P2p(pid)) = addr.iter().last() {
-                swarm.behaviour_mut().kademlia.add_address(&pid, addr.clone());
+                swarm
+                    .behaviour_mut()
+                    .kademlia
+                    .add_address(&pid, addr.clone());
             }
             match swarm.dial(addr) {
                 Ok(()) => println!("🔗 Dialing peer: {}", peer_addr),
@@ -696,9 +1010,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Bootstrap from bootstrap.json (and cached remote copy)
     {
         #[derive(serde::Deserialize)]
-        struct BootstrapFile { bootstrap_nodes: Vec<BootstrapNode> }
+        struct BootstrapFile {
+            bootstrap_nodes: Vec<BootstrapNode>,
+        }
         #[derive(serde::Deserialize)]
-        struct BootstrapNode { multiaddr: String }
+        struct BootstrapNode {
+            multiaddr: String,
+        }
         let dial_from_json = |data: &str, swarm: &mut libp2p::Swarm<RelayBehaviour>| {
             if let Ok(bf) = serde_json::from_str::<BootstrapFile>(data) {
                 for n in &bf.bootstrap_nodes {
@@ -708,40 +1026,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         };
-        if let Ok(data) = std::fs::read_to_string("bootstrap.json") { dial_from_json(&data, &mut swarm); }
-        if let Ok(data) = std::fs::read_to_string("bootstrap_cache.json") { dial_from_json(&data, &mut swarm); }
+        if let Ok(data) = std::fs::read_to_string("bootstrap.json") {
+            dial_from_json(&data, &mut swarm);
+        }
+        if let Ok(data) = std::fs::read_to_string("bootstrap_cache.json") {
+            dial_from_json(&data, &mut swarm);
+        }
         // Fetch gist in background and save to bootstrap_cache.json for next startup
         tokio::spawn(async {
             let urls = [
                 "https://raw.githubusercontent.com/PaddyOhFurnature/mverse/main/bootstrap.json",
                 "https://gist.githubusercontent.com/PaddyOhFurnature/e5b7fc9c077016682d8eb27abd7cca17/raw/bootstrap.json",
             ];
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_default();
             for url in &urls {
                 if let Ok(r) = client.get(*url).send().await {
-                    if let Ok(t) = r.text().await { let _ = std::fs::write("bootstrap_cache.json", t); break; }
+                    if let Ok(t) = r.text().await {
+                        let _ = std::fs::write("bootstrap_cache.json", t);
+                        break;
+                    }
                 }
             }
         });
     }
 
-    if !config.peers.is_empty() { swarm.behaviour_mut().kademlia.bootstrap().ok(); }
+    if !config.peers.is_empty() {
+        swarm.behaviour_mut().kademlia.bootstrap().ok();
+    }
 
     let mut state = AppState::new(config.clone(), local_peer_id.to_string(), public_ip.clone());
     state.push_log(format!("✅ Relay started — {}", local_peer_id));
 
     publish_relay_capabilities(&local_peer_id.to_string(), &config, &mut swarm);
-    state.push_log(format!("📡 NodeCapabilities published (tier=relay, always_on={})", config.always_on));
+    state.push_log(format!(
+        "📡 NodeCapabilities published (tier=relay, always_on={})",
+        config.always_on
+    ));
 
     // ── Web dashboard ─────────────────────────────────────────────────────────
     let web_status: SharedStatus = std::sync::Arc::new(tokio::sync::RwLock::new(NodeStatus {
-        node_name:  config.node_name.clone().unwrap_or_else(|| "relay".to_string()),
-        node_type:  "relay".to_string(),
-        version:    env!("CARGO_PKG_VERSION").to_string(),
-        peer_id:    local_peer_id.to_string(),
-        public_ip:  public_ip.clone(),
-        p2p_port:   config.port,
-        web_port:   config.web_port,
+        node_name: config
+            .node_name
+            .clone()
+            .unwrap_or_else(|| "relay".to_string()),
+        node_type: "relay".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        peer_id: local_peer_id.to_string(),
+        public_ip: public_ip.clone(),
+        p2p_port: config.port,
+        web_port: config.web_port,
         ..NodeStatus::default()
     }));
 
@@ -750,11 +1086,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let web_port = config.web_port;
         let config_val = serde_json::to_value(&config).unwrap_or_default();
         tokio::spawn(async move {
-            let app = build_base_router(ws)
-                .route("/api/config", axum::routing::get(move || {
+            let app = build_base_router(ws).route(
+                "/api/config",
+                axum::routing::get(move || {
                     let v = config_val.clone();
                     async move { axum::Json(v) }
-                }));
+                }),
+            );
             let bind = format!("0.0.0.0:{}", web_port);
             println!("🌐 Web dashboard: http://{}:{}/", "localhost", web_port);
             if let Ok(listener) = tokio::net::TcpListener::bind(&bind).await {
@@ -765,14 +1103,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         });
     }
 
-    if headless { run_headless(swarm, state, web_status).await } else { run_tui(swarm, state, web_status).await }
+    if headless {
+        run_headless(swarm, state, web_status).await
+    } else {
+        run_tui(swarm, state, web_status).await
+    }
 }
 
 // ─── Headless loop ───────────────────────────────────────────────────────────
 
-async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, web_status: SharedStatus) -> Result<(), Box<dyn Error>> {
+async fn run_headless(
+    mut swarm: libp2p::Swarm<RelayBehaviour>,
+    mut state: AppState,
+    web_status: SharedStatus,
+) -> Result<(), Box<dyn Error>> {
     let mut caps_tick = tokio::time::interval(Duration::from_secs(1800));
-    let mut web_tick  = tokio::time::interval(Duration::from_secs(3));
+    let mut web_tick = tokio::time::interval(Duration::from_secs(3));
     let update_interval = state.config.update_check_interval_secs.max(60);
     let mut update_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(update_interval),
@@ -809,7 +1155,11 @@ async fn run_headless(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppSt
 
 // ─── TUI loop ────────────────────────────────────────────────────────────────
 
-async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, web_status: SharedStatus) -> Result<(), Box<dyn Error>> {
+async fn run_tui(
+    mut swarm: libp2p::Swarm<RelayBehaviour>,
+    mut state: AppState,
+    web_status: SharedStatus,
+) -> Result<(), Box<dyn Error>> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
@@ -878,20 +1228,24 @@ async fn run_tui(mut swarm: libp2p::Swarm<RelayBehaviour>, mut state: AppState, 
 
 async fn update_web_status(state: &AppState, status: &SharedStatus) {
     let uptime = state.start_time.elapsed().as_secs();
-    let peers: Vec<PeerSummary> = state.connected_peers.values().map(|p| PeerSummary {
-        peer_id:        p.peer_id.to_string(),
-        peer_type:      "unknown".to_string(),
-        addr:           p.addr.clone(),
-        connected_secs: p.connected_at.elapsed().as_secs(),
-    }).collect();
+    let peers: Vec<PeerSummary> = state
+        .connected_peers
+        .values()
+        .map(|p| PeerSummary {
+            peer_id: p.peer_id.to_string(),
+            peer_type: "unknown".to_string(),
+            addr: p.addr.clone(),
+            connected_secs: p.connected_at.elapsed().as_secs(),
+        })
+        .collect();
     let mut st = status.write().await;
-    st.uptime_secs      = uptime;
-    st.peers            = peers;
-    st.circuit_count    = state.active_circuits.len();
+    st.uptime_secs = uptime;
+    st.peers = peers;
+    st.circuit_count = state.active_circuits.len();
     st.total_connections = state.total_connections;
-    st.dht_peer_count   = state.dht_peer_count;
-    st.cpu_pct          = state.cpu_pct;
-    st.ram_used_mb      = state.ram_used_mb;
-    st.ram_total_mb     = state.ram_total_mb;
-    st.extra            = serde_json::json!({ "total_reservations": state.total_reservations });
+    st.dht_peer_count = state.dht_peer_count;
+    st.cpu_pct = state.cpu_pct;
+    st.ram_used_mb = state.ram_used_mb;
+    st.ram_total_mb = state.ram_total_mb;
+    st.extra = serde_json::json!({ "total_reservations": state.total_reservations });
 }

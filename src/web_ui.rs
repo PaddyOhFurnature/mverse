@@ -12,11 +12,11 @@
 //! ```
 
 use axum::{
+    Router,
     extract::State,
     http::StatusCode,
     response::{Html, IntoResponse, Json},
     routing::get,
-    Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -27,9 +27,9 @@ use tokio::sync::RwLock;
 /// Summary of one connected peer, safe to serialise and send to the web UI.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PeerSummary {
-    pub peer_id:        String,
-    pub peer_type:      String,   // "client" | "relay" | "server" | "unknown"
-    pub addr:           String,
+    pub peer_id: String,
+    pub peer_type: String, // "client" | "relay" | "server" | "unknown"
+    pub addr: String,
     pub connected_secs: u64,
 }
 
@@ -37,26 +37,26 @@ pub struct PeerSummary {
 /// Populated by server / relay / client and served at `/api/status`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NodeStatus {
-    pub node_name:        String,
-    pub node_type:        String,   // "server" | "relay" | "client"
-    pub version:          String,
-    pub peer_id:          String,
-    pub public_ip:        String,
-    pub p2p_port:         u16,
-    pub web_port:         u16,
-    pub uptime_secs:      u64,
-    pub peers:            Vec<PeerSummary>,
-    pub circuit_count:    usize,
+    pub node_name: String,
+    pub node_type: String, // "server" | "relay" | "client"
+    pub version: String,
+    pub peer_id: String,
+    pub public_ip: String,
+    pub p2p_port: u16,
+    pub web_port: u16,
+    pub uptime_secs: u64,
+    pub peers: Vec<PeerSummary>,
+    pub circuit_count: usize,
     pub total_connections: u64,
-    pub dht_peer_count:   usize,
-    pub gossip_msgs_in:   u64,
-    pub gossip_msgs_out:  u64,
-    pub bytes_in:         u64,
-    pub bytes_out:        u64,
-    pub cpu_pct:          f32,
-    pub ram_used_mb:      u64,
-    pub ram_total_mb:     u64,
-    pub shedding:         bool,
+    pub dht_peer_count: usize,
+    pub gossip_msgs_in: u64,
+    pub gossip_msgs_out: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub cpu_pct: f32,
+    pub ram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub shedding: bool,
     /// If an update is available, contains the new version string (e.g. "0.1.6").
     /// `null` / absent when running the latest version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,7 +64,7 @@ pub struct NodeStatus {
     /// Node-type-specific extras (e.g. world stats, relay reservations).
     /// Serialised as a JSON object; the web UI reads known sub-keys.
     #[serde(default)]
-    pub extra:            serde_json::Value,
+    pub extra: serde_json::Value,
 }
 
 /// Shared handle used as Axum router state.
@@ -81,10 +81,10 @@ pub type SharedStatus = Arc<RwLock<NodeStatus>>;
 /// this call — the `with_state` on this router is already applied internally).
 pub fn build_base_router(status: SharedStatus) -> Router {
     Router::new()
-        .route("/",           get(web_root))
-        .route("/health",     get(web_health))
+        .route("/", get(web_root))
+        .route("/health", get(web_health))
         .route("/api/status", get(web_api_status))
-        .route("/api/peers",  get(web_api_peers))
+        .route("/api/peers", get(web_api_peers))
         .with_state(status)
 }
 

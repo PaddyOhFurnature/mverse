@@ -78,18 +78,26 @@ pub enum RegistryError {
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidSelfSig     => write!(f, "KeyRecord self_sig verification failed"),
-            Self::InvalidIssuerSig   => write!(f, "KeyRecord issuer_sig missing or invalid"),
-            Self::Stale              => write!(f, "Received stale KeyRecord (older than cached)"),
-            Self::Io(e)              => write!(f, "IO error: {}", e),
-            Self::Serialization(e)   => write!(f, "Serialization error: {}", e),
+            Self::InvalidSelfSig => write!(f, "KeyRecord self_sig verification failed"),
+            Self::InvalidIssuerSig => write!(f, "KeyRecord issuer_sig missing or invalid"),
+            Self::Stale => write!(f, "Received stale KeyRecord (older than cached)"),
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Serialization(e) => write!(f, "Serialization error: {}", e),
         }
     }
 }
 
 impl std::error::Error for RegistryError {}
-impl From<std::io::Error>   for RegistryError { fn from(e: std::io::Error)   -> Self { Self::Io(e) } }
-impl From<bincode::Error>   for RegistryError { fn from(e: bincode::Error)   -> Self { Self::Serialization(e) } }
+impl From<std::io::Error> for RegistryError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+impl From<bincode::Error> for RegistryError {
+    fn from(e: bincode::Error) -> Self {
+        Self::Serialization(e)
+    }
+}
 
 pub type Result<T> = std::result::Result<T, RegistryError>;
 
@@ -252,9 +260,7 @@ impl KeyRegistry {
                 self.stats.records_rejected_stale += 1;
                 return Err(RegistryError::Stale);
             }
-            if record.updated_at == existing.updated_at
-                && record.self_sig == existing.self_sig
-            {
+            if record.updated_at == existing.updated_at && record.self_sig == existing.self_sig {
                 // Identical record — idempotent, not an error
                 return Ok(false);
             }
@@ -290,7 +296,8 @@ impl KeyRegistry {
 
     /// Return all records of a specific `KeyType`.
     pub fn by_type(&self, key_type: KeyType) -> Vec<&KeyRecord> {
-        self.records.values()
+        self.records
+            .values()
             .filter(|r| r.key_type as u8 == key_type as u8)
             .collect()
     }
@@ -329,9 +336,13 @@ impl KeyRegistry {
 
         for prefix_entry in prefix_entries.flatten() {
             let prefix_path = prefix_entry.path();
-            if !prefix_path.is_dir() { continue; }
+            if !prefix_path.is_dir() {
+                continue;
+            }
 
-            let Ok(file_entries) = std::fs::read_dir(&prefix_path) else { continue; };
+            let Ok(file_entries) = std::fs::read_dir(&prefix_path) else {
+                continue;
+            };
 
             for file_entry in file_entries.flatten() {
                 let file_path = file_entry.path();
@@ -339,14 +350,22 @@ impl KeyRegistry {
                     continue;
                 }
 
-                let Ok(bytes) = std::fs::read(&file_path) else { continue; };
+                let Ok(bytes) = std::fs::read(&file_path) else {
+                    continue;
+                };
                 let Ok(record) = KeyRecord::from_bytes(&bytes) else {
-                    eprintln!("[key_registry] Skipping corrupt cache file: {}", file_path.display());
+                    eprintln!(
+                        "[key_registry] Skipping corrupt cache file: {}",
+                        file_path.display()
+                    );
                     continue;
                 };
 
                 if !record.verify_self_sig() {
-                    eprintln!("[key_registry] Skipping invalid cached record: {}", record.peer_id);
+                    eprintln!(
+                        "[key_registry] Skipping invalid cached record: {}",
+                        record.peer_id
+                    );
                     let _ = std::fs::remove_file(&file_path); // delete tampered cache
                     continue;
                 }
@@ -418,7 +437,9 @@ impl KeyRegistry {
     /// Call periodically to prevent unbounded cache growth. Keeps revoked records
     /// (tombstones) so revocations don't re-appear after cache clear.
     pub fn evict_stale(&mut self, max_age_secs: u64) {
-        let Some(cache_dir) = self.resolved_cache_dir() else { return };
+        let Some(cache_dir) = self.resolved_cache_dir() else {
+            return;
+        };
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -427,23 +448,36 @@ impl KeyRegistry {
         let cutoff = now.saturating_sub(max_age_secs);
 
         // Remove from memory
-        self.records.retain(|_, record| {
-            record.revoked || record.updated_at >= cutoff
-        });
+        self.records
+            .retain(|_, record| record.revoked || record.updated_at >= cutoff);
         self.stats.total_records = self.records.len();
 
         // Remove from disk
-        if !cache_dir.exists() { return; }
-        let Ok(prefix_entries) = std::fs::read_dir(&cache_dir) else { return };
+        if !cache_dir.exists() {
+            return;
+        }
+        let Ok(prefix_entries) = std::fs::read_dir(&cache_dir) else {
+            return;
+        };
         for prefix_entry in prefix_entries.flatten() {
             let prefix_path = prefix_entry.path();
-            if !prefix_path.is_dir() { continue; }
-            let Ok(file_entries) = std::fs::read_dir(&prefix_path) else { continue };
+            if !prefix_path.is_dir() {
+                continue;
+            }
+            let Ok(file_entries) = std::fs::read_dir(&prefix_path) else {
+                continue;
+            };
             for file_entry in file_entries.flatten() {
                 let file_path = file_entry.path();
-                if file_path.extension().and_then(|e| e.to_str()) != Some("keyrec") { continue; }
-                let Ok(bytes) = std::fs::read(&file_path) else { continue };
-                let Ok(record) = KeyRecord::from_bytes(&bytes) else { continue };
+                if file_path.extension().and_then(|e| e.to_str()) != Some("keyrec") {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&file_path) else {
+                    continue;
+                };
+                let Ok(record) = KeyRecord::from_bytes(&bytes) else {
+                    continue;
+                };
                 if !record.revoked && record.updated_at < cutoff {
                     let _ = std::fs::remove_file(&file_path);
                 }
@@ -571,13 +605,26 @@ pub fn revocation_signable_bytes(
 // Serde helper for [u8; 64] in Revocation variant (mirrors serde_arrays in messages.rs)
 mod serde_sig {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn serialize<S>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    pub fn serialize<S>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         bytes.serialize(s)
     }
-    pub fn deserialize<'de, D>(d: D) -> Result<[u8; 64], D::Error> where D: Deserializer<'de> {
+    pub fn deserialize<'de, D>(d: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         let v: Vec<u8> = Vec::deserialize(d)?;
-        if v.len() != 64 { return Err(serde::de::Error::custom(format!("expected 64 bytes, got {}", v.len()))); }
-        let mut a = [0u8; 64]; a.copy_from_slice(&v); Ok(a)
+        if v.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 64 bytes, got {}",
+                v.len()
+            )));
+        }
+        let mut a = [0u8; 64];
+        a.copy_from_slice(&v);
+        Ok(a)
     }
 }
 
@@ -599,7 +646,14 @@ mod tests {
     use crate::identity::Identity;
 
     fn make_personal_record(id: &Identity) -> KeyRecord {
-        id.create_key_record(KeyType::Personal, Some("Test User".into()), None, None, None, None)
+        id.create_key_record(
+            KeyType::Personal,
+            Some("Test User".into()),
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -631,7 +685,9 @@ mod tests {
 
         // Ensure record2 has a strictly higher updated_at by sleeping > 1 second
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        let record2 = id.update_key_record(&record1, Some("Updated Name".into()), None, None).unwrap();
+        let record2 = id
+            .update_key_record(&record1, Some("Updated Name".into()), None, None)
+            .unwrap();
 
         let mut registry = KeyRegistry::new();
         registry.apply_update(record2.clone()).unwrap();
@@ -668,7 +724,10 @@ mod tests {
         // Here we just re-submit our own record as if it came from remote.
         let result = registry.apply_update(local_record);
         assert!(result.is_ok());
-        assert!(!result.unwrap(), "remote override of local record must be silently ignored");
+        assert!(
+            !result.unwrap(),
+            "remote override of local record must be silently ignored"
+        );
     }
 
     #[test]
@@ -688,7 +747,14 @@ mod tests {
 
         let relay_rec = relay_id.create_key_record(KeyType::Relay, None, None, None, None, None);
         let server_rec = server_id.create_key_record(KeyType::Server, None, None, None, None, None);
-        let personal_rec = personal_id.create_key_record(KeyType::Personal, Some("User".into()), None, None, None, None);
+        let personal_rec = personal_id.create_key_record(
+            KeyType::Personal,
+            Some("User".into()),
+            None,
+            None,
+            None,
+            None,
+        );
 
         let mut registry = KeyRegistry::new();
         registry.insert_local(relay_rec);

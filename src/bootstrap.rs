@@ -55,7 +55,9 @@ pub struct BootstrapFile {
     pub bootstrap_nodes: Vec<BootstrapNode>,
 }
 
-fn default_ttl() -> u64 { 3600 }
+fn default_ttl() -> u64 {
+    3600
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapNode {
@@ -100,7 +102,9 @@ pub struct BootstrapNode {
     pub measured_rtt_ms: Option<f64>,
 }
 
-fn default_priority() -> u8 { 50 }
+fn default_priority() -> u8 {
+    50
+}
 
 impl BootstrapNode {
     /// Build the libp2p multiaddr strings for this node (TCP + optional WS).
@@ -108,12 +112,20 @@ impl BootstrapNode {
     pub fn multiaddrs(&self) -> Vec<String> {
         if !self.host.is_empty() && !self.peer_id.is_empty() && self.tcp_port > 0 {
             // Auto-select protocol: ip4 for IPv4 literals, dns4 for hostnames.
-            let proto = if self.host.parse::<std::net::Ipv4Addr>().is_ok() { "ip4" } else { "dns4" };
-            let mut addrs = vec![
-                format!("/{}/{}/tcp/{}/p2p/{}", proto, self.host, self.tcp_port, self.peer_id)
-            ];
+            let proto = if self.host.parse::<std::net::Ipv4Addr>().is_ok() {
+                "ip4"
+            } else {
+                "dns4"
+            };
+            let mut addrs = vec![format!(
+                "/{}/{}/tcp/{}/p2p/{}",
+                proto, self.host, self.tcp_port, self.peer_id
+            )];
             if let Some(ws) = self.ws_port.filter(|&p| p > 0) {
-                addrs.push(format!("/{}/{}/tcp/{}/ws/p2p/{}", proto, self.host, ws, self.peer_id));
+                addrs.push(format!(
+                    "/{}/{}/tcp/{}/ws/p2p/{}",
+                    proto, self.host, ws, self.peer_id
+                ));
             }
             return addrs;
         }
@@ -122,9 +134,13 @@ impl BootstrapNode {
         if let Some(ma) = &self.multiaddr {
             let fixed = autocorrect_multiaddr(ma);
             if fixed != *ma {
-                eprintln!("[bootstrap] ⚠️  Auto-corrected '{}' multiaddr: {} → {}",
-                    self.id, ma, fixed);
-                eprintln!("[bootstrap]    (Update your bootstrap source to use host+tcp_port+peer_id instead)");
+                eprintln!(
+                    "[bootstrap] ⚠️  Auto-corrected '{}' multiaddr: {} → {}",
+                    self.id, ma, fixed
+                );
+                eprintln!(
+                    "[bootstrap]    (Update your bootstrap source to use host+tcp_port+peer_id instead)"
+                );
             }
             return vec![fixed];
         }
@@ -135,7 +151,11 @@ impl BootstrapNode {
     /// Validate this node. Returns Err with a human-readable message on failure.
     pub fn validate(&self) -> Result<(), String> {
         let has_new_fmt = !self.host.is_empty() && !self.peer_id.is_empty() && self.tcp_port > 0;
-        let has_legacy  = self.multiaddr.as_deref().map(|m| !m.is_empty()).unwrap_or(false);
+        let has_legacy = self
+            .multiaddr
+            .as_deref()
+            .map(|m| !m.is_empty())
+            .unwrap_or(false);
 
         if !has_new_fmt && !has_legacy {
             return Err(format!(
@@ -243,18 +263,24 @@ pub async fn resolve_bootstrap_nodes() -> Vec<String> {
     // 2. Measure latency to each node, sort nearest-first.
     let mut nodes = nodes;
     measure_relay_latencies(&mut nodes).await;
-    nodes.sort_by(|a, b| {
-        match (a.measured_rtt_ms, b.measured_rtt_ms) {
-            (Some(ra), Some(rb)) => ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal),
-            (Some(_), None)      => std::cmp::Ordering::Less,
-            (None, Some(_))      => std::cmp::Ordering::Greater,
-            (None, None)         => b.priority.cmp(&a.priority),
-        }
+    nodes.sort_by(|a, b| match (a.measured_rtt_ms, b.measured_rtt_ms) {
+        (Some(ra), Some(rb)) => ra.partial_cmp(&rb).unwrap_or(std::cmp::Ordering::Equal),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => b.priority.cmp(&a.priority),
     });
 
     for n in &nodes {
-        let rtt = n.measured_rtt_ms.map(|r| format!("{:.0}ms", r)).unwrap_or_else(|| "unreachable".into());
-        println!("[bootstrap]   {} ({}) — {}", n.name, n.region.as_deref().unwrap_or("?"), rtt);
+        let rtt = n
+            .measured_rtt_ms
+            .map(|r| format!("{:.0}ms", r))
+            .unwrap_or_else(|| "unreachable".into());
+        println!(
+            "[bootstrap]   {} ({}) — {}",
+            n.name,
+            n.region.as_deref().unwrap_or("?"),
+            rtt
+        );
     }
 
     // Flatten: each node may produce TCP + WS multiaddrs.
@@ -286,8 +312,13 @@ async fn fetch_and_merge_all() -> Result<Vec<BootstrapNode>, String> {
                     } else {
                         node.id.clone()
                     };
-                    let keep = merged.get(&key).map(|e| node.priority > e.priority).unwrap_or(true);
-                    if keep { merged.insert(key, node); }
+                    let keep = merged
+                        .get(&key)
+                        .map(|e| node.priority > e.priority)
+                        .unwrap_or(true);
+                    if keep {
+                        merged.insert(key, node);
+                    }
                 }
             }
             Err(e) => eprintln!("[bootstrap] ❌ {} — {}", url, e),
@@ -305,11 +336,15 @@ async fn fetch_and_merge_all() -> Result<Vec<BootstrapNode>, String> {
 
 /// Fetch a single URL, parse, and return validated non-expired nodes.
 async fn fetch_one(client: &reqwest::Client, url: &str) -> Result<Vec<BootstrapNode>, String> {
-    let text = client.get(url).send().await
+    let text = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| e.to_string())?
         .error_for_status()
         .map_err(|e| format!("HTTP {}", e.status().map(|s| s.as_u16()).unwrap_or(0)))?
-        .text().await
+        .text()
+        .await
         .map_err(|e| e.to_string())?;
 
     // Accept either {"bootstrap_nodes":[...]} wrapper or a bare [...] array.
@@ -342,9 +377,9 @@ async fn fetch_one(client: &reqwest::Client, url: &str) -> Result<Vec<BootstrapN
 // ─── Latency measurement ─────────────────────────────────────────────────────
 
 async fn measure_relay_latencies(nodes: &mut Vec<BootstrapNode>) {
+    use std::time::Instant;
     use tokio::net::TcpStream;
     use tokio::time::timeout;
-    use std::time::Instant;
 
     for node in nodes.iter_mut() {
         if let Some(addr) = node.tcp_addr() {
@@ -358,7 +393,9 @@ async fn measure_relay_latencies(nodes: &mut Vec<BootstrapNode>) {
 
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
-fn cache_path() -> PathBuf { PathBuf::from("bootstrap_cache.json") }
+fn cache_path() -> PathBuf {
+    PathBuf::from("bootstrap_cache.json")
+}
 
 /// Load cache and re-validate every node. Expired/invalid nodes are dropped.
 /// Returns None if cache is missing, corrupt, or contains zero valid nodes.
@@ -377,7 +414,9 @@ fn load_and_validate_cache() -> Option<Vec<BootstrapNode>> {
 
     let mut valid = Vec::new();
     for node in file.bootstrap_nodes {
-        if node.is_expired() { continue; }
+        if node.is_expired() {
+            continue;
+        }
         match node.validate() {
             Ok(()) => valid.push(node),
             Err(e) => eprintln!("[bootstrap]   ❌ Dropping cached node — {}", e),
@@ -440,9 +479,12 @@ fn parse_iso8601_approx(s: &str) -> Option<u64> {
     let m: u64 = dp.next()?.parse().ok()?;
     let d: u64 = dp.next()?.parse().ok()?;
     // Approximate: days since epoch (good enough for expiry checking).
-    let days = (y.saturating_sub(1970)) * 365 + (y.saturating_sub(1970)) / 4
+    let days = (y.saturating_sub(1970)) * 365
+        + (y.saturating_sub(1970)) / 4
         + [0u64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-            .get(m.saturating_sub(1) as usize).copied().unwrap_or(0)
+            .get(m.saturating_sub(1) as usize)
+            .copied()
+            .unwrap_or(0)
         + d.saturating_sub(1);
     Some(days * 86400)
 }

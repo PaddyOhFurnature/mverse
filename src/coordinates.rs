@@ -5,9 +5,9 @@ use glam::{DVec3, Vec3};
 /// GPS coordinates (latitude, longitude, altitude)
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GPS {
-    pub lat: f64,  // degrees
-    pub lon: f64,  // degrees
-    pub alt: f64,  // meters above ellipsoid
+    pub lat: f64, // degrees
+    pub lon: f64, // degrees
+    pub alt: f64, // meters above ellipsoid
 }
 
 impl GPS {
@@ -16,14 +16,14 @@ impl GPS {
     }
 
     pub fn to_ecef(&self) -> ECEF {
-        use geoconv::{CoordinateSystem, WGS84, LLE, Degrees, Meters};
-        
+        use geoconv::{CoordinateSystem, Degrees, LLE, Meters, WGS84};
+
         let lle = LLE {
             latitude: Degrees(self.lat),
             longitude: Degrees(self.lon),
             elevation: Meters(self.alt),
         };
-        
+
         let xyz = WGS84::lle_to_xyz(lle);
         ECEF::new(xyz.x.0, xyz.y.0, xyz.z.0)
     }
@@ -43,14 +43,14 @@ impl ECEF {
     }
 
     pub fn to_gps(&self) -> GPS {
-        use geoconv::{CoordinateSystem, WGS84, XYZ, Meters};
-        
+        use geoconv::{CoordinateSystem, Meters, WGS84, XYZ};
+
         let xyz = XYZ {
             x: Meters(self.x),
             y: Meters(self.y),
             z: Meters(self.z),
         };
-        
+
         let lle = WGS84::xyz_to_lle(xyz);
         GPS::new(lle.latitude.0, lle.longitude.0, lle.elevation.0)
     }
@@ -209,9 +209,17 @@ mod tests {
         let point_ecef = point_gps.to_ecef();
         let relative = origin.to_camera_relative(&point_ecef);
         let distance = relative.length();
-        println!("Expected: 1000m, Got: {}m, Error: {}m", distance, (distance - 1000.0).abs());
+        println!(
+            "Expected: 1000m, Got: {}m, Error: {}m",
+            distance,
+            (distance - 1000.0).abs()
+        );
         // GPS coordinate calculation may introduce ~1% error at this scale
-        assert!((distance - 1000.0).abs() < 20.0, "1km offset - distance: {}m", distance);
+        assert!(
+            (distance - 1000.0).abs() < 20.0,
+            "1km offset - distance: {}m",
+            distance
+        );
     }
 
     #[test]
@@ -223,9 +231,17 @@ mod tests {
         let point_ecef = point_gps.to_ecef();
         let relative = origin.to_camera_relative(&point_ecef);
         let distance = relative.length();
-        println!("Expected: 10000m, Got: {}m, Error: {}m", distance, (distance - 10_000.0).abs());
+        println!(
+            "Expected: 10000m, Got: {}m, Error: {}m",
+            distance,
+            (distance - 10_000.0).abs()
+        );
         // GPS coordinate calculation may introduce ~1% error at this scale
-        assert!((distance - 10_000.0).abs() < 200.0, "10km offset - distance: {}m", distance);
+        assert!(
+            (distance - 10_000.0).abs() < 200.0,
+            "10km offset - distance: {}m",
+            distance
+        );
     }
 
     #[test]

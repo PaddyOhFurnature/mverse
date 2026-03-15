@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 /// HTTP tunnel client - send/receive P2P data via HTTP
 pub struct HttpTunnelClient {
@@ -38,7 +38,7 @@ impl HttpTunnelClient {
             .timeout(Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client");
-        
+
         Self {
             relay_url,
             peer_id,
@@ -46,7 +46,7 @@ impl HttpTunnelClient {
             client,
         }
     }
-    
+
     /// Send message via HTTP POST
     pub async fn send(&self, dest_peer: PeerId, data: Vec<u8>) -> Result<(), HttpTunnelError> {
         let response = self
@@ -58,16 +58,14 @@ impl HttpTunnelClient {
             .body(data)
             .send()
             .await?;
-        
+
         if response.status().is_success() {
             Ok(())
         } else {
-            Err(HttpTunnelError::SendFailed(
-                response.status().as_u16(),
-            ))
+            Err(HttpTunnelError::SendFailed(response.status().as_u16()))
         }
     }
-    
+
     /// Receive messages via long-polling (blocks up to 30 seconds)
     pub async fn receive(&self) -> Result<Option<HttpTunnelMessage>, HttpTunnelError> {
         let response = self
@@ -78,27 +76,22 @@ impl HttpTunnelClient {
             .timeout(Duration::from_secs(30))
             .send()
             .await?;
-        
+
         if response.status() == reqwest::StatusCode::NO_CONTENT {
             // No messages available
             return Ok(None);
         }
-        
+
         if !response.status().is_success() {
-            return Err(HttpTunnelError::ReceiveFailed(
-                response.status().as_u16(),
-            ));
+            return Err(HttpTunnelError::ReceiveFailed(response.status().as_u16()));
         }
-        
+
         let message: HttpTunnelMessage = response.json().await?;
         Ok(Some(message))
     }
-    
+
     /// Start receive loop (continuously poll for messages)
-    pub async fn receive_loop(
-        self,
-        tx: mpsc::UnboundedSender<HttpTunnelMessage>,
-    ) {
+    pub async fn receive_loop(self, tx: mpsc::UnboundedSender<HttpTunnelMessage>) {
         loop {
             match self.receive().await {
                 Ok(Some(msg)) => {
@@ -160,7 +153,7 @@ impl std::error::Error for HttpTunnelError {}
 pub struct HttpTunnelServer {
     /// Buffer of messages waiting for delivery (dest_peer -> messages)
     pending_messages: Arc<RwLock<HashMap<PeerId, Vec<HttpTunnelMessage>>>>,
-    
+
     /// Channel to forward messages to P2P network
     p2p_tx: mpsc::UnboundedSender<(PeerId, Vec<u8>)>,
 }
@@ -172,7 +165,7 @@ impl HttpTunnelServer {
             p2p_tx,
         }
     }
-    
+
     /// Handle incoming HTTP POST (send message)
     pub async fn handle_send(
         &self,
@@ -184,26 +177,26 @@ impl HttpTunnelServer {
         self.p2p_tx
             .send((dest_peer, data))
             .map_err(|_| HttpTunnelError::SendFailed(500))?;
-        
+
         Ok(())
     }
-    
+
     /// Handle incoming HTTP GET (receive message)
     pub async fn handle_receive(
         &self,
         peer_id: PeerId,
     ) -> Result<Option<HttpTunnelMessage>, HttpTunnelError> {
         let mut messages = self.pending_messages.write().await;
-        
+
         if let Some(queue) = messages.get_mut(&peer_id) {
             if let Some(msg) = queue.pop() {
                 return Ok(Some(msg));
             }
         }
-        
+
         Ok(None)
     }
-    
+
     /// Queue message for delivery via HTTP (called when P2P message arrives)
     pub async fn queue_message(&self, dest_peer: PeerId, from: PeerId, data: Vec<u8>) {
         let mut messages = self.pending_messages.write().await;
@@ -220,15 +213,12 @@ impl HttpTunnelServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_http_tunnel_client_creation() {
         let peer_id = PeerId::random();
-        let client = HttpTunnelClient::new(
-            "https://relay.example.com".to_string(),
-            peer_id,
-        );
-        
+        let client = HttpTunnelClient::new("https://relay.example.com".to_string(), peer_id);
+
         assert_eq!(client.peer_id, peer_id);
         assert!(client.session_id.len() > 0);
     }

@@ -27,10 +27,10 @@ pub enum NodeTier {
 impl std::fmt::Display for NodeTier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            NodeTier::Relay  => write!(f, "relay"),
+            NodeTier::Relay => write!(f, "relay"),
             NodeTier::Server => write!(f, "server"),
             NodeTier::Client => write!(f, "client"),
-            NodeTier::Light  => write!(f, "light"),
+            NodeTier::Light => write!(f, "light"),
         }
     }
 }

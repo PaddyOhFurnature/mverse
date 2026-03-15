@@ -2,7 +2,6 @@
 ///
 /// Provides thread-safe terrain generation for immediate integration.
 /// This is a bridge until ElevationSource becomes Send+Sync.
-
 use crate::chunk::ChunkId;
 use crate::terrain::TerrainGenerator;
 use crate::voxel::Octree;
@@ -23,14 +22,16 @@ impl SyncTerrainLoader {
             generator: Arc::new(Mutex::new(generator)),
         }
     }
-    
+
     /// Generate terrain for a chunk (synchronous, blocks calling thread)
     ///
     /// Safe to call from main thread. Returns generated octree with real terrain.
     pub fn generate_chunk_with_terrain(&self, chunk_id: &ChunkId) -> Result<Octree, String> {
-        let generator = self.generator.lock()
+        let generator = self
+            .generator
+            .lock()
             .map_err(|e| format!("Failed to lock terrain generator: {}", e))?;
-        
+
         generator.generate_chunk(chunk_id).map(|(octree, _)| octree)
     }
 }
@@ -60,7 +61,7 @@ impl SyncTerrainLoader {
 /// ```
 pub fn generate_chunk_terrain(
     generator: &TerrainGenerator,
-    chunk_id: &ChunkId
+    chunk_id: &ChunkId,
 ) -> Result<Octree, String> {
     // TerrainGenerator is thread-safe with Arc<RwLock<ElevationPipeline>> —
     generator.generate_chunk(chunk_id).map(|(octree, _)| octree)
@@ -69,10 +70,10 @@ pub fn generate_chunk_terrain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elevation::ElevationPipeline;
     use crate::coordinates::GPS;
+    use crate::elevation::ElevationPipeline;
     use crate::voxel::VoxelCoord;
-    
+
     #[test]
     #[ignore] // Requires elevation data
     fn test_sync_terrain_loader() {
@@ -80,12 +81,12 @@ mod tests {
         let origin_gps = GPS::new(0.0, 0.0, 0.0);
         let origin_voxel = VoxelCoord::new(0, 0, 0);
         let generator = TerrainGenerator::new(elevation, origin_gps, origin_voxel);
-        
+
         let loader = SyncTerrainLoader::new(generator);
-        
+
         let chunk_id = ChunkId::new(0, 0, 0);
         let octree = loader.generate_chunk_with_terrain(&chunk_id).unwrap();
-        
+
         // Octree should not be empty (should have terrain)
         // This is just a smoke test — generation succeeded if we got here
         let _ = octree; // use the value

@@ -48,9 +48,9 @@
 //!
 //! **BACK UP YOUR KEY FILE. There is no recovery.**
 
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
-use libp2p::identity::{Keypair as Libp2pKeypair, ed25519 as libp2p_ed25519};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use libp2p::PeerId;
+use libp2p::identity::{Keypair as Libp2pKeypair, ed25519 as libp2p_ed25519};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -67,7 +67,8 @@ mod serde_sig64 {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
         let v: Vec<u8> = serde::Deserialize::deserialize(d)?;
-        v.try_into().map_err(|_| D::Error::custom("expected exactly 64 bytes for signature"))
+        v.try_into()
+            .map_err(|_| D::Error::custom("expected exactly 64 bytes for signature"))
     }
 }
 
@@ -85,7 +86,8 @@ mod serde_opt_sig64 {
         let opt: Option<Vec<u8>> = serde::Deserialize::deserialize(d)?;
         match opt {
             None => Ok(None),
-            Some(v) => v.try_into()
+            Some(v) => v
+                .try_into()
                 .map(Some)
                 .map_err(|_| D::Error::custom("expected exactly 64 bytes for issuer_sig")),
         }
@@ -108,7 +110,10 @@ pub enum IdentityError {
     /// A KeyRecord failed self-signature verification on load.
     InvalidKeyRecord,
     /// Attempted an operation that requires a higher-trust key type.
-    InsufficientKeyType { required: KeyType, actual: KeyType },
+    InsufficientKeyType {
+        required: KeyType,
+        actual: KeyType,
+    },
 }
 
 impl std::fmt::Display for IdentityError {
@@ -120,8 +125,11 @@ impl std::fmt::Display for IdentityError {
             Self::InvalidKeypair => write!(f, "Invalid keypair"),
             Self::DirectoryCreationFailed(e) => write!(f, "Failed to create directory: {}", e),
             Self::InvalidKeyRecord => write!(f, "KeyRecord self-signature verification failed"),
-            Self::InsufficientKeyType { required, actual } =>
-                write!(f, "Operation requires {:?} key; this key is {:?}", required, actual),
+            Self::InsufficientKeyType { required, actual } => write!(
+                f,
+                "Operation requires {:?} key; this key is {:?}",
+                required, actual
+            ),
         }
     }
 }
@@ -129,10 +137,14 @@ impl std::fmt::Display for IdentityError {
 impl std::error::Error for IdentityError {}
 
 impl From<std::io::Error> for IdentityError {
-    fn from(e: std::io::Error) -> Self { Self::IoError(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::IoError(e)
+    }
 }
 impl From<bincode::Error> for IdentityError {
-    fn from(e: bincode::Error) -> Self { Self::SerializationError(e) }
+    fn from(e: bincode::Error) -> Self {
+        Self::SerializationError(e)
+    }
 }
 
 // ─── KeyType ──────────────────────────────────────────────────────────────────
@@ -188,19 +200,21 @@ pub enum KeyType {
 
 impl KeyType {
     /// Numeric discriminant used in canonical byte encoding.
-    pub fn discriminant(self) -> u8 { self as u8 }
+    pub fn discriminant(self) -> u8 {
+        self as u8
+    }
 
     /// Human-readable label shown in UI next to a player's name.
     pub fn display_label(self) -> &'static str {
         match self {
-            KeyType::Genesis  => "[Genesis]",
-            KeyType::Server   => "[Server]",
-            KeyType::Relay    => "[Relay]",
-            KeyType::Admin    => "[Admin]",
-            KeyType::Business  => "[Business]",
-            KeyType::User      => "",
-            KeyType::Guest     => "[Guest]",
-            KeyType::Trial     => "[Trial]",
+            KeyType::Genesis => "[Genesis]",
+            KeyType::Server => "[Server]",
+            KeyType::Relay => "[Relay]",
+            KeyType::Admin => "[Admin]",
+            KeyType::Business => "[Business]",
+            KeyType::User => "",
+            KeyType::Guest => "[Guest]",
+            KeyType::Trial => "[Trial]",
         }
     }
 
@@ -211,7 +225,10 @@ impl KeyType {
 
     /// True if this key type can build in owned parcels.
     pub fn can_build_in_owned_parcels(self) -> bool {
-        matches!(self, KeyType::User | KeyType::Business | KeyType::Admin | KeyType::Server)
+        matches!(
+            self,
+            KeyType::User | KeyType::Business | KeyType::Admin | KeyType::Server
+        )
     }
 
     /// True if this key type can sign commerce contracts.
@@ -221,7 +238,10 @@ impl KeyType {
 
     /// True if this key type requires a countersignature from a higher-tier key.
     pub fn requires_issuance(self) -> bool {
-        matches!(self, KeyType::Genesis | KeyType::Server | KeyType::Relay | KeyType::Admin)
+        matches!(
+            self,
+            KeyType::Genesis | KeyType::Server | KeyType::Relay | KeyType::Admin
+        )
     }
 
     /// True if this key type is an infrastructure role (runs a hardware node).
@@ -384,28 +404,40 @@ fn encode_bytes_lv(out: &mut Vec<u8>, b: &[u8]) {
 fn encode_opt_string(out: &mut Vec<u8>, s: &Option<String>) {
     match s {
         None => out.push(0),
-        Some(v) => { out.push(1); encode_bytes_lv(out, v.as_bytes()); }
+        Some(v) => {
+            out.push(1);
+            encode_bytes_lv(out, v.as_bytes());
+        }
     }
 }
 
 fn encode_opt_u64(out: &mut Vec<u8>, v: &Option<u64>) {
     match v {
         None => out.push(0),
-        Some(v) => { out.push(1); out.extend_from_slice(&v.to_le_bytes()); }
+        Some(v) => {
+            out.push(1);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
     }
 }
 
 fn encode_opt_bytes32(out: &mut Vec<u8>, v: &Option<[u8; 32]>) {
     match v {
         None => out.push(0),
-        Some(v) => { out.push(1); out.extend_from_slice(v.as_ref()); }
+        Some(v) => {
+            out.push(1);
+            out.extend_from_slice(v.as_ref());
+        }
     }
 }
 
 fn encode_opt_peer_id(out: &mut Vec<u8>, v: &Option<PeerId>) {
     match v {
         None => out.push(0),
-        Some(v) => { out.push(1); encode_bytes_lv(out, &v.to_bytes()); }
+        Some(v) => {
+            out.push(1);
+            encode_bytes_lv(out, &v.to_bytes());
+        }
     }
 }
 
@@ -539,8 +571,18 @@ impl std::fmt::Display for KeyRecord {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = self.display_name.as_deref().unwrap_or("<anonymous>");
         let label = self.key_type.display_label();
-        let label_part = if label.is_empty() { String::new() } else { format!(" {}", label) };
-        write!(f, "{}{} ({})", name, label_part, &self.peer_id.to_string()[..12])
+        let label_part = if label.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", label)
+        };
+        write!(
+            f,
+            "{}{} ({})",
+            name,
+            label_part,
+            &self.peer_id.to_string()[..12]
+        )
     }
 }
 
@@ -560,10 +602,10 @@ impl std::fmt::Display for KeyRecord {
 pub struct Identity {
     /// Ed25519 signing key (contains both secret and public key)
     signing_key: SigningKey,
-    
+
     /// Ed25519 verifying key (public key, derived from signing key)
     verifying_key: VerifyingKey,
-    
+
     /// libp2p PeerId (derived from public key)
     peer_id: PeerId,
 }
@@ -573,7 +615,7 @@ pub struct Identity {
 struct StoredIdentity {
     /// Secret key (32 bytes)
     secret_key: [u8; 32],
-    
+
     /// Public key (32 bytes)
     public_key: [u8; 32],
 }
@@ -608,7 +650,11 @@ impl Identity {
         let signing_key = SigningKey::generate(&mut csprng);
         let verifying_key = signing_key.verifying_key();
         let peer_id = Self::derive_peer_id(&signing_key);
-        Self { signing_key, verifying_key, peer_id }
+        Self {
+            signing_key,
+            verifying_key,
+            peer_id,
+        }
     }
 
     /// Derive a libp2p `PeerId` from an Ed25519 signing key.
@@ -779,7 +825,11 @@ impl Identity {
         let verifying_key = VerifyingKey::from_bytes(&stored.public_key)
             .map_err(|_| IdentityError::InvalidKeypair)?;
         let peer_id = Self::derive_peer_id(&signing_key);
-        Ok(Self { signing_key, verifying_key, peer_id })
+        Ok(Self {
+            signing_key,
+            verifying_key,
+            peer_id,
+        })
     }
 
     /// Save keypair to `path` with restrictive file permissions (0o600 on Unix).
@@ -999,21 +1049,31 @@ impl Identity {
     // ── Existing API (unchanged) ──────────────────────────────────────────────
 
     /// Our `PeerId`.
-    pub fn peer_id(&self) -> &PeerId { &self.peer_id }
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
 
     /// Ed25519 verifying key (public key).
-    pub fn verifying_key(&self) -> &VerifyingKey { &self.verifying_key }
+    pub fn verifying_key(&self) -> &VerifyingKey {
+        &self.verifying_key
+    }
 
     /// Ed25519 signing key. Use carefully — contains private key material.
-    pub fn signing_key(&self) -> &SigningKey { &self.signing_key }
+    pub fn signing_key(&self) -> &SigningKey {
+        &self.signing_key
+    }
 
     /// Raw signing key bytes (for deriving symmetric keys).
     ///
     /// **WARNING:** Private key material. Never log or transmit.
-    pub fn signing_key_bytes(&self) -> &[u8; 32] { self.signing_key.as_bytes() }
+    pub fn signing_key_bytes(&self) -> &[u8; 32] {
+        self.signing_key.as_bytes()
+    }
 
     /// Sign `data` with this identity's private key.
-    pub fn sign(&self, data: &[u8]) -> Signature { self.signing_key.sign(data) }
+    pub fn sign(&self, data: &[u8]) -> Signature {
+        self.signing_key.sign(data)
+    }
 
     /// Verify `signature` over `data` against this identity's public key.
     pub fn verify_own(&self, data: &[u8], signature: &Signature) -> bool {
@@ -1038,7 +1098,10 @@ impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Identity")
             .field("peer_id", &self.peer_id)
-            .field("verifying_key", &format!("{:02x?}", &self.verifying_key.to_bytes()[..8]))
+            .field(
+                "verifying_key",
+                &format!("{:02x?}", &self.verifying_key.to_bytes()[..8]),
+            )
             .field("signing_key", &"<REDACTED>")
             .finish()
     }
@@ -1071,7 +1134,11 @@ mod tests {
         let data = b"Test data";
         let sig = id.sign(data);
         assert!(Identity::verify_with_pubkey(id.verifying_key(), data, &sig));
-        assert!(!Identity::verify_with_pubkey(id.verifying_key(), b"Wrong", &sig));
+        assert!(!Identity::verify_with_pubkey(
+            id.verifying_key(),
+            b"Wrong",
+            &sig
+        ));
     }
 
     #[test]
@@ -1104,9 +1171,14 @@ mod tests {
     fn test_key_type_discriminants_unique() {
         use std::collections::HashSet;
         let types = [
-            KeyType::Genesis, KeyType::Server, KeyType::Relay,
-            KeyType::Admin, KeyType::Business, KeyType::User,
-            KeyType::Trial, KeyType::Guest,
+            KeyType::Genesis,
+            KeyType::Server,
+            KeyType::Relay,
+            KeyType::Admin,
+            KeyType::Business,
+            KeyType::User,
+            KeyType::Trial,
+            KeyType::Guest,
         ];
         let discs: HashSet<u8> = types.iter().map(|t| t.discriminant()).collect();
         assert_eq!(discs.len(), types.len(), "discriminants must be unique");
@@ -1152,16 +1224,29 @@ mod tests {
             None,
             None,
         );
-        assert!(record.verify_self_sig(), "self_sig must verify immediately after creation");
+        assert!(
+            record.verify_self_sig(),
+            "self_sig must verify immediately after creation"
+        );
     }
 
     #[test]
     fn test_key_record_self_sig_invalid_after_tamper() {
         let id = Identity::generate();
-        let mut record = id.create_key_record(KeyType::User, Some("Bob".to_string()), None, None, None, None);
+        let mut record = id.create_key_record(
+            KeyType::User,
+            Some("Bob".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
         // Tamper with display name
         record.display_name = Some("EvilBob".to_string());
-        assert!(!record.verify_self_sig(), "tampered record must fail verification");
+        assert!(
+            !record.verify_self_sig(),
+            "tampered record must fail verification"
+        );
     }
 
     #[test]
@@ -1178,9 +1263,26 @@ mod tests {
     #[test]
     fn test_key_record_different_content_different_bytes() {
         let id = Identity::generate();
-        let r1 = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
-        let r2 = id.create_key_record(KeyType::User, Some("Bob".to_string()), None, None, None, None);
-        assert_ne!(r1.canonical_bytes_for_self_sig(), r2.canonical_bytes_for_self_sig());
+        let r1 = id.create_key_record(
+            KeyType::User,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let r2 = id.create_key_record(
+            KeyType::User,
+            Some("Bob".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_ne!(
+            r1.canonical_bytes_for_self_sig(),
+            r2.canonical_bytes_for_self_sig()
+        );
     }
 
     #[test]
@@ -1199,7 +1301,10 @@ mod tests {
         assert_eq!(decoded.peer_id, record.peer_id);
         assert_eq!(decoded.key_type as u8, record.key_type as u8);
         assert_eq!(decoded.display_name, record.display_name);
-        assert!(decoded.verify_self_sig(), "decoded record must still verify");
+        assert!(
+            decoded.verify_self_sig(),
+            "decoded record must still verify"
+        );
     }
 
     #[test]
@@ -1210,26 +1315,46 @@ mod tests {
         assert!(record.expires_at.is_some(), "guest record must have expiry");
         let exp = record.expires_at.unwrap();
         let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         // Should be 30 days ± a few seconds
-        assert!((exp - now) > 29 * 24 * 3600, "expiry should be ~30 days from now");
-        assert!(!record.is_expired(), "freshly created guest key must not be expired");
+        assert!(
+            (exp - now) > 29 * 24 * 3600,
+            "expiry should be ~30 days from now"
+        );
+        assert!(
+            !record.is_expired(),
+            "freshly created guest key must not be expired"
+        );
     }
 
     #[test]
     fn test_key_record_update_preserves_peer_id_and_created_at() {
         let id = Identity::generate();
-        let original = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
-        let updated = id.update_key_record(
-            &original,
-            Some("Alice Smith".to_string()),
-            Some("New bio".to_string()),
+        let original = id.create_key_record(
+            KeyType::User,
+            Some("Alice".to_string()),
             None,
-        ).unwrap();
+            None,
+            None,
+            None,
+        );
+        let updated = id
+            .update_key_record(
+                &original,
+                Some("Alice Smith".to_string()),
+                Some("New bio".to_string()),
+                None,
+            )
+            .unwrap();
 
         assert_eq!(updated.peer_id, original.peer_id);
         assert_eq!(updated.created_at, original.created_at);
-        assert_eq!(updated.key_type as u8, original.key_type as u8, "key_type is immutable via update");
+        assert_eq!(
+            updated.key_type as u8, original.key_type as u8,
+            "key_type is immutable via update"
+        );
         assert_eq!(updated.display_name, Some("Alice Smith".to_string()));
         assert!(updated.verify_self_sig(), "updated record must verify");
     }
@@ -1238,23 +1363,48 @@ mod tests {
     fn test_key_record_update_wrong_identity_fails() {
         let id1 = Identity::generate();
         let id2 = Identity::generate();
-        let record = id1.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
+        let record = id1.create_key_record(
+            KeyType::User,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
         // id2 should not be able to update id1's record
-        assert!(id2.update_key_record(&record, Some("Hacked".to_string()), None, None).is_err());
+        assert!(
+            id2.update_key_record(&record, Some("Hacked".to_string()), None, None)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_self_revocation() {
         let id = Identity::generate();
-        let record = id.create_key_record(KeyType::User, Some("Alice".to_string()), None, None, None, None);
-        let revoked = id.self_revoke(&record, Some("Key compromised".to_string())).unwrap();
+        let record = id.create_key_record(
+            KeyType::User,
+            Some("Alice".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        let revoked = id
+            .self_revoke(&record, Some("Key compromised".to_string()))
+            .unwrap();
 
         assert!(revoked.revoked);
         assert_eq!(revoked.revoked_by, Some(*id.peer_id()));
         assert!(revoked.revocation_reason.is_some());
-        assert!(revoked.verify_self_sig(), "revoked record must still self-verify (tombstone)");
-        assert_eq!(revoked.effective_key_type() as u8, KeyType::Guest as u8,
-            "revoked key degrades to Guest-level permissions");
+        assert!(
+            revoked.verify_self_sig(),
+            "revoked record must still self-verify (tombstone)"
+        );
+        assert_eq!(
+            revoked.effective_key_type() as u8,
+            KeyType::Guest as u8,
+            "revoked key degrades to Guest-level permissions"
+        );
     }
 
     #[test]
@@ -1293,8 +1443,10 @@ mod tests {
 
         // Tamper → issuer sig fails
         relay_record.key_type = KeyType::Server;
-        assert!(!relay_record.verify_issuer_sig(&server_id.verifying_key().to_bytes()),
-            "tampered record must fail issuer verification");
+        assert!(
+            !relay_record.verify_issuer_sig(&server_id.verifying_key().to_bytes()),
+            "tampered record must fail issuer verification"
+        );
     }
 
     #[test]
@@ -1302,8 +1454,11 @@ mod tests {
         let id = Identity::generate();
         let long_name = "A".repeat(200);
         let record = id.create_key_record(KeyType::User, Some(long_name), None, None, None, None);
-        assert_eq!(record.display_name.as_ref().unwrap().len(), 64,
-            "display_name must be truncated to 64 chars");
+        assert_eq!(
+            record.display_name.as_ref().unwrap().len(),
+            64,
+            "display_name must be truncated to 64 chars"
+        );
         assert!(record.verify_self_sig());
     }
 
@@ -1312,8 +1467,11 @@ mod tests {
         let id = Identity::generate();
         let long_bio = "B".repeat(500);
         let record = id.create_key_record(KeyType::User, None, Some(long_bio), None, None, None);
-        assert_eq!(record.bio.as_ref().unwrap().len(), 280,
-            "bio must be truncated to 280 chars");
+        assert_eq!(
+            record.bio.as_ref().unwrap().len(),
+            280,
+            "bio must be truncated to 280 chars"
+        );
         assert!(record.verify_self_sig());
     }
 
@@ -1321,8 +1479,11 @@ mod tests {
     fn test_effective_key_type_normal() {
         let id = Identity::generate();
         let record = id.create_key_record(KeyType::Admin, None, None, None, None, None);
-        assert_eq!(record.effective_key_type() as u8, KeyType::Admin as u8,
-            "valid non-revoked record returns its actual type");
+        assert_eq!(
+            record.effective_key_type() as u8,
+            KeyType::Admin as u8,
+            "valid non-revoked record returns its actual type"
+        );
     }
 
     #[test]

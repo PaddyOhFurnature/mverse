@@ -19,59 +19,56 @@
 //! `"srtm_version"`, `"terrain_version"`). If the stored version differs from
 //! the compiled constant the CF is dropped and recreated — no manual purge needed.
 
+use rocksdb::{BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options, WriteBatch};
 use std::path::Path;
 use std::sync::Arc;
-use rocksdb::{
-    DB, Options, ColumnFamilyDescriptor, BlockBasedOptions, Cache,
-    SliceTransform, WriteBatch, ReadOptions,
-};
 
 // ── Process-level TileStore registry ──────────────────────────────────────────
 // RocksDB allows only one open per DB path per process. This registry returns
 // the existing Arc when the same path is opened a second time,
 // preventing "lock hold by current process" LOCK conflicts.
 // Uses Weak so the DB is closed when all real holders drop their Arcs.
-use std::sync::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-static TILE_STORE_REGISTRY: std::sync::OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>>>> =
-    std::sync::OnceLock::new();
+static TILE_STORE_REGISTRY: std::sync::OnceLock<
+    Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>>>,
+> = std::sync::OnceLock::new();
 
 fn registry() -> &'static Mutex<HashMap<PathBuf, std::sync::Weak<TileStoreInner>>> {
     TILE_STORE_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-
 // ── Schema versions ────────────────────────────────────────────────────────────
-pub const OSM_TILE_VERSION:     u32 = 8;
-pub const SRTM_TILE_VERSION:    u32 = 1;
+pub const OSM_TILE_VERSION: u32 = 9;
+pub const SRTM_TILE_VERSION: u32 = 1;
 /// Must match `TERRAIN_CACHE_VERSION` in chunk_loader.rs.  Bump both together
 /// whenever the terrain binary format changes — the DB wipes all stale chunks on open.
-pub const TERRAIN_TILE_VERSION: u32 = 13;
+pub const TERRAIN_TILE_VERSION: u32 = 14;
 
 /// Pass versions — bump ONLY the pass whose algorithm changes.
 /// The TileStore wipes only that pass's data on version mismatch.
-pub const PASS_TERRAIN_VERSION:   u16 = 1;  // SRTM shape (Octree)
-pub const PASS_SUBSTRATE_VERSION: u16 = 1;  // Biome/substrate material layer
-pub const PASS_HYDRO_VERSION:     u16 = 1;  // Rivers, water bodies
-pub const PASS_ROADS_VERSION:     u16 = 0;  // Not yet generated
-pub const PASS_BUILDINGS_VERSION: u16 = 0;  // Not yet generated
+pub const PASS_TERRAIN_VERSION: u16 = 9; // SRTM shape (Octree) + engineered-ground fringe halo for recreation/sports complexes
+pub const PASS_SUBSTRATE_VERSION: u16 = 1; // Biome/substrate material layer
+pub const PASS_HYDRO_VERSION: u16 = 26; // Rivers, water bodies
+pub const PASS_ROADS_VERSION: u16 = 32; // Roads snapshot stored after hydro; bump when upstream composition changes
+pub const PASS_BUILDINGS_VERSION: u16 = 0; // Not yet generated
 
 const CHECKSUM_LEN: usize = 32;
 
 // ── Column family names ─────────────────────────────────────────────────────────
-const CF_OSM:     &str = "osm";
-const CF_SRTM:    &str = "srtm";
+const CF_OSM: &str = "osm";
+const CF_SRTM: &str = "srtm";
 const CF_TERRAIN: &str = "terrain";
-const CF_META:    &str = "meta";
+const CF_META: &str = "meta";
 
-const CF_PASS_TERRAIN:   &str = "pass_terrain";
+const CF_PASS_TERRAIN: &str = "pass_terrain";
 const CF_PASS_SUBSTRATE: &str = "pass_substrate";
-const CF_PASS_HYDRO:     &str = "pass_hydro";
-const CF_PASS_ROADS:     &str = "pass_roads";
+const CF_PASS_HYDRO: &str = "pass_hydro";
+const CF_PASS_ROADS: &str = "pass_roads";
 const CF_PASS_BUILDINGS: &str = "pass_buildings";
-const CF_FEATURE_RULES:  &str = "feature_rules";
+const CF_FEATURE_RULES: &str = "feature_rules";
 
 // ── Key encoding ───────────────────────────────────────────────────────────────
 
@@ -185,12 +182,11 @@ impl TileStore {
     /// Automatically checks schema versions and wipes stale column families.
     /// Safe to call from multiple threads after open — `Arc` is `Send + Sync`.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let canonical = path.canonicalize()
-            .unwrap_or_else(|_| {
-                // Path doesn't exist yet — create dir first, then canonicalize
-                let _ = std::fs::create_dir_all(path);
-                path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-            });
+        let canonical = path.canonicalize().unwrap_or_else(|_| {
+            // Path doesn't exist yet — create dir first, then canonicalize
+            let _ = std::fs::create_dir_all(path);
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+        });
 
         // Check registry first — return existing Arc if already open
         {
@@ -211,16 +207,16 @@ impl TileStore {
         db_opts.create_missing_column_families(true);
 
         let cf_descs = vec![
-            ColumnFamilyDescriptor::new(CF_OSM,          make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_SRTM,         make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_TERRAIN,      make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_META,         meta_opts()),
-            ColumnFamilyDescriptor::new(CF_PASS_TERRAIN,   make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_OSM, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_SRTM, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_TERRAIN, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_META, meta_opts()),
+            ColumnFamilyDescriptor::new(CF_PASS_TERRAIN, make_cf_opts(true)),
             ColumnFamilyDescriptor::new(CF_PASS_SUBSTRATE, make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_PASS_HYDRO,     make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_PASS_ROADS,     make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_HYDRO, make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_PASS_ROADS, make_cf_opts(true)),
             ColumnFamilyDescriptor::new(CF_PASS_BUILDINGS, make_cf_opts(true)),
-            ColumnFamilyDescriptor::new(CF_FEATURE_RULES,  make_cf_opts(true)),
+            ColumnFamilyDescriptor::new(CF_FEATURE_RULES, make_cf_opts(true)),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descs)
@@ -238,28 +234,54 @@ impl TileStore {
     }
 
     fn check_versions(&self) -> Result<(), String> {
-        self.check_cf_version("osm_version",     OSM_TILE_VERSION,     CF_OSM)?;
-        self.check_cf_version("srtm_version",    SRTM_TILE_VERSION,    CF_SRTM)?;
+        self.check_cf_version("osm_version", OSM_TILE_VERSION, CF_OSM)?;
+        self.check_cf_version("srtm_version", SRTM_TILE_VERSION, CF_SRTM)?;
         self.check_cf_version("terrain_version", TERRAIN_TILE_VERSION, CF_TERRAIN)?;
-        self.check_cf_version("pass_terrain_version",   PASS_TERRAIN_VERSION   as u32, CF_PASS_TERRAIN)?;
-        self.check_cf_version("pass_substrate_version", PASS_SUBSTRATE_VERSION as u32, CF_PASS_SUBSTRATE)?;
-        self.check_cf_version("pass_hydro_version",     PASS_HYDRO_VERSION     as u32, CF_PASS_HYDRO)?;
-        self.check_cf_version("pass_roads_version",     PASS_ROADS_VERSION     as u32, CF_PASS_ROADS)?;
-        self.check_cf_version("pass_buildings_version", PASS_BUILDINGS_VERSION as u32, CF_PASS_BUILDINGS)?;
+        self.check_cf_version(
+            "pass_terrain_version",
+            PASS_TERRAIN_VERSION as u32,
+            CF_PASS_TERRAIN,
+        )?;
+        self.check_cf_version(
+            "pass_substrate_version",
+            PASS_SUBSTRATE_VERSION as u32,
+            CF_PASS_SUBSTRATE,
+        )?;
+        self.check_cf_version(
+            "pass_hydro_version",
+            PASS_HYDRO_VERSION as u32,
+            CF_PASS_HYDRO,
+        )?;
+        self.check_cf_version(
+            "pass_roads_version",
+            PASS_ROADS_VERSION as u32,
+            CF_PASS_ROADS,
+        )?;
+        self.check_cf_version(
+            "pass_buildings_version",
+            PASS_BUILDINGS_VERSION as u32,
+            CF_PASS_BUILDINGS,
+        )?;
         Ok(())
     }
 
     fn check_cf_version(&self, meta_key: &str, expected: u32, cf_name: &str) -> Result<(), String> {
-        let meta_cf = self.db.db.cf_handle(CF_META)
-            .ok_or("meta CF missing")?;
-        let stored = self.db.db.get_cf(&meta_cf, meta_key)
+        let meta_cf = self.db.db.cf_handle(CF_META).ok_or("meta CF missing")?;
+        let stored = self
+            .db
+            .db
+            .get_cf(&meta_cf, meta_key)
             .map_err(|e| e.to_string())?
             .and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
             .unwrap_or(0);
 
         if stored != expected {
             // Stale version — wipe the CF by deleting all keys in range
-            let cf = self.db.db.cf_handle(cf_name).ok_or(format!("{cf_name} CF missing"))?;
+            let cf = self
+                .db
+                .db
+                .cf_handle(cf_name)
+                .ok_or(format!("{cf_name} CF missing"))?;
             let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
             let mut batch = WriteBatch::default();
             for item in iter {
@@ -302,21 +324,41 @@ impl TileStore {
 
     /// Store a pre-validated OSM tile (bincode bytes that already deserialised OK).
     pub fn put_osm(&self, s: f64, w: f64, n: f64, e: f64, data: &[u8]) {
-        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return };
-        let existed = self.db.db.get_cf(&cf, osm_key(s, w, n, e))
-            .ok().flatten().is_some();
-        let _ = self.db.db.put_cf(&cf, osm_key(s, w, n, e), make_value(data));
-        if !existed { self.inc_count(CF_OSM); }
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else {
+            return;
+        };
+        let existed = self
+            .db
+            .db
+            .get_cf(&cf, osm_key(s, w, n, e))
+            .ok()
+            .flatten()
+            .is_some();
+        let _ = self
+            .db
+            .db
+            .put_cf(&cf, osm_key(s, w, n, e), make_value(data));
+        if !existed {
+            self.inc_count(CF_OSM);
+        }
     }
 
     pub fn has_osm(&self, s: f64, w: f64, n: f64, e: f64) -> bool {
-        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return false };
-        self.db.db.get_cf(&cf, osm_key(s, w, n, e))
-            .ok().flatten().is_some()
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else {
+            return false;
+        };
+        self.db
+            .db
+            .get_cf(&cf, osm_key(s, w, n, e))
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     pub fn delete_osm(&self, s: f64, w: f64, n: f64, e: f64) {
-        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return };
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else {
+            return;
+        };
         if self.has_osm(s, w, n, e) {
             let _ = self.db.db.delete_cf(&cf, osm_key(s, w, n, e));
             self.dec_count(CF_OSM);
@@ -340,20 +382,38 @@ impl TileStore {
     }
 
     pub fn put_srtm(&self, lat: i32, lon: i32, data: &[u8]) {
-        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return };
-        let existed = self.db.db.get_cf(&cf, srtm_key(lat, lon))
-            .ok().flatten().is_some();
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else {
+            return;
+        };
+        let existed = self
+            .db
+            .db
+            .get_cf(&cf, srtm_key(lat, lon))
+            .ok()
+            .flatten()
+            .is_some();
         let _ = self.db.db.put_cf(&cf, srtm_key(lat, lon), make_value(data));
-        if !existed { self.inc_count(CF_SRTM); }
+        if !existed {
+            self.inc_count(CF_SRTM);
+        }
     }
 
     pub fn has_srtm(&self, lat: i32, lon: i32) -> bool {
-        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return false };
-        self.db.db.get_cf(&cf, srtm_key(lat, lon)).ok().flatten().is_some()
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else {
+            return false;
+        };
+        self.db
+            .db
+            .get_cf(&cf, srtm_key(lat, lon))
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     pub fn delete_srtm(&self, lat: i32, lon: i32) {
-        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else { return };
+        let Some(cf) = self.db.db.cf_handle(CF_SRTM) else {
+            return;
+        };
         if self.has_srtm(lat, lon) {
             let _ = self.db.db.delete_cf(&cf, srtm_key(lat, lon));
             self.dec_count(CF_SRTM);
@@ -377,16 +437,35 @@ impl TileStore {
     }
 
     pub fn put_terrain(&self, cx: i32, cy: i32, cz: i32, data: &[u8]) {
-        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else { return };
-        let existed = self.db.db.get_cf(&cf, terrain_key(cx, cy, cz))
-            .ok().flatten().is_some();
-        let _ = self.db.db.put_cf(&cf, terrain_key(cx, cy, cz), make_value(data));
-        if !existed { self.inc_count(CF_TERRAIN); }
+        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else {
+            return;
+        };
+        let existed = self
+            .db
+            .db
+            .get_cf(&cf, terrain_key(cx, cy, cz))
+            .ok()
+            .flatten()
+            .is_some();
+        let _ = self
+            .db
+            .db
+            .put_cf(&cf, terrain_key(cx, cy, cz), make_value(data));
+        if !existed {
+            self.inc_count(CF_TERRAIN);
+        }
     }
 
     pub fn has_terrain(&self, cx: i32, cy: i32, cz: i32) -> bool {
-        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else { return false };
-        self.db.db.get_cf(&cf, terrain_key(cx, cy, cz)).ok().flatten().is_some()
+        let Some(cf) = self.db.db.cf_handle(CF_TERRAIN) else {
+            return false;
+        };
+        self.db
+            .db
+            .get_cf(&cf, terrain_key(cx, cy, cz))
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     // ── Pass-based chunk storage ───────────────────────────────────────────────
@@ -398,15 +477,21 @@ impl TileStore {
         let cf = self.db.db.cf_handle(pass.cf_name())?;
         let key = chunk_key(cx, cy, cz);
         let raw = self.db.db.get_cf(&cf, &key).ok()??;
-        if raw.len() < 2 { return None; }
+        if raw.len() < 2 {
+            return None;
+        }
         let stored_version = u16::from_le_bytes([raw[0], raw[1]]);
-        if stored_version != pass.current_version() { return None; }
+        if stored_version != pass.current_version() {
+            return None;
+        }
         Some(raw[2..].to_vec())
     }
 
     /// Store a chunk pass. Prepends `[u16 version LE]` to the payload before writing.
     pub fn put_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId, data: &[u8]) {
-        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return };
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else {
+            return;
+        };
         let key = chunk_key(cx, cy, cz);
         let mut buf = Vec::with_capacity(2 + data.len());
         buf.extend_from_slice(&pass.current_version().to_le_bytes());
@@ -416,17 +501,25 @@ impl TileStore {
 
     /// Check if a chunk pass exists and is current version.
     pub fn has_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId) -> bool {
-        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return false };
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else {
+            return false;
+        };
         let key = chunk_key(cx, cy, cz);
-        let Ok(Some(raw)) = self.db.db.get_cf(&cf, &key) else { return false };
-        if raw.len() < 2 { return false }
+        let Ok(Some(raw)) = self.db.db.get_cf(&cf, &key) else {
+            return false;
+        };
+        if raw.len() < 2 {
+            return false;
+        }
         let stored_version = u16::from_le_bytes([raw[0], raw[1]]);
         stored_version == pass.current_version()
     }
 
     /// Delete a specific pass for a chunk (e.g. to force re-generation of just that pass).
     pub fn delete_chunk_pass(&self, cx: i32, cy: i32, cz: i32, pass: PassId) {
-        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else { return };
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else {
+            return;
+        };
         let key = chunk_key(cx, cy, cz);
         let _ = self.db.db.delete_cf(&cf, &key);
     }
@@ -434,33 +527,53 @@ impl TileStore {
     /// Returns which passes are currently stored and current-version for this chunk.
     pub fn chunk_pass_status(&self, cx: i32, cy: i32, cz: i32) -> Vec<(PassId, bool)> {
         let passes = [
-            PassId::Terrain, PassId::Substrate, PassId::Hydro,
-            PassId::Roads, PassId::Buildings, PassId::FeatureRules,
+            PassId::Terrain,
+            PassId::Substrate,
+            PassId::Hydro,
+            PassId::Roads,
+            PassId::Buildings,
+            PassId::FeatureRules,
         ];
-        passes.iter().map(|&p| (p, self.has_chunk_pass(cx, cy, cz, p))).collect()
+        passes
+            .iter()
+            .map(|&p| (p, self.has_chunk_pass(cx, cy, cz, p)))
+            .collect()
     }
 
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     /// Instant tile count read from a meta counter (no full scan).
     pub fn tile_count(&self, cf_name: &str) -> u64 {
-        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return 0 };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else {
+            return 0;
+        };
         let key = format!("{cf_name}_count");
-        self.db.db.get_cf(&meta_cf, key.as_bytes())
-            .ok().flatten()
+        self.db
+            .db
+            .get_cf(&meta_cf, key.as_bytes())
+            .ok()
+            .flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(0)
     }
 
-    pub fn osm_count(&self)     -> u64 { self.tile_count(CF_OSM) }
-    pub fn srtm_count(&self)    -> u64 { self.tile_count(CF_SRTM) }
-    pub fn terrain_count(&self) -> u64 { self.tile_count(CF_TERRAIN) }
+    pub fn osm_count(&self) -> u64 {
+        self.tile_count(CF_OSM)
+    }
+    pub fn srtm_count(&self) -> u64 {
+        self.tile_count(CF_SRTM)
+    }
+    pub fn terrain_count(&self) -> u64 {
+        self.tile_count(CF_TERRAIN)
+    }
 
     /// Iterate all stored OSM tile coordinates.
     /// Decodes each 16-byte key back to (s, w, n, e) float pairs.
     /// Used for DHT announce-all at startup.
     pub fn iter_osm_coords(&self) -> Vec<(f64, f64, f64, f64)> {
-        let Some(cf) = self.db.db.cf_handle(CF_OSM) else { return vec![] };
+        let Some(cf) = self.db.db.cf_handle(CF_OSM) else {
+            return vec![];
+        };
         let mut result = Vec::new();
         for item in self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
             if let Ok((key, _)) = item {
@@ -479,7 +592,9 @@ impl TileStore {
     /// Scan all tiles in a CF and verify checksums.
     /// Returns `(total, corrupt)` — corrupt entries are deleted automatically.
     pub fn verify_cf(&self, cf_name: &str) -> (u64, u64) {
-        let Some(cf) = self.db.db.cf_handle(cf_name) else { return (0, 0) };
+        let Some(cf) = self.db.db.cf_handle(cf_name) else {
+            return (0, 0);
+        };
         let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let (mut total, mut corrupt) = (0u64, 0u64);
         let mut to_delete: Vec<Vec<u8>> = Vec::new();
@@ -497,17 +612,25 @@ impl TileStore {
         }
         if corrupt > 0 {
             // Recount — easier than trying to decrement by exact corrupt count
-            let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return (total, corrupt) };
+            let Some(meta_cf) = self.db.db.cf_handle(CF_META) else {
+                return (total, corrupt);
+            };
             let new_count = total - corrupt;
             let count_key = format!("{cf_name}_count");
-            let _ = self.db.db.put_cf(&meta_cf, count_key.as_bytes(), new_count.to_be_bytes());
+            let _ = self
+                .db
+                .db
+                .put_cf(&meta_cf, count_key.as_bytes(), new_count.to_be_bytes());
         }
         (total, corrupt)
     }
 
     /// Wipe an entire column family (nuclear option — all tiles deleted).
     pub fn purge_cf(&self, cf_name: &str) -> Result<usize, String> {
-        let cf = self.db.db.cf_handle(cf_name)
+        let cf = self
+            .db
+            .db
+            .cf_handle(cf_name)
             .ok_or(format!("unknown CF: {cf_name}"))?;
         let iter = self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
         let mut batch = WriteBatch::default();
@@ -530,23 +653,42 @@ impl TileStore {
     // ── Internal counter helpers ───────────────────────────────────────────────
 
     fn inc_count(&self, cf_name: &str) {
-        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else {
+            return;
+        };
         let key = format!("{cf_name}_count");
-        let cur = self.db.db.get_cf(&meta_cf, key.as_bytes())
-            .ok().flatten()
+        let cur = self
+            .db
+            .db
+            .get_cf(&meta_cf, key.as_bytes())
+            .ok()
+            .flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(0);
-        let _ = self.db.db.put_cf(&meta_cf, key.as_bytes(), (cur + 1).to_be_bytes());
+        let _ = self
+            .db
+            .db
+            .put_cf(&meta_cf, key.as_bytes(), (cur + 1).to_be_bytes());
     }
 
     fn dec_count(&self, cf_name: &str) {
-        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else { return };
+        let Some(meta_cf) = self.db.db.cf_handle(CF_META) else {
+            return;
+        };
         let key = format!("{cf_name}_count");
-        let cur = self.db.db.get_cf(&meta_cf, key.as_bytes())
-            .ok().flatten()
+        let cur = self
+            .db
+            .db
+            .get_cf(&meta_cf, key.as_bytes())
+            .ok()
+            .flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(1);
-        let _ = self.db.db.put_cf(&meta_cf, key.as_bytes(), cur.saturating_sub(1).to_be_bytes());
+        let _ = self.db.db.put_cf(
+            &meta_cf,
+            key.as_bytes(),
+            cur.saturating_sub(1).to_be_bytes(),
+        );
     }
 }
 
@@ -566,22 +708,22 @@ pub enum PassId {
 impl PassId {
     fn cf_name(&self) -> &'static str {
         match self {
-            PassId::Terrain      => CF_PASS_TERRAIN,
-            PassId::Substrate    => CF_PASS_SUBSTRATE,
-            PassId::Hydro        => CF_PASS_HYDRO,
-            PassId::Roads        => CF_PASS_ROADS,
-            PassId::Buildings    => CF_PASS_BUILDINGS,
+            PassId::Terrain => CF_PASS_TERRAIN,
+            PassId::Substrate => CF_PASS_SUBSTRATE,
+            PassId::Hydro => CF_PASS_HYDRO,
+            PassId::Roads => CF_PASS_ROADS,
+            PassId::Buildings => CF_PASS_BUILDINGS,
             PassId::FeatureRules => CF_FEATURE_RULES,
         }
     }
 
     pub fn current_version(&self) -> u16 {
         match self {
-            PassId::Terrain      => PASS_TERRAIN_VERSION,
-            PassId::Substrate    => PASS_SUBSTRATE_VERSION,
-            PassId::Hydro        => PASS_HYDRO_VERSION,
-            PassId::Roads        => PASS_ROADS_VERSION,
-            PassId::Buildings    => PASS_BUILDINGS_VERSION,
+            PassId::Terrain => PASS_TERRAIN_VERSION,
+            PassId::Substrate => PASS_SUBSTRATE_VERSION,
+            PassId::Hydro => PASS_HYDRO_VERSION,
+            PassId::Roads => PASS_ROADS_VERSION,
+            PassId::Buildings => PASS_BUILDINGS_VERSION,
             PassId::FeatureRules => 1,
         }
     }
@@ -624,10 +766,7 @@ pub fn cleanup_old_tile_dir(dir: &Path) {
         .unwrap_or(0);
 
     // Build the rename target path
-    let mut old_path = dir.to_path_buf();
-    let dir_name = dir.file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("tiles");
+    let dir_name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("tiles");
     let parent = dir.parent().unwrap_or(dir);
     let old_path = parent.join(format!("{}_deleting_{}", dir_name, ts));
 
@@ -641,7 +780,10 @@ pub fn cleanup_old_tile_dir(dir: &Path) {
     }
 
     let old_path_owned = old_path.clone();
-    eprintln!("🗑  Old tile dir detected → renamed to {:?}, deleting in background…", old_path_owned);
+    eprintln!(
+        "🗑  Old tile dir detected → renamed to {:?}, deleting in background…",
+        old_path_owned
+    );
 
     std::thread::spawn(move || {
         // ionice -c3 = idle I/O class: only uses disk when nothing else needs it
@@ -679,7 +821,9 @@ pub fn cleanup_old_srtm_dir(dir: &Path) {
         .and_then(|mut rd| {
             for _ in 0..5 {
                 if let Some(Ok(e)) = rd.next() {
-                    let ext = e.path().extension()
+                    let ext = e
+                        .path()
+                        .extension()
                         .and_then(|x| x.to_str())
                         .unwrap_or("")
                         .to_lowercase();
@@ -701,7 +845,8 @@ pub fn cleanup_old_srtm_dir(dir: &Path) {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let dir_name = dir.file_name()
+    let dir_name = dir
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("elevation_cache");
     let parent = dir.parent().unwrap_or(dir);
@@ -717,7 +862,10 @@ pub fn cleanup_old_srtm_dir(dir: &Path) {
     }
 
     let old_path_owned = old_path.clone();
-    eprintln!("🗑  Old SRTM dir detected → renamed to {:?}, deleting in background…", old_path_owned);
+    eprintln!(
+        "🗑  Old SRTM dir detected → renamed to {:?}, deleting in background…",
+        old_path_owned
+    );
 
     std::thread::spawn(move || {
         let status = std::process::Command::new("ionice")

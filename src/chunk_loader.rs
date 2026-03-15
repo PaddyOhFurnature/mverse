@@ -7,15 +7,17 @@ pub const TERRAIN_CACHE_VERSION: u32 = 13; // v0.1.62: density field requires fr
 ///
 /// Loads chunks in background thread to avoid blocking main game loop.
 /// Supports terrain generation, mesh generation, and collider generation.
-
 use crate::chunk::ChunkId;
-use crate::voxel::Octree;
-use crate::terrain::{TerrainGenerator, SurfaceCache};
 use crate::materials::MaterialId;
+use crate::terrain::{SurfaceCache, TerrainGenerator};
+use crate::tile_store::{PassId, TileStore};
+use crate::voxel::Octree;
 use crate::voxel::VoxelCoord;
-use crate::tile_store::{TileStore, PassId};
 use std::path::Path;
-use std::sync::{mpsc::{channel, Sender, Receiver}, Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{Receiver, Sender, channel},
+};
 use std::thread;
 use std::time::Instant;
 
@@ -23,7 +25,7 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct LoadRequest {
     pub chunk_id: ChunkId,
-    pub priority: f64,  // Distance from player (lower = higher priority)
+    pub priority: f64, // Distance from player (lower = higher priority)
 }
 
 /// Result of a chunk load operation
@@ -48,10 +50,10 @@ enum LoaderCommand {
 pub struct ChunkLoader {
     /// Send commands to background thread
     cmd_tx: Sender<LoaderCommand>,
-    
+
     /// Receive completed chunks from background thread
     result_rx: Receiver<LoadResult>,
-    
+
     /// Statistics
     pub chunks_loaded: usize,
     pub total_load_time_ms: u128,
@@ -61,31 +63,44 @@ impl ChunkLoader {
     /// Create new background chunk loader with parallel workers
     ///
     /// Spawns multiple background threads for parallel terrain generation.
-    /// 
+    ///
     /// # Arguments
     /// * `terrain_generator` - Thread-safe terrain generator (Send+Sync)
     /// * `num_workers` - Number of parallel worker threads (default: 4)
     /// * `tile_store` - Optional TileStore for chunk caching (None = generate every time)
-    pub fn new(terrain_generator: Arc<Mutex<TerrainGenerator>>, num_workers: usize, tile_store: Option<Arc<TileStore>>) -> Self {
+    pub fn new(
+        terrain_generator: Arc<Mutex<TerrainGenerator>>,
+        num_workers: usize,
+        tile_store: Option<Arc<TileStore>>,
+    ) -> Self {
         let (cmd_tx, cmd_rx) = channel();
         let (result_tx, result_rx) = channel();
-        
+
         // Spawn multiple worker threads for parallel generation
         let cmd_rx = Arc::new(Mutex::new(cmd_rx));
-        
+
         for worker_id in 0..num_workers {
             let cmd_rx_clone = Arc::clone(&cmd_rx);
             let result_tx_clone = result_tx.clone();
             let terrain_gen_clone = Arc::clone(&terrain_generator);
             let ts_clone = tile_store.clone();
-            
+
             thread::spawn(move || {
-                Self::worker_thread(worker_id, cmd_rx_clone, result_tx_clone, terrain_gen_clone, ts_clone);
+                Self::worker_thread(
+                    worker_id,
+                    cmd_rx_clone,
+                    result_tx_clone,
+                    terrain_gen_clone,
+                    ts_clone,
+                );
             });
         }
-        
-        println!("✅ ChunkLoader initialized with {} worker threads", num_workers);
-        
+
+        println!(
+            "✅ ChunkLoader initialized with {} worker threads",
+            num_workers
+        );
+
         ChunkLoader {
             cmd_tx,
             result_rx,
@@ -93,33 +108,32 @@ impl ChunkLoader {
             total_load_time_ms: 0,
         }
     }
-    
+
     /// Request a chunk to be loaded
     ///
     /// Non-blocking - adds to queue, returns immediately.
     pub fn request_load(&mut self, chunk_id: ChunkId, priority: f64) -> Result<(), String> {
-        self.cmd_tx.send(LoaderCommand::Load(LoadRequest {
-            chunk_id,
-            priority,
-        })).map_err(|e| format!("Failed to send load request: {}", e))
+        self.cmd_tx
+            .send(LoaderCommand::Load(LoadRequest { chunk_id, priority }))
+            .map_err(|e| format!("Failed to send load request: {}", e))
     }
-    
+
     /// Poll for completed chunks (non-blocking)
     ///
     /// Returns all chunks that finished loading since last poll.
     pub fn poll_completed(&mut self) -> Vec<LoadResult> {
         let mut results = Vec::new();
-        
+
         // Drain all available results
         while let Ok(result) = self.result_rx.try_recv() {
             self.chunks_loaded += 1;
             self.total_load_time_ms += result.load_time_ms;
             results.push(result);
         }
-        
+
         results
     }
-    
+
     /// Average load time per chunk (for performance monitoring)
     pub fn avg_load_time_ms(&self) -> f64 {
         if self.chunks_loaded == 0 {
@@ -128,7 +142,7 @@ impl ChunkLoader {
             self.total_load_time_ms as f64 / self.chunks_loaded as f64
         }
     }
-    
+
     /// Background worker thread (now with REAL terrain generation)
     ///
     /// Processes load requests, generates terrain using SRTM data, sends results back.
@@ -146,7 +160,7 @@ impl ChunkLoader {
                 let rx = cmd_rx.lock().unwrap();
                 rx.recv()
             };
-            
+
             match command {
                 Ok(LoaderCommand::Load(request)) => {
                     let start = Instant::now();
@@ -156,7 +170,10 @@ impl ChunkLoader {
                     let (octree, surface_cache) = if let Some(ref ts) = tile_store {
                         match Self::load_from_store(ts, id) {
                             Some(cached) => {
-                                let sc = Self::compute_surface_cache(&cached, id);
+                                let upper_cached =
+                                    Self::load_from_store(ts, &ChunkId::new(id.x, id.y + 1, id.z));
+                                let sc =
+                                    Self::compute_surface_cache(&cached, upper_cached.as_ref(), id);
                                 (Some(cached), Some(sc))
                             }
                             None => {
@@ -167,7 +184,10 @@ impl ChunkLoader {
                                         (Some(octree), Some(cache))
                                     }
                                     Err(e) => {
-                                        eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, id, e);
+                                        eprintln!(
+                                            "[Worker {}] Failed to generate chunk {}: {}",
+                                            worker_id, id, e
+                                        );
                                         (None, None)
                                     }
                                 }
@@ -177,19 +197,26 @@ impl ChunkLoader {
                         match terrain_generator.lock().unwrap().generate_chunk(id) {
                             Ok((octree, cache)) => (Some(octree), Some(cache)),
                             Err(e) => {
-                                eprintln!("[Worker {}] Failed to generate chunk {}: {}", worker_id, id, e);
+                                eprintln!(
+                                    "[Worker {}] Failed to generate chunk {}: {}",
+                                    worker_id, id, e
+                                );
                                 (None, None)
                             }
                         }
                     };
-                    
+
                     let elapsed = start.elapsed().as_millis();
-                    
+
                     if octree.is_some() && elapsed > 1000 {
-                        println!("[Worker {}] Generated chunk {} in {:.2}s", 
-                            worker_id, request.chunk_id, elapsed as f64 / 1000.0);
+                        println!(
+                            "[Worker {}] Generated chunk {} in {:.2}s",
+                            worker_id,
+                            request.chunk_id,
+                            elapsed as f64 / 1000.0
+                        );
                     }
-                    
+
                     let result = LoadResult {
                         chunk_id: request.chunk_id,
                         octree,
@@ -197,7 +224,7 @@ impl ChunkLoader {
                         load_time_ms: elapsed,
                         error: None,
                     };
-                    
+
                     if result_tx.send(result).is_err() {
                         // Main thread dropped receiver, exit
                         break;
@@ -214,7 +241,7 @@ impl ChunkLoader {
             }
         }
     }
-    
+
     /// Derive a SurfaceCache by scanning the octree for the topmost solid voxel per column.
     /// Used when a chunk is loaded from disk cache (no SRTM data available).
     ///
@@ -227,10 +254,27 @@ impl ChunkLoader {
     /// lower Y layer under a cliff).  Without this fix, surface_y = max_v.y - 0.5 causes the
     /// smooth MC to draw a phantom horizontal plane at the very top of the chunk — the
     /// "green cloud" visible inside cliffs and near sea-level terrain.
-    fn compute_surface_cache(octree: &Octree, chunk_id: &ChunkId) -> SurfaceCache {
+    fn column_has_solid(octree: &Octree, vx: i64, vz: i64, min_y: i64, max_y: i64) -> bool {
+        for vy in (min_y..max_y).rev() {
+            let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
+            if mat != MaterialId::AIR && mat != MaterialId::WATER {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn compute_surface_cache(
+        octree: &Octree,
+        upper_octree: Option<&Octree>,
+        chunk_id: &ChunkId,
+    ) -> SurfaceCache {
         use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
         let min_v = chunk_id.min_voxel();
         let max_v = chunk_id.max_voxel();
+        let upper_chunk_id = ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z);
+        let upper_min_v = upper_chunk_id.min_voxel();
+        let upper_max_v = upper_chunk_id.max_voxel();
         let mut cache = SurfaceCache::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
         for vx in min_v.x..max_v.x {
             for vz in min_v.z..max_v.z {
@@ -245,29 +289,21 @@ impl ChunkLoader {
                 }
 
                 let surface_y = match top_vy {
-                    None => min_v.y as f32 - 1.0, // all air → density always negative → no mesh
-                    Some(vy) if vy < max_v.y - 1 => vy as f32 + 0.5, // surface below chunk top
+                    None => min_v.y as f64 - 1.0, // all air → density always negative → no mesh
+                    Some(vy) if vy < max_v.y - 1 => vy as f64 + 0.5, // surface below chunk top
                     Some(_) => {
                         // Topmost solid is the VERY TOP of the chunk (max_v.y − 1).
-                        // Two cases:
-                        //   A. Genuine surface here — the voxel is a surface material
-                        //      (GRASS, ASPHALT, CONCRETE, WATER).  All voxels below it are
-                        //      STONE/DIRT/GRAVEL within the chunk; there is no AIR here
-                        //      because the AIR is in the +Y chunk above.  Render normally.
-                        //   B. All-solid / terrain above — the voxel is a subsurface material
-                        //      (DIRT, STONE, GRAVEL).  The real surface is in the +Y chunk.
-                        //      Push surface_y 2 m above chunk top so MC density is always
-                        //      ≥ 1.5 at every grid point → no phantom surface.
-                        //
-                        // Checking the material at max_v.y-1 is O(1) and avoids the O(200)
-                        // has-air scan that incorrectly classified case A as all-solid.
-                        let top_mat = octree.get_voxel(VoxelCoord::new(vx, max_v.y - 1, vz));
-                        match top_mat {
-                            MaterialId::GRASS
-                            | MaterialId::ASPHALT
-                            | MaterialId::CONCRETE
-                            | MaterialId::WATER => (max_v.y - 1) as f32 + 0.5,
-                            _ => max_v.y as f32 + 2.0,
+                        // Distinguish a genuine surface from buried terrain by looking at
+                        // the chunk above, not by guessing from the top material.
+                        if upper_octree
+                            .map(|upper| {
+                                Self::column_has_solid(upper, vx, vz, upper_min_v.y, upper_max_v.y)
+                            })
+                            .unwrap_or(false)
+                        {
+                            max_v.y as f64 + 2.0
+                        } else {
+                            (max_v.y - 1) as f64 + 0.5
                         }
                     }
                 };
@@ -279,10 +315,23 @@ impl ChunkLoader {
 
     /// Load a chunk octree from the TileStore. Returns None on miss or version mismatch.
     fn load_from_store(ts: &TileStore, chunk_id: &ChunkId) -> Option<Octree> {
-        let data = ts.get_chunk_pass(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32, PassId::Terrain)?;
-        if data.len() < 4 { return None; }
+        let data = [PassId::Roads, PassId::Hydro, PassId::Terrain]
+            .into_iter()
+            .find_map(|pass| {
+                ts.get_chunk_pass(
+                    chunk_id.x as i32,
+                    chunk_id.y as i32,
+                    chunk_id.z as i32,
+                    pass,
+                )
+            })?;
+        if data.len() < 4 {
+            return None;
+        }
         let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if version != TERRAIN_CACHE_VERSION { return None; }
+        if version != TERRAIN_CACHE_VERSION {
+            return None;
+        }
         Octree::from_bytes(&data[4..]).ok()
     }
 
@@ -291,7 +340,13 @@ impl ChunkLoader {
         if let Ok(octree_bytes) = octree.to_bytes() {
             let mut data = TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
             data.extend_from_slice(&octree_bytes);
-            ts.put_chunk_pass(chunk_id.x as i32, chunk_id.y as i32, chunk_id.z as i32, PassId::Terrain, &data);
+            ts.put_chunk_pass(
+                chunk_id.x as i32,
+                chunk_id.y as i32,
+                chunk_id.z as i32,
+                PassId::Terrain,
+                &data,
+            );
         }
     }
 
@@ -311,7 +366,7 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
     };
 
     let mut migrated = 0u32;
-    let mut skipped  = 0u32;
+    let mut skipped = 0u32;
 
     for entry in dir.flatten() {
         let path = entry.path();
@@ -321,8 +376,14 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
         };
         // Parse "x_y_z.bin"
         let parts: Vec<&str> = name.trim_end_matches(".bin").split('_').collect();
-        if parts.len() != 3 { continue; }
-        let (cx, cy, cz) = match (parts[0].parse::<i32>(), parts[1].parse::<i32>(), parts[2].parse::<i32>()) {
+        if parts.len() != 3 {
+            continue;
+        }
+        let (cx, cy, cz) = match (
+            parts[0].parse::<i32>(),
+            parts[1].parse::<i32>(),
+            parts[2].parse::<i32>(),
+        ) {
             (Ok(x), Ok(y), Ok(z)) => (x, y, z),
             _ => continue,
         };
@@ -352,7 +413,10 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
     let _ = std::fs::remove_dir(cache_dir);
 
     if migrated > 0 || skipped > 0 {
-        println!("📦 Migrated {} terrain chunks from flat files to TileStore ({} already present)", migrated, skipped);
+        println!(
+            "📦 Migrated {} terrain chunks from flat files to TileStore ({} already present)",
+            migrated, skipped
+        );
     }
 }
 
@@ -365,29 +429,32 @@ impl Drop for ChunkLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        coordinates::GPS, elevation::ElevationPipeline, terrain::TerrainGenerator,
+        voxel::VoxelCoord,
+    };
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
-    use crate::{elevation::ElevationPipeline, coordinates::GPS, voxel::VoxelCoord,
-                terrain::TerrainGenerator};
-    use std::sync::{Arc, Mutex};
 
     fn make_loader() -> ChunkLoader {
         let pipeline = ElevationPipeline::new();
-        let terrain_gen = TerrainGenerator::new(pipeline, GPS::new(0.0, 0.0, 0.0), VoxelCoord::new(0, 0, 0));
+        let terrain_gen =
+            TerrainGenerator::new(pipeline, GPS::new(0.0, 0.0, 0.0), VoxelCoord::new(0, 0, 0));
         ChunkLoader::new(Arc::new(Mutex::new(terrain_gen)), 2, None)
     }
-    
+
     #[test]
     fn test_chunk_loader_basic() {
         let mut loader = make_loader();
-        
+
         // Request a chunk
         let chunk_id = ChunkId::new(0, 0, 0);
         loader.request_load(chunk_id, 0.0).unwrap();
-        
+
         // Wait for completion (give background thread time to work)
         thread::sleep(Duration::from_millis(100));
-        
+
         // Poll for results
         let results = loader.poll_completed();
         assert_eq!(results.len(), 1);
@@ -395,44 +462,103 @@ mod tests {
         assert!(results[0].octree.is_some());
         assert!(results[0].error.is_none());
     }
-    
+
     #[test]
     fn test_chunk_loader_multiple() {
         let mut loader = make_loader();
-        
+
         // Request multiple chunks
         for i in 0..5 {
-            loader.request_load(ChunkId::new(i, 0, 0), i as f64).unwrap();
+            loader
+                .request_load(ChunkId::new(i, 0, 0), i as f64)
+                .unwrap();
         }
-        
+
         // Wait for completion
         thread::sleep(Duration::from_millis(200));
-        
+
         // Poll for results
         let results = loader.poll_completed();
         assert_eq!(results.len(), 5);
-        
+
         // All should succeed
         for result in &results {
             assert!(result.octree.is_some());
             assert!(result.error.is_none());
         }
     }
-    
+
     #[test]
     fn test_chunk_loader_stats() {
         let mut loader = make_loader();
-        
+
         // Load some chunks
         for i in 0..3 {
             loader.request_load(ChunkId::new(i, 0, 0), 0.0).unwrap();
         }
-        
+
         thread::sleep(Duration::from_millis(150));
         loader.poll_completed();
-        
+
         // Check stats
         assert_eq!(loader.chunks_loaded, 3);
         assert!(loader.avg_load_time_ms() > 0.0);
+    }
+
+    #[test]
+    fn compute_surface_cache_preserves_chunk_top_surface_when_upper_chunk_is_air() {
+        let chunk_id = ChunkId::new(0, 0, 0);
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+        let vx = min_v.x;
+        let vz = min_v.z;
+        let mut octree = Octree::new();
+        octree.set_voxel(VoxelCoord::new(vx, max_v.y - 1, vz), MaterialId::GRASS_DRY);
+        let upper_octree = Octree::new();
+
+        let cache = ChunkLoader::compute_surface_cache(&octree, Some(&upper_octree), &chunk_id);
+
+        assert_eq!(
+            cache.get(&(vx, vz)).copied(),
+            Some((max_v.y - 1) as f64 + 0.5)
+        );
+    }
+
+    #[test]
+    fn compute_surface_cache_pushes_buried_chunk_top_when_upper_chunk_has_solid() {
+        let chunk_id = ChunkId::new(0, 0, 0);
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+        let vx = min_v.x;
+        let vz = min_v.z;
+        let mut octree = Octree::new();
+        octree.set_voxel(VoxelCoord::new(vx, max_v.y - 1, vz), MaterialId::DIRT);
+
+        let upper_chunk_id = ChunkId::new(0, 1, 0);
+        let upper_min_v = upper_chunk_id.min_voxel();
+        let mut upper_octree = Octree::new();
+        upper_octree.set_voxel(VoxelCoord::new(vx, upper_min_v.y, vz), MaterialId::STONE);
+
+        let cache = ChunkLoader::compute_surface_cache(&octree, Some(&upper_octree), &chunk_id);
+
+        assert_eq!(cache.get(&(vx, vz)).copied(), Some(max_v.y as f64 + 2.0));
+    }
+
+    #[test]
+    fn compute_surface_cache_preserves_half_voxel_precision_at_high_world_y() {
+        let chunk_id = ChunkId::new(0, 45_148, 0);
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+        let vx = min_v.x;
+        let vz = min_v.z;
+        let mut octree = Octree::new();
+        octree.set_voxel(VoxelCoord::new(vx, max_v.y - 1, vz), MaterialId::GRASS_DRY);
+
+        let cache = ChunkLoader::compute_surface_cache(&octree, None, &chunk_id);
+
+        assert_eq!(
+            cache.get(&(vx, vz)).copied(),
+            Some((max_v.y - 1) as f64 + 0.5)
+        );
     }
 }

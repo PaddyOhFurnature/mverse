@@ -40,25 +40,21 @@
 //! ```
 
 use crate::identity::Identity;
-use crate::tile_protocol::{TileCodec, TileRequest, TileResponse, TILE_PROTOCOL};
+use crate::tile_protocol::{TILE_PROTOCOL, TileCodec, TileRequest, TileResponse};
+use futures::StreamExt;
 use libp2p::{
-    autonat,
+    Multiaddr, PeerId, Swarm, autonat, dcutr,
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
     identify,
     kad::{self, store::MemoryStore},
-    mdns,
-    noise,
-    ping,
-    relay,
-    dcutr,
+    mdns, noise, ping, relay,
     request_response::{self, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, Swarm,
+    tcp, yamux,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use futures::StreamExt;
 
 /// Result type for network operations
 pub type Result<T> = std::result::Result<T, NetworkError>;
@@ -67,71 +63,45 @@ pub type Result<T> = std::result::Result<T, NetworkError>;
 #[derive(Debug, Clone)]
 pub enum NetworkCommand {
     /// Start listening on an address
-    Listen {
-        multiaddr: String,
-    },
-    
+    Listen { multiaddr: String },
+
     /// Dial a peer by address
-    Dial {
-        address: String,
-    },
+    Dial { address: String },
 
     /// Dial a peer directly by PeerId (uses Kademlia routing table for address resolution).
     /// Works when the peer's address is already known from DHT routing or mDNS.
-    DialPeer {
-        peer_id: PeerId,
-    },
-    
+    DialPeer { peer_id: PeerId },
+
     /// Subscribe to a topic
-    Subscribe {
-        topic: String,
-    },
-    
+    Subscribe { topic: String },
+
     /// Unsubscribe from a topic
-    Unsubscribe {
-        topic: String,
-    },
-    
+    Unsubscribe { topic: String },
+
     /// Subscribe to multiple topics at once (efficient bulk operation)
-    SubscribeBulk {
-        topics: Vec<String>,
-    },
-    
+    SubscribeBulk { topics: Vec<String> },
+
     /// Unsubscribe from multiple topics at once (efficient bulk operation)
-    UnsubscribeBulk {
-        topics: Vec<String>,
-    },
-    
+    UnsubscribeBulk { topics: Vec<String> },
+
     /// Publish a message to a topic
-    Publish {
-        topic: String,
-        data: Vec<u8>,
-    },
-    
+    Publish { topic: String, data: Vec<u8> },
+
     /// Publish own KeyRecord to the Kademlia DHT (value = bincode bytes of KeyRecord).
     /// Key = SHA-256 of the local PeerId bytes, making lookups deterministic.
-    PutDhtRecord {
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
+    PutDhtRecord { key: Vec<u8>, value: Vec<u8> },
 
     /// Advertise ourselves as a provider for a DHT content key.
     /// Used so others can discover our KeyRecord via `get_providers`.
-    StartProvidingKey {
-        key: Vec<u8>,
-    },
+    StartProvidingKey { key: Vec<u8> },
 
     /// Request a value from the DHT by content key.
     /// Result is returned as a `NetworkEvent::DhtRecordFound`.
-    GetDhtRecord {
-        key: Vec<u8>,
-    },
+    GetDhtRecord { key: Vec<u8> },
 
     /// Find peers that are providing a content key.
     /// Result is returned as a `NetworkEvent::ChunkProvidersFound`.
-    GetProviders {
-        key: Vec<u8>,
-    },
+    GetProviders { key: Vec<u8> },
 
     /// Shutdown the network thread
     Shutdown,
@@ -146,9 +116,7 @@ pub enum NetworkCommand {
 
     /// Queue a tile for background fetch — called when an inbound request can't be served from disk.
     /// The idle downloader will fetch from the network/internet, cache locally, and announce.
-    QueueIdleFetch {
-        request: TileRequest,
-    },
+    QueueIdleFetch { request: TileRequest },
 }
 
 /// Errors that can occur during network operations
@@ -156,22 +124,22 @@ pub enum NetworkCommand {
 pub enum NetworkError {
     /// Failed to initialize libp2p transport
     TransportError(String),
-    
+
     /// Failed to build Swarm
     SwarmBuildError(String),
-    
+
     /// Failed to start listening on address
     ListenError(std::io::Error),
-    
+
     /// Failed to parse multiaddr
     MultiaddrParseError(String),
-    
+
     /// Topic not subscribed
     TopicNotSubscribed(String),
-    
+
     /// Failed to publish message
     PublishError(String),
-    
+
     /// Tokio runtime error
     RuntimeError(String),
 }
@@ -201,61 +169,40 @@ pub enum NetworkEvent {
         topic: String,
         data: Vec<u8>,
     },
-    
+
     /// Connected to a new peer
-    PeerConnected {
-        peer_id: PeerId,
-        address: Multiaddr,
-    },
-    
+    PeerConnected { peer_id: PeerId, address: Multiaddr },
+
     /// Disconnected from a peer
-    PeerDisconnected {
-        peer_id: PeerId,
-    },
-    
+    PeerDisconnected { peer_id: PeerId },
+
     /// Discovered a new peer via mDNS
-    PeerDiscovered {
-        peer_id: PeerId,
-    },
-    
+    PeerDiscovered { peer_id: PeerId },
+
     /// Started listening on an address
-    ListeningOn {
-        address: Multiaddr,
-    },
-    
+    ListeningOn { address: Multiaddr },
+
     /// Subscribed to a new topic
-    TopicSubscribed {
-        topic: String,
-    },
-    
+    TopicSubscribed { topic: String },
+
     /// Unsubscribed from a topic
-    TopicUnsubscribed {
-        topic: String,
-    },
-    
+    TopicUnsubscribed { topic: String },
+
     /// NAT status changed (detected via AutoNAT)
     NatStatusChanged {
         old_status: String,
         new_status: String,
         external_address: Option<Multiaddr>,
     },
-    
+
     /// Connection upgraded from relay to direct (DCUtR success)
-    ConnectionUpgraded {
-        peer_id: PeerId,
-        from_relay: bool,
-    },
+    ConnectionUpgraded { peer_id: PeerId, from_relay: bool },
 
     /// Direct connection established via DCUtR hole punching
-    DirectConnectionUpgraded {
-        peer_id: PeerId,
-    },
+    DirectConnectionUpgraded { peer_id: PeerId },
 
     /// A DHT record was found for a previously requested key.
-    DhtRecordFound {
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
+    DhtRecordFound { key: Vec<u8>, value: Vec<u8> },
 
     /// Peers found that are providing a content key (from `GetProviders`).
     ChunkProvidersFound {
@@ -274,10 +221,7 @@ pub enum NetworkEvent {
     /// After receiving this event the game loop can map `PeerId` ↔ `session_id`
     /// locally. Hot-path compact messages use the session ID instead of the
     /// full 39-byte PeerId, saving ~37 bytes per packet (critical for LoRa).
-    SessionIdAssigned {
-        peer_id: PeerId,
-        session_id: u16,
-    },
+    SessionIdAssigned { peer_id: PeerId, session_id: u16 },
 }
 
 /// Combined network behaviour for libp2p
@@ -311,20 +255,20 @@ pub(crate) struct MetaverseBehaviour {
 pub struct NetworkNode {
     /// libp2p Swarm managing connections and protocols
     pub(crate) swarm: Swarm<MetaverseBehaviour>,
-    
+
     /// Local peer identity
     #[allow(dead_code)]
     identity: Identity,
-    
+
     /// Local peer ID
     local_peer_id: PeerId,
-    
+
     /// Currently subscribed topics
     subscribed_topics: HashMap<String, IdentTopic>,
-    
+
     /// Event queue (for non-async polling)
     event_queue: Vec<NetworkEvent>,
-    
+
     /// Connected peers
     connected_peers: HashSet<PeerId>,
 
@@ -345,7 +289,8 @@ pub struct NetworkNode {
 
     /// Pending outbound tile requests, keyed by request ID.
     /// When the response arrives, the value (Sender) is used to deliver it.
-    pending_tile_requests: HashMap<request_response::OutboundRequestId, crossbeam::channel::Sender<TileResponse>>,
+    pending_tile_requests:
+        HashMap<request_response::OutboundRequestId, crossbeam::channel::Sender<TileResponse>>,
 
     /// Root directory for local tile cache. When set, inbound TileRequests are served
     /// from disk before responding NotFound. Set via set_tile_cache_root().
@@ -363,15 +308,27 @@ fn is_routable_addr(addr: &Multiaddr) -> bool {
     for proto in addr.iter() {
         match proto {
             Protocol::Ip4(ip) => {
-                if ip.is_loopback()   { return false; } // 127.x
-                if ip.is_link_local() { return false; } // 169.254.x
+                if ip.is_loopback() {
+                    return false;
+                } // 127.x
+                if ip.is_link_local() {
+                    return false;
+                } // 169.254.x
                 let octets = ip.octets();
-                if octets[0] == 10                                         { return false; } // 10.x.x.x
-                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 { return false; } // 172.16-31.x
-                if octets[0] == 192 && octets[1] == 168                    { return false; } // 192.168.x.x
+                if octets[0] == 10 {
+                    return false;
+                } // 10.x.x.x
+                if octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31 {
+                    return false;
+                } // 172.16-31.x
+                if octets[0] == 192 && octets[1] == 168 {
+                    return false;
+                } // 192.168.x.x
             }
             Protocol::Ip6(ip) => {
-                if ip.is_loopback() { return false; }
+                if ip.is_loopback() {
+                    return false;
+                }
             }
             _ => {}
         }
@@ -395,11 +352,11 @@ impl NetworkNode {
     /// - Identify protocol for peer info exchange
     pub fn new(identity: Identity) -> Result<Self> {
         let local_peer_id = identity.peer_id().clone();
-        
+
         // Build the Swarm (now synchronous since we use pollster)
         // WARNING: This will fail for mDNS if not in a tokio context
         let swarm = pollster::block_on(Self::build_swarm(identity.clone()))?;
-        
+
         Ok(Self {
             swarm,
             identity,
@@ -416,7 +373,7 @@ impl NetworkNode {
             idle_queue: None,
         })
     }
-    
+
     /// Create a new NetworkNode with the given identity (async version)
     ///
     /// **This is the preferred method when using with MultiplayerSystem.**
@@ -432,10 +389,10 @@ impl NetworkNode {
     /// - Identify protocol for peer info exchange
     pub async fn new_async(identity: Identity) -> Result<Self> {
         let local_peer_id = identity.peer_id().clone();
-        
+
         // Build the Swarm asynchronously (mDNS needs tokio context)
         let swarm = Self::build_swarm(identity.clone()).await?;
-        
+
         Ok(Self {
             swarm,
             identity,
@@ -460,7 +417,10 @@ impl NetworkNode {
     }
 
     /// Set the idle fetch queue so inbound misses can be queued for background download.
-    pub fn set_idle_queue(&mut self, q: Arc<std::sync::Mutex<std::collections::VecDeque<TileRequest>>>) {
+    pub fn set_idle_queue(
+        &mut self,
+        q: Arc<std::sync::Mutex<std::collections::VecDeque<TileRequest>>>,
+    ) {
         self.idle_queue = Some(q);
     }
 
@@ -474,12 +434,12 @@ impl NetworkNode {
             }
         }
     }
-    
+
     /// Build the libp2p Swarm with all protocols configured
     async fn build_swarm(identity: Identity) -> Result<Swarm<MetaverseBehaviour>> {
         let local_peer_id = identity.peer_id().clone();
         let keypair = identity.to_libp2p_keypair();
-        
+
         // Build Swarm with multi-transport support for universal connectivity
         // TCP + QUIC + WebSocket = works on open networks, CGNAT, VPNs, firewalls
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
@@ -512,54 +472,54 @@ impl NetworkNode {
                 let kad_store = MemoryStore::new(local_peer_id);
                 let mut kad_config = kad::Config::default();
                 kad_config.set_query_timeout(Duration::from_secs(5 * 60));
-                let mut kademlia = kad::Behaviour::with_config(
-                    local_peer_id,
-                    kad_store,
-                    kad_config,
-                );
+                let mut kademlia =
+                    kad::Behaviour::with_config(local_peer_id, kad_store, kad_config);
                 // Server mode: advertise our addresses (including circuit addresses) to the DHT
                 // This is how other peers find us when we're behind CGNAT/VPN/Starlink
                 kademlia.set_mode(Some(kad::Mode::Server));
-                
+
                 // Configure Gossipsub
                 let gossipsub_config = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_secs(1))
                     .validation_mode(ValidationMode::Strict)
                     .max_transmit_size(1024 * 1024) // 1 MB max message size (for state sync)
                     .flood_publish(true) // Send to all peers when mesh is small (< D peers)
-                    .mesh_n_low(1)       // Allow mesh with just 1 peer
-                    .mesh_n(2)           // Target mesh size of 2
-                    .mesh_n_high(4)      // Max mesh size before pruning
+                    .mesh_n_low(1) // Allow mesh with just 1 peer
+                    .mesh_n(2) // Target mesh size of 2
+                    .mesh_n_high(4) // Max mesh size before pruning
                     .message_id_fn(|msg| {
-                        use sha2::{Sha256, Digest};
+                        use sha2::{Digest, Sha256};
                         let mut hasher = Sha256::new();
                         hasher.update(&msg.data);
-                        hasher.update(msg.source.as_ref().map(|p| p.to_bytes()).unwrap_or_default().as_slice());
+                        hasher.update(
+                            msg.source
+                                .as_ref()
+                                .map(|p| p.to_bytes())
+                                .unwrap_or_default()
+                                .as_slice(),
+                        );
                         hasher.update(&msg.sequence_number.unwrap_or(0).to_le_bytes());
                         gossipsub::MessageId::from(hasher.finalize().to_vec())
                     })
                     .build()
                     .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-                
+
                 let gossipsub = gossipsub::Behaviour::new(
                     MessageAuthenticity::Signed(keypair.clone()),
                     gossipsub_config,
-                ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-                
+                )
+                .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
+
                 // Configure mDNS for local network discovery
-                let mdns = mdns::tokio::Behaviour::new(
-                    mdns::Config::default(),
-                    local_peer_id,
-                ).map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-                
+                let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)
+                    .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
+
                 // Configure Identify protocol
-                let identify = identify::Behaviour::new(
-                    identify::Config::new(
-                        "/metaverse/1.0.0".to_string(),
-                        keypair.public(),
-                    )
-                );
-                
+                let identify = identify::Behaviour::new(identify::Config::new(
+                    "/metaverse/1.0.0".to_string(),
+                    keypair.public(),
+                ));
+
                 // Configure AutoNAT - detect our own NAT status
                 let autonat = autonat::Behaviour::new(
                     local_peer_id,
@@ -577,7 +537,7 @@ impl NetworkNode {
                         ..Default::default()
                     },
                 );
-                
+
                 // Every node in a P2P network can relay for others — conservative limits for
                 // non-dedicated nodes so they don't become overloaded.
                 let relay_server_config = relay::Config {
@@ -590,7 +550,7 @@ impl NetworkNode {
                     ..Default::default()
                 };
                 let relay_server = relay::Behaviour::new(local_peer_id, relay_server_config);
-                
+
                 // DCUtR for hole punching — attempts direct connection upgrade after
                 // meeting via relay. Falls back gracefully on CGNAT/strict NAT.
                 let dcutr = dcutr::Behaviour::new(local_peer_id);
@@ -603,14 +563,17 @@ impl NetworkNode {
                     ping: ping::Behaviour::new(
                         ping::Config::new()
                             .with_interval(Duration::from_secs(5))
-                            .with_timeout(Duration::from_secs(20))
+                            .with_timeout(Duration::from_secs(20)),
                     ),
                     relay_client: relay_behaviour,
                     relay_server,
                     autonat,
                     dcutr,
                     tile_rr: request_response::Behaviour::new(
-                        [(libp2p::StreamProtocol::new(TILE_PROTOCOL), ProtocolSupport::Full)],
+                        [(
+                            libp2p::StreamProtocol::new(TILE_PROTOCOL),
+                            ProtocolSupport::Full,
+                        )],
                         request_response::Config::default(),
                     ),
                 })
@@ -618,31 +581,38 @@ impl NetworkNode {
             .map_err(|e| NetworkError::SwarmBuildError(format!("{:?}", e)))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
             .build();
-        
+
         Ok(swarm)
     }
-    
+
     /// Start listening on the given multiaddr
     ///
     /// Example: "/ip4/0.0.0.0/tcp/0" to listen on random port
     pub fn listen_on(&mut self, addr: &str) -> Result<()> {
-        let multiaddr: Multiaddr = addr.parse()
+        let multiaddr: Multiaddr = addr
+            .parse()
             .map_err(|e| NetworkError::MultiaddrParseError(format!("{}", e)))?;
-        
-        self.swarm.listen_on(multiaddr)
-            .map_err(|e| NetworkError::ListenError(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
-        
+
+        self.swarm.listen_on(multiaddr).map_err(|e| {
+            NetworkError::ListenError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+
         Ok(())
     }
-    
+
     /// Dial a peer at the given multiaddr
     pub fn dial(&mut self, addr: &str) -> Result<()> {
-        let multiaddr: Multiaddr = addr.parse()
+        let multiaddr: Multiaddr = addr
+            .parse()
             .map_err(|e| NetworkError::MultiaddrParseError(format!("{}", e)))?;
-        
-        self.swarm.dial(multiaddr)
+
+        self.swarm
+            .dial(multiaddr)
             .map_err(|e| NetworkError::SwarmBuildError(e.to_string()))?;
-        
+
         Ok(())
     }
 
@@ -663,7 +633,10 @@ impl NetworkNode {
     /// Call this once after `listen_on` to join the network.
     pub async fn connect_to_bootstrap(&mut self) {
         let nodes = crate::bootstrap::resolve_bootstrap_nodes().await;
-        println!("[bootstrap] Dialing {} node(s) from bootstrap file", nodes.len());
+        println!(
+            "[bootstrap] Dialing {} node(s) from bootstrap file",
+            nodes.len()
+        );
         for addr in &nodes {
             if let Ok(ma) = addr.parse::<Multiaddr>() {
                 // Pre-seed relay_nodes with the peer ID from the address (for the common case
@@ -674,7 +647,8 @@ impl NetworkNode {
                 // Dial WITHOUT the /p2p/<peer-id> suffix so the connection succeeds even if
                 // the server regenerated its key (peer ID changed). Identify will reveal the
                 // actual peer ID and is_dedicated_relay checks protocol strings, not peer ID.
-                let base_addr: Multiaddr = ma.iter()
+                let base_addr: Multiaddr = ma
+                    .iter()
                     .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                     .collect();
                 match self.swarm.dial(base_addr.clone()) {
@@ -690,12 +664,19 @@ impl NetworkNode {
         // Re-register circuit relay for every currently connected relay node that doesn't
         // already have a circuit registered. Handles the case where the relay TCP connection
         // stayed alive but the circuit reservation expired.
-        let relay_pairs: Vec<(PeerId, Multiaddr)> = self.relay_addrs.iter()
-            .filter(|(p, _)| self.connected_peers.contains(*p) && !self.circuit_registered.contains(*p))
+        let relay_pairs: Vec<(PeerId, Multiaddr)> = self
+            .relay_addrs
+            .iter()
+            .filter(|(p, _)| {
+                self.connected_peers.contains(*p) && !self.circuit_registered.contains(*p)
+            })
             .map(|(p, a)| (*p, a.clone()))
             .collect();
         for (relay_peer_id, relay_base) in relay_pairs {
-            println!("[relay] Re-registering circuit with connected relay {}", relay_peer_id);
+            println!(
+                "[relay] Re-registering circuit with connected relay {}",
+                relay_peer_id
+            );
             self.listen_via_relay(relay_peer_id, relay_base.clone());
             self.circuit_registered.insert(relay_peer_id);
         }
@@ -708,7 +689,8 @@ impl NetworkNode {
 
     /// Redial any known game peers we're no longer connected to.
     pub fn redial_known_game_peers(&mut self) {
-        let to_dial: Vec<(PeerId, Multiaddr)> = self.known_game_peers
+        let to_dial: Vec<(PeerId, Multiaddr)> = self
+            .known_game_peers
             .iter()
             .filter(|(peer, _)| !self.connected_peers.contains(*peer))
             .map(|(p, a)| (*p, a.clone()))
@@ -721,10 +703,13 @@ impl NetworkNode {
                 addr.with(libp2p::multiaddr::Protocol::P2p(peer_id))
             } else {
                 // Try via each known relay
-                let relay_circuit: Option<Multiaddr> = self.relay_addrs.iter()
+                let relay_circuit: Option<Multiaddr> = self
+                    .relay_addrs
+                    .iter()
                     .find(|(rp, _)| self.connected_peers.contains(*rp))
                     .map(|(relay_peer_id, relay_base)| {
-                        relay_base.clone()
+                        relay_base
+                            .clone()
                             .with(libp2p::multiaddr::Protocol::P2p(*relay_peer_id))
                             .with(libp2p::multiaddr::Protocol::P2pCircuit)
                             .with(libp2p::multiaddr::Protocol::P2p(peer_id))
@@ -734,7 +719,10 @@ impl NetworkNode {
                     None => addr.with(libp2p::multiaddr::Protocol::P2p(peer_id)),
                 }
             };
-            println!("🔄 [Network] Redialing known peer {} via {}", peer_id, dial_addr);
+            println!(
+                "🔄 [Network] Redialing known peer {} via {}",
+                peer_id, dial_addr
+            );
             self.swarm.dial(dial_addr).ok();
         }
     }
@@ -752,7 +740,6 @@ impl NetworkNode {
         }
     }
 
-    
     /// Subscribe to a topic
     ///
     /// After subscribing, messages published to this topic will trigger
@@ -761,48 +748,56 @@ impl NetworkNode {
         if self.subscribed_topics.contains_key(topic_name) {
             return Ok(()); // Already subscribed
         }
-        
+
         let topic = IdentTopic::new(topic_name);
-        
-        self.swarm.behaviour_mut().gossipsub.subscribe(&topic)
+
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&topic)
             .map_err(|e| NetworkError::PublishError(e.to_string()))?;
-        
+
         self.subscribed_topics.insert(topic_name.to_string(), topic);
         self.event_queue.push(NetworkEvent::TopicSubscribed {
             topic: topic_name.to_string(),
         });
-        
+
         Ok(())
     }
-    
+
     /// Unsubscribe from a topic
     pub fn unsubscribe(&mut self, topic_name: &str) -> Result<()> {
         if let Some(topic) = self.subscribed_topics.remove(topic_name) {
             // unsubscribe() returns bool (true if was subscribed), not Result
             let _ = self.swarm.behaviour_mut().gossipsub.unsubscribe(&topic);
-            
+
             self.event_queue.push(NetworkEvent::TopicUnsubscribed {
                 topic: topic_name.to_string(),
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Publish data to a topic
     ///
     /// Returns error if not subscribed to the topic.
     pub fn publish(&mut self, topic_name: &str, data: Vec<u8>) -> Result<()> {
-        let topic = self.subscribed_topics.get(topic_name)
+        let topic = self
+            .subscribed_topics
+            .get(topic_name)
             .ok_or_else(|| NetworkError::TopicNotSubscribed(topic_name.to_string()))?
             .clone();
-        
-        self.swarm.behaviour_mut().gossipsub.publish(topic, data)
+
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .publish(topic, data)
             .map_err(|e| NetworkError::PublishError(e.to_string()))?;
-        
+
         Ok(())
     }
-    
+
     /// Poll for network events (non-blocking)
     ///
     /// Returns Some(event) if an event is available, None otherwise.
@@ -812,7 +807,7 @@ impl NetworkNode {
         if !self.event_queue.is_empty() {
             return Some(self.event_queue.remove(0));
         }
-        
+
         // Poll the swarm for new events (non-blocking)
         // Use pollster to run the async poll in a blocking context
         pollster::block_on(async {
@@ -838,9 +833,12 @@ impl NetworkNode {
             }
         }
     }
-    
+
     /// Handle a swarm event and convert to NetworkEvent
-    pub(crate) fn handle_swarm_event(&mut self, event: SwarmEvent<MetaverseBehaviourEvent>) -> Option<NetworkEvent> {
+    pub(crate) fn handle_swarm_event(
+        &mut self,
+        event: SwarmEvent<MetaverseBehaviourEvent>,
+    ) -> Option<NetworkEvent> {
         match event {
             // Gossipsub message received
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Gossipsub(
@@ -848,28 +846,35 @@ impl NetworkNode {
                     propagation_source: peer_id,
                     message,
                     ..
-                }
+                },
             )) => {
                 let topic = message.topic.to_string();
                 let data = message.data;
-                
-                println!("🔵 [NETWORK] Gossipsub message received! topic={}, from={}, size={} bytes", 
-                    topic, peer_id, data.len());
-                
+
+                println!(
+                    "🔵 [NETWORK] Gossipsub message received! topic={}, from={}, size={} bytes",
+                    topic,
+                    peer_id,
+                    data.len()
+                );
+
                 Some(NetworkEvent::Message {
                     peer_id,
                     topic,
                     data,
                 })
             }
-            
+
             // mDNS discovered a peer
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Mdns(
-                mdns::Event::Discovered(peers)
-            )) => {
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Mdns(mdns::Event::Discovered(
+                peers,
+            ))) => {
                 for (peer_id, multiaddr) in peers {
                     // Add to Kademlia DHT
-                    self.swarm.behaviour_mut().kademlia.add_address(&peer_id, multiaddr.clone());
+                    self.swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .add_address(&peer_id, multiaddr.clone());
 
                     // Dial immediately — mDNS gives us a direct LAN address, use it
                     if !self.connected_peers.contains(&peer_id) {
@@ -881,15 +886,13 @@ impl NetworkNode {
                         peer_id: peer_id.clone(),
                     });
                 }
-                
+
                 // Return first discovery event
                 self.event_queue.pop()
             }
-            
+
             // mDNS expired a peer
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Mdns(
-                mdns::Event::Expired(peers)
-            )) => {
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
                 for (peer_id, _) in peers {
                     if self.connected_peers.remove(&peer_id) {
                         return Some(NetworkEvent::PeerDisconnected { peer_id });
@@ -897,12 +900,10 @@ impl NetworkNode {
                 }
                 None
             }
-            
+
             // Connection established
             SwarmEvent::ConnectionEstablished {
-                peer_id,
-                endpoint,
-                ..
+                peer_id, endpoint, ..
             } => {
                 self.connected_peers.insert(peer_id);
                 let remote_addr = endpoint.get_remote_address().clone();
@@ -911,7 +912,8 @@ impl NetworkNode {
                 // This makes us reachable through the relay - works through CGNAT/VPN/Starlink
                 if self.relay_nodes.contains(&peer_id) {
                     // Strip the peer ID suffix from the address for the circuit listen
-                    let relay_base: Multiaddr = remote_addr.iter()
+                    let relay_base: Multiaddr = remote_addr
+                        .iter()
                         .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
                         .collect();
                     // Store for later circuit registration (listen_via_relay called at Identify::Received)
@@ -929,7 +931,7 @@ impl NetworkNode {
                     address: remote_addr,
                 })
             }
-            
+
             // Connection closed — only remove peer when ALL connections to them are gone.
             // libp2p opens multiple connections per peer (QUIC + TCP + circuit).
             // Removing on any single close causes spurious "Peers: 0" while still connected.
@@ -950,7 +952,7 @@ impl NetworkNode {
                     None // Still have other connections to this peer
                 }
             }
-            
+
             // New listen address
             SwarmEvent::NewListenAddr { address, .. } => {
                 // If we got a circuit address, re-advertise to DHT so other peers find us
@@ -959,15 +961,18 @@ impl NetworkNode {
                 }
                 Some(NetworkEvent::ListeningOn { address })
             }
-            
+
             // Identify protocol received peer info
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Identify(
-                identify::Event::Received { peer_id, info, .. }
+                identify::Event::Received { peer_id, info, .. },
             )) => {
                 // Add peer's listen addresses to Kademlia — skip virtual/loopback addrs
                 for addr in &info.listen_addrs {
                     if is_routable_addr(addr) {
-                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr.clone());
                     }
                 }
                 // Only register circuit relay through actual dedicated relay/server nodes,
@@ -986,13 +991,17 @@ impl NetworkNode {
                     if !self.circuit_registered.contains(&peer_id) {
                         // Prefer a routable address from identify; fall back to what we saw
                         // at connection time (covers servers that only advertise private IPs)
-                        let relay_base = info.listen_addrs.iter()
+                        let relay_base = info
+                            .listen_addrs
+                            .iter()
                             .find(|a| is_routable_addr(a))
                             .or_else(|| self.relay_addrs.get(&peer_id))
                             .or_else(|| self.known_game_peers.get(&peer_id))
-                            .map(|a| a.iter()
-                                .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
-                                .collect::<Multiaddr>());
+                            .map(|a| {
+                                a.iter()
+                                    .filter(|p| !matches!(p, libp2p::multiaddr::Protocol::P2p(_)))
+                                    .collect::<Multiaddr>()
+                            });
                         if let Some(base) = relay_base {
                             println!("[relay] Registering circuit via {}: {}", peer_id, base);
                             self.relay_addrs.insert(peer_id, base.clone());
@@ -1003,58 +1012,91 @@ impl NetworkNode {
                 }
                 None
             }
-            
+
             // Relay client events - NAT traversal coordination
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayClient(event)) => {
-                match event {
-                    relay::client::Event::ReservationReqAccepted { relay_peer_id, renewal, .. } => {
-                        println!("✅ [RELAY] Reservation {} by relay: {}", 
-                            if renewal { "renewed" } else { "accepted" }, relay_peer_id);
-                        None
-                    }
-                    relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
-                        println!("🔄 [RELAY] Circuit established via {}", relay_peer_id);
-                        None
-                    }
-                    relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
-                        println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
-                        None
-                    }
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayClient(event)) => match event {
+                relay::client::Event::ReservationReqAccepted {
+                    relay_peer_id,
+                    renewal,
+                    ..
+                } => {
+                    println!(
+                        "✅ [RELAY] Reservation {} by relay: {}",
+                        if renewal { "renewed" } else { "accepted" },
+                        relay_peer_id
+                    );
+                    None
                 }
-            }
-            
+                relay::client::Event::OutboundCircuitEstablished { relay_peer_id, .. } => {
+                    println!("🔄 [RELAY] Circuit established via {}", relay_peer_id);
+                    None
+                }
+                relay::client::Event::InboundCircuitEstablished { src_peer_id, .. } => {
+                    println!("📞 [RELAY] Inbound circuit from {}", src_peer_id);
+                    None
+                }
+            },
+
             // Relay server events - this node acting as relay for other peers
-            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayServer(event)) => {
-                match event {
-                    relay::Event::ReservationReqAccepted { src_peer_id, renewed, .. } => {
-                        println!("✅ [RELAY SERVER] Reservation {} for peer: {}", 
-                            if renewed { "renewed" } else { "accepted" }, src_peer_id);
-                        None
-                    }
-                    relay::Event::ReservationTimedOut { src_peer_id } => {
-                        println!("⏱️  [RELAY SERVER] Reservation timed out for: {}", src_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitReqAccepted { src_peer_id, dst_peer_id } => {
-                        println!("🔄 [RELAY SERVER] Circuit: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitReqDenied { src_peer_id, dst_peer_id, .. } => {
-                        println!("❌ [RELAY SERVER] Circuit denied: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::CircuitClosed { src_peer_id, dst_peer_id, .. } => {
-                        println!("🔚 [RELAY SERVER] Circuit closed: {} → {}", src_peer_id, dst_peer_id);
-                        None
-                    }
-                    relay::Event::ReservationReqDenied { src_peer_id, .. } => {
-                        println!("❌ [RELAY SERVER] Reservation denied for: {}", src_peer_id);
-                        None
-                    }
-                    _ => None,
+            SwarmEvent::Behaviour(MetaverseBehaviourEvent::RelayServer(event)) => match event {
+                relay::Event::ReservationReqAccepted {
+                    src_peer_id,
+                    renewed,
+                    ..
+                } => {
+                    println!(
+                        "✅ [RELAY SERVER] Reservation {} for peer: {}",
+                        if renewed { "renewed" } else { "accepted" },
+                        src_peer_id
+                    );
+                    None
                 }
-            }
-            
+                relay::Event::ReservationTimedOut { src_peer_id } => {
+                    println!(
+                        "⏱️  [RELAY SERVER] Reservation timed out for: {}",
+                        src_peer_id
+                    );
+                    None
+                }
+                relay::Event::CircuitReqAccepted {
+                    src_peer_id,
+                    dst_peer_id,
+                } => {
+                    println!(
+                        "🔄 [RELAY SERVER] Circuit: {} → {}",
+                        src_peer_id, dst_peer_id
+                    );
+                    None
+                }
+                relay::Event::CircuitReqDenied {
+                    src_peer_id,
+                    dst_peer_id,
+                    ..
+                } => {
+                    println!(
+                        "❌ [RELAY SERVER] Circuit denied: {} → {}",
+                        src_peer_id, dst_peer_id
+                    );
+                    None
+                }
+                relay::Event::CircuitClosed {
+                    src_peer_id,
+                    dst_peer_id,
+                    ..
+                } => {
+                    println!(
+                        "🔚 [RELAY SERVER] Circuit closed: {} → {}",
+                        src_peer_id, dst_peer_id
+                    );
+                    None
+                }
+                relay::Event::ReservationReqDenied { src_peer_id, .. } => {
+                    println!("❌ [RELAY SERVER] Reservation denied for: {}", src_peer_id);
+                    None
+                }
+                _ => None,
+            },
+
             // AutoNAT events - Detect our NAT status
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Autonat(event)) => {
                 match event {
@@ -1074,12 +1116,12 @@ impl NetworkNode {
                             }
                             _ => return None,
                         };
-                        
+
                         println!("🔍 [AUTONAT] NAT status: {} → {}", old_str, new_str);
                         if let Some(ref addr) = external_addr {
                             println!("   External address: {}", addr);
                         }
-                        
+
                         Some(NetworkEvent::NatStatusChanged {
                             old_status: old_str.to_string(),
                             new_status: new_str.to_string(),
@@ -1096,13 +1138,27 @@ impl NetworkNode {
             // DCUtR — direct connection upgrade through relay (hole punching)
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Dcutr(event)) => {
                 match event {
-                    dcutr::Event { remote_peer_id, result: Ok(_) } => {
-                        println!("🕳️ [DCUtR] Direct connection established with {}", remote_peer_id);
-                        Some(NetworkEvent::DirectConnectionUpgraded { peer_id: remote_peer_id })
+                    dcutr::Event {
+                        remote_peer_id,
+                        result: Ok(_),
+                    } => {
+                        println!(
+                            "🕳️ [DCUtR] Direct connection established with {}",
+                            remote_peer_id
+                        );
+                        Some(NetworkEvent::DirectConnectionUpgraded {
+                            peer_id: remote_peer_id,
+                        })
                     }
-                    dcutr::Event { remote_peer_id, result: Err(e) } => {
+                    dcutr::Event {
+                        remote_peer_id,
+                        result: Err(e),
+                    } => {
                         // Hole punch failed — staying on relay, this is normal for strict NAT
-                        println!("🕳️ [DCUtR] Hole punch failed with {} ({}), staying on relay", remote_peer_id, e);
+                        println!(
+                            "🕳️ [DCUtR] Hole punch failed with {} ({}), staying on relay",
+                            remote_peer_id, e
+                        );
                         None
                     }
                 }
@@ -1111,36 +1167,50 @@ impl NetworkNode {
             // Kademlia DHT events - peer discovery via DHT
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::Kademlia(event)) => {
                 match event {
-                    kad::Event::RoutingUpdated { peer, addresses, .. } => {
+                    kad::Event::RoutingUpdated {
+                        peer, addresses, ..
+                    } => {
                         // New peer found in DHT - dial via circuit address preferentially
                         if !self.connected_peers.contains(&peer) {
                             let all_addrs: Vec<_> = addresses.iter().collect();
                             // Prefer circuit address (works through CGNAT/VPN/Starlink)
-                            let circuit_addr = all_addrs.iter()
+                            let circuit_addr = all_addrs
+                                .iter()
                                 .find(|a| a.to_string().contains("p2p-circuit"));
                             if let Some(addr) = circuit_addr {
-                                let dial_addr = (*addr).clone()
-                                    .with(libp2p::multiaddr::Protocol::P2p(peer));
-                                println!("🔍 [DHT] Found peer {}, dialing via circuit: {}", peer, dial_addr);
+                                let dial_addr =
+                                    (*addr).clone().with(libp2p::multiaddr::Protocol::P2p(peer));
+                                println!(
+                                    "🔍 [DHT] Found peer {}, dialing via circuit: {}",
+                                    peer, dial_addr
+                                );
                                 self.swarm.dial(dial_addr).ok();
                             } else {
                                 // No circuit address yet — try dialing via all known relays
                                 // The peer may not have announced its circuit addr to DHT yet
                                 let mut dialed_via_relay = false;
                                 for (relay_peer, relay_addr) in &self.relay_addrs {
-                                    let circuit = relay_addr.clone()
+                                    let circuit = relay_addr
+                                        .clone()
                                         .with(libp2p::multiaddr::Protocol::P2pCircuit)
                                         .with(libp2p::multiaddr::Protocol::P2p(peer));
-                                    println!("🔍 [DHT] Found peer {} (no circuit addr yet), trying via relay {}", peer, relay_peer);
+                                    println!(
+                                        "🔍 [DHT] Found peer {} (no circuit addr yet), trying via relay {}",
+                                        peer, relay_peer
+                                    );
                                     self.swarm.dial(circuit).ok();
                                     dialed_via_relay = true;
                                 }
                                 if !dialed_via_relay {
                                     // No relay known, try direct (last resort)
                                     if let Some(addr) = all_addrs.first() {
-                                        let dial_addr = (*addr).clone()
+                                        let dial_addr = (*addr)
+                                            .clone()
                                             .with(libp2p::multiaddr::Protocol::P2p(peer));
-                                        println!("🔍 [DHT] Found peer {}, dialing direct: {}", peer, dial_addr);
+                                        println!(
+                                            "🔍 [DHT] Found peer {}, dialing direct: {}",
+                                            peer, dial_addr
+                                        );
                                         self.swarm.dial(dial_addr).ok();
                                     }
                                 }
@@ -1149,7 +1219,8 @@ impl NetworkNode {
                         None
                     }
                     kad::Event::OutboundQueryProgressed {
-                        result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk { num_remaining, .. })),
+                        result:
+                            kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk { num_remaining, .. })),
                         ..
                     } => {
                         if num_remaining == 0 {
@@ -1159,12 +1230,16 @@ impl NetworkNode {
                     }
                     // DHT record found — emit event so multiplayer can update key registry
                     kad::Event::OutboundQueryProgressed {
-                        result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(
-                            kad::PeerRecord { record, .. }
-                        ))),
+                        result:
+                            kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(
+                                kad::PeerRecord { record, .. },
+                            ))),
                         ..
                     } => {
-                        println!("🔑 [DHT] Record found for key ({} bytes)", record.value.len());
+                        println!(
+                            "🔑 [DHT] Record found for key ({} bytes)",
+                            record.value.len()
+                        );
                         Some(NetworkEvent::DhtRecordFound {
                             key: record.key.to_vec(),
                             value: record.value,
@@ -1192,9 +1267,12 @@ impl NetworkNode {
                     }
                     // Providers found for a content key
                     kad::Event::OutboundQueryProgressed {
-                        result: kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
-                            key, providers, ..
-                        })),
+                        result:
+                            kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                                key,
+                                providers,
+                                ..
+                            })),
                         ..
                     } => {
                         if !providers.is_empty() {
@@ -1214,9 +1292,13 @@ impl NetworkNode {
             // Tile request-response: response received
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
                 request_response::Event::Message {
-                    message: request_response::Message::Response { request_id, response },
+                    message:
+                        request_response::Message::Response {
+                            request_id,
+                            response,
+                        },
                     ..
-                }
+                },
             )) => {
                 if let Some(tx) = self.pending_tile_requests.remove(&request_id) {
                     let _ = tx.send(response);
@@ -1226,7 +1308,7 @@ impl NetworkNode {
 
             // Tile request-response: outbound request failed
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
-                request_response::Event::OutboundFailure { request_id, .. }
+                request_response::Event::OutboundFailure { request_id, .. },
             )) => {
                 if let Some(tx) = self.pending_tile_requests.remove(&request_id) {
                     let _ = tx.send(TileResponse::NotFound);
@@ -1237,9 +1319,12 @@ impl NetworkNode {
             // Tile request-response: inbound request — serve from local cache if available
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(
                 request_response::Event::Message {
-                    message: request_response::Message::Request { request, channel, .. },
+                    message:
+                        request_response::Message::Request {
+                            request, channel, ..
+                        },
                     ..
-                }
+                },
             )) => {
                 let response = if let Some(ref root) = self.tile_cache_root {
                     serve_tile_locally(&request, root)
@@ -1256,7 +1341,11 @@ impl NetworkNode {
                         }
                     }
                 }
-                let _ = self.swarm.behaviour_mut().tile_rr.send_response(channel, response);
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .tile_rr
+                    .send_response(channel, response);
                 None
             }
 
@@ -1264,7 +1353,9 @@ impl NetworkNode {
             SwarmEvent::Behaviour(MetaverseBehaviourEvent::TileRr(_)) => None,
 
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                let pid_str = peer_id.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+                let pid_str = peer_id
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "?".to_string());
                 eprintln!("✗  [NET] Dial failed {} — {}", pid_str, error);
                 None
             }
@@ -1282,7 +1373,7 @@ impl NetworkNode {
     pub fn local_peer_id(&self) -> &PeerId {
         &self.local_peer_id
     }
-    
+
     /// Get number of connected peers
     pub fn connected_peer_count(&self) -> usize {
         self.connected_peers.len()
@@ -1290,19 +1381,22 @@ impl NetworkNode {
 
     /// Count only non-relay game peers (relay nodes don't count as "connected players")
     pub fn game_peer_count(&self) -> usize {
-        self.connected_peers.iter().filter(|p| !self.relay_nodes.contains(*p)).count()
+        self.connected_peers
+            .iter()
+            .filter(|p| !self.relay_nodes.contains(*p))
+            .count()
     }
-    
+
     /// Get list of connected peers
     pub fn connected_peers(&self) -> Vec<PeerId> {
         self.connected_peers.iter().cloned().collect()
     }
-    
+
     /// Check if subscribed to a topic
     pub fn is_subscribed(&self, topic_name: &str) -> bool {
         self.subscribed_topics.contains_key(topic_name)
     }
-    
+
     /// Get list of subscribed topics
     pub fn subscribed_topics(&self) -> Vec<String> {
         self.subscribed_topics.keys().cloned().collect()
@@ -1310,14 +1404,19 @@ impl NetworkNode {
 
     /// Store a value in the Kademlia DHT under the given key.
     pub fn put_dht_record(&mut self, key: Vec<u8>, value: Vec<u8>) {
-        use kad::{Record, RecordKey, Quorum};
+        use kad::{Quorum, Record, RecordKey};
         let record = Record {
             key: RecordKey::new(&key),
             value,
             publisher: Some(self.local_peer_id),
             expires: None,
         };
-        if let Err(e) = self.swarm.behaviour_mut().kademlia.put_record(record, Quorum::One) {
+        if let Err(e) = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .put_record(record, Quorum::One)
+        {
             eprintln!("⚠️  [DHT] put_record failed: {:?}", e);
         }
     }
@@ -1325,7 +1424,12 @@ impl NetworkNode {
     /// Advertise ourselves as a provider for the given DHT key.
     pub fn start_providing_key(&mut self, key: Vec<u8>) {
         use kad::RecordKey;
-        if let Err(e) = self.swarm.behaviour_mut().kademlia.start_providing(RecordKey::new(&key)) {
+        if let Err(e) = self
+            .swarm
+            .behaviour_mut()
+            .kademlia
+            .start_providing(RecordKey::new(&key))
+        {
             eprintln!("⚠️  [DHT] start_providing failed: {:?}", e);
         }
     }
@@ -1333,20 +1437,35 @@ impl NetworkNode {
     /// Request a value from the DHT by key. Result comes back as `NetworkEvent::DhtRecordFound`.
     pub fn get_dht_record(&mut self, key: Vec<u8>) {
         use kad::RecordKey;
-        self.swarm.behaviour_mut().kademlia.get_record(RecordKey::new(&key));
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .get_record(RecordKey::new(&key));
     }
 
     /// Find peers that are providing a content key.
     /// Result comes back as `NetworkEvent::ChunkProvidersFound`.
     pub fn get_providers(&mut self, key: Vec<u8>) {
         use kad::RecordKey;
-        self.swarm.behaviour_mut().kademlia.get_providers(RecordKey::new(&key));
+        self.swarm
+            .behaviour_mut()
+            .kademlia
+            .get_providers(RecordKey::new(&key));
     }
 
     /// Send a tile request to a specific peer.
     /// The response (or failure) will be delivered via `response_tx`.
-    pub fn request_tile(&mut self, peer_id: PeerId, request: TileRequest, response_tx: crossbeam::channel::Sender<TileResponse>) {
-        let id = self.swarm.behaviour_mut().tile_rr.send_request(&peer_id, request);
+    pub fn request_tile(
+        &mut self,
+        peer_id: PeerId,
+        request: TileRequest,
+        response_tx: crossbeam::channel::Sender<TileResponse>,
+    ) {
+        let id = self
+            .swarm
+            .behaviour_mut()
+            .tile_rr
+            .send_request(&peer_id, request);
         self.pending_tile_requests.insert(id, response_tx);
     }
 }
@@ -1367,16 +1486,41 @@ fn serve_tile_locally(request: &TileRequest, world_data_dir: &std::path::Path) -
         TileRequest::ElevationTile { lat, lon } => {
             let lat_prefix = if *lat >= 0 { 'n' } else { 's' };
             let lon_prefix = if *lon >= 0 { 'e' } else { 'w' };
-            let lat_dir = if *lat >= 0 { format!("N{:02}", lat) } else { format!("S{:02}", lat.unsigned_abs()) };
-            let lon_dir = if *lon >= 0 { format!("E{:03}", lon) } else { format!("W{:03}", lon.unsigned_abs()) };
-            let tile_name = format!("srtm_{}{:02}_{}{:03}.tif",
-                lat_prefix, lat.unsigned_abs(), lon_prefix, lon.unsigned_abs());
-            let path = world_data_dir.join("elevation_cache").join(&lat_dir).join(&lon_dir).join(&tile_name);
+            let lat_dir = if *lat >= 0 {
+                format!("N{:02}", lat)
+            } else {
+                format!("S{:02}", lat.unsigned_abs())
+            };
+            let lon_dir = if *lon >= 0 {
+                format!("E{:03}", lon)
+            } else {
+                format!("W{:03}", lon.unsigned_abs())
+            };
+            let tile_name = format!(
+                "srtm_{}{:02}_{}{:03}.tif",
+                lat_prefix,
+                lat.unsigned_abs(),
+                lon_prefix,
+                lon.unsigned_abs()
+            );
+            let path = world_data_dir
+                .join("elevation_cache")
+                .join(&lat_dir)
+                .join(&lon_dir)
+                .join(&tile_name);
             // Also check HGT format (Skadi downloads)
-            let hgt_name = format!("{}{:02}{}{:03}.hgt",
-                if *lat >= 0 { 'N' } else { 'S' }, lat.unsigned_abs(),
-                if *lon >= 0 { 'E' } else { 'W' }, lon.unsigned_abs());
-            let hgt_path = world_data_dir.join("elevation_cache").join(&lat_dir).join(&lon_dir).join(&hgt_name);
+            let hgt_name = format!(
+                "{}{:02}{}{:03}.hgt",
+                if *lat >= 0 { 'N' } else { 'S' },
+                lat.unsigned_abs(),
+                if *lon >= 0 { 'E' } else { 'W' },
+                lon.unsigned_abs()
+            );
+            let hgt_path = world_data_dir
+                .join("elevation_cache")
+                .join(&lat_dir)
+                .join(&lon_dir)
+                .join(&hgt_name);
             if let Ok(bytes) = std::fs::read(&path) {
                 TileResponse::Found(bytes)
             } else if let Ok(bytes) = std::fs::read(&hgt_path) {
@@ -1394,7 +1538,10 @@ impl std::fmt::Debug for NetworkNode {
         f.debug_struct("NetworkNode")
             .field("local_peer_id", &self.local_peer_id)
             .field("connected_peers", &self.connected_peers.len())
-            .field("subscribed_topics", &self.subscribed_topics.keys().collect::<Vec<_>>())
+            .field(
+                "subscribed_topics",
+                &self.subscribed_topics.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -1403,37 +1550,37 @@ impl std::fmt::Debug for NetworkNode {
 mod tests {
     use super::*;
     use crate::identity::Identity;
-    
+
     #[test]
     fn test_network_node_creation() {
         let identity = Identity::generate();
         let network = NetworkNode::new(identity);
         assert!(network.is_ok());
     }
-    
+
     #[test]
     fn test_subscribe_unsubscribe() {
         let identity = Identity::generate();
         let mut network = NetworkNode::new(identity).unwrap();
-        
+
         // Subscribe to topic
         network.subscribe("test-topic").unwrap();
         assert!(network.is_subscribed("test-topic"));
-        
+
         // Unsubscribe
         network.unsubscribe("test-topic").unwrap();
         assert!(!network.is_subscribed("test-topic"));
     }
-    
+
     #[test]
     fn test_publish_requires_subscription() {
         let identity = Identity::generate();
         let mut network = NetworkNode::new(identity).unwrap();
-        
+
         // Publishing without subscription should fail
         let result = network.publish("test-topic", vec![1, 2, 3]);
         assert!(result.is_err());
-        
+
         // After subscribing, should work
         network.subscribe("test-topic").unwrap();
         let result = network.publish("test-topic", vec![1, 2, 3]);

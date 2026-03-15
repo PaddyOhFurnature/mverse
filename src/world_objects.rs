@@ -22,7 +22,34 @@
 //! 3. All clients nearby query `GetDhtRecord("world/chunk/{cx}/{cz}")` on area load.
 //! 4. Clients receive the record and render whatever object types they know about.
 
+use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+
+// Custom serde for [u8; 64] arrays
+mod serde_arrays {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bytes.serialize(serializer)
+    }
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Vec::deserialize(deserializer)?;
+        if bytes.len() != 64 {
+            return Err(serde::de::Error::custom(format!(
+                "Expected 64 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut array = [0u8; 64];
+        array.copy_from_slice(&bytes);
+        Ok(array)
+    }
+}
 
 // ── Chunk grid ────────────────────────────────────────────────────────────────
 
@@ -32,7 +59,10 @@ pub const CHUNK_GRID_M: f32 = 64.0;
 
 /// Convert a world X/Z position to chunk-index coordinates.
 pub fn chunk_coords_for_pos(x: f32, z: f32) -> (i32, i32) {
-    ((x / CHUNK_GRID_M).floor() as i32, (z / CHUNK_GRID_M).floor() as i32)
+    (
+        (x / CHUNK_GRID_M).floor() as i32,
+        (z / CHUNK_GRID_M).floor() as i32,
+    )
 }
 
 /// DHT key for the object list in a given chunk.
@@ -68,23 +98,23 @@ pub enum ObjectType {
 impl ObjectType {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Billboard  => "billboard",
-            Self::Terminal   => "terminal",
-            Self::Kiosk      => "kiosk",
-            Self::Portal     => "portal",
+            Self::Billboard => "billboard",
+            Self::Terminal => "terminal",
+            Self::Kiosk => "kiosk",
+            Self::Portal => "portal",
             Self::SpawnPoint => "spawn_point",
-            Self::Custom(s)  => s.as_str(),
+            Self::Custom(s) => s.as_str(),
         }
     }
 
     pub fn from_str(s: &str) -> Self {
         match s {
-            "billboard"   => Self::Billboard,
-            "terminal"    => Self::Terminal,
-            "kiosk"       => Self::Kiosk,
-            "portal"      => Self::Portal,
+            "billboard" => Self::Billboard,
+            "terminal" => Self::Terminal,
+            "kiosk" => Self::Kiosk,
+            "portal" => Self::Portal,
             "spawn_point" => Self::SpawnPoint,
-            other         => Self::Custom(other.to_string()),
+            other => Self::Custom(other.to_string()),
         }
     }
 }
@@ -125,7 +155,9 @@ pub struct PlacedObject {
     pub placed_at: u64,
 }
 
-fn default_scale() -> f32 { 1.0 }
+fn default_scale() -> f32 {
+    1.0
+}
 
 impl PlacedObject {
     /// World position as a `glam::Vec3`.
@@ -176,5 +208,108 @@ impl ChunkObjectList {
 
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         serde_json::from_slice(data).ok()
+    }
+}
+
+// ── DHT key helpers ───────────────────────────────────────────────────────────
+
+/// DHT key for the inference-status record of one chunk.
+/// Value: 8-byte little-endian Unix timestamp (ms) of when inference was last run.
+pub fn inference_status_key(cx: i32, cz: i32) -> Vec<u8> {
+    format!("world/inferred/{cx}/{cz}").into_bytes()
+}
+
+/// DHT key for the override list of one chunk.
+pub fn chunk_override_key(cx: i32, cz: i32) -> Vec<u8> {
+    format!("world/overrides/{cx}/{cz}").into_bytes()
+}
+
+// ── Object overrides ──────────────────────────────────────────────────────────
+
+/// What to do to an inferred object.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OverrideAction {
+    /// Reposition / reorient (local metres relative to the render origin).
+    Move { position: [f32; 3], rotation_y: f32 },
+    /// Swap to a different model type (e.g. replace a generic streetlight with a custom lamp).
+    Replace { new_type: String },
+    /// Change uniform scale.
+    Scale { scale: f32 },
+    /// Permanently hide this inferred object from the scene.
+    Remove,
+}
+
+/// A signed admin instruction that overrides one inferred [`PlacedObject`].
+///
+/// Stored in the DHT under [`chunk_override_key`] as part of a [`ChunkOverrideList`].
+/// Any client can verify the signature without a central server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObjectOverride {
+    /// Deterministic ID of the inferred object being overridden (e.g. `"inf_a1b2c3d4..."`).
+    pub target_id: String,
+    /// What to do.
+    pub action: OverrideAction,
+    /// Author peer ID (hex string).
+    pub author_peer: String,
+    /// Author's Ed25519 public key (32 bytes) — used to verify the signature.
+    pub public_key: [u8; 32],
+    /// Unix timestamp in milliseconds.
+    pub timestamp: u64,
+    /// Ed25519 signature over [`signable_bytes()`].
+    #[serde(with = "serde_arrays")]
+    pub signature: [u8; 64],
+}
+
+impl ObjectOverride {
+    /// Bytes covered by the signature.
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(self.target_id.as_bytes());
+        out.extend_from_slice(&bincode::serialize(&self.action).unwrap_or_default());
+        out.extend_from_slice(&self.timestamp.to_le_bytes());
+        out
+    }
+
+    pub fn sign(&mut self, key: &impl Signer<Signature>) {
+        self.signature = key.sign(&self.signable_bytes()).to_bytes();
+    }
+
+    pub fn verify(&self) -> bool {
+        let Ok(vk) = VerifyingKey::from_bytes(&self.public_key) else {
+            return false;
+        };
+        let sig = Signature::from_bytes(&self.signature);
+        vk.verify(&self.signable_bytes(), &sig).is_ok()
+    }
+}
+
+/// All admin overrides for one chunk cell — stored as a single DHT record.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ChunkOverrideList {
+    pub cx: i32,
+    pub cz: i32,
+    pub overrides: Vec<ObjectOverride>,
+}
+
+impl ChunkOverrideList {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap_or_default()
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        bincode::deserialize(data).ok()
+    }
+
+    /// Merge an incoming override — replaces any existing entry for the same target.
+    pub fn upsert(&mut self, ov: ObjectOverride) {
+        if let Some(existing) = self
+            .overrides
+            .iter_mut()
+            .find(|o| o.target_id == ov.target_id)
+        {
+            *existing = ov;
+        } else {
+            self.overrides.push(ov);
+        }
     }
 }

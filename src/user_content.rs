@@ -11,13 +11,13 @@
 //! - Scales to infinite world size
 //! - Foundation for DHT replication
 
+use crate::identity::KeyRecord;
 use crate::{
     chunk::ChunkId,
-    messages::{VoxelOperation, SignedOperation},
-    permissions::{action_to_class, check_record_permission, PermissionConfig, PermissionResult},
+    messages::{SignedOperation, VoxelOperation},
+    permissions::{PermissionConfig, PermissionResult, action_to_class, check_record_permission},
     voxel::VoxelCoord,
 };
-use crate::identity::{KeyRecord};
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -35,11 +35,14 @@ impl ParcelBounds {
     pub fn new(min: VoxelCoord, max: VoxelCoord) -> Self {
         Self { min, max }
     }
-    
+
     pub fn contains(&self, coord: &VoxelCoord) -> bool {
-        coord.x >= self.min.x && coord.x <= self.max.x
-            && coord.y >= self.min.y && coord.y <= self.max.y
-            && coord.z >= self.min.z && coord.z <= self.max.z
+        coord.x >= self.min.x
+            && coord.x <= self.max.x
+            && coord.y >= self.min.y
+            && coord.y <= self.max.y
+            && coord.z >= self.min.z
+            && coord.z <= self.max.z
     }
 }
 
@@ -54,13 +57,13 @@ pub struct UserContentLayer {
 
     /// Deduplication set — prevents double-adding ops with the same signature
     seen_sigs: std::collections::HashSet<[u8; 64]>,
-    
+
     /// Parcel ownership map
     parcels: HashMap<ParcelBounds, PeerId>,
-    
+
     /// Access grants
     access_grants: HashMap<(ParcelBounds, PeerId), bool>,
-    
+
     /// Permission configuration (replaces old VerificationConfig)
     pub config: PermissionConfig,
 
@@ -78,7 +81,7 @@ impl UserContentLayer {
     pub fn new() -> Self {
         Self::with_config(PermissionConfig::default())
     }
-    
+
     /// Create with custom permission config
     pub fn with_config(config: PermissionConfig) -> Self {
         Self {
@@ -91,7 +94,7 @@ impl UserContentLayer {
             world_store: None,
         }
     }
-    
+
     /// Apply a voxel operation to the user content layer
     ///
     /// Returns Ok(true) if operation was applied,
@@ -125,10 +128,13 @@ impl UserContentLayer {
                 return Ok(false);
             }
         }
-        
+
         // 4. Permission check via key-type table (if enabled)
         // Uses a synthetic Guest record when author's real record is unknown
-        if self.config.verify_key_types || self.config.verify_expiry || self.config.verify_revocation {
+        if self.config.verify_key_types
+            || self.config.verify_expiry
+            || self.config.verify_revocation
+        {
             // Build a minimal guest record for checking key-type permissions
             // (full sig + registry check happens in multiplayer.rs before ops reach here)
             let guest_record = KeyRecord {
@@ -163,22 +169,25 @@ impl UserContentLayer {
                 return Err(ApplyError::Unauthorized);
             }
         }
-        
+
         // 6. Append to operation log
         self.op_log.push(op);
-        
+
         Ok(true)
     }
-    
+
     /// Get all operations affecting a chunk (for applying on load)
     pub fn operations_for_chunk(&self, chunk_id: &ChunkId) -> Vec<&SignedOperation> {
-        self.op_log.iter()
+        self.op_log
+            .iter()
             .filter(|op| {
-                op.coord().map(|c| ChunkId::from_voxel(&c) == *chunk_id).unwrap_or(false)
+                op.coord()
+                    .map(|c| ChunkId::from_voxel(&c) == *chunk_id)
+                    .unwrap_or(false)
             })
             .collect()
     }
-    
+
     /// Add a local operation to the log
     ///
     /// Use this for operations created by the local player (already verified by
@@ -222,12 +231,12 @@ impl UserContentLayer {
         }
         result
     }
-    
+
     /// Get the operation log
     pub fn op_log(&self) -> &[SignedOperation] {
         &self.op_log
     }
-    
+
     /// Get operation count
     pub fn op_count(&self) -> usize {
         self.op_log.len()
@@ -252,18 +261,18 @@ impl UserContentLayer {
     ///
     /// Returns 32 bytes suitable for ChaCha20-Poly1305.
     pub fn derive_encryption_key(signing_key_bytes: &[u8; 32]) -> [u8; 32] {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"at-rest-v1");
         hasher.update(signing_key_bytes);
         hasher.finalize().into()
     }
-    
+
     /// Clear operation log (for testing/reset)
     pub fn clear(&mut self) {
         self.op_log.clear();
     }
-    
+
     /// Claim a parcel (for future permission system)
     pub fn claim_parcel(&mut self, owner: PeerId, bounds: ParcelBounds) -> Result<(), ClaimError> {
         // Check if any part of this parcel is already claimed
@@ -272,11 +281,11 @@ impl UserContentLayer {
                 return Err(ClaimError::AlreadyClaimed);
             }
         }
-        
+
         self.parcels.insert(bounds, owner);
         Ok(())
     }
-    
+
     /// Get parcel owner for a coordinate (if in a parcel)
     pub fn get_parcel_owner(&self, coord: &VoxelCoord) -> Option<PeerId> {
         for (bounds, owner) in &self.parcels {
@@ -286,12 +295,12 @@ impl UserContentLayer {
         }
         None
     }
-    
+
     /// Grant access to a parcel
     pub fn grant_access(&mut self, parcel: ParcelBounds, grantee: PeerId) {
         self.access_grants.insert((parcel, grantee), true);
     }
-    
+
     /// Check if a peer has access to a coordinate
     pub fn has_access(&self, peer: PeerId, coord: &VoxelCoord) -> bool {
         for (bounds, owner) in &self.parcels {
@@ -300,21 +309,27 @@ impl UserContentLayer {
                 if *owner == peer {
                     return true;
                 }
-                
+
                 // Check for granted access
-                return self.access_grants.get(&(*bounds, peer)).copied().unwrap_or(false);
+                return self
+                    .access_grants
+                    .get(&(*bounds, peer))
+                    .copied()
+                    .unwrap_or(false);
             }
         }
-        
+
         // Not in any parcel - assume free-build zone
         true
     }
-    
+
     /// Check if operation is permitted based on parcel ownership
     fn check_ownership(&self, op: &SignedOperation) -> bool {
-        op.coord().map(|c| self.has_access(op.author, &c)).unwrap_or(true)
+        op.coord()
+            .map(|c| self.has_access(op.author, &c))
+            .unwrap_or(true)
     }
-    
+
     /// Save operation log to disk (legacy single-file format)
     ///
     /// **Deprecated:** Use `save_chunks()` for chunk-based storage
@@ -323,7 +338,7 @@ impl UserContentLayer {
         std::fs::write(path, json)?;
         Ok(())
     }
-    
+
     /// Load operation log from disk (legacy single-file format)
     ///
     /// **Deprecated:** Use `load_chunks()` for chunk-based storage
@@ -336,7 +351,7 @@ impl UserContentLayer {
         self.op_log = ops;
         Ok(count)
     }
-    
+
     /// Save operations organized by chunk
     ///
     /// Creates directory structure:
@@ -354,7 +369,10 @@ impl UserContentLayer {
     ///
     /// # Returns
     /// HashMap mapping chunk ID to number of operations saved
-    pub fn save_chunks<P: AsRef<Path>>(&self, base_dir: P) -> std::io::Result<HashMap<ChunkId, usize>> {
+    pub fn save_chunks<P: AsRef<Path>>(
+        &self,
+        base_dir: P,
+    ) -> std::io::Result<HashMap<ChunkId, usize>> {
         // Group operations by ALL affected chunks, deduplicating by signature.
         let mut ops_by_chunk: HashMap<ChunkId, Vec<&SignedOperation>> = HashMap::new();
         let mut seen_sigs: std::collections::HashSet<[u8; 64]> = std::collections::HashSet::new();
@@ -364,16 +382,20 @@ impl UserContentLayer {
                 continue;
             }
             for chunk_id in op.affecting_chunks() {
-                ops_by_chunk.entry(chunk_id).or_insert_with(Vec::new).push(op);
+                ops_by_chunk
+                    .entry(chunk_id)
+                    .or_insert_with(Vec::new)
+                    .push(op);
             }
         }
-        
+
         let mut result = HashMap::new();
-        
+
         if let Some(ws) = &self.world_store {
             // WorldStore path: persist via RocksDB
             for (chunk_id, ops) in ops_by_chunk {
-                let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
+                let mut ops_owned: Vec<SignedOperation> =
+                    ops.iter().map(|&op| op.clone()).collect();
                 ops_owned.sort_by(|a, b| a.replay_cmp(b));
                 let cx = chunk_id.x as i32;
                 let cy = chunk_id.y as i32;
@@ -393,10 +415,11 @@ impl UserContentLayer {
             for (chunk_id, ops) in ops_by_chunk {
                 let chunk_dir = chunks_dir.join(chunk_id.to_path_string());
                 std::fs::create_dir_all(&chunk_dir)?;
-                
-                let mut ops_owned: Vec<SignedOperation> = ops.iter().map(|&op| op.clone()).collect();
+
+                let mut ops_owned: Vec<SignedOperation> =
+                    ops.iter().map(|&op| op.clone()).collect();
                 ops_owned.sort_by(|a, b| a.replay_cmp(b));
-                
+
                 let ops_file = chunk_dir.join("operations.bin");
                 let bytes = bincode::serialize(&ops_owned)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -407,14 +430,14 @@ impl UserContentLayer {
                     bytes
                 };
                 std::fs::write(&ops_file, out_bytes)?;
-                
+
                 result.insert(chunk_id, ops_owned.len());
             }
         }
-        
+
         Ok(result)
     }
-    
+
     /// Load operations from a specific chunk
     ///
     /// # Arguments
@@ -423,7 +446,11 @@ impl UserContentLayer {
     ///
     /// # Returns
     /// Number of operations loaded
-    pub fn load_chunk<P: AsRef<Path>>(&mut self, base_dir: P, chunk_id: &ChunkId) -> std::io::Result<usize> {
+    pub fn load_chunk<P: AsRef<Path>>(
+        &mut self,
+        base_dir: P,
+        chunk_id: &ChunkId,
+    ) -> std::io::Result<usize> {
         if let Some(ws) = self.world_store.clone() {
             // WorldStore path: read from RocksDB
             let cx = chunk_id.x as i32;
@@ -443,15 +470,16 @@ impl UserContentLayer {
         }
 
         // Flat-file fallback
-        let ops_file = base_dir.as_ref()
+        let ops_file = base_dir
+            .as_ref()
             .join("chunks")
             .join(chunk_id.to_path_string())
             .join("operations.bin");
-        
+
         if !ops_file.exists() {
             return Ok(0);
         }
-        
+
         let raw = std::fs::read(ops_file)?;
 
         let bytes = if raw.starts_with(&[0xCC, 0x01]) {
@@ -490,9 +518,12 @@ impl UserContentLayer {
             }
             return Ok(count);
         }
-        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize operations"))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Failed to deserialize operations",
+        ))
     }
-    
+
     /// Load operations from multiple chunks
     ///
     /// Useful for loading all chunks in player's view radius.
@@ -503,9 +534,13 @@ impl UserContentLayer {
     ///
     /// # Returns
     /// HashMap mapping chunk ID to number of operations loaded
-    pub fn load_chunks<P: AsRef<Path>>(&mut self, base_dir: P, chunk_ids: &[ChunkId]) -> std::io::Result<HashMap<ChunkId, usize>> {
+    pub fn load_chunks<P: AsRef<Path>>(
+        &mut self,
+        base_dir: P,
+        chunk_ids: &[ChunkId],
+    ) -> std::io::Result<HashMap<ChunkId, usize>> {
         let mut result = HashMap::new();
-        
+
         for chunk_id in chunk_ids {
             match self.load_chunk(base_dir.as_ref(), chunk_id) {
                 Ok(count) => {
@@ -520,10 +555,10 @@ impl UserContentLayer {
                 Err(e) => return Err(e),
             }
         }
-        
+
         Ok(result)
     }
-    
+
     /// Get all chunks that have operations
     ///
     /// Returns ops sorted in causal replay order (oldest first) so that callers
@@ -533,19 +568,22 @@ impl UserContentLayer {
     /// HashMap mapping chunk ID to operations in that chunk (sorted for replay)
     pub fn get_chunks_with_ops(&self) -> HashMap<ChunkId, Vec<SignedOperation>> {
         let mut chunks: HashMap<ChunkId, Vec<SignedOperation>> = HashMap::new();
-        
+
         for op in &self.op_log {
             if let Some(coord) = op.coord() {
                 let chunk_id = ChunkId::from_voxel(&coord);
-                chunks.entry(chunk_id).or_insert_with(Vec::new).push(op.clone());
+                chunks
+                    .entry(chunk_id)
+                    .or_insert_with(Vec::new)
+                    .push(op.clone());
             }
         }
-        
+
         // Sort ops within each chunk in causal replay order
         for ops in chunks.values_mut() {
             ops.sort_by(|a, b| a.replay_cmp(b));
         }
-        
+
         chunks
     }
 }
@@ -561,7 +599,7 @@ impl Default for UserContentLayer {
 pub enum ApplyError {
     /// Signature verification failed
     InvalidSignature,
-    
+
     /// Author doesn't have permission to edit this coordinate
     Unauthorized,
 }
@@ -575,9 +613,12 @@ pub enum ClaimError {
 
 /// Check if two parcel bounds overlap
 fn bounds_overlap(a: &ParcelBounds, b: &ParcelBounds) -> bool {
-    !(a.max.x < b.min.x || a.min.x > b.max.x
-        || a.max.y < b.min.y || a.min.y > b.max.y
-        || a.max.z < b.min.z || a.min.z > b.max.z)
+    !(a.max.x < b.min.x
+        || a.min.x > b.max.x
+        || a.max.y < b.min.y
+        || a.min.y > b.max.y
+        || a.max.z < b.min.z
+        || a.min.z > b.max.z)
 }
 
 // Magic header for encrypted chunk files (version 1, ChaCha20-Poly1305)
@@ -586,9 +627,13 @@ const ENCRYPT_MAGIC: [u8; 2] = [0xCC, 0x01];
 /// Encrypt chunk operation bytes with ChaCha20-Poly1305.
 /// Nonce is derived deterministically from the chunk coordinates (12 bytes).
 /// Output: ENCRYPT_MAGIC (2 bytes) + nonce (12 bytes) + ciphertext + tag
-fn encrypt_chunk_bytes(plaintext: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+fn encrypt_chunk_bytes(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    chunk_id: &ChunkId,
+) -> Result<Vec<u8>, String> {
     use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     // Deterministic 12-byte nonce from chunk coordinates (low 4 bytes of each i64)
@@ -598,7 +643,8 @@ fn encrypt_chunk_bytes(plaintext: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> 
     nonce_bytes[8..12].copy_from_slice(&(chunk_id.z as i32).to_le_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher.encrypt(nonce, plaintext)
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
         .map_err(|e| format!("Encryption failed: {}", e))?;
 
     let mut out = Vec::with_capacity(2 + 12 + ciphertext.len());
@@ -610,8 +656,8 @@ fn encrypt_chunk_bytes(plaintext: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> 
 
 /// Decrypt chunk operation bytes encrypted by `encrypt_chunk_bytes`.
 fn decrypt_chunk_bytes(data: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> Result<Vec<u8>, String> {
-    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
     use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
     if data.len() < 2 + 12 {
         return Err("Encrypted chunk file too short".to_string());
@@ -631,50 +677,57 @@ fn decrypt_chunk_bytes(data: &[u8], key: &[u8; 32], chunk_id: &ChunkId) -> Resul
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     let nonce = Nonce::from_slice(nonce_bytes);
-    cipher.decrypt(nonce, ciphertext)
+    cipher
+        .decrypt(nonce, ciphertext)
         .map_err(|e| format!("Decryption failed for chunk {}: {}", chunk_id, e))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::messages::{Material, Action, SignedOperation};
-    
+    use crate::messages::{Action, Material, SignedOperation};
+
     #[test]
     fn test_user_content_layer() {
         let mut layer = UserContentLayer::new();
         let local_ops = HashMap::new();
-        
+
         // Disable signature verification for test
         layer.config.verify_signatures = false;
-        
+
         let coord = VoxelCoord::new(10, 20, 30);
         let op = SignedOperation::new(
-            Action::SetVoxel { coord, material: Material::Stone },
+            Action::SetVoxel {
+                coord,
+                material: Material::Stone,
+            },
             1,
             crate::vector_clock::VectorClock::new(),
             PeerId::random(),
             [0u8; 32],
         );
-        
+
         let result = layer.apply_operation(op, &local_ops);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), true);
-        
+
         // Check that operation was logged
         assert_eq!(layer.op_count(), 1);
     }
-    
+
     #[test]
     fn test_crdt_conflict_resolution() {
         let mut layer = UserContentLayer::new();
         layer.config.verify_signatures = false;
-        
+
         let coord = VoxelCoord::new(5, 5, 5);
-        
+
         // Local operation with timestamp 10
         let local_op = SignedOperation::new(
-            Action::SetVoxel { coord, material: Material::Stone },
+            Action::SetVoxel {
+                coord,
+                material: Material::Stone,
+            },
             10,
             crate::vector_clock::VectorClock::new(),
             PeerId::random(),
@@ -682,38 +735,32 @@ mod tests {
         );
         let mut local_ops = HashMap::new();
         local_ops.insert(coord, local_op);
-        
+
         // Remote operation with timestamp 5 (older)
         let remote_op = SignedOperation::new(
-            Action::SetVoxel { coord, material: Material::Dirt },
+            Action::SetVoxel {
+                coord,
+                material: Material::Dirt,
+            },
             5,
             crate::vector_clock::VectorClock::new(),
             PeerId::random(),
             [0u8; 32],
         );
-        
+
         // Remote operation should be rejected (local wins)
         let result = layer.apply_operation(remote_op, &local_ops);
         assert_eq!(result.unwrap(), false);
     }
-    
+
     #[test]
     fn test_parcel_overlap() {
-        let bounds1 = ParcelBounds::new(
-            VoxelCoord::new(0, 0, 0),
-            VoxelCoord::new(10, 10, 10),
-        );
-        
-        let bounds2 = ParcelBounds::new(
-            VoxelCoord::new(5, 5, 5),
-            VoxelCoord::new(15, 15, 15),
-        );
-        
-        let bounds3 = ParcelBounds::new(
-            VoxelCoord::new(20, 20, 20),
-            VoxelCoord::new(30, 30, 30),
-        );
-        
+        let bounds1 = ParcelBounds::new(VoxelCoord::new(0, 0, 0), VoxelCoord::new(10, 10, 10));
+
+        let bounds2 = ParcelBounds::new(VoxelCoord::new(5, 5, 5), VoxelCoord::new(15, 15, 15));
+
+        let bounds3 = ParcelBounds::new(VoxelCoord::new(20, 20, 20), VoxelCoord::new(30, 30, 30));
+
         assert!(bounds_overlap(&bounds1, &bounds2));
         assert!(!bounds_overlap(&bounds1, &bounds3));
     }

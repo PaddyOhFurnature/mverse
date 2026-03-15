@@ -6,6 +6,8 @@ A voxel-based multiplayer world engine built on libp2p. No central servers — c
 
 ## What it is
 
+> Status: the current local-authoritative terrain and atlas workflow is still under active testing. Treat the source on `main` as experimental until the local COP30/GSHHG/OSM validation path has been rerun end-to-end.
+
 - **Voxel world** — Minecraft-style block editing on a procedurally generated planet-scale terrain
 - **P2P multiplayer** — clients discover and connect to each other through relay nodes, no game server required
 - **CGNAT/VPN friendly** — WebSocket transport punches through firewalls, Starlink, 4G NAT

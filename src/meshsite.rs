@@ -16,10 +16,10 @@ use sha2::{Digest, Sha256};
 
 // ── Gossipsub topics ──────────────────────────────────────────────────────────
 
-pub const TOPIC_MESHSITE_FORUMS:      &str = "meshsite/forums";
-pub const TOPIC_MESHSITE_WIKI:        &str = "meshsite/wiki";
+pub const TOPIC_MESHSITE_FORUMS: &str = "meshsite/forums";
+pub const TOPIC_MESHSITE_WIKI: &str = "meshsite/wiki";
 pub const TOPIC_MESHSITE_MARKETPLACE: &str = "meshsite/marketplace";
-pub const TOPIC_MESHSITE_POST:        &str = "meshsite/post";
+pub const TOPIC_MESHSITE_POST: &str = "meshsite/post";
 
 /// All meshsite gossipsub topics (subscribe to all at startup).
 pub const MESHSITE_TOPICS: &[&str] = &[
@@ -32,10 +32,10 @@ pub const MESHSITE_TOPICS: &[&str] = &[
 /// The gossipsub topic for a given section.
 pub fn topic_for_section(section: &Section) -> &'static str {
     match section {
-        Section::Forums      => TOPIC_MESHSITE_FORUMS,
-        Section::Wiki        => TOPIC_MESHSITE_WIKI,
+        Section::Forums => TOPIC_MESHSITE_FORUMS,
+        Section::Wiki => TOPIC_MESHSITE_WIKI,
         Section::Marketplace => TOPIC_MESHSITE_MARKETPLACE,
-        Section::Post        => TOPIC_MESHSITE_POST,
+        Section::Post => TOPIC_MESHSITE_POST,
     }
 }
 
@@ -54,34 +54,39 @@ pub enum Section {
 impl Section {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Section::Forums      => "forums",
-            Section::Wiki        => "wiki",
+            Section::Forums => "forums",
+            Section::Wiki => "wiki",
             Section::Marketplace => "marketplace",
-            Section::Post        => "post",
+            Section::Post => "post",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "forums"      => Some(Section::Forums),
-            "wiki"        => Some(Section::Wiki),
+            "forums" => Some(Section::Forums),
+            "wiki" => Some(Section::Wiki),
             "marketplace" => Some(Section::Marketplace),
-            "post"        => Some(Section::Post),
-            _             => None,
+            "post" => Some(Section::Post),
+            _ => None,
         }
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Section::Forums      => "Forums",
-            Section::Wiki        => "Wiki",
+            Section::Forums => "Forums",
+            Section::Wiki => "Wiki",
             Section::Marketplace => "Marketplace",
-            Section::Post        => "Post Office",
+            Section::Post => "Post Office",
         }
     }
 
     pub fn all() -> &'static [Section] {
-        &[Section::Forums, Section::Wiki, Section::Marketplace, Section::Post]
+        &[
+            Section::Forums,
+            Section::Wiki,
+            Section::Marketplace,
+            Section::Post,
+        ]
     }
 }
 
@@ -114,8 +119,13 @@ impl ContentItem {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         format!(
             "{}\0{}\0{}\0{}\0{}",
-            self.section.as_str(), self.title, self.body, self.author, self.created_at
-        ).into_bytes()
+            self.section.as_str(),
+            self.title,
+            self.body,
+            self.author,
+            self.created_at
+        )
+        .into_bytes()
     }
 
     /// Compute the SHA-256 id from the current fields.

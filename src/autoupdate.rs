@@ -27,13 +27,13 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 struct GhRelease {
     tag_name: String,
-    body:     Option<String>,
-    assets:   Vec<GhAsset>,
+    body: Option<String>,
+    assets: Vec<GhAsset>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GhAsset {
-    name:                 String,
+    name: String,
     browser_download_url: String,
 }
 
@@ -42,7 +42,11 @@ struct GhAsset {
 fn parse_semver(v: &str) -> (u64, u64, u64) {
     let v = v.trim_start_matches('v');
     let mut parts = v.split('.').map(|s| s.parse::<u64>().unwrap_or(0));
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
 }
 
 /// Returns `true` if `candidate` is strictly newer than `current`.
@@ -61,14 +65,20 @@ pub async fn check_for_update(
     github_repo: &str,
     current_version: &str,
 ) -> Option<(String, String, String)> {
-    if github_repo.is_empty() { return None; }
+    if github_repo.is_empty() {
+        return None;
+    }
 
-    let binary_name = std::env::current_exe().ok()?
+    let binary_name = std::env::current_exe()
+        .ok()?
         .file_name()?
         .to_string_lossy()
         .to_string();
 
-    let api_url = format!("https://api.github.com/repos/{}/releases/latest", github_repo);
+    let api_url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        github_repo
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -79,10 +89,19 @@ pub async fn check_for_update(
     let release: GhRelease = match client.get(&api_url).send().await {
         Ok(r) if r.status().is_success() => match r.json().await {
             Ok(v) => v,
-            Err(e) => { eprintln!("[AutoUpdate] parse error: {}", e); return None; }
+            Err(e) => {
+                eprintln!("[AutoUpdate] parse error: {}", e);
+                return None;
+            }
         },
-        Ok(r)  => { eprintln!("[AutoUpdate] GitHub API returned {}", r.status()); return None; }
-        Err(e) => { eprintln!("[AutoUpdate] GitHub API unreachable: {}", e); return None; }
+        Ok(r) => {
+            eprintln!("[AutoUpdate] GitHub API returned {}", r.status());
+            return None;
+        }
+        Err(e) => {
+            eprintln!("[AutoUpdate] GitHub API unreachable: {}", e);
+            return None;
+        }
     };
 
     if !is_newer(&release.tag_name, current_version) {
@@ -116,9 +135,7 @@ pub async fn apply_update(
         .build()?;
 
     // GitHub releases redirect to the CDN; follow redirects automatically.
-    let bytes = client.get(download_url)
-        .send().await?
-        .bytes().await?;
+    let bytes = client.get(download_url).send().await?.bytes().await?;
 
     eprintln!("[AutoUpdate] Downloaded {} bytes", bytes.len());
 
@@ -128,7 +145,9 @@ pub async fn apply_update(
     // cause an infinite update loop — skip silently and retry next interval.
     if let Ok(current) = std::fs::read(&exe_path) {
         if current == bytes.as_ref() {
-            eprintln!("[AutoUpdate] Downloaded binary is identical to current executable — skipping (release built with wrong version baked in)");
+            eprintln!(
+                "[AutoUpdate] Downloaded binary is identical to current executable — skipping (release built with wrong version baked in)"
+            );
             return Ok(());
         }
     }
@@ -160,7 +179,10 @@ pub async fn apply_update(
             .exec(); // only returns on error
         // exec() failed but binary is already replaced on disk.
         // Exit so the supervisor (systemd / shell) restarts with the new binary.
-        eprintln!("[AutoUpdate] exec failed: {} — exiting for supervisor restart", err);
+        eprintln!(
+            "[AutoUpdate] exec failed: {} — exiting for supervisor restart",
+            err
+        );
         std::process::exit(0);
     }
 

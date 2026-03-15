@@ -60,7 +60,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Chunk dimensions in voxels
-/// 
+///
 /// **ALIGNED TO SRTM DATA:**
 /// - Horizontal: 30m × 30m matches SRTM ~30m resolution
 /// - Vertical: 200m spans terrain (bedrock to sky)
@@ -86,7 +86,7 @@ impl ChunkId {
     pub fn new(x: i64, y: i64, z: i64) -> Self {
         Self { x, y, z }
     }
-    
+
     /// Calculate chunk ID from voxel coordinate
     ///
     /// Uses floor division to handle negative coordinates correctly:
@@ -115,7 +115,7 @@ impl ChunkId {
             z: coord.z.div_euclid(CHUNK_SIZE_Z),
         }
     }
-    
+
     /// Get minimum voxel coordinate contained in this chunk (inclusive)
     ///
     /// # Example
@@ -134,7 +134,7 @@ impl ChunkId {
             self.z * CHUNK_SIZE_Z,
         )
     }
-    
+
     /// Get maximum voxel coordinate contained in this chunk (exclusive)
     ///
     /// # Example
@@ -153,7 +153,7 @@ impl ChunkId {
             (self.z + 1) * CHUNK_SIZE_Z,
         )
     }
-    
+
     /// Get GPS bounds for this chunk (min, max)
     ///
     /// Converts chunk voxel bounds to GPS coordinates for terrain generation.
@@ -169,24 +169,24 @@ impl ChunkId {
     pub fn gps_bounds(&self) -> (f64, f64, f64, f64) {
         let min_voxel = self.min_voxel();
         let max_voxel = self.max_voxel();
-        
+
         // Convert min corner to GPS
         let min_ecef = min_voxel.to_ecef();
         let min_gps = min_ecef.to_gps();
-        
+
         // Convert max corner to GPS
         let max_ecef = max_voxel.to_ecef();
         let max_gps = max_ecef.to_gps();
-        
+
         // Return bounding box (may not be perfectly aligned due to Earth curvature)
         (
-            min_gps.lat.min(max_gps.lat),  // lat_min
-            min_gps.lat.max(max_gps.lat),  // lat_max
-            min_gps.lon.min(max_gps.lon),  // lon_min
-            min_gps.lon.max(max_gps.lon),  // lon_max
+            min_gps.lat.min(max_gps.lat), // lat_min
+            min_gps.lat.max(max_gps.lat), // lat_max
+            min_gps.lon.min(max_gps.lon), // lon_min
+            min_gps.lon.max(max_gps.lon), // lon_max
         )
     }
-    
+
     /// Get center GPS coordinate of this chunk
     ///
     /// Useful for terrain generation origin point.
@@ -206,12 +206,12 @@ impl ChunkId {
             min.y + (CHUNK_SIZE_Y / 2),
             min.z + (CHUNK_SIZE_Z / 2),
         );
-        
+
         // Convert to GPS
         let center_ecef = center_voxel.to_ecef();
         center_ecef.to_gps()
     }
-    
+
     /// Get all chunks affected by a voxel modification
     ///
     /// When a voxel changes, marching cubes needs to regenerate meshes for all
@@ -243,7 +243,7 @@ impl ChunkId {
     /// ```
     pub fn affected_by_voxel(voxel: &VoxelCoord) -> Vec<ChunkId> {
         let mut affected = Vec::new();
-        
+
         // A voxel can be a corner of up to 8 cubes in the marching cubes grid
         // Each cube is at position (cube_x, cube_y, cube_z) and samples corners:
         // (x,y,z), (x+1,y,z), (x+1,y,z+1), (x,y,z+1),
@@ -260,10 +260,10 @@ impl ChunkId {
                     let cube_x = voxel.x + dx;
                     let cube_y = voxel.y + dy;
                     let cube_z = voxel.z + dz;
-                    
+
                     let cube_coord = VoxelCoord::new(cube_x, cube_y, cube_z);
                     let chunk_id = ChunkId::from_voxel(&cube_coord);
-                    
+
                     // Use a set-like behavior to avoid duplicates
                     if !affected.contains(&chunk_id) {
                         affected.push(chunk_id);
@@ -271,10 +271,10 @@ impl ChunkId {
                 }
             }
         }
-        
+
         affected
     }
-    
+
     /// Check if voxel coordinate is within this chunk
     ///
     /// # Example
@@ -289,12 +289,15 @@ impl ChunkId {
     pub fn contains(&self, coord: &VoxelCoord) -> bool {
         let min = self.min_voxel();
         let max = self.max_voxel();
-        
-        coord.x >= min.x && coord.x < max.x &&
-        coord.y >= min.y && coord.y < max.y &&
-        coord.z >= min.z && coord.z < max.z
+
+        coord.x >= min.x
+            && coord.x < max.x
+            && coord.y >= min.y
+            && coord.y < max.y
+            && coord.z >= min.z
+            && coord.z < max.z
     }
-    
+
     /// Get all 26 neighboring chunks (3×3×3 cube minus center)
     ///
     /// Useful for:
@@ -314,7 +317,7 @@ impl ChunkId {
     /// ```
     pub fn neighbors(&self) -> Vec<ChunkId> {
         let mut result = Vec::with_capacity(26);
-        
+
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
@@ -322,19 +325,15 @@ impl ChunkId {
                     if dx == 0 && dy == 0 && dz == 0 {
                         continue;
                     }
-                    
-                    result.push(ChunkId::new(
-                        self.x + dx,
-                        self.y + dy,
-                        self.z + dz,
-                    ));
+
+                    result.push(ChunkId::new(self.x + dx, self.y + dy, self.z + dz));
                 }
             }
         }
-        
+
         result
     }
-    
+
     /// Get Manhattan distance to another chunk
     ///
     /// Useful for prioritizing chunk loads (closer = higher priority)
@@ -348,11 +347,9 @@ impl ChunkId {
     /// assert_eq!(chunk_a.manhattan_distance(&chunk_b), 6);
     /// ```
     pub fn manhattan_distance(&self, other: &ChunkId) -> i64 {
-        (self.x - other.x).abs() + 
-        (self.y - other.y).abs() + 
-        (self.z - other.z).abs()
+        (self.x - other.x).abs() + (self.y - other.y).abs() + (self.z - other.z).abs()
     }
-    
+
     /// Calculate chunk ID from ECEF position
     ///
     /// Converts ECEF coordinates to voxel, then to chunk ID.
@@ -361,7 +358,7 @@ impl ChunkId {
         let voxel = VoxelCoord::from_ecef(ecef);
         Self::from_voxel(&voxel)
     }
-    
+
     /// Get center ECEF coordinate of this chunk
     ///
     /// Useful for distance calculations and chunk streaming.
@@ -373,7 +370,7 @@ impl ChunkId {
         );
         center_voxel.to_ecef()
     }
-    
+
     /// Convert to directory-safe string identifier
     ///
     /// Format: `chunk_X_Y_Z` where X, Y, Z are signed integers
@@ -430,17 +427,17 @@ impl fmt::Display for ChunkId {
 /// ```
 pub fn chunks_in_radius(center: &ChunkId, radius: i64) -> Vec<ChunkId> {
     let mut result = Vec::new();
-    
+
     // Only iterate horizontally (X, Z), keep same Y level
     // This prevents loading chunks above/below which would create stacked terrain
     for dx in -radius..=radius {
         for dz in -radius..=radius {
             let chunk = ChunkId::new(
                 center.x + dx,
-                center.y,  // Keep same Y level
+                center.y, // Keep same Y level
                 center.z + dz,
             );
-            
+
             // Only include if within horizontal Manhattan distance
             let horizontal_distance = dx.abs() + dz.abs();
             if horizontal_distance <= radius {
@@ -448,14 +445,14 @@ pub fn chunks_in_radius(center: &ChunkId, radius: i64) -> Vec<ChunkId> {
             }
         }
     }
-    
+
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_chunk_from_voxel() {
         // Positive coordinates
@@ -467,7 +464,7 @@ mod tests {
             ChunkId::from_voxel(&VoxelCoord::new(150, 200, 50)),
             ChunkId::new(1, 2, 0)
         );
-        
+
         // Negative coordinates (floor division)
         assert_eq!(
             ChunkId::from_voxel(&VoxelCoord::new(-1, 0, 0)),
@@ -477,7 +474,7 @@ mod tests {
             ChunkId::from_voxel(&VoxelCoord::new(-150, 50, 0)),
             ChunkId::new(-2, 0, 0)
         );
-        
+
         // Chunk boundaries
         assert_eq!(
             ChunkId::from_voxel(&VoxelCoord::new(99, 99, 99)),
@@ -488,90 +485,84 @@ mod tests {
             ChunkId::new(1, 1, 1)
         );
     }
-    
+
     #[test]
     fn test_chunk_bounds() {
         let chunk = ChunkId::new(1, 2, 0);
-        
+
         assert_eq!(chunk.min_voxel(), VoxelCoord::new(100, 200, 0));
         assert_eq!(chunk.max_voxel(), VoxelCoord::new(200, 300, 100));
-        
+
         // Contains tests
         assert!(chunk.contains(&VoxelCoord::new(100, 200, 0))); // Min corner
         assert!(chunk.contains(&VoxelCoord::new(150, 250, 50))); // Center
         assert!(!chunk.contains(&VoxelCoord::new(200, 300, 100))); // Max corner (exclusive)
         assert!(!chunk.contains(&VoxelCoord::new(99, 200, 0))); // Just outside
     }
-    
+
     #[test]
     fn test_chunk_neighbors() {
         let chunk = ChunkId::new(0, 0, 0);
         let neighbors = chunk.neighbors();
-        
+
         assert_eq!(neighbors.len(), 26); // 3³ - 1
-        
+
         // Check some specific neighbors
         assert!(neighbors.contains(&ChunkId::new(1, 0, 0)));
         assert!(neighbors.contains(&ChunkId::new(-1, 0, 0)));
         assert!(neighbors.contains(&ChunkId::new(0, 1, 0)));
         assert!(neighbors.contains(&ChunkId::new(0, 0, 1)));
         assert!(neighbors.contains(&ChunkId::new(1, 1, 1)));
-        
+
         // Should not contain self
         assert!(!neighbors.contains(&chunk));
     }
-    
+
     #[test]
     fn test_chunk_manhattan_distance() {
         let chunk_a = ChunkId::new(0, 0, 0);
         let chunk_b = ChunkId::new(2, 1, 3);
-        
+
         assert_eq!(chunk_a.manhattan_distance(&chunk_b), 6);
         assert_eq!(chunk_b.manhattan_distance(&chunk_a), 6); // Symmetric
-        
+
         assert_eq!(chunk_a.manhattan_distance(&chunk_a), 0); // Self
     }
-    
+
     #[test]
     fn test_chunks_in_radius() {
         let center = ChunkId::new(0, 0, 0);
-        
+
         // Radius 0 = just center
         let r0 = chunks_in_radius(&center, 0);
         assert_eq!(r0.len(), 1);
         assert!(r0.contains(&center));
-        
+
         // Radius 1 = 3×3×3 cube
         let r1 = chunks_in_radius(&center, 1);
         assert_eq!(r1.len(), 27);
         assert!(r1.contains(&center));
         assert!(r1.contains(&ChunkId::new(1, 0, 0)));
         assert!(r1.contains(&ChunkId::new(1, 1, 1)));
-        
+
         // Should not include chunks at distance > 1
         assert!(!r1.contains(&ChunkId::new(2, 0, 0)));
     }
-    
+
     #[test]
     fn test_chunk_path_string() {
-        assert_eq!(
-            ChunkId::new(5, 10, 3).to_path_string(),
-            "chunk_5_10_3"
-        );
-        
+        assert_eq!(ChunkId::new(5, 10, 3).to_path_string(), "chunk_5_10_3");
+
         // Negative coordinates
-        assert_eq!(
-            ChunkId::new(-5, 10, -3).to_path_string(),
-            "chunk_-5_10_-3"
-        );
+        assert_eq!(ChunkId::new(-5, 10, -3).to_path_string(), "chunk_-5_10_-3");
     }
-    
+
     #[test]
     fn test_chunk_display() {
         let chunk = ChunkId::new(1, -2, 3);
         assert_eq!(format!("{}", chunk), "chunk_1_-2_3");
     }
-    
+
     #[test]
     fn test_chunk_determinism() {
         // Same voxel ALWAYS produces same chunk
@@ -579,7 +570,7 @@ mod tests {
         let chunk1 = ChunkId::from_voxel(&voxel);
         let chunk2 = ChunkId::from_voxel(&voxel);
         assert_eq!(chunk1, chunk2);
-        
+
         // Round-trip: voxel → chunk → contains
         assert!(chunk1.contains(&voxel));
     }

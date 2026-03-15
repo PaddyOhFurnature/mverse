@@ -71,9 +71,9 @@ impl Default for PermissionConfig {
     fn default() -> Self {
         Self {
             verify_signatures: true,
-            verify_key_types:  true,
-            verify_ownership:  false, // not yet wired — set true once parcels land
-            verify_expiry:     true,
+            verify_key_types: true,
+            verify_ownership: false, // not yet wired — set true once parcels land
+            verify_expiry: true,
             verify_revocation: true,
         }
     }
@@ -84,9 +84,9 @@ impl PermissionConfig {
     pub fn permissive() -> Self {
         Self {
             verify_signatures: false,
-            verify_key_types:  false,
-            verify_ownership:  false,
-            verify_expiry:     false,
+            verify_key_types: false,
+            verify_ownership: false,
+            verify_expiry: false,
             verify_revocation: false,
         }
     }
@@ -214,14 +214,14 @@ impl PermissionResult {
 impl std::fmt::Display for PermissionResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Allowed            => write!(f, "allowed"),
-            Self::KeyTypeNotAllowed  => write!(f, "key type not allowed for this action"),
-            Self::Revoked            => write!(f, "key has been revoked"),
-            Self::Expired            => write!(f, "key has expired"),
-            Self::InvalidSignature   => write!(f, "key record signature invalid"),
-            Self::NotOwner           => write!(f, "author does not own target parcel"),
-            Self::Restricted         => write!(f, "target zone is restricted"),
-            Self::Disabled           => write!(f, "permission check disabled (dev mode)"),
+            Self::Allowed => write!(f, "allowed"),
+            Self::KeyTypeNotAllowed => write!(f, "key type not allowed for this action"),
+            Self::Revoked => write!(f, "key has been revoked"),
+            Self::Expired => write!(f, "key has expired"),
+            Self::InvalidSignature => write!(f, "key record signature invalid"),
+            Self::NotOwner => write!(f, "author does not own target parcel"),
+            Self::Restricted => write!(f, "target zone is restricted"),
+            Self::Disabled => write!(f, "permission check disabled (dev mode)"),
         }
     }
 }
@@ -257,22 +257,22 @@ pub fn key_type_allows(key_type: KeyType, action: ActionClass) -> bool {
         TransferOwnership => matches!(key_type, User | Business | Server | Genesis),
 
         // ── Access management ─────────────────────────────────────────────────
-        GrantAccess  => matches!(key_type, User | Business | Admin | Server | Genesis),
+        GrantAccess => matches!(key_type, User | Business | Admin | Server | Genesis),
         RevokeAccess => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Content creation ─────────────────────────────────────────────────
         PublishContent => !matches!(key_type, Guest | Relay),
-        ImportAsset    => !matches!(key_type, Guest | Relay),
+        ImportAsset => !matches!(key_type, Guest | Relay),
 
         // ── Commerce ─────────────────────────────────────────────────────────
         CreateListing => matches!(key_type, User | Business | Server | Genesis),
-        SignContract  => matches!(key_type, User | Business | Server | Genesis),
+        SignContract => matches!(key_type, User | Business | Server | Genesis),
 
         // ── Scripts ──────────────────────────────────────────────────────────
         DeployScript => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Governance ───────────────────────────────────────────────────────
-        Vote           => matches!(key_type, User | Business | Admin | Server),
+        Vote => matches!(key_type, User | Business | Admin | Server),
         CreateProposal => matches!(key_type, User | Business | Admin | Server | Genesis),
 
         // ── Moderation ───────────────────────────────────────────────────────
@@ -284,7 +284,7 @@ pub fn key_type_allows(key_type: KeyType, action: ActionClass) -> bool {
 
         // ── Infrastructure ────────────────────────────────────────────────────
         ManageRelay => matches!(key_type, Relay | Server | Genesis),
-        IssueKey    => matches!(key_type, Server | Genesis),
+        IssueKey => matches!(key_type, Server | Genesis),
     }
 }
 
@@ -315,7 +315,7 @@ pub fn check_key_level_permission(
 ) -> PermissionResult {
     // ── 1. Signature check ────────────────────────────────────────────────────
     if config.verify_signatures {
-        use ed25519_dalek::{Signature, VerifyingKey, Verifier};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
         let Ok(vk) = VerifyingKey::from_bytes(author_pubkey) else {
             return PermissionResult::InvalidSignature;
         };
@@ -390,39 +390,39 @@ pub fn check_record_permission(
 pub fn action_to_class(action: &Action) -> ActionClass {
     match action {
         // Terrain edits default to free-zone build; ownership layer upgrades when needed
-        Action::SetVoxel { .. }       => ActionClass::BuildInFreeZone,
-        Action::RemoveVoxel { .. }    => ActionClass::BuildInFreeZone,
-        Action::FillRegion { .. }     => ActionClass::BuildInFreeZone,
+        Action::SetVoxel { .. } => ActionClass::BuildInFreeZone,
+        Action::RemoveVoxel { .. } => ActionClass::BuildInFreeZone,
+        Action::FillRegion { .. } => ActionClass::BuildInFreeZone,
 
         // Object manipulation also defaults to free-zone
-        Action::PlaceObject { .. }    => ActionClass::BuildInFreeZone,
-        Action::RemoveObject { .. }   => ActionClass::BuildInFreeZone,
-        Action::MoveObject { .. }     => ActionClass::BuildInFreeZone,
-        Action::ConfigureObject { .. }=> ActionClass::BuildInFreeZone,
+        Action::PlaceObject { .. } => ActionClass::BuildInFreeZone,
+        Action::RemoveObject { .. } => ActionClass::BuildInFreeZone,
+        Action::MoveObject { .. } => ActionClass::BuildInFreeZone,
+        Action::ConfigureObject { .. } => ActionClass::BuildInFreeZone,
 
         // Parcel management
-        Action::ClaimParcel { .. }    => ActionClass::ClaimParcel,
-        Action::AbandonParcel { .. }  => ActionClass::AbandonParcel,
+        Action::ClaimParcel { .. } => ActionClass::ClaimParcel,
+        Action::AbandonParcel { .. } => ActionClass::AbandonParcel,
         Action::TransferOwnership { .. } => ActionClass::TransferOwnership,
-        Action::GrantAccess { .. }    => ActionClass::GrantAccess,
-        Action::RevokeAccess { .. }   => ActionClass::RevokeAccess,
+        Action::GrantAccess { .. } => ActionClass::GrantAccess,
+        Action::RevokeAccess { .. } => ActionClass::RevokeAccess,
 
         // Commerce
-        Action::CreateListing { .. }  => ActionClass::CreateListing,
-        Action::AcceptListing { .. }  => ActionClass::SignContract,
-        Action::CancelListing { .. }  => ActionClass::TransferOwnership,
-        Action::SignContract { .. }   => ActionClass::SignContract,
+        Action::CreateListing { .. } => ActionClass::CreateListing,
+        Action::AcceptListing { .. } => ActionClass::SignContract,
+        Action::CancelListing { .. } => ActionClass::TransferOwnership,
+        Action::SignContract { .. } => ActionClass::SignContract,
 
         // Content creation
         Action::PublishBlueprint { .. } => ActionClass::PublishContent,
-        Action::ImportAsset { .. }      => ActionClass::ImportAsset,
+        Action::ImportAsset { .. } => ActionClass::ImportAsset,
 
         // Identity management
         Action::PublishKeyRecord { .. } => ActionClass::PublishKeyRecord,
-        Action::RevokeKey { .. }        => ActionClass::RevokeKey,
+        Action::RevokeKey { .. } => ActionClass::RevokeKey,
 
         // Infrastructure
-        Action::RegisterRelay { .. }    => ActionClass::ManageRelay,
+        Action::RegisterRelay { .. } => ActionClass::ManageRelay,
     }
 }
 
@@ -441,11 +441,21 @@ mod tests {
 
     #[test]
     fn test_all_keys_can_explore() {
-        for kt in [KeyType::Genesis, KeyType::Server, KeyType::Relay,
-                   KeyType::Admin, KeyType::Business, KeyType::User,
-                   KeyType::Trial, KeyType::Guest] {
-            assert!(key_type_allows(kt, ActionClass::Explore),
-                "{:?} must be able to explore", kt);
+        for kt in [
+            KeyType::Genesis,
+            KeyType::Server,
+            KeyType::Relay,
+            KeyType::Admin,
+            KeyType::Business,
+            KeyType::User,
+            KeyType::Trial,
+            KeyType::Guest,
+        ] {
+            assert!(
+                key_type_allows(kt, ActionClass::Explore),
+                "{:?} must be able to explore",
+                kt
+            );
         }
     }
 
@@ -471,8 +481,14 @@ mod tests {
 
     #[test]
     fn test_relay_cannot_build() {
-        assert!(!key_type_allows(KeyType::Relay, ActionClass::BuildInFreeZone));
-        assert!(!key_type_allows(KeyType::Relay, ActionClass::BuildInOwnedParcel));
+        assert!(!key_type_allows(
+            KeyType::Relay,
+            ActionClass::BuildInFreeZone
+        ));
+        assert!(!key_type_allows(
+            KeyType::Relay,
+            ActionClass::BuildInOwnedParcel
+        ));
     }
 
     #[test]
@@ -489,10 +505,19 @@ mod tests {
     fn test_only_server_can_issue_keys() {
         assert!(key_type_allows(KeyType::Server, ActionClass::IssueKey));
         assert!(key_type_allows(KeyType::Genesis, ActionClass::IssueKey));
-        for kt in [KeyType::Relay, KeyType::Admin, KeyType::Business,
-                   KeyType::User, KeyType::Trial, KeyType::Guest] {
-            assert!(!key_type_allows(kt, ActionClass::IssueKey),
-                "{:?} must not be able to issue keys", kt);
+        for kt in [
+            KeyType::Relay,
+            KeyType::Admin,
+            KeyType::Business,
+            KeyType::User,
+            KeyType::Trial,
+            KeyType::Guest,
+        ] {
+            assert!(
+                !key_type_allows(kt, ActionClass::IssueKey),
+                "{:?} must not be able to issue keys",
+                kt
+            );
         }
     }
 
@@ -506,10 +531,20 @@ mod tests {
 
     #[test]
     fn test_any_key_can_publish_own_record() {
-        for kt in [KeyType::Guest, KeyType::Trial, KeyType::User,
-                   KeyType::Business, KeyType::Admin, KeyType::Server, KeyType::Relay] {
-            assert!(key_type_allows(kt, ActionClass::PublishKeyRecord),
-                "{:?} must be able to publish own key record", kt);
+        for kt in [
+            KeyType::Guest,
+            KeyType::Trial,
+            KeyType::User,
+            KeyType::Business,
+            KeyType::Admin,
+            KeyType::Server,
+            KeyType::Relay,
+        ] {
+            assert!(
+                key_type_allows(kt, ActionClass::PublishKeyRecord),
+                "{:?} must be able to publish own key record",
+                kt
+            );
         }
     }
 
@@ -557,7 +592,9 @@ mod tests {
     fn test_check_record_permission_expired() {
         let id = Identity::generate();
         let past = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
             .saturating_sub(3600); // 1 hour ago
         let mut rec = id.create_key_record(KeyType::User, None, None, None, Some(past), None);
         // Re-sign with expiry in the past

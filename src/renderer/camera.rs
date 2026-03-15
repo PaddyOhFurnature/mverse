@@ -2,8 +2,8 @@
 
 use glam::{Mat4, Vec3};
 use std::f32::consts::FRAC_PI_2;
-use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::event::ElementState;
+use winit::keyboard::{KeyCode, PhysicalKey};
 
 /// First-person camera with WASD movement and mouse look
 pub struct Camera {
@@ -128,7 +128,7 @@ mod tests {
     fn test_camera_forward() {
         let camera = Camera::new(Vec3::ZERO, 1.0);
         let forward = camera.forward();
-        
+
         // Looking forward (yaw=0, pitch=0) should be +X direction
         assert!((forward.x - 1.0).abs() < 0.01);
         assert!(forward.y.abs() < 0.01);
@@ -139,7 +139,7 @@ mod tests {
     fn test_camera_right() {
         let camera = Camera::new(Vec3::ZERO, 1.0);
         let right = camera.right();
-        
+
         // Right vector should be perpendicular to forward
         let forward = camera.forward();
         assert!(forward.dot(right).abs() < 0.01);
@@ -149,12 +149,12 @@ mod tests {
     fn test_camera_mouse_look() {
         let mut camera = Camera::new(Vec3::ZERO, 1.0);
         let initial_yaw = camera.yaw;
-        
+
         camera.process_mouse(100.0, 0.0);
-        
+
         // Yaw should change
         assert_ne!(camera.yaw, initial_yaw);
-        
+
         // Pitch should be clamped
         camera.process_mouse(0.0, 10000.0);
         assert!(camera.pitch > -FRAC_PI_2);

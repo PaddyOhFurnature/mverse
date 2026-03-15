@@ -2,9 +2,15 @@
 ///
 /// Renders P2P content onto any physical surface (terminal, tablet, wall, billboard).
 /// Same renderer, same address system, key-gated access tiers.
-
+///
+/// Architecture: two layers with a clean interface boundary.
+///   Protocol layer  — `WorldnetAddress`, `WorldnetResponse`, `query_world()`
+///                     Pure data.  WorldOS consumes this directly, no rendering dep.
+///   Display layer   — `WorldnetPixelBuffer`, `render_page()`
+///                     Pixel-buffer fallback used until WorldOS is wired up.
 use crate::identity::KeyType;
 use crate::meshsite::ContentItem;
+use std::collections::HashMap;
 
 // ── Address System ─────────────────────────────────────────────────────────────
 
@@ -13,13 +19,14 @@ pub enum WorldnetAddress {
     Root,
     Signup,
     Forums,
-    ForumThread(String),        // thread id
+    ForumThread(String), // thread id
     Wiki,
-    WikiPage(String),           // slug
+    WikiPage(String), // slug
     Marketplace,
-    UserProfile(String),        // peer_id string
+    UserProfile(String), // peer_id string
     WorldConstruct,
     WorldChunk(i32, i32),
+    WorldObject(String), // worldnet://world/object/<id>
     WorldObjects,
     Settings,
     SettingsIdentity,
@@ -29,7 +36,7 @@ pub enum WorldnetAddress {
     AdminRegions,
     AdminModeration,
     AdminWorldConfig,
-    Custom(String),             // worldnet://anything/else
+    Custom(String), // worldnet://anything/else
 }
 
 impl WorldnetAddress {
@@ -39,54 +46,56 @@ impl WorldnetAddress {
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         match parts.as_slice() {
             [] | [""] => Self::Root,
-            ["signup"]                     => Self::Signup,
-            ["forums"]                     => Self::Forums,
-            ["forums", "thread", id]       => Self::ForumThread(id.to_string()),
-            ["wiki"]                       => Self::Wiki,
-            ["wiki", slug]                 => Self::WikiPage(slug.to_string()),
-            ["marketplace"]                => Self::Marketplace,
-            ["user", pid]                  => Self::UserProfile(pid.to_string()),
-            ["world", "construct"]         => Self::WorldConstruct,
-            ["world", "chunk", cx, cz]     => {
+            ["signup"] => Self::Signup,
+            ["forums"] => Self::Forums,
+            ["forums", "thread", id] => Self::ForumThread(id.to_string()),
+            ["wiki"] => Self::Wiki,
+            ["wiki", slug] => Self::WikiPage(slug.to_string()),
+            ["marketplace"] => Self::Marketplace,
+            ["user", pid] => Self::UserProfile(pid.to_string()),
+            ["world", "construct"] => Self::WorldConstruct,
+            ["world", "chunk", cx, cz] => {
                 let cx = cx.parse().unwrap_or(0);
                 let cz = cz.parse().unwrap_or(0);
                 Self::WorldChunk(cx, cz)
             }
-            ["world", "objects"]           => Self::WorldObjects,
-            ["settings"]                   => Self::Settings,
-            ["settings", "identity"]       => Self::SettingsIdentity,
-            ["settings", "property"]       => Self::SettingsProperty,
-            ["settings", "inventory"]      => Self::SettingsInventory,
-            ["admin", "keys"]              => Self::AdminKeys,
-            ["admin", "regions"]           => Self::AdminRegions,
-            ["admin", "moderation"]        => Self::AdminModeration,
-            ["admin", "worldconfig"]       => Self::AdminWorldConfig,
-            other                          => Self::Custom(other.join("/")),
+            ["world", "object", id] => Self::WorldObject(id.to_string()),
+            ["world", "objects"] => Self::WorldObjects,
+            ["settings"] => Self::Settings,
+            ["settings", "identity"] => Self::SettingsIdentity,
+            ["settings", "property"] => Self::SettingsProperty,
+            ["settings", "inventory"] => Self::SettingsInventory,
+            ["admin", "keys"] => Self::AdminKeys,
+            ["admin", "regions"] => Self::AdminRegions,
+            ["admin", "moderation"] => Self::AdminModeration,
+            ["admin", "worldconfig"] => Self::AdminWorldConfig,
+            other => Self::Custom(other.join("/")),
         }
     }
 
     pub fn to_string(&self) -> String {
         match self {
-            Self::Root                    => "worldnet://".into(),
-            Self::Signup                  => "worldnet://signup".into(),
-            Self::Forums                  => "worldnet://forums".into(),
-            Self::ForumThread(id)         => format!("worldnet://forums/thread/{}", id),
-            Self::Wiki                    => "worldnet://wiki".into(),
-            Self::WikiPage(slug)          => format!("worldnet://wiki/{}", slug),
-            Self::Marketplace             => "worldnet://marketplace".into(),
-            Self::UserProfile(pid)        => format!("worldnet://user/{}", pid),
-            Self::WorldConstruct          => "worldnet://world/construct".into(),
-            Self::WorldChunk(cx, cz)      => format!("worldnet://world/chunk/{}/{}", cx, cz),
-            Self::WorldObjects            => "worldnet://world/objects".into(),
-            Self::Settings                => "worldnet://settings".into(),
-            Self::SettingsIdentity        => "worldnet://settings/identity".into(),
-            Self::SettingsProperty        => "worldnet://settings/property".into(),
-            Self::SettingsInventory       => "worldnet://settings/inventory".into(),
-            Self::AdminKeys               => "worldnet://admin/keys".into(),
-            Self::AdminRegions            => "worldnet://admin/regions".into(),
-            Self::AdminModeration         => "worldnet://admin/moderation".into(),
-            Self::AdminWorldConfig        => "worldnet://admin/worldconfig".into(),
-            Self::Custom(s)               => format!("worldnet://{}", s),
+            Self::Root => "worldnet://".into(),
+            Self::Signup => "worldnet://signup".into(),
+            Self::Forums => "worldnet://forums".into(),
+            Self::ForumThread(id) => format!("worldnet://forums/thread/{}", id),
+            Self::Wiki => "worldnet://wiki".into(),
+            Self::WikiPage(slug) => format!("worldnet://wiki/{}", slug),
+            Self::Marketplace => "worldnet://marketplace".into(),
+            Self::UserProfile(pid) => format!("worldnet://user/{}", pid),
+            Self::WorldConstruct => "worldnet://world/construct".into(),
+            Self::WorldChunk(cx, cz) => format!("worldnet://world/chunk/{}/{}", cx, cz),
+            Self::WorldObject(id) => format!("worldnet://world/object/{}", id),
+            Self::WorldObjects => "worldnet://world/objects".into(),
+            Self::Settings => "worldnet://settings".into(),
+            Self::SettingsIdentity => "worldnet://settings/identity".into(),
+            Self::SettingsProperty => "worldnet://settings/property".into(),
+            Self::SettingsInventory => "worldnet://settings/inventory".into(),
+            Self::AdminKeys => "worldnet://admin/keys".into(),
+            Self::AdminRegions => "worldnet://admin/regions".into(),
+            Self::AdminModeration => "worldnet://admin/moderation".into(),
+            Self::AdminWorldConfig => "worldnet://admin/worldconfig".into(),
+            Self::Custom(s) => format!("worldnet://{}", s),
         }
     }
 
@@ -94,17 +103,30 @@ impl WorldnetAddress {
     pub fn required_key_type(&self) -> Option<KeyType> {
         match self {
             // Public — no key required
-            Self::Root | Self::Signup | Self::Forums | Self::ForumThread(_)
-            | Self::Wiki | Self::WikiPage(_) | Self::Marketplace
-            | Self::WorldConstruct | Self::WorldChunk(..) | Self::WorldObjects => None,
+            Self::Root
+            | Self::Signup
+            | Self::Forums
+            | Self::ForumThread(_)
+            | Self::Wiki
+            | Self::WikiPage(_)
+            | Self::Marketplace
+            | Self::WorldConstruct
+            | Self::WorldChunk(..)
+            | Self::WorldObject(_)
+            | Self::WorldObjects => None,
 
             // Registered users only
-            Self::UserProfile(_) | Self::Settings | Self::SettingsIdentity
-            | Self::SettingsProperty | Self::SettingsInventory => Some(KeyType::Guest),
+            Self::UserProfile(_)
+            | Self::Settings
+            | Self::SettingsIdentity
+            | Self::SettingsProperty
+            | Self::SettingsInventory => Some(KeyType::Guest),
 
             // Admin only
-            Self::AdminKeys | Self::AdminRegions
-            | Self::AdminModeration | Self::AdminWorldConfig => Some(KeyType::Admin),
+            Self::AdminKeys
+            | Self::AdminRegions
+            | Self::AdminModeration
+            | Self::AdminWorldConfig => Some(KeyType::Admin),
 
             Self::Custom(_) => None,
         }
@@ -116,9 +138,13 @@ impl WorldnetAddress {
             None => true,
             Some(KeyType::Guest) => matches!(
                 key_type,
-                Some(KeyType::Guest) | Some(KeyType::User) | Some(KeyType::Business)
-                | Some(KeyType::Admin) | Some(KeyType::Relay) | Some(KeyType::Server)
-                | Some(KeyType::Genesis)
+                Some(KeyType::Guest)
+                    | Some(KeyType::User)
+                    | Some(KeyType::Business)
+                    | Some(KeyType::Admin)
+                    | Some(KeyType::Relay)
+                    | Some(KeyType::Server)
+                    | Some(KeyType::Genesis)
             ),
             Some(KeyType::Admin) => matches!(
                 key_type,
@@ -126,6 +152,150 @@ impl WorldnetAddress {
             ),
             _ => true,
         }
+    }
+}
+
+// ── Protocol layer — WorldnetResponse ─────────────────────────────────────────
+//
+// This is the interface boundary between the OS kernel and any display surface.
+// A future WorldOS tablet renderer consumes WorldnetResponse directly and never
+// touches the pixel buffer.  The pixel-buffer render_page() below is the fallback
+// display until that surface exists.
+
+/// Flat summary of one placed object — safe to clone into response data.
+#[derive(Debug, Clone)]
+pub struct ObjectSummary {
+    pub id: String,
+    pub label: String,
+    pub type_name: String,
+    pub position: [f32; 3],
+    pub chunk: (i32, i32),
+}
+
+/// Summary of one admin override applied to an object.
+#[derive(Debug, Clone)]
+pub struct OverrideSummary {
+    pub action: String, // human-readable, e.g. "Move", "Remove", "Scale(2.0)"
+    pub timestamp: u64, // ms since epoch
+}
+
+/// Renderer-agnostic response returned by `query_world()`.
+/// WorldOS consumes this directly; pixel-buffer renderer uses it to draw pages.
+#[derive(Debug, Clone)]
+pub enum WorldnetResponse {
+    /// Detail view for a single placed object.
+    ObjectDetail {
+        obj: ObjectSummary,
+        overrides: Vec<OverrideSummary>,
+    },
+    /// All objects in a single chunk grid cell.
+    ChunkObjects {
+        cx: i32,
+        cz: i32,
+        objects: Vec<ObjectSummary>,
+        override_count: usize,
+    },
+    /// Top-level world object index (chunk list + totals).
+    AllObjects {
+        total_objects: usize,
+        chunks: Vec<(i32, i32, usize)>, // (cx, cz, object_count)
+    },
+    /// Address not found or no data available yet.
+    NotFound(String),
+}
+
+/// Data the query engine needs to resolve world/* addresses.
+/// Built by the caller from multiplayer state — no dep on multiplayer.rs here.
+pub struct WorldQueryContext {
+    objects_by_chunk: HashMap<(i32, i32), Vec<ObjectSummary>>,
+    overrides_by_chunk: HashMap<(i32, i32), Vec<OverrideSummary>>,
+}
+
+impl WorldQueryContext {
+    pub fn new() -> Self {
+        Self {
+            objects_by_chunk: HashMap::new(),
+            overrides_by_chunk: HashMap::new(),
+        }
+    }
+
+    pub fn add_object(&mut self, obj: ObjectSummary) {
+        self.objects_by_chunk
+            .entry(obj.chunk)
+            .or_default()
+            .push(obj);
+    }
+
+    pub fn add_override(&mut self, chunk: (i32, i32), ov: OverrideSummary) {
+        self.overrides_by_chunk.entry(chunk).or_default().push(ov);
+    }
+
+    pub fn find_object(&self, id: &str) -> Option<&ObjectSummary> {
+        self.objects_by_chunk
+            .values()
+            .flat_map(|v| v.iter())
+            .find(|o| o.id == id)
+    }
+
+    pub fn chunk_keys(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.objects_by_chunk.keys().copied()
+    }
+}
+
+/// Resolve a world/* address into structured response data.
+/// Returns `None` if the address is not a world/* address (caller falls through to
+/// existing page rendering for forums, wiki, etc.).
+pub fn query_world(addr: &WorldnetAddress, ctx: &WorldQueryContext) -> Option<WorldnetResponse> {
+    match addr {
+        WorldnetAddress::WorldObject(id) => match ctx.find_object(id) {
+            Some(obj) => {
+                let overrides = ctx
+                    .overrides_by_chunk
+                    .get(&obj.chunk)
+                    .map(|v| v.clone())
+                    .unwrap_or_default();
+                Some(WorldnetResponse::ObjectDetail {
+                    obj: obj.clone(),
+                    overrides,
+                })
+            }
+            None => Some(WorldnetResponse::NotFound(format!(
+                "worldnet://world/object/{}",
+                id
+            ))),
+        },
+        WorldnetAddress::WorldChunk(cx, cz) => {
+            let objects = ctx
+                .objects_by_chunk
+                .get(&(*cx, *cz))
+                .cloned()
+                .unwrap_or_default();
+            let override_count = ctx
+                .overrides_by_chunk
+                .get(&(*cx, *cz))
+                .map(|v| v.len())
+                .unwrap_or(0);
+            Some(WorldnetResponse::ChunkObjects {
+                cx: *cx,
+                cz: *cz,
+                objects,
+                override_count,
+            })
+        }
+        WorldnetAddress::WorldObjects => {
+            let total_objects: usize = ctx.objects_by_chunk.values().map(|v| v.len()).sum();
+            let mut chunks: Vec<(i32, i32, usize)> = ctx
+                .objects_by_chunk
+                .iter()
+                .map(|(&(cx, cz), v)| (cx, cz, v.len()))
+                .collect();
+            chunks.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            Some(WorldnetResponse::AllObjects {
+                total_objects,
+                chunks,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -137,8 +307,8 @@ pub const WORLDNET_H: u32 = 384;
 
 /// RGBA pixel buffer — upload directly to a wgpu Texture.
 pub struct WorldnetPixelBuffer {
-    pub pixels: Vec<u8>,   // RGBA, WORLDNET_W * WORLDNET_H * 4 bytes
-    pub width:  u32,
+    pub pixels: Vec<u8>, // RGBA, WORLDNET_W * WORLDNET_H * 4 bytes
+    pub width: u32,
     pub height: u32,
 }
 
@@ -146,7 +316,7 @@ impl WorldnetPixelBuffer {
     pub fn new() -> Self {
         Self {
             pixels: vec![0u8; (WORLDNET_W * WORLDNET_H * 4) as usize],
-            width:  WORLDNET_W,
+            width: WORLDNET_W,
             height: WORLDNET_H,
         }
     }
@@ -154,7 +324,10 @@ impl WorldnetPixelBuffer {
     /// Fill the entire buffer with a solid colour (RGBA).
     pub fn clear(&mut self, r: u8, g: u8, b: u8, a: u8) {
         for px in self.pixels.chunks_exact_mut(4) {
-            px[0] = r; px[1] = g; px[2] = b; px[3] = a;
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = a;
         }
     }
 
@@ -163,7 +336,7 @@ impl WorldnetPixelBuffer {
         for row in y..(y + h).min(self.height) {
             for col in x..(x + w).min(self.width) {
                 let i = ((row * self.width + col) * 4) as usize;
-                self.pixels[i]     = r;
+                self.pixels[i] = r;
                 self.pixels[i + 1] = g;
                 self.pixels[i + 2] = b;
                 self.pixels[i + 3] = 255;
@@ -174,7 +347,8 @@ impl WorldnetPixelBuffer {
     /// Draw a single 8×8 character using the font8x8 bitmap font.
     pub fn draw_char(&mut self, ch: char, x: u32, y: u32, r: u8, g: u8, b: u8) {
         use font8x8::UnicodeFonts;
-        let glyph = font8x8::BASIC_FONTS.get(ch)
+        let glyph = font8x8::BASIC_FONTS
+            .get(ch)
             .or_else(|| font8x8::BASIC_FONTS.get('?'));
         if let Some(glyph) = glyph {
             for (row, &bits) in glyph.iter().enumerate() {
@@ -184,7 +358,7 @@ impl WorldnetPixelBuffer {
                         let py = y + row as u32;
                         if px < self.width && py < self.height {
                             let i = ((py * self.width + px) * 4) as usize;
-                            self.pixels[i]     = r;
+                            self.pixels[i] = r;
                             self.pixels[i + 1] = g;
                             self.pixels[i + 2] = b;
                             self.pixels[i + 3] = 255;
@@ -201,14 +375,24 @@ impl WorldnetPixelBuffer {
         for ch in text.chars() {
             self.draw_char(ch, cx, y, r, g, b);
             cx += 9; // 8px glyph + 1px spacing
-            if cx + 8 >= self.width { break; }
+            if cx + 8 >= self.width {
+                break;
+            }
         }
         cx
     }
 
     /// Draw text with word-wrap. Returns y after last line.
-    pub fn draw_text_wrapped(&mut self, text: &str, x: u32, y: u32, max_w: u32,
-                              r: u8, g: u8, b: u8) -> u32 {
+    pub fn draw_text_wrapped(
+        &mut self,
+        text: &str,
+        x: u32,
+        y: u32,
+        max_w: u32,
+        r: u8,
+        g: u8,
+        b: u8,
+    ) -> u32 {
         let chars_per_line = (max_w / 9).max(1) as usize;
         let mut cy = y;
         let mut line = String::new();
@@ -218,10 +402,14 @@ impl WorldnetPixelBuffer {
                 cy += 11;
                 line = word.to_string();
             } else {
-                if !line.is_empty() { line.push(' '); }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
                 line.push_str(word);
             }
-            if cy >= self.height { break; }
+            if cy >= self.height {
+                break;
+            }
         }
         if !line.is_empty() && cy < self.height {
             self.draw_text(&line, x, cy, r, g, b);
@@ -234,11 +422,13 @@ impl WorldnetPixelBuffer {
 // ── Page Renderer ──────────────────────────────────────────────────────────────
 
 /// Render a WORLDNET page to a pixel buffer.
+/// `world_ctx` is optional — pass `Some` when navigating world/* addresses.
 pub fn render_page(
-    addr:     &WorldnetAddress,
+    addr: &WorldnetAddress,
     key_type: Option<KeyType>,
-    content:  &[ContentItem],
-    buf:      &mut WorldnetPixelBuffer,
+    content: &[ContentItem],
+    world_ctx: Option<&WorldQueryContext>,
+    buf: &mut WorldnetPixelBuffer,
 ) {
     // Background: near-black
     buf.clear(12, 14, 20, 255);
@@ -253,7 +443,14 @@ pub fn render_page(
     // Access denied
     if !addr.can_access(key_type) {
         buf.draw_text("ACCESS DENIED", 4, 30, 255, 60, 60);
-        buf.draw_text("This address requires a higher key tier.", 4, 44, 180, 180, 180);
+        buf.draw_text(
+            "This address requires a higher key tier.",
+            4,
+            44,
+            180,
+            180,
+            180,
+        );
         return;
     }
 
@@ -264,8 +461,7 @@ pub fn render_page(
         WorldnetAddress::Signup => {
             render_signup(buf);
         }
-        WorldnetAddress::Forums | WorldnetAddress::Wiki
-        | WorldnetAddress::Marketplace => {
+        WorldnetAddress::Forums | WorldnetAddress::Wiki | WorldnetAddress::Marketplace => {
             render_content_list(addr, content, buf);
         }
         WorldnetAddress::ForumThread(id) => {
@@ -274,9 +470,26 @@ pub fn render_page(
         WorldnetAddress::Settings | WorldnetAddress::SettingsIdentity => {
             render_settings(key_type, buf);
         }
-        WorldnetAddress::AdminWorldConfig | WorldnetAddress::AdminKeys
-        | WorldnetAddress::AdminRegions | WorldnetAddress::AdminModeration => {
+        WorldnetAddress::AdminWorldConfig
+        | WorldnetAddress::AdminKeys
+        | WorldnetAddress::AdminRegions
+        | WorldnetAddress::AdminModeration => {
             render_admin(addr, buf);
+        }
+        WorldnetAddress::WorldObject(_)
+        | WorldnetAddress::WorldChunk(..)
+        | WorldnetAddress::WorldObjects => {
+            if let Some(ctx) = world_ctx {
+                if let Some(response) = query_world(addr, ctx) {
+                    render_world_response(&response, buf);
+                    return;
+                }
+            }
+            // No context supplied or no data — show waiting message
+            buf.draw_text("WORLD OBJECTS", 4, 20, 80, 220, 160);
+            buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
+            buf.draw_text("No world data loaded yet.", 4, 42, 140, 140, 140);
+            buf.draw_text("Move around to load chunks.", 4, 56, 100, 100, 100);
         }
         WorldnetAddress::Custom(s) if s == "help" => {
             render_help(buf);
@@ -297,29 +510,31 @@ fn render_home(key_type: Option<KeyType>, buf: &mut WorldnetPixelBuffer) {
     let mut y = 50u32;
     let items: &[(&str, &str)] = match key_type {
         None | Some(KeyType::Trial) => &[
-            ("worldnet://forums",  "Forums       (read only)"),
-            ("worldnet://wiki",    "Wiki         (read only)"),
-            ("worldnet://signup",  "Sign up / Log in"),
+            ("worldnet://forums", "Forums       (read only)"),
+            ("worldnet://wiki", "Wiki         (read only)"),
+            ("worldnet://signup", "Sign up / Log in"),
         ],
         Some(KeyType::Guest) => &[
-            ("worldnet://forums",      "Forums"),
-            ("worldnet://wiki",        "Wiki"),
+            ("worldnet://forums", "Forums"),
+            ("worldnet://wiki", "Wiki"),
             ("worldnet://marketplace", "Marketplace"),
-            ("worldnet://settings",    "Settings"),
+            ("worldnet://settings", "Settings"),
         ],
         Some(KeyType::User) | Some(KeyType::Business) => &[
-            ("worldnet://forums",      "Forums"),
-            ("worldnet://wiki",        "Wiki"),
+            ("worldnet://forums", "Forums"),
+            ("worldnet://wiki", "Wiki"),
             ("worldnet://marketplace", "Marketplace"),
-            ("worldnet://settings",    "Settings"),
+            ("worldnet://settings", "Settings"),
         ],
-        Some(KeyType::Admin) | Some(KeyType::Relay)
-        | Some(KeyType::Server) | Some(KeyType::Genesis) => &[
-            ("worldnet://forums",           "Forums"),
-            ("worldnet://wiki",             "Wiki"),
-            ("worldnet://marketplace",      "Marketplace"),
-            ("worldnet://settings",         "Settings"),
-            ("worldnet://admin/worldconfig","Admin: World Config"),
+        Some(KeyType::Admin)
+        | Some(KeyType::Relay)
+        | Some(KeyType::Server)
+        | Some(KeyType::Genesis) => &[
+            ("worldnet://forums", "Forums"),
+            ("worldnet://wiki", "Wiki"),
+            ("worldnet://marketplace", "Marketplace"),
+            ("worldnet://settings", "Settings"),
+            ("worldnet://admin/worldconfig", "Admin: World Config"),
             ("worldnet://admin/moderation", "Admin: Moderation"),
         ],
     };
@@ -343,20 +558,25 @@ fn render_signup(buf: &mut WorldnetPixelBuffer) {
         "Guest    — free, email required",
         "User     — full access, certified",
     ] {
-        let col = if line.starts_with("Trial") || line.starts_with("Guest") || line.starts_with("User") {
-            (100u8, 200u8, 255u8)
-        } else {
-            (200u8, 200u8, 200u8)
-        };
+        let col =
+            if line.starts_with("Trial") || line.starts_with("Guest") || line.starts_with("User") {
+                (100u8, 200u8, 255u8)
+            } else {
+                (200u8, 200u8, 200u8)
+            };
         buf.draw_text(line, 4, y, col.0, col.1, col.2);
         y += 12;
     }
 }
 
-fn render_content_list(addr: &WorldnetAddress, content: &[ContentItem], buf: &mut WorldnetPixelBuffer) {
+fn render_content_list(
+    addr: &WorldnetAddress,
+    content: &[ContentItem],
+    buf: &mut WorldnetPixelBuffer,
+) {
     let title = match addr {
-        WorldnetAddress::Forums      => "FORUMS",
-        WorldnetAddress::Wiki        => "WIKI",
+        WorldnetAddress::Forums => "FORUMS",
+        WorldnetAddress::Wiki => "WIKI",
         WorldnetAddress::Marketplace => "MARKETPLACE",
         _ => "CONTENT",
     };
@@ -364,7 +584,14 @@ fn render_content_list(addr: &WorldnetAddress, content: &[ContentItem], buf: &mu
     buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
 
     if content.is_empty() {
-        buf.draw_text("No content yet. Be the first to post.", 4, 42, 140, 140, 140);
+        buf.draw_text(
+            "No content yet. Be the first to post.",
+            4,
+            42,
+            140,
+            140,
+            140,
+        );
         return;
     }
 
@@ -376,7 +603,9 @@ fn render_content_list(addr: &WorldnetAddress, content: &[ContentItem], buf: &mu
         let meta = format!("by {} ", &item.author[..item.author.len().min(12)]);
         buf.draw_text(&meta, 28, y + 10, 100, 120, 140);
         y += 24;
-        if y + 24 > buf.height { break; }
+        if y + 24 > buf.height {
+            break;
+        }
     }
 }
 
@@ -396,15 +625,15 @@ fn render_settings(key_type: Option<KeyType>, buf: &mut WorldnetPixelBuffer) {
     buf.draw_text("SETTINGS", 4, 20, 80, 220, 160);
     buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
     let tier = match key_type {
-        None                      => "None (guest)",
-        Some(KeyType::Trial)      => "Trial",
-        Some(KeyType::Guest)      => "Guest",
-        Some(KeyType::User)       => "Certified User",
-        Some(KeyType::Business)   => "Business",
-        Some(KeyType::Admin)      => "Admin",
-        Some(KeyType::Relay)      => "Relay",
-        Some(KeyType::Server)     => "Server",
-        Some(KeyType::Genesis)    => "Genesis",
+        None => "None (guest)",
+        Some(KeyType::Trial) => "Trial",
+        Some(KeyType::Guest) => "Guest",
+        Some(KeyType::User) => "Certified User",
+        Some(KeyType::Business) => "Business",
+        Some(KeyType::Admin) => "Admin",
+        Some(KeyType::Relay) => "Relay",
+        Some(KeyType::Server) => "Server",
+        Some(KeyType::Genesis) => "Genesis",
     };
     let line = format!("Key tier: {}", tier);
     buf.draw_text(&line, 4, 40, 200, 200, 200);
@@ -417,14 +646,144 @@ fn render_admin(addr: &WorldnetAddress, buf: &mut WorldnetPixelBuffer) {
     buf.draw_text("ADMIN INTRANET", 4, 20, 255, 180, 60);
     buf.fill_rect(0, 32, buf.width, 1, 80, 60, 20);
     let page = match addr {
-        WorldnetAddress::AdminWorldConfig  => "World Configuration",
-        WorldnetAddress::AdminKeys         => "Key Registry",
-        WorldnetAddress::AdminRegions      => "Region Management",
-        WorldnetAddress::AdminModeration   => "Moderation Queue",
+        WorldnetAddress::AdminWorldConfig => "World Configuration",
+        WorldnetAddress::AdminKeys => "Key Registry",
+        WorldnetAddress::AdminRegions => "Region Management",
+        WorldnetAddress::AdminModeration => "Moderation Queue",
         _ => "Admin",
     };
     buf.draw_text(page, 4, 40, 255, 200, 100);
     buf.draw_text("(full editor — coming soon)", 4, 54, 140, 140, 140);
+}
+
+fn render_world_response(response: &WorldnetResponse, buf: &mut WorldnetPixelBuffer) {
+    match response {
+        WorldnetResponse::ObjectDetail { obj, overrides } => {
+            buf.draw_text("OBJECT DETAIL", 4, 20, 80, 220, 160);
+            buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
+            let label = if obj.label.is_empty() {
+                &obj.type_name
+            } else {
+                &obj.label
+            };
+            buf.draw_text(label, 4, 38, 220, 220, 220);
+            buf.draw_text(&format!("type: {}", obj.type_name), 4, 50, 120, 160, 200);
+            buf.draw_text(
+                &format!("id:   {}", &obj.id[..obj.id.len().min(36)]),
+                4,
+                62,
+                80,
+                100,
+                120,
+            );
+            buf.draw_text(
+                &format!(
+                    "pos:  {:.1},{:.1},{:.1}",
+                    obj.position[0], obj.position[1], obj.position[2]
+                ),
+                4,
+                74,
+                160,
+                160,
+                160,
+            );
+            buf.draw_text(
+                &format!("chunk: {},{}", obj.chunk.0, obj.chunk.1),
+                4,
+                86,
+                120,
+                120,
+                120,
+            );
+            if !overrides.is_empty() {
+                buf.fill_rect(0, 100, buf.width, 1, 40, 44, 60);
+                buf.draw_text(
+                    &format!("Overrides ({})", overrides.len()),
+                    4,
+                    106,
+                    255,
+                    180,
+                    60,
+                );
+                let mut y = 118u32;
+                for ov in overrides.iter().take(5) {
+                    buf.draw_text(
+                        &format!("  {} t={}", ov.action, ov.timestamp),
+                        4,
+                        y,
+                        200,
+                        160,
+                        80,
+                    );
+                    y += 12;
+                }
+            }
+        }
+        WorldnetResponse::ChunkObjects {
+            cx,
+            cz,
+            objects,
+            override_count,
+        } => {
+            buf.draw_text(&format!("CHUNK {},{}", cx, cz), 4, 20, 80, 220, 160);
+            buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
+            if objects.is_empty() {
+                buf.draw_text("No objects in this chunk.", 4, 42, 140, 140, 140);
+            } else {
+                buf.draw_text(
+                    &format!("{} objects  {} overrides", objects.len(), override_count),
+                    4,
+                    38,
+                    160,
+                    180,
+                    200,
+                );
+                let mut y = 52u32;
+                for obj in objects.iter().take(14) {
+                    let label = if obj.label.is_empty() {
+                        &obj.type_name
+                    } else {
+                        &obj.label
+                    };
+                    buf.draw_text("›", 4, y, 60, 160, 255);
+                    buf.draw_text(label, 16, y, 210, 210, 210);
+                    buf.draw_text(&obj.id[..obj.id.len().min(16)], 16, y + 10, 60, 80, 100);
+                    y += 24;
+                    if y + 24 > buf.height {
+                        break;
+                    }
+                }
+            }
+        }
+        WorldnetResponse::AllObjects {
+            total_objects,
+            chunks,
+        } => {
+            buf.draw_text("WORLD OBJECTS", 4, 20, 80, 220, 160);
+            buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
+            buf.draw_text(
+                &format!("{} objects across {} chunks", total_objects, chunks.len()),
+                4,
+                38,
+                160,
+                180,
+                200,
+            );
+            let mut y = 52u32;
+            for (cx, cz, count) in chunks.iter().take(14) {
+                let s = format!("chunk {},{}: {} obj", cx, cz, count);
+                buf.draw_text(&s, 4, y, 180, 180, 180);
+                y += 12;
+                if y + 12 > buf.height {
+                    break;
+                }
+            }
+        }
+        WorldnetResponse::NotFound(addr) => {
+            buf.draw_text("NOT FOUND", 4, 20, 255, 80, 80);
+            buf.draw_text(addr, 4, 34, 140, 140, 140);
+        }
+    }
 }
 
 fn render_not_found(addr: &WorldnetAddress, buf: &mut WorldnetPixelBuffer) {
@@ -437,23 +796,28 @@ fn render_help(buf: &mut WorldnetPixelBuffer) {
     buf.draw_text("COMMANDS", 4, 20, 80, 220, 160);
     buf.fill_rect(0, 32, buf.width, 1, 40, 44, 60);
     let cmds: &[(&str, &str)] = &[
-        ("forums / f",   "Go to forums"),
-        ("wiki / w",     "Go to wiki"),
-        ("market / m",   "Go to marketplace"),
+        ("forums / f", "Go to forums"),
+        ("wiki / w", "Go to wiki"),
+        ("market / m", "Go to marketplace"),
         ("settings / s", "Identity & settings"),
-        ("admin / a",    "Admin intranet"),
-        ("home",         "Root page"),
-        ("post",         "Compose a new post"),
-        ("who",          "Your identity info"),
-        ("go <path>",    "Navigate to worldnet://path"),
-        ("exit / q",     "Close terminal"),
+        ("admin / a", "Admin intranet"),
+        ("home", "Root page"),
+        ("objects / world", "All loaded world objects"),
+        ("obj <id>", "View object by ID"),
+        ("chunk <cx> <cz>", "Objects in chunk grid cell"),
+        ("post", "Compose a new post"),
+        ("who", "Your identity info"),
+        ("go <path>", "Navigate to worldnet://path"),
+        ("exit / q", "Close terminal"),
     ];
     let mut y = 40u32;
     for (cmd, desc) in cmds {
         buf.draw_text(cmd, 4, y, 100, 200, 255);
         buf.draw_text(desc, 112, y, 180, 180, 180);
         y += 12;
-        if y + 12 > buf.height { break; }
+        if y + 12 > buf.height {
+            break;
+        }
     }
 }
 
@@ -473,22 +837,32 @@ pub fn process_terminal_command(cmd: &str, _current: &WorldnetAddress) -> Termin
     let parts: Vec<&str> = cmd.trim().splitn(2, ' ').collect();
     match parts.as_slice() {
         // Navigation shorthands
-        [] | [""]              => TerminalCmd::Refresh,
-        ["home"] | ["root"]    => TerminalCmd::Navigate(WorldnetAddress::Root),
-        ["forums"] | ["f"]     => TerminalCmd::Navigate(WorldnetAddress::Forums),
-        ["wiki"] | ["w"]       => TerminalCmd::Navigate(WorldnetAddress::Wiki),
-        ["market"] | ["marketplace"] | ["m"]
-                               => TerminalCmd::Navigate(WorldnetAddress::Marketplace),
-        ["settings"] | ["s"]   => TerminalCmd::Navigate(WorldnetAddress::Settings),
-        ["admin"] | ["a"]      => TerminalCmd::Navigate(WorldnetAddress::AdminWorldConfig),
-        ["who"] | ["whoami"] | ["id"]
-                               => TerminalCmd::Navigate(WorldnetAddress::SettingsIdentity),
-        ["help"] | ["?"] | ["h"]
-                               => TerminalCmd::Navigate(WorldnetAddress::Custom("help".into())),
-        ["post"] | ["new"] | ["write"]
-                               => TerminalCmd::OpenCompose,
-        ["exit"] | ["quit"] | ["q"] | ["close"]
-                               => TerminalCmd::Close,
+        [] | [""] => TerminalCmd::Refresh,
+        ["home"] | ["root"] => TerminalCmd::Navigate(WorldnetAddress::Root),
+        ["forums"] | ["f"] => TerminalCmd::Navigate(WorldnetAddress::Forums),
+        ["wiki"] | ["w"] => TerminalCmd::Navigate(WorldnetAddress::Wiki),
+        ["market"] | ["marketplace"] | ["m"] => TerminalCmd::Navigate(WorldnetAddress::Marketplace),
+        ["settings"] | ["s"] => TerminalCmd::Navigate(WorldnetAddress::Settings),
+        ["admin"] | ["a"] => TerminalCmd::Navigate(WorldnetAddress::AdminWorldConfig),
+        ["who"] | ["whoami"] | ["id"] => TerminalCmd::Navigate(WorldnetAddress::SettingsIdentity),
+        ["help"] | ["?"] | ["h"] => TerminalCmd::Navigate(WorldnetAddress::Custom("help".into())),
+        ["post"] | ["new"] | ["write"] => TerminalCmd::OpenCompose,
+        ["exit"] | ["quit"] | ["q"] | ["close"] => TerminalCmd::Close,
+        // World object shortcuts
+        ["objects"] | ["objs"] | ["world"] => TerminalCmd::Navigate(WorldnetAddress::WorldObjects),
+        ["obj", id] | ["object", id] => {
+            TerminalCmd::Navigate(WorldnetAddress::WorldObject(id.to_string()))
+        }
+        ["chunk", cx] => {
+            // "chunk 3" — chunk 3,0
+            let cx = cx.parse().unwrap_or(0);
+            TerminalCmd::Navigate(WorldnetAddress::WorldChunk(cx, 0))
+        }
+        ["chunk", cx, cz] | [cx, cz] if cx.parse::<i32>().is_ok() && cz.parse::<i32>().is_ok() => {
+            let cx = cx.parse().unwrap_or(0);
+            let cz = cz.parse().unwrap_or(0);
+            TerminalCmd::Navigate(WorldnetAddress::WorldChunk(cx, cz))
+        }
         // Full address navigation: "go forums/thread/123" or "go worldnet://forums"
         ["go", path] | ["cd", path] | ["open", path] => {
             let addr_str = if path.starts_with("worldnet://") {
@@ -522,7 +896,14 @@ pub fn render_terminal_prompt(input: &str, buf: &mut WorldnetPixelBuffer) {
     // Prompt symbol
     buf.draw_text(">", 4, y + 6, 60, 200, 120);
     // Input text (cap display at buffer width)
-    let display: String = input.chars().rev().take(((buf.width - 20) / 9) as usize).collect::<String>().chars().rev().collect();
+    let display: String = input
+        .chars()
+        .rev()
+        .take(((buf.width - 20) / 9) as usize)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     buf.draw_text(&display, 16, y + 6, 240, 240, 240);
     // Block cursor at end of input
     let cursor_x = 16 + (display.len() as u32) * 9;
@@ -535,8 +916,8 @@ pub fn render_terminal_prompt(input: &str, buf: &mut WorldnetPixelBuffer) {
 pub fn addr_section(addr: &WorldnetAddress) -> &'static str {
     match addr {
         WorldnetAddress::Forums | WorldnetAddress::ForumThread(_) => "forums",
-        WorldnetAddress::Wiki   | WorldnetAddress::WikiPage(_)    => "wiki",
-        WorldnetAddress::Marketplace                               => "marketplace",
-        _                                                          => "",
+        WorldnetAddress::Wiki | WorldnetAddress::WikiPage(_) => "wiki",
+        WorldnetAddress::Marketplace => "marketplace",
+        _ => "",
     }
 }

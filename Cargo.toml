@@ -165,5 +165,10 @@ name = "worldgen"
 path = "src/bin/worldgen.rs"
 required-features = []
 
+[[bin]]
+name = "osm-import"
+path = "src/bin/osm_import.rs"
+required-features = []
+
 [dependencies.zstd]
 version = "0.13"

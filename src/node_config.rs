@@ -22,7 +22,13 @@ pub struct UiConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { show_cpu: true, show_ram: true, show_dht: true, refresh_ms: 500, max_log_entries: 1000 }
+        Self {
+            show_cpu: true,
+            show_ram: true,
+            show_dht: true,
+            refresh_ms: 500,
+            max_log_entries: 1000,
+        }
     }
 }
 
@@ -57,9 +63,9 @@ impl Default for DataSourceConfig {
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct DownloadBbox {
     pub south: f64,
-    pub west:  f64,
+    pub west: f64,
     pub north: f64,
-    pub east:  f64,
+    pub east: f64,
 }
 
 // ─── Main config ─────────────────────────────────────────────────────────────
@@ -68,54 +74,54 @@ pub struct DownloadBbox {
 #[serde(default)]
 pub struct NodeConfig {
     // ── Identity ─────────────────────────────────────────────────────────
-    pub node_name:              Option<String>,
+    pub node_name: Option<String>,
     /// Path to persistent Ed25519 keypair file (default: ./node.key)
-    pub identity_file:          Option<String>,
-    pub temp_identity:          bool,
+    pub identity_file: Option<String>,
+    pub temp_identity: bool,
 
     // ── Network / relay ──────────────────────────────────────────────────
-    pub port:                   u16,
+    pub port: u16,
     /// WebSocket port (default port + 5000)
-    pub ws_port:                Option<u16>,
-    pub external_addr:          Option<String>,
-    pub node_type:              String,
-    pub priority_score:         u32,
+    pub ws_port: Option<u16>,
+    pub external_addr: Option<String>,
+    pub node_type: String,
+    pub priority_score: u32,
 
-    pub max_circuits:           usize,
+    pub max_circuits: usize,
     pub max_circuit_duration_secs: u64,
-    pub max_circuit_bytes:      u64,
+    pub max_circuit_bytes: u64,
 
-    pub peers:                  Vec<String>,
-    pub blacklist:              Vec<String>,
-    pub whitelist:              Vec<String>,
-    pub priority_peers:         Vec<String>,
+    pub peers: Vec<String>,
+    pub blacklist: Vec<String>,
+    pub whitelist: Vec<String>,
+    pub priority_peers: Vec<String>,
 
-    pub max_bandwidth_mbps:     u32,
-    pub max_peers:              u32,
-    pub max_ping_ms:            u32,
-    pub max_retries:            u32,
-    pub always_on:              bool,
+    pub max_bandwidth_mbps: u32,
+    pub max_peers: u32,
+    pub max_ping_ms: u32,
+    pub max_retries: u32,
+    pub always_on: bool,
 
     // ── Feature flags (client has all true; strip down per node type) ──
-    pub graphics_enabled:       bool,   // wgpu renderer — false for server/relay
-    pub world_enabled:          bool,   // terrain/OSM/elevation — false for relay (unless relay wants to cache)
-    pub relay_enabled:          bool,   // libp2p circuit relay
-    pub tui_enabled:            bool,   // terminal TUI dashboard
-    pub web_enabled:            bool,   // REST API + web dashboard
+    pub graphics_enabled: bool, // wgpu renderer — false for server/relay
+    pub world_enabled: bool, // terrain/OSM/elevation — false for relay (unless relay wants to cache)
+    pub relay_enabled: bool, // libp2p circuit relay
+    pub tui_enabled: bool,   // terminal TUI dashboard
+    pub web_enabled: bool,   // REST API + web dashboard
 
     // ── World / tile data ─────────────────────────────────────────────────
-    pub world_dir:              Option<String>,
-    pub max_world_data_gb:      u32,
-    pub max_loaded_chunks:      usize,
-    pub chunk_load_radius_m:    f64,
-    pub chunk_unload_radius_m:  f64,
+    pub world_dir: Option<String>,
+    pub max_world_data_gb: u32,
+    pub max_loaded_chunks: usize,
+    pub chunk_load_radius_m: f64,
+    pub chunk_unload_radius_m: f64,
     pub world_save_interval_secs: u64,
 
     // ── Storage budget ────────────────────────────────────────────────────
     /// Total disk budget for cached tiles/chunks (GB). 0 = unlimited.
-    pub storage_budget_gb:      u32,
+    pub storage_budget_gb: u32,
     /// Cache OSM/elevation/terrain tiles within this many chunks of visited area.
-    pub cache_radius_chunks:    u32,
+    pub cache_radius_chunks: u32,
 
     // ── Data sources ──────────────────────────────────────────────────────
     pub data: DataSourceConfig,
@@ -147,24 +153,24 @@ pub struct NodeConfig {
     pub ram_shed_threshold_pct: u8,
 
     // ── Web dashboard ─────────────────────────────────────────────────────
-    pub web_port:               u16,
-    pub web_bind:               String,
-    pub web_auth:               bool,
-    pub web_username:           String,
-    pub web_password:           String,
+    pub web_port: u16,
+    pub web_bind: String,
+    pub web_auth: bool,
+    pub web_username: String,
+    pub web_password: String,
 
     // ── UI ────────────────────────────────────────────────────────────────
-    pub headless:               bool,
-    pub ui:                     UiConfig,
+    pub headless: bool,
+    pub ui: UiConfig,
 
     // ── Logging ───────────────────────────────────────────────────────────
-    pub log_level:              String,
+    pub log_level: String,
 
     // ── Server sync ───────────────────────────────────────────────────────
-    pub known_servers:          Vec<String>,
+    pub known_servers: Vec<String>,
 
     // ── Auto-update ───────────────────────────────────────────────────────
-    pub github_repo:            String,
+    pub github_repo: String,
     pub update_check_interval_secs: u64,
 }
 
@@ -232,7 +238,10 @@ impl NodeConfig {
 
     /// Path to the identity key file (defaults to ./node.key, overridden by identity_file field).
     pub fn identity_path(&self) -> PathBuf {
-        self.identity_file.as_ref().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("node.key"))
+        self.identity_file
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("node.key"))
     }
 }
 

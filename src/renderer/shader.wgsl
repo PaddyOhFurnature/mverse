@@ -16,12 +16,14 @@ var<uniform> model: ModelUniform;
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) color: vec3<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) world_position: vec3<f32>,
+    @location(2) vert_color: vec3<f32>,
 };
 
 @vertex
@@ -36,6 +38,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_normal = model.model * vec4<f32>(in.normal, 0.0);
     out.world_normal = world_normal.xyz;
     out.world_position = world_pos.xyz;
+    out.vert_color = in.color;
     
     return out;
 }
@@ -45,17 +48,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal = normalize(in.world_normal);
 
-    // Slope-based terrain colours: blend between grass (flat tops) and rock (steep sides)
-    let up_dot = dot(normal, vec3<f32>(0.0, 1.0, 0.0)); // 1 = flat top, 0 = vertical
-    let grass = vec3<f32>(0.30, 0.52, 0.18); // green grass
-    let rock  = vec3<f32>(0.52, 0.47, 0.42); // warm gray rock
-    let dirt  = vec3<f32>(0.50, 0.37, 0.22); // brown dirt (mid-slope)
+    // Slope factor: 1 = flat top, 0 = vertical wall
+    let up_dot = dot(normal, vec3<f32>(0.0, 1.0, 0.0));
 
-    // grass above ~35°, dirt 15–35°, rock below ~15° from vertical
-    let t_grass = clamp((up_dot - 0.5) * 3.0, 0.0, 1.0);    // smooth 0→1 as slope flattens
-    let t_rock  = clamp((0.3 - up_dot) * 4.0, 0.0, 1.0);    // smooth 0→1 as slope steepens
-    let t_dirt  = 1.0 - t_grass - t_rock;
-    let base_color = grass * t_grass + dirt * clamp(t_dirt, 0.0, 1.0) + rock * t_rock;
+    // Vertex color carries material color from terrain generation (asphalt, grass, rock etc.)
+    // On steep slopes, blend toward a rock color so cliff faces look natural regardless of material.
+    let rock = vec3<f32>(0.52, 0.47, 0.42);
+    let t_rock = clamp((0.3 - up_dot) * 4.0, 0.0, 1.0);
+    let base_color = mix(in.vert_color, rock, t_rock);
 
     // Directional sun light
     let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.4));

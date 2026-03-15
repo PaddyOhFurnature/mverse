@@ -6,8 +6,8 @@
 
 use async_trait::async_trait;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use libp2p::request_response::Codec;
 use libp2p::StreamProtocol;
+use libp2p::request_response::Codec;
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -55,14 +55,21 @@ impl Codec for TileCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > 1 << 20 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "tile request too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tile request too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
         bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    async fn read_response<T>(&mut self, _: &Self::Protocol, io: &mut T) -> io::Result<Self::Response>
+    async fn read_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -70,30 +77,43 @@ impl Codec for TileCodec {
         io.read_exact(&mut len_buf).await?;
         let len = u32::from_be_bytes(len_buf) as usize;
         if len > 64 << 20 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "tile response too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tile response too large",
+            ));
         }
         let mut buf = vec![0u8; len];
         io.read_exact(&mut buf).await?;
         bincode::deserialize(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    async fn write_request<T>(&mut self, _: &Self::Protocol, io: &mut T, req: Self::Request) -> io::Result<()>
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let bytes = bincode::serialize(&req)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let bytes =
+            bincode::serialize(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         io.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
         io.write_all(&bytes).await?;
         io.close().await
     }
 
-    async fn write_response<T>(&mut self, _: &Self::Protocol, io: &mut T, resp: Self::Response) -> io::Result<()>
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        io: &mut T,
+        resp: Self::Response,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let bytes = bincode::serialize(&resp)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let bytes =
+            bincode::serialize(&resp).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         io.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
         io.write_all(&bytes).await?;
         io.close().await

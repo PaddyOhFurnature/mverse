@@ -3,8 +3,8 @@
 //! Converts binary voxel grid into smooth triangle mesh.
 //! Uses lookup tables for 256 cube configurations.
 
-use crate::mesh::{Mesh, Vertex};
 use crate::materials::MaterialId;
+use crate::mesh::{Mesh, Vertex};
 use crate::voxel::{Octree, VoxelCoord};
 use glam::Vec3;
 
@@ -31,16 +31,27 @@ const CORNER_OFFSETS: [Vec3; 8] = [
 
 /// Edge connections (which two corners each edge connects)
 const EDGE_CONNECTIONS: [(usize, usize); 12] = [
-    (0, 1), (1, 2), (2, 3), (3, 0), // Bottom face
-    (4, 5), (5, 6), (6, 7), (7, 4), // Top face
-    (0, 4), (1, 5), (2, 6), (3, 7), // Vertical edges
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 0), // Bottom face
+    (4, 5),
+    (5, 6),
+    (6, 7),
+    (7, 4), // Top face
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7), // Vertical edges
 ];
 
 /// Triangle table: lists which edges form triangles for each configuration
 /// Each row is 16 values (up to 5 triangles × 3 edges, -1 terminated)
 /// Rows indexed by cube configuration (0-255)
 pub const TRIANGLE_TABLE: [[i8; 16]; 256] = [
-    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ],
     [0, 8, 3, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [0, 1, 9, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [1, 8, 3, 9, 8, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
@@ -295,44 +306,34 @@ pub const TRIANGLE_TABLE: [[i8; 16]; 256] = [
     [1, 3, 8, 9, 1, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [0, 9, 1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
     [0, 3, 8, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
-    [-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1],
+    [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ],
 ];
 
 /// Edge table: which edges are intersected for each cube configuration (256 entries)
 /// Bit N set means edge N has a vertex
 pub const EDGE_TABLE: [u16; 256] = [
-    0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
-    0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03, 0xe09, 0xf00,
-    0x190, 0x099, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
-    0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90,
-    0x230, 0x339, 0x033, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
-    0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
-    0x3a0, 0x2a9, 0x1a3, 0x0aa, 0x7a6, 0x6af, 0x5a5, 0x4ac,
-    0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0,
-    0x460, 0x569, 0x663, 0x76a, 0x066, 0x16f, 0x265, 0x36c,
-    0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69, 0xb60,
-    0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0x0ff, 0x3f5, 0x2fc,
-    0xdfc, 0xcf5, 0xfff, 0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0,
-    0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x055, 0x15c,
-    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950,
-    0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6, 0x2cf, 0x1c5, 0x0cc,
-    0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0,
-    0x8c0, 0x9c9, 0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc,
-    0x0cc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9, 0x7c0,
-    0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c,
-    0x15c, 0x055, 0x35f, 0x256, 0x55a, 0x453, 0x759, 0x650,
-    0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc,
-    0x2fc, 0x3f5, 0x0ff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0,
-    0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f, 0xd65, 0xc6c,
-    0x36c, 0x265, 0x16f, 0x066, 0x76a, 0x663, 0x569, 0x460,
-    0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac,
-    0x4ac, 0x5a5, 0x6af, 0x7a6, 0x0aa, 0x1a3, 0x2a9, 0x3a0,
-    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
-    0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x033, 0x339, 0x230,
-    0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c,
-    0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x099, 0x190,
-    0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
-    0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000,
+    0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a,
+    0xd03, 0xe09, 0xf00, 0x190, 0x099, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895,
+    0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x339, 0x033, 0x13a, 0x636, 0x73f, 0x435,
+    0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30, 0x3a0, 0x2a9, 0x1a3, 0x0aa,
+    0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0, 0x460,
+    0x569, 0x663, 0x76a, 0x066, 0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963,
+    0xa69, 0xb60, 0x5f0, 0x4f9, 0x7f3, 0x6fa, 0x1f6, 0x0ff, 0x3f5, 0x2fc, 0xdfc, 0xcf5, 0xfff,
+    0xef6, 0x9fa, 0x8f3, 0xbf9, 0xaf0, 0x650, 0x759, 0x453, 0x55a, 0x256, 0x35f, 0x055, 0x15c,
+    0xe5c, 0xf55, 0xc5f, 0xd56, 0xa5a, 0xb53, 0x859, 0x950, 0x7c0, 0x6c9, 0x5c3, 0x4ca, 0x3c6,
+    0x2cf, 0x1c5, 0x0cc, 0xfcc, 0xec5, 0xdcf, 0xcc6, 0xbca, 0xac3, 0x9c9, 0x8c0, 0x8c0, 0x9c9,
+    0xac3, 0xbca, 0xcc6, 0xdcf, 0xec5, 0xfcc, 0x0cc, 0x1c5, 0x2cf, 0x3c6, 0x4ca, 0x5c3, 0x6c9,
+    0x7c0, 0x950, 0x859, 0xb53, 0xa5a, 0xd56, 0xc5f, 0xf55, 0xe5c, 0x15c, 0x055, 0x35f, 0x256,
+    0x55a, 0x453, 0x759, 0x650, 0xaf0, 0xbf9, 0x8f3, 0x9fa, 0xef6, 0xfff, 0xcf5, 0xdfc, 0x2fc,
+    0x3f5, 0x0ff, 0x1f6, 0x6fa, 0x7f3, 0x4f9, 0x5f0, 0xb60, 0xa69, 0x963, 0x86a, 0xf66, 0xe6f,
+    0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x066, 0x76a, 0x663, 0x569, 0x460, 0xca0, 0xda9, 0xea3,
+    0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0x0aa, 0x1a3, 0x2a9, 0x3a0,
+    0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a,
+    0x033, 0x339, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795,
+    0x49f, 0x596, 0x29a, 0x393, 0x099, 0x190, 0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905,
+    0x80c, 0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000,
 ];
 
 /// Get cube configuration index from 8 corner states
@@ -356,97 +357,97 @@ fn interpolate_vertex(p1: Vec3, p2: Vec3, _t: f32) -> Vec3 {
 }
 
 /// Extract mesh from a single cube using marching cubes algorithm
-/// 
+///
 /// # Arguments
 /// * `cube_pos` - Position of cube minimum corner (in world space)
 /// * `corners` - Boolean array of 8 corner states (true = solid, false = air)
-/// 
+///
 /// # Returns
 /// A Mesh containing triangles for this cube, or empty mesh if fully empty/solid
-pub fn extract_cube_mesh(cube_pos: Vec3, corners: &[bool; 8]) -> Mesh {
+pub fn extract_cube_mesh(cube_pos: Vec3, corners: &[bool; 8], scale: f32) -> Mesh {
     let index = cube_index(corners);
-    
+
     // Get which edges have vertices
     let edges = EDGE_TABLE[index];
-    
+
     // If 0, cube is entirely inside/outside surface
     if edges == 0 {
         return Mesh::new();
     }
-    
+
     // Calculate vertex positions for each edge that's intersected
     let mut edge_vertices = [Vec3::ZERO; 12];
     for edge_idx in 0..12 {
         if (edges & (1 << edge_idx)) != 0 {
             let (c1, c2) = EDGE_CONNECTIONS[edge_idx];
-            let p1 = cube_pos + CORNER_OFFSETS[c1];
-            let p2 = cube_pos + CORNER_OFFSETS[c2];
+            let p1 = cube_pos + CORNER_OFFSETS[c1] * scale;
+            let p2 = cube_pos + CORNER_OFFSETS[c2] * scale;
             edge_vertices[edge_idx] = interpolate_vertex(p1, p2, 0.5);
         }
     }
-    
+
     // Build triangles from triangle table
     let mut mesh = Mesh::new();
-    
+
     let tri_table = TRIANGLE_TABLE[index];
     let mut tri_idx = 0;
-    
+
     while tri_table[tri_idx] != -1 {
         // Read 3 edges forming a triangle
         let e1 = tri_table[tri_idx] as usize;
         let e2 = tri_table[tri_idx + 1] as usize;
         let e3 = tri_table[tri_idx + 2] as usize;
-        
+
         let v1 = edge_vertices[e1];
         let v2 = edge_vertices[e2];
         let v3 = edge_vertices[e3];
-        
+
         // Calculate normal from triangle
         let edge1 = v2 - v1;
         let edge2 = v3 - v1;
         let normal = edge1.cross(edge2).normalize();
-        
+
         // Add vertices and get their indices
         let i1 = mesh.add_vertex(Vertex::new(v1, normal));
         let i2 = mesh.add_vertex(Vertex::new(v2, normal));
         let i3 = mesh.add_vertex(Vertex::new(v3, normal));
-        
+
         // Add triangle
         mesh.add_triangle(crate::mesh::Triangle::new(i1, i2, i3));
-        
+
         tri_idx += 3;
     }
-    
+
     mesh
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_cube_index_empty() {
         let corners = [false; 8];
         assert_eq!(cube_index(&corners), 0);
     }
-    
+
     #[test]
     fn test_cube_index_full() {
         let corners = [true; 8];
         assert_eq!(cube_index(&corners), 255);
     }
-    
+
     #[test]
     fn test_cube_index_single_corner() {
         let mut corners = [false; 8];
         corners[0] = true;
         assert_eq!(cube_index(&corners), 1);
-        
+
         corners = [false; 8];
         corners[7] = true;
         assert_eq!(cube_index(&corners), 128);
     }
-    
+
     #[test]
     fn test_interpolate_vertex() {
         let p1 = Vec3::new(0.0, 0.0, 0.0);
@@ -454,7 +455,7 @@ mod tests {
         let result = interpolate_vertex(p1, p2, 0.5);
         assert_eq!(result, Vec3::new(1.0, 1.0, 1.0));
     }
-    
+
     #[test]
     fn test_edge_table_populated() {
         // Edge table should have non-zero entries
@@ -462,37 +463,43 @@ mod tests {
         assert_eq!(EDGE_TABLE[255], 0x000); // No edges
         assert_ne!(EDGE_TABLE[1], 0x000); // Has edges
     }
-    
+
     #[test]
     fn test_extract_empty_cube() {
         // All corners AIR = no mesh
         let corners = [false; 8];
-        let mesh = extract_cube_mesh(Vec3::ZERO, &corners);
+        let mesh = extract_cube_mesh(Vec3::ZERO, &corners, 1.0);
         assert_eq!(mesh.vertex_count(), 0);
         assert_eq!(mesh.triangle_count(), 0);
     }
-    
+
     #[test]
     fn test_extract_full_cube() {
         // All corners SOLID = no mesh (entirely inside surface)
         let corners = [true; 8];
-        let mesh = extract_cube_mesh(Vec3::ZERO, &corners);
+        let mesh = extract_cube_mesh(Vec3::ZERO, &corners, 1.0);
         assert_eq!(mesh.vertex_count(), 0);
         assert_eq!(mesh.triangle_count(), 0);
     }
-    
+
     #[test]
     fn test_extract_single_corner() {
         // Single solid corner = small pyramid
         let mut corners = [false; 8];
         corners[0] = true;
-        
-        let mesh = extract_cube_mesh(Vec3::ZERO, &corners);
-        
+
+        let mesh = extract_cube_mesh(Vec3::ZERO, &corners, 1.0);
+
         // Should produce at least one triangle
-        assert!(mesh.vertex_count() >= 3, "Should have at least 3 vertices for a triangle");
-        assert!(mesh.triangle_count() >= 1, "Should have at least 1 triangle");
-        
+        assert!(
+            mesh.vertex_count() >= 3,
+            "Should have at least 3 vertices for a triangle"
+        );
+        assert!(
+            mesh.triangle_count() >= 1,
+            "Should have at least 1 triangle"
+        );
+
         // All vertices should be within cube bounds
         for v in &mesh.vertices {
             let pos = v.position;
@@ -501,23 +508,25 @@ mod tests {
             assert!(pos.z >= -0.1 && pos.z <= 1.1, "Z out of bounds: {}", pos.z);
         }
     }
-    
+
     #[test]
     fn test_extract_half_cube() {
         // Bottom half solid, top half air = horizontal plane
         let corners = [true, true, true, true, false, false, false, false];
-        
-        let mesh = extract_cube_mesh(Vec3::ZERO, &corners);
-        
-        // Should produce triangles for the surface between solid/air
+
+        let mesh = extract_cube_mesh(Vec3::ZERO, &corners, 1.0);
         assert!(mesh.vertex_count() >= 3);
         assert!(mesh.triangle_count() >= 1);
-        
+
         // Vertices should be near y=0.5 (midpoint between bottom and top)
         for v in &mesh.vertices {
             let pos = v.position;
             // Allow some tolerance
-            assert!(pos.y >= 0.4 && pos.y <= 0.6, "Y should be near midpoint: {}", pos.y);
+            assert!(
+                pos.y >= 0.4 && pos.y <= 0.6,
+                "Y should be near midpoint: {}",
+                pos.y
+            );
         }
     }
 }
@@ -526,52 +535,49 @@ mod tests {
 ///
 /// Samples octree in a cube around `center` of size `2^depth` meters.
 /// Transforms vertices from ECEF absolute coordinates to camera-relative (FloatingOrigin).
-/// 
+///
 /// For depth=7: samples 128×128×128 cube = 2,097,152 voxels
 pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> Mesh {
     let mut mesh = Mesh::new();
-    let size = 1 << depth;  // 2^depth
+    let size = 1 << depth; // 2^depth
     let half = size / 2;
-    
+
     // Iterate over all cubes in the region
     for x in (-half)..half {
         for y in (-half)..half {
             for z in (-half)..half {
-                let voxel_pos = VoxelCoord::new(
-                    center.x + x,
-                    center.y + y,
-                    center.z + z,
-                );
-                
+                let voxel_pos = VoxelCoord::new(center.x + x, center.y + y, center.z + z);
+
                 // Sample 8 corners of this cube
                 let mut corners = [false; 8];
                 let offsets = [
-                    (0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1),
-                    (0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1),
+                    (0, 0, 0),
+                    (1, 0, 0),
+                    (1, 0, 1),
+                    (0, 0, 1),
+                    (0, 1, 0),
+                    (1, 1, 0),
+                    (1, 1, 1),
+                    (0, 1, 1),
                 ];
-                
+
                 for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
-                    let corner_pos = VoxelCoord::new(
-                        voxel_pos.x + dx,
-                        voxel_pos.y + dy,
-                        voxel_pos.z + dz,
-                    );
+                    let corner_pos =
+                        VoxelCoord::new(voxel_pos.x + dx, voxel_pos.y + dy, voxel_pos.z + dz);
                     let mat = octree.get_voxel(corner_pos);
                     corners[i] = mat != MaterialId::AIR && mat != MaterialId::WATER;
                 }
-                
+
                 // Use simple integer offsets for marching cubes
                 // Marching cubes will interpolate vertices within the cube
-                let cube_mesh = extract_cube_mesh(
-                    Vec3::new(x as f32, y as f32, z as f32),
-                    &corners,
-                );
-                
+                let cube_mesh =
+                    extract_cube_mesh(Vec3::new(x as f32, y as f32, z as f32), &corners, 1.0);
+
                 mesh.merge(&cube_mesh);
             }
         }
     }
-    
+
     mesh
 }
 
@@ -584,12 +590,13 @@ pub fn extract_octree_mesh(octree: &Octree, center: &VoxelCoord, depth: u8) -> M
 /// Vertices are positioned relative to chunk center (centered at origin).
 /// Returns both the mesh and the chunk center voxel coordinate.
 pub fn extract_chunk_mesh(
-    octree: &Octree, 
-    min_voxel: &VoxelCoord, 
+    octree: &Octree,
+    min_voxel: &VoxelCoord,
     max_voxel: &VoxelCoord,
+    step: usize,
 ) -> (Mesh, VoxelCoord) {
     let mut mesh = Mesh::new();
-    
+
     // Calculate chunk center - max_voxel is exclusive, so true max is max-1
     // For min=0, max=100: range is 0..99 (inclusive), center should be 49.5
     // Using integer math: (0+100-1)/2 = 99/2 = 49 (not 50!)
@@ -598,45 +605,59 @@ pub fn extract_chunk_mesh(
         min_voxel.y + (max_voxel.y - min_voxel.y - 1) / 2,
         min_voxel.z + (max_voxel.z - min_voxel.z - 1) / 2,
     );
-    
-    // Iterate over all cubes in the chunk bounds
-    for voxel_x in min_voxel.x..max_voxel.x {
-        for voxel_y in min_voxel.y..max_voxel.y {
-            for voxel_z in min_voxel.z..max_voxel.z {
+
+    // Iterate over all cubes in the chunk bounds, stepping by `step` for LOD.
+    let s = step.max(1) as i64;
+    let sf = s as f32;
+
+    let mut voxel_x = min_voxel.x;
+    while voxel_x < max_voxel.x {
+        let mut voxel_y = min_voxel.y;
+        while voxel_y < max_voxel.y {
+            let mut voxel_z = min_voxel.z;
+            while voxel_z < max_voxel.z {
                 let voxel_pos = VoxelCoord::new(voxel_x, voxel_y, voxel_z);
-                
-                // Sample 8 corners of this cube
+
+                // Sample 8 corners of this (step-sized) cube,
+                // clamping to chunk bounds to avoid out-of-range reads.
                 let mut corners = [false; 8];
-                let offsets = [
-                    (0, 0, 0), (1, 0, 0), (1, 0, 1), (0, 0, 1),
-                    (0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1),
+                let offsets: [(i64, i64, i64); 8] = [
+                    (0, 0, 0),
+                    (s, 0, 0),
+                    (s, 0, s),
+                    (0, 0, s),
+                    (0, s, 0),
+                    (s, s, 0),
+                    (s, s, s),
+                    (0, s, s),
                 ];
-                
+
                 for (i, (dx, dy, dz)) in offsets.iter().enumerate() {
                     let corner_pos = VoxelCoord::new(
-                        voxel_pos.x + dx,
-                        voxel_pos.y + dy,
-                        voxel_pos.z + dz,
+                        (voxel_pos.x + dx).min(max_voxel.x - 1),
+                        (voxel_pos.y + dy).min(max_voxel.y - 1),
+                        (voxel_pos.z + dz).min(max_voxel.z - 1),
                     );
                     let mat = octree.get_voxel(corner_pos);
                     corners[i] = mat != MaterialId::AIR && mat != MaterialId::WATER;
                 }
-                
+
                 // Position relative to chunk center (mesh centered at origin)
                 let local_x = (voxel_x - center.x) as f32;
                 let local_y = (voxel_y - center.y) as f32;
                 let local_z = (voxel_z - center.z) as f32;
-                
-                let cube_mesh = extract_cube_mesh(
-                    Vec3::new(local_x, local_y, local_z),
-                    &corners,
-                );
-                
+
+                let cube_mesh =
+                    extract_cube_mesh(Vec3::new(local_x, local_y, local_z), &corners, sf);
+
                 mesh.merge(&cube_mesh);
+                voxel_z += s;
             }
+            voxel_y += s;
         }
+        voxel_x += s;
     }
-    
+
     (mesh, center)
 }
 
@@ -675,10 +696,11 @@ pub fn extract_water_surface_mesh(
                     let ly = (voxel_y - center.y) as f32 + 1.0; // top of voxel
                     let lz = (voxel_z - center.z) as f32;
 
-                    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(lx,       ly, lz),       water_color));
-                    let v1 = mesh.add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz),       water_color));
-                    let v2 = mesh.add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz + 1.0), water_color));
-                    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(lx,       ly, lz + 1.0), water_color));
+                    let v0 = mesh.add_vertex(Vertex::new(Vec3::new(lx, ly, lz), water_color));
+                    let v1 = mesh.add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz), water_color));
+                    let v2 = mesh
+                        .add_vertex(Vertex::new(Vec3::new(lx + 1.0, ly, lz + 1.0), water_color));
+                    let v3 = mesh.add_vertex(Vertex::new(Vec3::new(lx, ly, lz + 1.0), water_color));
 
                     mesh.add_triangle(Triangle::new(v0, v1, v2));
                     mesh.add_triangle(Triangle::new(v0, v2, v3));
@@ -724,10 +746,17 @@ pub fn extract_chunk_mesh_smooth(
     // +Y neighbour: used for all-solid top columns so both chunks agree on density
     // at wy = max_voxel.y (shared boundary with the chunk above).
     neighbor_y_upper: Option<&crate::terrain::SurfaceCache>,
+    // Voxel step size for LOD. step=1 (LOD 0/1) gives 1m cells; step=2 (LOD 2)
+    // gives 2m cells; step=4 (LOD 3) gives 4m cells. Boundary stitching still uses
+    // the neighbor's 1m surface_cache so seams remain correct at all LOD levels.
+    step: usize,
 ) -> (Mesh, VoxelCoord) {
-    use noise::{NoiseFn, Fbm, Perlin, MultiFractal};
+    use noise::{Fbm, MultiFractal, NoiseFn, Perlin};
 
-    // Medium-scale FBM: adds gentle undulation over ~143m wavelengths
+    let step = step.max(1);
+
+    // Medium-scale FBM: adds gentle undulation over ~143m wavelengths.
+    // Disabled at step≥2 — noise is smaller than the cell size at coarse LOD.
     let fbm_med: Fbm<Perlin> = Fbm::<Perlin>::new(42)
         .set_octaves(4)
         .set_frequency(0.007)
@@ -739,6 +768,7 @@ pub fn extract_chunk_mesh_smooth(
         .set_frequency(0.08)
         .set_lacunarity(2.0)
         .set_persistence(0.5);
+    let apply_noise = false; // disabled: FBM noise obscures SRTM surface; re-enable for polish pass
 
     let center = VoxelCoord::new(
         min_voxel.x + (max_voxel.x - min_voxel.x - 1) / 2,
@@ -746,10 +776,14 @@ pub fn extract_chunk_mesh_smooth(
         min_voxel.z + (max_voxel.z - min_voxel.z - 1) / 2,
     );
 
-    // Grid dimensions (one extra point on each axis for corner sampling)
-    let gx = (max_voxel.x - min_voxel.x + 1) as usize;
-    let gy = (max_voxel.y - min_voxel.y + 1) as usize;
-    let gz = (max_voxel.z - min_voxel.z + 1) as usize;
+    // Grid dimensions — one sample point per cell corner, step-spaced.
+    // At step=1: gx = CHUNK_SIZE+1; at step=2: gx = CHUNK_SIZE/2+1, etc.
+    let chunk_x = (max_voxel.x - min_voxel.x) as usize;
+    let chunk_y = (max_voxel.y - min_voxel.y) as usize;
+    let chunk_z = (max_voxel.z - min_voxel.z) as usize;
+    let gx = chunk_x / step + 1;
+    let gy = chunk_y / step + 1;
+    let gz = chunk_z / step + 1;
 
     // Stride: density_grid[xi * gy * gz + yi * gz + zi]
     let g_stride = gy * gz;
@@ -757,30 +791,31 @@ pub fn extract_chunk_mesh_smooth(
 
     // Pre-compute density for all grid points in a single pass.
     //
-    // The density grid is gx × gy × gz where gx = CHUNK_SIZE_X + 1 and
-    // gz = CHUNK_SIZE_Z + 1.  The extra column on each axis provides the outer
-    // corner of the edge cubes.  surface_cache only covers the interior columns
-    // [min_voxel.x, max_voxel.x) × [min_voxel.z, max_voxel.z), so the boundary
-    // column (xi=gx-1 or zi=gz-1) must come from the neighbour chunk.
+    // The density grid has one entry per step-spaced column corner.  The last
+    // column on each axis (xi=gx-1, zi=gz-1) corresponds to the chunk boundary
+    // (wx=max_voxel.x, wz=max_voxel.z) and is fetched from the neighbor surface
+    // cache so both chunks produce the same density at shared edges.
     //
-    // If the neighbour's surface cache is available we use its exact value →
-    // seamless join.  If it is not yet loaded we clamp to the last interior column
-    // (minor flat shelf at that edge) which disappears once the neighbour loads.
+    // If the neighbour cache is not yet loaded we fall back to the last interior
+    // column (a minor flat shelf that disappears once the neighbour loads).
     let mut density_grid = vec![0.0f32; gx * gy * gz];
+    // Per-grid-point material color (linear RGB, derived from the surface voxel material).
+    // Boundary columns default to grass; interior columns sample the octree at surface_y.
+    let default_color = Vec3::new(0.30, 0.52, 0.18); // grass green
+    let mut color_grid = vec![default_color; gx * gy * gz];
     let xi_last = gx - 1;
     let zi_last = gz - 1;
-    let no_surface = min_voxel.y as f32 - 1.0; // sentinel → all air
+    let no_surface = min_voxel.y as f64 - 1.0; // sentinel → all air
 
     // Look up surface_y from this chunk's cache (interior only).
-    let own = |cx: i64, cz: i64| -> f32 {
-        surface_cache.get(&(cx, cz)).copied().unwrap_or(no_surface)
-    };
+    let own =
+        |cx: i64, cz: i64| -> f64 { surface_cache.get(&(cx, cz)).copied().unwrap_or(no_surface) };
 
     for xi in 0..gx {
-        let wx = min_voxel.x + xi as i64;
+        let wx = min_voxel.x + (xi * step) as i64;
         let x_bnd = xi == xi_last;
         for zi in 0..gz {
-            let wz = min_voxel.z + zi as i64;
+            let wz = min_voxel.z + (zi * step) as i64;
             let z_bnd = zi == zi_last;
 
             let surface_y = match (x_bnd, z_bnd) {
@@ -809,30 +844,20 @@ pub fn extract_chunk_mesh_smooth(
                 }
             };
 
-            // Y-boundary override — ensures the density at the shared row
+            // Y-boundary override — ensures density at the shared row
             // (wy = max_voxel.y = min_voxel.y of the chunk above, and vice-versa)
-            // is IDENTICAL in both the lower and upper Y chunk, eliminating the
-            // horizontal seam at Y-chunk boundaries.
-            //
-            // The column key used below matches the key used in the match above so
-            // we always look up the same column from the Y-neighbour.
+            // is IDENTICAL in both chunks, eliminating horizontal seams.
             let ny_key = match (x_bnd, z_bnd) {
                 (false, false) => (wx, wz),
-                (true,  false) => (max_voxel.x, wz),
-                (false, true)  => (wx, max_voxel.z),
-                (true,  true)  => (max_voxel.x, max_voxel.z),
+                (true, false) => (max_voxel.x, wz),
+                (false, true) => (wx, max_voxel.z),
+                (true, true) => (max_voxel.x, max_voxel.z),
             };
-            let surface_y = if surface_y >= max_voxel.y as f32 {
-                // All-solid column: real surface is in the +Y chunk.
-                // Use the +Y neighbour's exact surface_y so both chunks agree on
-                // density at wy = max_voxel.y.
+            let surface_y = if surface_y >= max_voxel.y as f64 {
                 neighbor_y_upper
                     .and_then(|ny| ny.get(&ny_key).copied())
                     .unwrap_or(surface_y)
-            } else if surface_y < min_voxel.y as f32 {
-                // All-air column: real surface is in the −Y chunk.
-                // Use the −Y neighbour's exact surface_y so both chunks agree on
-                // density at wy = min_voxel.y.
+            } else if surface_y < min_voxel.y as f64 {
                 neighbor_y_lower
                     .and_then(|ny| ny.get(&ny_key).copied())
                     .unwrap_or(surface_y)
@@ -840,29 +865,68 @@ pub fn extract_chunk_mesh_smooth(
                 surface_y
             };
 
-            let med = fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4;
+            // Noise is sampled at actual world coordinates so it stays consistent
+            // across LOD levels. At step>1 we skip fine-grained noise (sub-cell detail
+            // would be aliased anyway).
+            let med = if apply_noise {
+                fbm_med.get([wx as f64, wz as f64]) as f32 * 0.4
+            } else {
+                0.0
+            };
+
+            // Sample material color at surface voxel for interior columns only.
+            // Boundary columns use the default grass color since the voxel data
+            // belongs to the neighbour chunk's octree.
+            let col_color = if !x_bnd && !z_bnd {
+                let sy = surface_y.round() as i64;
+                let sy_clamped = sy.clamp(min_voxel.y, max_voxel.y - 1);
+                let mat = octree.get_voxel(crate::voxel::VoxelCoord::new(wx, sy_clamped, wz));
+                let c = crate::materials::MaterialId::properties(mat).color;
+                Vec3::new(
+                    c[0] as f32 / 255.0,
+                    c[1] as f32 / 255.0,
+                    c[2] as f32 / 255.0,
+                )
+            } else {
+                default_color
+            };
+
             for yi in 0..gy {
-                let wy = min_voxel.y + yi as i64;
-                let fine = fbm_fine.get([wx as f64, wy as f64, wz as f64]) as f32 * 0.12;
-                density_grid[g_idx(xi, yi, zi)] = surface_y - wy as f32 + med + fine;
+                let wy = min_voxel.y + (yi * step) as i64;
+                let fine = if apply_noise {
+                    fbm_fine.get([wx as f64, wy as f64, wz as f64]) as f32 * 0.12
+                } else {
+                    0.0
+                };
+                density_grid[g_idx(xi, yi, zi)] =
+                    (surface_y - wy as f64 + med as f64 + fine as f64) as f32;
+                color_grid[g_idx(xi, yi, zi)] = col_color;
             }
         }
     }
 
     // Corner offset layout (matches CORNER_OFFSETS / EDGE_CONNECTIONS tables above)
     const OFFSETS: [(usize, usize, usize); 8] = [
-        (0,0,0),(1,0,0),(1,0,1),(0,0,1),
-        (0,1,0),(1,1,0),(1,1,1),(0,1,1),
+        (0, 0, 0),
+        (1, 0, 0),
+        (1, 0, 1),
+        (0, 0, 1),
+        (0, 1, 0),
+        (1, 1, 0),
+        (1, 1, 1),
+        (0, 1, 1),
     ];
 
     let mut mesh = Mesh::new();
 
-    for voxel_x in min_voxel.x..max_voxel.x {
-        for voxel_y in min_voxel.y..max_voxel.y {
-            for voxel_z in min_voxel.z..max_voxel.z {
-                let xi0 = (voxel_x - min_voxel.x) as usize;
-                let yi0 = (voxel_y - min_voxel.y) as usize;
-                let zi0 = (voxel_z - min_voxel.z) as usize;
+    // Iterate over cells (gx-1) × (gy-1) × (gz-1); each cell is step×step×step voxels.
+    let stepf = step as f64;
+    for xi0 in 0..gx - 1 {
+        let voxel_x = min_voxel.x + (xi0 * step) as i64;
+        for yi0 in 0..gy - 1 {
+            let voxel_y = min_voxel.y + (yi0 * step) as i64;
+            for zi0 in 0..gz - 1 {
+                let voxel_z = min_voxel.z + (zi0 * step) as i64;
 
                 // Sample density at 8 corners from the pre-computed grid
                 let mut d = [0.0f32; 8];
@@ -877,14 +941,19 @@ pub fn extract_chunk_mesh_smooth(
                 }
 
                 let edges = EDGE_TABLE[cube_idx];
-                if edges == 0 { continue; } // fully solid or fully air
+                if edges == 0 {
+                    continue;
+                } // fully solid or fully air
 
                 // Compute interpolated vertex position + gradient normal for each active edge
                 let mut edge_verts = [Vec3::ZERO; 12];
                 let mut edge_norms = [Vec3::new(0.0, 1.0, 0.0); 12];
+                let mut edge_colors = [default_color; 12];
 
                 for edge_idx in 0..12usize {
-                    if (edges & (1 << edge_idx)) == 0 { continue; }
+                    if (edges & (1 << edge_idx)) == 0 {
+                        continue;
+                    }
 
                     let (c1, c2) = EDGE_CONNECTIONS[edge_idx];
                     let (dx1, dy1, dz1) = OFFSETS[c1];
@@ -899,10 +968,13 @@ pub fn extract_chunk_mesh_smooth(
                         0.5
                     };
 
-                    // World voxel position of vertex (fractional)
-                    let wx_v = voxel_x as f64 + dx1 as f64 + t * (dx2 as f64 - dx1 as f64);
-                    let wy_v = voxel_y as f64 + dy1 as f64 + t * (dy2 as f64 - dy1 as f64);
-                    let wz_v = voxel_z as f64 + dz1 as f64 + t * (dz2 as f64 - dz1 as f64);
+                    // World voxel position of vertex (fractional), scaled by step
+                    let wx_v =
+                        voxel_x as f64 + (dx1 as f64 + t * (dx2 as f64 - dx1 as f64)) * stepf;
+                    let wy_v =
+                        voxel_y as f64 + (dy1 as f64 + t * (dy2 as f64 - dy1 as f64)) * stepf;
+                    let wz_v =
+                        voxel_z as f64 + (dz1 as f64 + t * (dz2 as f64 - dz1 as f64)) * stepf;
 
                     // Local position relative to chunk center (what the GPU sees)
                     edge_verts[edge_idx] = Vec3::new(
@@ -912,10 +984,10 @@ pub fn extract_chunk_mesh_smooth(
                     );
 
                     // Gradient normal via central differences on the density grid.
-                    // Grid indices are clamped so boundary vertices use one-sided differences.
-                    let xi_v = (wx_v - min_voxel.x as f64).round() as i64;
-                    let yi_v = (wy_v - min_voxel.y as f64).round() as i64;
-                    let zi_v = (wz_v - min_voxel.z as f64).round() as i64;
+                    // Grid indices are in cell-space (divide world offset by step).
+                    let xi_v = ((wx_v - min_voxel.x as f64) / stepf).round() as i64;
+                    let yi_v = ((wy_v - min_voxel.y as f64) / stepf).round() as i64;
+                    let zi_v = ((wz_v - min_voxel.z as f64) / stepf).round() as i64;
 
                     let gxp = (xi_v + 1).clamp(0, gx as i64 - 1) as usize;
                     let gxn = (xi_v - 1).clamp(0, gx as i64 - 1) as usize;
@@ -927,30 +999,56 @@ pub fn extract_chunk_mesh_smooth(
                     let xi_c = xi_v.clamp(0, gx as i64 - 1) as usize;
                     let zi_c = zi_v.clamp(0, gz as i64 - 1) as usize;
 
-                    let ngx = density_grid[g_idx(gxp, yi_c, zi_c)]
-                             - density_grid[g_idx(gxn, yi_c, zi_c)];
-                    let ngy = density_grid[g_idx(xi_c, gyp, zi_c)]
-                             - density_grid[g_idx(xi_c, gyn, zi_c)];
-                    let ngz = density_grid[g_idx(xi_c, yi_c, gzp)]
-                             - density_grid[g_idx(xi_c, yi_c, gzn)];
+                    let ngx =
+                        density_grid[g_idx(gxp, yi_c, zi_c)] - density_grid[g_idx(gxn, yi_c, zi_c)];
+                    let ngy =
+                        density_grid[g_idx(xi_c, gyp, zi_c)] - density_grid[g_idx(xi_c, gyn, zi_c)];
+                    let ngz =
+                        density_grid[g_idx(xi_c, yi_c, gzp)] - density_grid[g_idx(xi_c, yi_c, gzn)];
 
                     // Gradient points "into" the solid; negate for outward-facing normal
                     let n = Vec3::new(-ngx, -ngy, -ngz);
                     let len = n.dot(n).sqrt();
-                    edge_norms[edge_idx] = if len > 1e-4 { n / len } else { Vec3::new(0.0, 1.0, 0.0) };
+                    edge_norms[edge_idx] = if len > 1e-4 {
+                        n / len
+                    } else {
+                        Vec3::new(0.0, 1.0, 0.0)
+                    };
+
+                    // Color: use the solid side of the edge (d >= 0 → solid)
+                    let (c1, c2) = EDGE_CONNECTIONS[edge_idx];
+                    edge_colors[edge_idx] = if d[c1] >= 0.0 {
+                        let (dx1, dy1, dz1) = OFFSETS[c1];
+                        color_grid[g_idx(xi0 + dx1, yi0 + dy1, zi0 + dz1)]
+                    } else {
+                        let (dx2, dy2, dz2) = OFFSETS[c2];
+                        color_grid[g_idx(xi0 + dx2, yi0 + dy2, zi0 + dz2)]
+                    };
                 }
 
                 // Build triangles from the marching cubes triangle table
                 let tri_table = TRIANGLE_TABLE[cube_idx];
                 let mut ti = 0;
                 while tri_table[ti] != -1 {
-                    let e1 = tri_table[ti]     as usize;
+                    let e1 = tri_table[ti] as usize;
                     let e2 = tri_table[ti + 1] as usize;
                     let e3 = tri_table[ti + 2] as usize;
 
-                    let i1 = mesh.add_vertex(Vertex::new(edge_verts[e1], edge_norms[e1]));
-                    let i2 = mesh.add_vertex(Vertex::new(edge_verts[e2], edge_norms[e2]));
-                    let i3 = mesh.add_vertex(Vertex::new(edge_verts[e3], edge_norms[e3]));
+                    let i1 = mesh.add_vertex(Vertex::with_color(
+                        edge_verts[e1],
+                        edge_norms[e1],
+                        edge_colors[e1],
+                    ));
+                    let i2 = mesh.add_vertex(Vertex::with_color(
+                        edge_verts[e2],
+                        edge_norms[e2],
+                        edge_colors[e2],
+                    ));
+                    let i3 = mesh.add_vertex(Vertex::with_color(
+                        edge_verts[e3],
+                        edge_norms[e3],
+                        edge_colors[e3],
+                    ));
                     mesh.add_triangle(crate::mesh::Triangle::new(i1, i2, i3));
 
                     ti += 3;

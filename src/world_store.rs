@@ -27,18 +27,17 @@
 //! `world_data/chunks/**/operations.bin`, import all `SignedOperation` vecs,
 //! then set `meta["ops_migrated"] = 1`. Subsequent opens skip this.
 
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, Options, SliceTransform, WriteBatch,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use rocksdb::{
-    DB, Options, ColumnFamilyDescriptor, BlockBasedOptions, Cache,
-    SliceTransform, WriteBatch,
-};
 
-const CF_VOXEL_OPS:    &str = "voxel_ops";
-const CF_PARCELS:      &str = "parcels";
-const CF_ACCESS:       &str = "access_grants";
-const CF_PLAYERS:      &str = "players";
-const CF_META:         &str = "meta";
+const CF_VOXEL_OPS: &str = "voxel_ops";
+const CF_PARCELS: &str = "parcels";
+const CF_ACCESS: &str = "access_grants";
+const CF_PLAYERS: &str = "players";
+const CF_META: &str = "meta";
 
 pub const WORLD_SCHEMA_VERSION: u32 = 1;
 
@@ -64,7 +63,14 @@ pub fn chunk_prefix(cx: i32, cy: i32, cz: i32) -> [u8; 12] {
 }
 
 /// 24-byte parcel key from (min, max) integer bounds.
-pub fn parcel_key(min_x: i32, min_y: i32, min_z: i32, max_x: i32, max_y: i32, max_z: i32) -> [u8; 24] {
+pub fn parcel_key(
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    max_x: i32,
+    max_y: i32,
+    max_z: i32,
+) -> [u8; 24] {
     let mut k = [0u8; 24];
     k[0..4].copy_from_slice(&min_x.to_be_bytes());
     k[4..8].copy_from_slice(&min_y.to_be_bytes());
@@ -79,7 +85,9 @@ pub fn parcel_key(min_x: i32, min_y: i32, min_z: i32, max_x: i32, max_y: i32, ma
 
 /// A single queued write: chunk coords + Lamport key + raw value bytes.
 struct PendingOp {
-    cx: i32, cy: i32, cz: i32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
     lamport: u64,
     value: Vec<u8>,
 }
@@ -147,10 +155,10 @@ impl WorldStore {
 
         let cf_descs = vec![
             ColumnFamilyDescriptor::new(CF_VOXEL_OPS, voxel_ops_opts()),
-            ColumnFamilyDescriptor::new(CF_PARCELS,   small_cf_opts()),
-            ColumnFamilyDescriptor::new(CF_ACCESS,    small_cf_opts()),
-            ColumnFamilyDescriptor::new(CF_PLAYERS,   small_cf_opts()),
-            ColumnFamilyDescriptor::new(CF_META,      meta_opts()),
+            ColumnFamilyDescriptor::new(CF_PARCELS, small_cf_opts()),
+            ColumnFamilyDescriptor::new(CF_ACCESS, small_cf_opts()),
+            ColumnFamilyDescriptor::new(CF_PLAYERS, small_cf_opts()),
+            ColumnFamilyDescriptor::new(CF_META, meta_opts()),
         ];
 
         let db = DB::open_cf_descriptors(&db_opts, path, cf_descs)
@@ -172,33 +180,49 @@ impl WorldStore {
 
     fn check_schema_version(&self) -> Result<(), String> {
         let meta_cf = self.db.cf_handle(CF_META).ok_or("meta CF missing")?;
-        let stored = self.db.get_cf(&meta_cf, b"world_schema_version")
+        let stored = self
+            .db
+            .get_cf(&meta_cf, b"world_schema_version")
             .map_err(|e| e.to_string())?
             .and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
             .unwrap_or(0);
 
         if stored == 0 {
             // First open — write version
-            self.db.put_cf(&meta_cf, b"world_schema_version", WORLD_SCHEMA_VERSION.to_be_bytes())
+            self.db
+                .put_cf(
+                    &meta_cf,
+                    b"world_schema_version",
+                    WORLD_SCHEMA_VERSION.to_be_bytes(),
+                )
                 .map_err(|e| e.to_string())?;
             eprintln!("WorldStore: initialised schema v{}", WORLD_SCHEMA_VERSION);
         } else if stored != WORLD_SCHEMA_VERSION {
-            eprintln!("WorldStore: schema v{stored} → v{WORLD_SCHEMA_VERSION} (manual migration may be needed)");
+            eprintln!(
+                "WorldStore: schema v{stored} → v{WORLD_SCHEMA_VERSION} (manual migration may be needed)"
+            );
         }
         Ok(())
     }
 
     /// One-time import of existing `world_data/chunks/**/operations.bin` flat files.
     fn migrate_flat_ops(&self, world_data_dir: &Path) {
-        let Some(meta_cf) = self.db.cf_handle(CF_META) else { return };
+        let Some(meta_cf) = self.db.cf_handle(CF_META) else {
+            return;
+        };
 
         // Check migration flag
-        let done = self.db.get_cf(&meta_cf, b"ops_migrated")
-            .ok().flatten()
+        let done = self
+            .db
+            .get_cf(&meta_cf, b"ops_migrated")
+            .ok()
+            .flatten()
             .map(|b| b.first().copied().unwrap_or(0) == 1)
             .unwrap_or(false);
 
-        if done { return; }
+        if done {
+            return;
+        }
 
         let chunks_dir = world_data_dir.join("chunks");
         if !chunks_dir.exists() {
@@ -213,7 +237,9 @@ impl WorldStore {
         if let Ok(entries) = std::fs::read_dir(&chunks_dir) {
             for entry in entries.flatten() {
                 let ops_file = entry.path().join("operations.bin");
-                if !ops_file.exists() { continue; }
+                if !ops_file.exists() {
+                    continue;
+                }
 
                 let bytes = match std::fs::read(&ops_file) {
                     Ok(b) => b,
@@ -225,19 +251,29 @@ impl WorldStore {
                 let dir_str = dir_name.to_string_lossy();
                 let parts: Vec<&str> = dir_str.split('_').collect();
                 let (cx, cy, cz) = if parts.len() >= 4 {
-                    match (parts[1].parse::<i32>(), parts[2].parse::<i32>(), parts[3].parse::<i32>()) {
+                    match (
+                        parts[1].parse::<i32>(),
+                        parts[2].parse::<i32>(),
+                        parts[3].parse::<i32>(),
+                    ) {
                         (Ok(x), Ok(y), Ok(z)) => (x, y, z),
                         _ => (0, 0, 0),
                     }
-                } else { (0, 0, 0) };
+                } else {
+                    (0, 0, 0)
+                };
 
                 // Try deserialising as Vec<SignedOperation> (current format)
-                let ops: Vec<crate::messages::SignedOperation> = 
+                let ops: Vec<crate::messages::SignedOperation> =
                     bincode::deserialize(&bytes).unwrap_or_default();
 
-                if ops.is_empty() { continue; }
+                if ops.is_empty() {
+                    continue;
+                }
 
-                let Some(vox_cf) = self.db.cf_handle(CF_VOXEL_OPS) else { continue };
+                let Some(vox_cf) = self.db.cf_handle(CF_VOXEL_OPS) else {
+                    continue;
+                };
                 let mut batch = WriteBatch::default();
                 for op in &ops {
                     let key = voxel_op_key(cx, cy, cz, op.lamport);
@@ -257,11 +293,17 @@ impl WorldStore {
 
         // Mark migration complete
         let _ = self.db.put_cf(&meta_cf, b"ops_migrated", &[1u8]);
-        let _ = self.db.put_cf(&meta_cf, b"migrated_op_count",
-            (imported as u64).to_be_bytes().as_ref());
+        let _ = self.db.put_cf(
+            &meta_cf,
+            b"migrated_op_count",
+            (imported as u64).to_be_bytes().as_ref(),
+        );
 
         if imported > 0 {
-            eprintln!("WorldStore: migrated {} ops from {} flat-file chunks", imported, chunk_count);
+            eprintln!(
+                "WorldStore: migrated {} ops from {} flat-file chunks",
+                imported, chunk_count
+            );
         }
     }
 
@@ -269,13 +311,26 @@ impl WorldStore {
 
     /// Queue a voxel op for the next batch flush.
     /// This is non-blocking — the op is stored in memory until `flush_pending()` is called.
-    pub fn queue_op(&self, cx: i32, cy: i32, cz: i32, lamport: u64,
-                    sig: &[u8; 64], op_bytes: &[u8]) {
+    pub fn queue_op(
+        &self,
+        cx: i32,
+        cy: i32,
+        cz: i32,
+        lamport: u64,
+        sig: &[u8; 64],
+        op_bytes: &[u8],
+    ) {
         let mut value = Vec::with_capacity(64 + op_bytes.len());
         value.extend_from_slice(sig);
         value.extend_from_slice(op_bytes);
         if let Ok(mut q) = self.pending.lock() {
-            q.push(PendingOp { cx, cy, cz, lamport, value });
+            q.push(PendingOp {
+                cx,
+                cy,
+                cz,
+                lamport,
+                value,
+            });
         }
     }
 
@@ -290,9 +345,13 @@ impl WorldStore {
             };
             std::mem::take(&mut *q)
         };
-        if ops.is_empty() { return 0; }
+        if ops.is_empty() {
+            return 0;
+        }
 
-        let Some(cf) = self.db.cf_handle(CF_VOXEL_OPS) else { return 0 };
+        let Some(cf) = self.db.cf_handle(CF_VOXEL_OPS) else {
+            return 0;
+        };
         let mut batch = WriteBatch::default();
         let count = ops.len();
         for op in ops {
@@ -303,12 +362,18 @@ impl WorldStore {
 
         // Update op count in meta
         if let Some(meta_cf) = self.db.cf_handle(CF_META) {
-            let cur = self.db.get_cf(&meta_cf, b"op_count")
-                .ok().flatten()
+            let cur = self
+                .db
+                .get_cf(&meta_cf, b"op_count")
+                .ok()
+                .flatten()
                 .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
                 .unwrap_or(0);
-            let _ = self.db.put_cf(&meta_cf, b"op_count",
-                (cur + count as u64).to_be_bytes().as_ref());
+            let _ = self.db.put_cf(
+                &meta_cf,
+                b"op_count",
+                (cur + count as u64).to_be_bytes().as_ref(),
+            );
         }
         count
     }
@@ -316,15 +381,23 @@ impl WorldStore {
     /// Load all ops for a chunk in Lamport order (prefix scan).
     /// Returns raw `(lamport, value_bytes)` pairs. Caller deserialises.
     pub fn ops_for_chunk(&self, cx: i32, cy: i32, cz: i32) -> Vec<(u64, Vec<u8>)> {
-        let Some(cf) = self.db.cf_handle(CF_VOXEL_OPS) else { return vec![] };
+        let Some(cf) = self.db.cf_handle(CF_VOXEL_OPS) else {
+            return vec![];
+        };
         let prefix = chunk_prefix(cx, cy, cz);
         let mut read_opts = rocksdb::ReadOptions::default();
         read_opts.set_prefix_same_as_start(true);
-        let iter = self.db.iterator_cf_opt(&cf, read_opts, rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward));
+        let iter = self.db.iterator_cf_opt(
+            &cf,
+            read_opts,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
         let mut result = Vec::new();
         for item in iter {
             if let Ok((key, value)) = item {
-                if !key.starts_with(&prefix) { break; }
+                if !key.starts_with(&prefix) {
+                    break;
+                }
                 if key.len() >= 20 {
                     let lamport = u64::from_be_bytes(key[12..20].try_into().unwrap_or([0u8; 8]));
                     result.push((lamport, value.to_vec()));
@@ -341,32 +414,57 @@ impl WorldStore {
 
     // ── Parcels ───────────────────────────────────────────────────────────────
 
-    pub fn set_parcel_owner(&self,
-        min_x: i32, min_y: i32, min_z: i32,
-        max_x: i32, max_y: i32, max_z: i32,
+    pub fn set_parcel_owner(
+        &self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        max_x: i32,
+        max_y: i32,
+        max_z: i32,
         peer_id_bytes: &[u8],
     ) {
-        let Some(cf) = self.db.cf_handle(CF_PARCELS) else { return };
-        let _ = self.db.put_cf(&cf, parcel_key(min_x, min_y, min_z, max_x, max_y, max_z), peer_id_bytes);
+        let Some(cf) = self.db.cf_handle(CF_PARCELS) else {
+            return;
+        };
+        let _ = self.db.put_cf(
+            &cf,
+            parcel_key(min_x, min_y, min_z, max_x, max_y, max_z),
+            peer_id_bytes,
+        );
     }
 
-    pub fn get_parcel_owner(&self,
-        min_x: i32, min_y: i32, min_z: i32,
-        max_x: i32, max_y: i32, max_z: i32,
+    pub fn get_parcel_owner(
+        &self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        max_x: i32,
+        max_y: i32,
+        max_z: i32,
     ) -> Option<Vec<u8>> {
         let cf = self.db.cf_handle(CF_PARCELS)?;
-        self.db.get_cf(&cf, parcel_key(min_x, min_y, min_z, max_x, max_y, max_z)).ok()?
+        self.db
+            .get_cf(&cf, parcel_key(min_x, min_y, min_z, max_x, max_y, max_z))
+            .ok()?
     }
 
     // ── Access grants ─────────────────────────────────────────────────────────
 
-    pub fn set_access_grant(&self,
-        min_x: i32, min_y: i32, min_z: i32,
-        max_x: i32, max_y: i32, max_z: i32,
+    pub fn set_access_grant(
+        &self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        max_x: i32,
+        max_y: i32,
+        max_z: i32,
         peer_id_bytes: &[u8],
         allow: bool,
     ) {
-        let Some(cf) = self.db.cf_handle(CF_ACCESS) else { return };
+        let Some(cf) = self.db.cf_handle(CF_ACCESS) else {
+            return;
+        };
         let pk = parcel_key(min_x, min_y, min_z, max_x, max_y, max_z);
         let mut key = Vec::with_capacity(24 + peer_id_bytes.len());
         key.extend_from_slice(&pk);
@@ -374,9 +472,14 @@ impl WorldStore {
         let _ = self.db.put_cf(&cf, key, &[allow as u8]);
     }
 
-    pub fn get_access_grant(&self,
-        min_x: i32, min_y: i32, min_z: i32,
-        max_x: i32, max_y: i32, max_z: i32,
+    pub fn get_access_grant(
+        &self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        max_x: i32,
+        max_y: i32,
+        max_z: i32,
         peer_id_bytes: &[u8],
     ) -> Option<bool> {
         let cf = self.db.cf_handle(CF_ACCESS)?;
@@ -392,7 +495,9 @@ impl WorldStore {
 
     /// Store player state bytes (bincode-serialised PlayerState).
     pub fn put_player(&self, peer_id_bytes: &[u8], state_bytes: &[u8]) {
-        let Some(cf) = self.db.cf_handle(CF_PLAYERS) else { return };
+        let Some(cf) = self.db.cf_handle(CF_PLAYERS) else {
+            return;
+        };
         let _ = self.db.put_cf(&cf, peer_id_bytes, state_bytes);
     }
 
@@ -404,21 +509,33 @@ impl WorldStore {
     // ── Stats ─────────────────────────────────────────────────────────────────
 
     pub fn op_count(&self) -> u64 {
-        let Some(meta_cf) = self.db.cf_handle(CF_META) else { return 0 };
-        self.db.get_cf(&meta_cf, b"op_count")
-            .ok().flatten()
+        let Some(meta_cf) = self.db.cf_handle(CF_META) else {
+            return 0;
+        };
+        self.db
+            .get_cf(&meta_cf, b"op_count")
+            .ok()
+            .flatten()
             .and_then(|b| b.try_into().ok().map(u64::from_be_bytes))
             .unwrap_or(0)
     }
 
     pub fn parcel_count(&self) -> u64 {
-        let Some(cf) = self.db.cf_handle(CF_PARCELS) else { return 0 };
-        self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start).count() as u64
+        let Some(cf) = self.db.cf_handle(CF_PARCELS) else {
+            return 0;
+        };
+        self.db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .count() as u64
     }
 
     pub fn player_count(&self) -> u64 {
-        let Some(cf) = self.db.cf_handle(CF_PLAYERS) else { return 0 };
-        self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start).count() as u64
+        let Some(cf) = self.db.cf_handle(CF_PLAYERS) else {
+            return 0;
+        };
+        self.db
+            .iterator_cf(&cf, rocksdb::IteratorMode::Start)
+            .count() as u64
     }
 
     pub fn pending_count(&self) -> usize {

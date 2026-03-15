@@ -13,21 +13,23 @@
 ///     each ChunkId, serialises result, writes to TileStore.
 /// 4.  `RegionManifest` — JSON summary written on completion; server uses this
 ///     to answer "what chunks do you have?" queries from peers.
-
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::path::PathBuf;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::terrain_analysis::{RegionDem, TerrainAnalysis};
 
-use serde::{Serialize, Deserialize};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
 use crate::chunk::ChunkId;
 use crate::chunk_loader::TERRAIN_CACHE_VERSION;
 use crate::coordinates::GPS;
-use crate::voxel::VoxelCoord;
 use crate::terrain::TerrainGenerator;
-use crate::tile_store::{TileStore, PassId};
+use crate::tile_store::{PassId, TileStore};
+use crate::voxel::VoxelCoord;
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -41,7 +43,22 @@ pub struct RegionBounds {
 
 impl RegionBounds {
     pub fn new(lat_min: f64, lat_max: f64, lon_min: f64, lon_max: f64) -> Self {
-        Self { lat_min, lat_max, lon_min, lon_max }
+        Self {
+            lat_min,
+            lat_max,
+            lon_min,
+            lon_max,
+        }
+    }
+
+    /// Geographic centre of the region (lat, lon).
+    /// Used as the worldgen origin so any region can be generated without
+    /// hardcoded coordinates.
+    pub fn center(&self) -> (f64, f64) {
+        (
+            (self.lat_min + self.lat_max) * 0.5,
+            (self.lon_min + self.lon_max) * 0.5,
+        )
     }
 
     /// A few pre-defined named regions.
@@ -50,6 +67,8 @@ impl RegionBounds {
             "brisbane" => Some(Self::new(-27.70, -27.20, 152.70, 153.30)),
             "brisbane-cbd" => Some(Self::new(-27.50, -27.44, 153.00, 153.05)),
             "brisbane-small" | "test" => Some(Self::new(-27.48, -27.45, 153.01, 153.04)),
+            // 2km radius around Gympie Hospital — visual regression test reference scene
+            "gympie" => Some(Self::new(-26.208, -26.172, 152.646, 152.686)),
             _ => None,
         }
     }
@@ -58,9 +77,9 @@ impl RegionBounds {
 /// Per-chunk entry in the manifest (used for incremental updates & P2P verification).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestChunk {
-    pub chunk_id: String,     // "x,y,z"
-    pub size:     u64,        // bytes
-    pub sha256:   String,     // hex
+    pub chunk_id: String, // "x,y,z"
+    pub size: u64,        // bytes
+    pub sha256: String,   // hex
 }
 
 /// Written to `manifest.json` in the output directory on completion.
@@ -69,18 +88,18 @@ pub struct RegionManifest {
     pub format_version: u32,
     pub terrain_cache_version: u32,
     pub region: RegionBounds,
-    pub origin_gps: [f64; 3],     // [lat, lon, alt]
-    pub generated_at: String,     // RFC3339 UTC
+    pub origin_gps: [f64; 3], // [lat, lon, alt]
+    pub generated_at: String, // RFC3339 UTC
     pub chunk_count: usize,
     pub chunks: Vec<ManifestChunk>,
 }
 
 /// Configuration for a worldgen run.
 pub struct WorldgenConfig {
-    pub region:      RegionBounds,
+    pub region: RegionBounds,
     /// Directory for the manifest JSON and the `tiles.db` TileStore output.
-    pub output_dir:  PathBuf,
-    pub workers:     usize,
+    pub output_dir: PathBuf,
+    pub workers: usize,
     /// Also generate Y+1 layer for tall buildings / multi-storey structures.
     pub extra_y_layers: i32,
     /// Print progress to stderr every `report_interval` chunks.
@@ -98,6 +117,14 @@ pub struct WorldgenConfig {
     /// Path to a GSHHG binary coastline file (e.g. `gshhs_f.b`).
     /// When set, coastal distance is computed and fed into biome classification.
     pub gshhg_path: Option<std::path::PathBuf>,
+    /// Skip all vegetation placement (trees, shrubs).
+    pub skip_vegetation: bool,
+    /// Skip OSM water/road processing even if osm_cache is set.
+    pub skip_osm: bool,
+    /// Skip road geometry only (carriageways, footpaths, bridges, tunnels).
+    pub skip_roads: bool,
+    /// Skip OSM water polygons and waterway channel carving only.
+    pub skip_water: bool,
 }
 
 // ─── Chunk enumeration ────────────────────────────────────────────────────────
@@ -142,7 +169,7 @@ pub fn enumerate_surface_chunks(
 
     for gps in &corners {
         let ecef = gps.to_ecef();
-        let vox  = VoxelCoord::from_ecef(&ecef);
+        let vox = VoxelCoord::from_ecef(&ecef);
         let dx = vox.x - origin_voxel.x;
         let dz = vox.z - origin_voxel.z;
         let cx = dx.div_euclid(CHUNK_SIZE_X) + origin_voxel.x.div_euclid(CHUNK_SIZE_X);
@@ -172,8 +199,7 @@ pub fn enumerate_surface_chunks(
 pub fn serialise_chunk(octree: &crate::voxel::Octree) -> Result<Vec<u8>, String> {
     let mut buf: Vec<u8> = Vec::new();
     buf.extend_from_slice(&TERRAIN_CACHE_VERSION.to_le_bytes());
-    let encoded = bincode::serialize(octree)
-        .map_err(|e| format!("bincode error: {e}"))?;
+    let encoded = bincode::serialize(octree).map_err(|e| format!("bincode error: {e}"))?;
     buf.extend_from_slice(&encoded);
     Ok(buf)
 }
@@ -181,8 +207,23 @@ pub fn serialise_chunk(octree: &crate::voxel::Octree) -> Result<Vec<u8>, String>
 fn fnv1a_hex(data: &[u8]) -> String {
     // FNV-1a 64-bit hash for manifest integrity tagging (not crypto).
     let mut h: u64 = 14695981039346656037;
-    for &b in data { h ^= b as u64; h = h.wrapping_mul(1099511628211); }
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(1099511628211);
+    }
     format!("{h:016x}")
+}
+
+fn preferred_output_pass(cfg: &WorldgenConfig) -> PassId {
+    if !cfg.skip_osm && cfg.osm_cache.is_some() {
+        if !cfg.skip_roads {
+            return PassId::Roads;
+        }
+        if !cfg.skip_water {
+            return PassId::Hydro;
+        }
+    }
+    PassId::Terrain
 }
 
 // ─── Region generation ────────────────────────────────────────────────────────
@@ -212,16 +253,20 @@ pub fn generate_region(
     // Open or reuse the TileStore for this region.
     let ts: Arc<TileStore> = match cfg.tile_store.clone() {
         Some(existing) => existing,
-        None => Arc::new(TileStore::open(&cfg.output_dir.join("tiles.db"))
-            .map_err(|e| format!("TileStore open failed: {e}"))?),
+        None => Arc::new(
+            TileStore::open(&cfg.output_dir.join("tiles.db"))
+                .map_err(|e| format!("TileStore open failed: {e}"))?,
+        ),
     };
 
-    let chunk_ids = enumerate_surface_chunks(
-        &cfg.region, origin_gps, origin_voxel, cfg.extra_y_layers,
-    );
+    let chunk_ids =
+        enumerate_surface_chunks(&cfg.region, origin_gps, origin_voxel, cfg.extra_y_layers);
     let total = chunk_ids.len() as u64;
 
-    eprintln!("[worldgen] {} chunks to generate → {:?}/tiles.db", total, cfg.output_dir);
+    eprintln!(
+        "[worldgen] {} chunks to generate → {:?}/tiles.db",
+        total, cfg.output_dir
+    );
 
     // Compute (or reuse) terrain analysis before entering the parallel loop.
     let analysis: Option<Arc<TerrainAnalysis>> = if let Some(ref a) = cfg.analysis {
@@ -241,15 +286,111 @@ pub fn generate_region(
             step,
         );
         drop(pipeline);
+
+        // Sea-level datum calibration: find the lowest-elevation cells in the DEM.
+        // For any coastal region, those cells are near 0 m orthometric (sea level).
+        // Compute a median-based correction and apply it to all subsequent queries.
+        // For inland regions the lowest cells will be well above sea level, so the
+        // plausibility gate (-8 m to 12 m) prevents spurious corrections.
+        {
+            let step = dem.cell_size_deg;
+            let mut low_elevs: Vec<f64> = dem
+                .elevations
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &e)| {
+                    if e < -50.0 {
+                        return None;
+                    } // exclude SRTM void artefacts
+                    let row = idx / dem.cols;
+                    let col = idx % dem.cols;
+                    let lat = dem.lat_min + (row as f64 + 0.5) * step;
+                    let lon = dem.lon_min + (col as f64 + 0.5) * step;
+                    // Only consider cells plausibly near the coast: low elevation AND
+                    // not obviously inland (use a generous ±0.5° buffer from region edge).
+                    let near_edge = lat < dem.lat_min + 0.5
+                        || lat > dem.lat_max - 0.5
+                        || lon < dem.lon_min + 0.5
+                        || lon > dem.lon_max - 0.5;
+                    if near_edge || (e as f64) < 20.0 {
+                        Some(e as f64)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            low_elevs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Take median of the bottom 2%, capped at 30 samples.
+            let n = (low_elevs.len() / 50).max(1).min(30);
+            if let Some(&median) = low_elevs.get(n / 2) {
+                if median > -8.0 && median < 12.0 {
+                    // Plausibly coastal — calibrate.
+                    let offset = pipeline_arc
+                        .write()
+                        .map_err(|e| format!("elevation pipeline lock: {e}"))?
+                        .calibrate_from_elevations(&low_elevs[..n]);
+                    if offset.abs() > 0.3 {
+                        eprintln!(
+                            "[worldgen] datum calibrated: {:.2} m offset (DEM min median {:.2} m, {} samples)",
+                            offset, median, n
+                        );
+                    }
+                }
+            }
+        }
+
         eprintln!("[worldgen] terrain analysis: computing derived rasters …");
         let mut analysis = TerrainAnalysis::compute(dem);
         if let Some(ref gshhg_path) = cfg.gshhg_path {
             analysis.compute_coastal_dist(gshhg_path);
         } else {
-            eprintln!("[worldgen] no GSHHG coastline file — coastal substrate disabled (use --coastline)");
+            eprintln!(
+                "[worldgen] no GSHHG coastline file — coastal substrate disabled (use --coastline)"
+            );
+        }
+        // Collect reservoir polygons from OSM and mark them in the mask.
+        if let Some(ref osm_cache) = cfg.osm_cache {
+            let mut water_polys: Vec<crate::osm::OsmWater> = Vec::new();
+            let mut land_areas: Vec<crate::osm::OsmLandArea> = Vec::new();
+            const TILE: f64 = 0.01;
+            let tile_lat_start = (cfg.region.lat_min / TILE).floor() as i64;
+            let tile_lat_end = (cfg.region.lat_max / TILE).floor() as i64;
+            let tile_lon_start = (cfg.region.lon_min / TILE).floor() as i64;
+            let tile_lon_end = (cfg.region.lon_max / TILE).floor() as i64;
+
+            for tile_lat in tile_lat_start..=tile_lat_end {
+                let lat = tile_lat as f64 * TILE;
+                for tile_lon in tile_lon_start..=tile_lon_end {
+                    let lon = tile_lon as f64 * TILE;
+                    if let Some(tile) = osm_cache.load(lat, lon, lat + TILE, lon + TILE) {
+                        water_polys.extend(tile.water);
+                        land_areas.extend(tile.land_areas);
+                    }
+                }
+            }
+            if !water_polys.is_empty() {
+                eprintln!(
+                    "[worldgen] computing reservoir mask from {} water polygons …",
+                    water_polys.len()
+                );
+                analysis.compute_reservoirs(&water_polys);
+            }
+            if !land_areas.is_empty() {
+                eprintln!(
+                    "[worldgen] computing OSM landuse and engineered-ground masks from {} land areas …",
+                    land_areas.len()
+                );
+                analysis.compute_osm_landuse(&land_areas);
+                analysis.compute_engineered_ground(&land_areas);
+            }
         }
         Some(Arc::new(analysis))
     };
+
+    // Terrain generation must use the same derived analysis that later OSM/hydro
+    // stages see, otherwise terrain shaping masks are computed but never applied.
+    let terrain_gen = Arc::new(terrain_gen.as_ref().clone_with_analysis(analysis.clone()));
 
     // Build river profiles once for the whole region (Tier 4a).
     // This requires both OSM cache and terrain analysis to be available.
@@ -258,13 +399,18 @@ pub fn generate_region(
             eprintln!("[worldgen] building river profiles …");
             let elev_arc = terrain_gen.elevation_pipeline();
             let cache = crate::worldgen_river::RiverProfileCache::build(
-                cfg.region.lat_min, cfg.region.lat_max,
-                cfg.region.lon_min, cfg.region.lon_max,
+                cfg.region.lat_min,
+                cfg.region.lat_max,
+                cfg.region.lon_min,
+                cfg.region.lon_max,
                 osm_cache,
                 elev_arc.as_ref(),
                 Some(analysis_arc.as_ref()),
             );
-            eprintln!("[worldgen] river profiles: {} segments", cache.segments.len());
+            eprintln!(
+                "[worldgen] river profiles: {} segments",
+                cache.segments.len()
+            );
             Some(Arc::new(cache))
         } else {
             None
@@ -276,11 +422,12 @@ pub fn generate_region(
         .build()
         .map_err(|e| format!("Rayon pool error: {e}"))?;
 
-    let done    = Arc::new(AtomicU64::new(0));
+    let done = Arc::new(AtomicU64::new(0));
     let results = Arc::new(Mutex::new(Vec::<ManifestChunk>::new()));
-    let errors  = Arc::new(Mutex::new(Vec::<String>::new()));
-    let timing  = Arc::new(Mutex::new((0u64, 0u64, 0u64)));
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let timing = Arc::new(Mutex::new((0u64, 0u64, 0u64)));
     let run_start = std::time::Instant::now();
+    let target_pass = preferred_output_pass(cfg);
 
     pool.install(|| {
         chunk_ids.par_iter().for_each(|id| {
@@ -289,10 +436,10 @@ pub fn generate_region(
             let cz = id.z as i32;
 
             // Resume support: skip chunks already in the DB.
-            if ts.has_chunk_pass(cx, cy, cz, PassId::Terrain) {
+            if ts.has_chunk_pass(cx, cy, cz, target_pass) {
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(ref p) = progress { p(n, total, id); }
-                if let Some(data) = ts.get_chunk_pass(cx, cy, cz, PassId::Terrain) {
+                if let Some(data) = ts.get_chunk_pass(cx, cy, cz, target_pass) {
                     results.lock().unwrap().push(ManifestChunk {
                         chunk_id: format!("{},{},{}", id.x, id.y, id.z),
                         size: data.len() as u64,
@@ -304,30 +451,67 @@ pub fn generate_region(
 
             let t_gen = std::time::Instant::now();
             match terrain_gen.generate_chunk(id) {
-                Ok((mut octree, _surface_cache)) => {
-                    // Apply OSM waterways/water-polygons when cache is available.
-                    if let Some(ref osm_cache) = cfg.osm_cache {
-                        let mut processor = crate::worldgen_osm::OsmProcessor::new(
-                            Arc::clone(osm_cache),
-                            *origin_gps,
-                            *origin_voxel,
-                            analysis.clone(),
-                        );
-                        if let Some(ref rp) = river_profiles {
-                            processor = processor.with_river_profiles(Arc::clone(rp));
-                        }
-                        processor.apply_to_chunk(id, &mut octree);
-                    }
+                Ok((terrain_octree, _surface_cache)) => {
                     let gen_ms = t_gen.elapsed().as_millis() as u64;
                     let t_ser = std::time::Instant::now();
-                    match serialise_chunk(&octree) {
-                        Ok(data) => {
+                    match serialise_chunk(&terrain_octree) {
+                        Ok(terrain_data) => {
+                            ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &terrain_data);
+
+                            let mut final_pass = PassId::Terrain;
+                            let mut final_data = terrain_data;
+
+                            if !cfg.skip_osm {
+                                if let Some(ref osm_cache) = cfg.osm_cache {
+                                    let mut hydro_octree = terrain_octree.clone();
+
+                                    if !cfg.skip_water {
+                                        let mut processor = crate::worldgen_osm::OsmProcessor::new(
+                                            Arc::clone(osm_cache),
+                                            *origin_gps,
+                                            *origin_voxel,
+                                            analysis.clone(),
+                                        );
+                                        if let Some(ref rp) = river_profiles {
+                                            processor = processor.with_river_profiles(Arc::clone(rp));
+                                        }
+                                        processor.apply_to_chunk(id, &mut hydro_octree);
+                                        if let Ok(hydro_data) = serialise_chunk(&hydro_octree) {
+                                            ts.put_chunk_pass(cx, cy, cz, PassId::Hydro, &hydro_data);
+                                            final_pass = PassId::Hydro;
+                                            final_data = hydro_data;
+                                        }
+                                    }
+
+                                    if !cfg.skip_roads {
+                                        let mut roads_octree = hydro_octree.clone();
+                                        let road_proc = crate::worldgen_roads::RoadProcessor::new(
+                                            Arc::clone(osm_cache),
+                                            *origin_voxel,
+                                            *origin_gps,
+                                        )
+                                        .with_elevation(terrain_gen.elevation_pipeline());
+                                        road_proc.apply_to_chunk(id, &mut roads_octree);
+                                        if let Ok(roads_data) = serialise_chunk(&roads_octree) {
+                                            ts.put_chunk_pass(cx, cy, cz, PassId::Roads, &roads_data);
+                                            final_pass = PassId::Roads;
+                                            final_data = roads_data;
+                                        }
+                                    }
+                                } // end osm_cache
+                            } // end skip_osm
+
                             let ser_ms = t_ser.elapsed().as_millis() as u64;
-                            ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &data);
+                            if final_pass != target_pass {
+                                errors.lock().unwrap().push(format!(
+                                    "{:?}: target pass {:?} not generated, final pass {:?}",
+                                    id, target_pass, final_pass
+                                ));
+                            }
                             results.lock().unwrap().push(ManifestChunk {
                                 chunk_id: format!("{},{},{}", id.x, id.y, id.z),
-                                size: data.len() as u64,
-                                sha256: fnv1a_hex(&data),
+                                size: final_data.len() as u64,
+                                sha256: fnv1a_hex(&final_data),
                             });
                             let mut t = timing.lock().unwrap();
                             t.0 += gen_ms; t.1 += ser_ms; t.2 += 1;
@@ -359,7 +543,9 @@ pub fn generate_region(
     let errs = errors.lock().unwrap();
     if !errs.is_empty() {
         eprintln!("[worldgen] {} errors:", errs.len());
-        for e in errs.iter().take(20) { eprintln!("  {e}"); }
+        for e in errs.iter().take(20) {
+            eprintln!("  {e}");
+        }
     }
 
     let chunks: Vec<ManifestChunk> = {
@@ -386,14 +572,15 @@ pub fn generate_region(
     };
 
     let manifest_path = cfg.output_dir.join("manifest.json");
-    let json = serde_json::to_string_pretty(&manifest)
-        .map_err(|e| format!("manifest json: {e}"))?;
-    std::fs::write(&manifest_path, json)
-        .map_err(|e| format!("manifest write: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| format!("manifest json: {e}"))?;
+    std::fs::write(&manifest_path, json).map_err(|e| format!("manifest write: {e}"))?;
 
     eprintln!(
         "[worldgen] Done. {} chunks in tiles.db, {} errors. Manifest: {:?}",
-        manifest.chunk_count, errs.len(), manifest_path
+        manifest.chunk_count,
+        errs.len(),
+        manifest_path
     );
 
     Ok(manifest)
