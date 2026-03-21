@@ -8,6 +8,12 @@ A voxel-based multiplayer world engine built on libp2p. No central servers — c
 
 > Status: the current local-authoritative terrain and atlas workflow is still under active testing. Treat the source on `main` as experimental until the local COP30/GSHHG/OSM validation path has been rerun end-to-end.
 
+**Current operator references:**
+
+- `docs/PROJECT_REALIGNMENT_ROADMAP.md` — current cleanup/consolidation plan, working state, broken state, and rewrite phases
+- `docs/CONTROL_ATLAS_WORKFLOW_RESET.md` — canonical control-atlas operational workflow
+- `docs/INDEX.md` — documentation map and document authority guide
+
 - **Voxel world** — Minecraft-style block editing on a procedurally generated planet-scale terrain
 - **P2P multiplayer** — clients discover and connect to each other through relay nodes, no game server required
 - **CGNAT/VPN friendly** — WebSocket transport punches through firewalls, Starlink, 4G NAT
@@ -20,6 +26,7 @@ A voxel-based multiplayer world engine built on libp2p. No central servers — c
 
 | Binary | Description |
 |--------|-------------|
+| `atlas` | Control-atlas workflow helper — generate teleport/flyby inputs and merge cached control packs into `world_data/tiles.db` |
 | `metaworld_alpha` | Game client — renders the world, lets you move/edit blocks, connects to peers |
 | `metaverse-relay` | Relay node — routes P2P traffic, lightweight, run headless |
 | `metaverse-server` | Full server — world data storage, DHT, content hosting |
@@ -50,7 +57,19 @@ cargo build --release
 ./metaworld_alpha
 ```
 
-Connects to the relay network automatically using `bootstrap.json`. World data is stored in `world_data_<identity>/`.
+The client now reads `client.json` from the repo root by default.
+
+- `network_enabled: false` → fully local/offline testing
+- `bootstrap_enabled: false` → LAN/direct peers only, no remote bootstrap
+- `security_enabled: false` → keep key/security plumbing present but do not enforce it during local iteration
+
+The checked-in `client.json` is set up for local testing. Toggle those flags when you want to move back to networked or authenticated runs.
+
+You can also point at another config file explicitly:
+
+```bash
+./metaworld_alpha --config ./client.json
+```
 
 **Controls:**
 - `WASD` — move
@@ -162,7 +181,8 @@ WebSocket entries (`/tcp/9001/ws/`) work through VPN, CGNAT, and most firewalls.
 
 ```
 src/          Library source — networking, world, rendering, multiplayer
-examples/     Runnable binaries (metaworld_alpha, metaverse_relay, ...)
+src/bin/      Product binaries (metaworld_alpha, metaverse-relay, metaverse-server, ...)
+examples/     Compatibility/demo entrypoints (legacy client shim remains temporarily)
 tests/        Integration tests
 scripts/      install.sh, release.sh
 bootstrap.json  Relay node list for client bootstrap

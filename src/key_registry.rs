@@ -44,7 +44,7 @@
 //!
 //! // Publish own record on connect
 //! let identity = Identity::load_or_create().unwrap();
-//! let record = identity.create_key_record(KeyType::Personal, Some("Alice".into()), None, None, None, None);
+//! let record = identity.create_key_record(KeyType::User, Some("Alice".into()), None, None, None, None);
 //! registry.insert_local(record.clone());
 //!
 //! // Look up another peer
@@ -645,9 +645,9 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
 
-    fn make_personal_record(id: &Identity) -> KeyRecord {
+    fn make_user_record(id: &Identity) -> KeyRecord {
         id.create_key_record(
-            KeyType::Personal,
+            KeyType::User,
             Some("Test User".into()),
             None,
             None,
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn test_apply_update_valid() {
         let id = Identity::generate();
-        let record = make_personal_record(&id);
+        let record = make_user_record(&id);
         let mut registry = KeyRegistry::new();
         let result = registry.apply_update(record.clone());
         assert!(result.is_ok());
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn test_apply_update_invalid_sig_rejected() {
         let id = Identity::generate();
-        let mut record = make_personal_record(&id);
+        let mut record = make_user_record(&id);
         record.display_name = Some("Tampered".into()); // invalidates self_sig
         let mut registry = KeyRegistry::new();
         assert!(registry.apply_update(record).is_err());
@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_apply_update_stale_rejected() {
         let id = Identity::generate();
-        let record1 = make_personal_record(&id);
+        let record1 = make_user_record(&id);
 
         // Ensure record2 has a strictly higher updated_at by sleeping > 1 second
         std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn test_apply_update_idempotent() {
         let id = Identity::generate();
-        let record = make_personal_record(&id);
+        let record = make_user_record(&id);
         let mut registry = KeyRegistry::new();
         registry.apply_update(record.clone()).unwrap();
 
@@ -713,7 +713,7 @@ mod tests {
     #[test]
     fn test_local_record_not_overridable() {
         let id = Identity::generate();
-        let local_record = make_personal_record(&id);
+        let local_record = make_user_record(&id);
 
         let mut registry = KeyRegistry::with_local_peer(*id.peer_id());
         registry.insert_local(local_record.clone());
@@ -743,12 +743,12 @@ mod tests {
     fn test_by_type_filter() {
         let relay_id = Identity::generate();
         let server_id = Identity::generate();
-        let personal_id = Identity::generate();
+        let user_id = Identity::generate();
 
         let relay_rec = relay_id.create_key_record(KeyType::Relay, None, None, None, None, None);
         let server_rec = server_id.create_key_record(KeyType::Server, None, None, None, None, None);
-        let personal_rec = personal_id.create_key_record(
-            KeyType::Personal,
+        let user_rec = user_id.create_key_record(
+            KeyType::User,
             Some("User".into()),
             None,
             None,
@@ -759,17 +759,17 @@ mod tests {
         let mut registry = KeyRegistry::new();
         registry.insert_local(relay_rec);
         registry.insert_local(server_rec);
-        registry.insert_local(personal_rec);
+        registry.insert_local(user_rec);
 
         assert_eq!(registry.relays().len(), 1);
         assert_eq!(registry.servers().len(), 1);
-        assert_eq!(registry.by_type(KeyType::Personal).len(), 1);
+        assert_eq!(registry.by_type(KeyType::User).len(), 1);
     }
 
     #[test]
     fn test_disk_cache_roundtrip() {
         let id = Identity::generate();
-        let record = make_personal_record(&id);
+        let record = make_user_record(&id);
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let mut registry = KeyRegistry::new();
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn test_key_registry_message_roundtrip() {
         let id = Identity::generate();
-        let record = make_personal_record(&id);
+        let record = make_user_record(&id);
         let msg = KeyRegistryMessage::Publish(record.clone());
 
         let bytes = msg.to_bytes().unwrap();
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn test_batch_message() {
         let ids: Vec<_> = (0..5).map(|_| Identity::generate()).collect();
-        let records: Vec<_> = ids.iter().map(|id| make_personal_record(id)).collect();
+        let records: Vec<_> = ids.iter().map(|id| make_user_record(id)).collect();
         let msg = KeyRegistryMessage::Batch(records.clone());
 
         let bytes = msg.to_bytes().unwrap();

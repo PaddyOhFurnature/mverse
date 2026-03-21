@@ -150,7 +150,7 @@ impl VectorClock {
     /// Two clocks are concurrent if neither happens-before the other.
     /// This means the operations occurred independently without knowledge of each other.
     pub fn concurrent(&self, other: &VectorClock) -> bool {
-        !self.happens_before(other) && !other.happens_before(self)
+        self != other && !self.happens_before(other) && !other.happens_before(self)
     }
 
     /// Compare two vector clocks

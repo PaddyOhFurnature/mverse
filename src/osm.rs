@@ -21,6 +21,41 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+fn approx_gps_vec_bytes(points: &[GPS]) -> usize {
+    std::mem::size_of::<Vec<GPS>>() + points.len() * std::mem::size_of::<GPS>()
+}
+
+fn approx_string_bytes<T: AsRef<str>>(value: Option<&T>) -> usize {
+    value
+    .map(|s| std::mem::size_of::<String>() + s.as_ref().len())
+        .unwrap_or(0)
+}
+
+fn approx_tags_bytes(tags: &[(String, String)]) -> usize {
+    std::mem::size_of::<Vec<(String, String)>>()
+        + tags
+            .iter()
+            .map(|(k, v)| 2 * std::mem::size_of::<String>() + k.len() + v.len())
+            .sum::<usize>()
+}
+
+fn current_process_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let rss_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page_size <= 0 {
+            return None;
+        }
+        Some(rss_pages.saturating_mul(page_size as u64))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 // ── Data types ────────────────────────────────────────────────────────────────
 
 /// Road classification from OSM highway tag.
@@ -809,6 +844,57 @@ fn stitch_ways(ways: Vec<Vec<GPS>>) -> Vec<GPS> {
     ring
 }
 
+fn gps_points_match(a: &GPS, b: &GPS) -> bool {
+    a.lat == b.lat && a.lon == b.lon
+}
+
+fn stitch_relation_outer_rings(mut ways: Vec<Vec<GPS>>) -> Vec<Vec<GPS>> {
+    let mut rings = Vec::new();
+
+    while !ways.is_empty() {
+        let mut ring = ways.swap_remove(0);
+        while !ring.is_empty()
+            && !gps_points_match(ring.first().unwrap(), ring.last().unwrap())
+        {
+            let tail = *ring.last().unwrap();
+            let Some((next_idx, reverse)) = ways.iter().enumerate().find_map(|(idx, way)| {
+                if way.is_empty() {
+                    None
+                } else if gps_points_match(&tail, way.first().unwrap()) {
+                    Some((idx, false))
+                } else if gps_points_match(&tail, way.last().unwrap()) {
+                    Some((idx, true))
+                } else {
+                    None
+                }
+            }) else {
+                break;
+            };
+
+            let mut next = ways.swap_remove(next_idx);
+            if reverse {
+                next.reverse();
+            }
+            ring.extend(next.into_iter().skip(1));
+        }
+
+        if ring.len() >= 3 && !gps_points_match(ring.first().unwrap(), ring.last().unwrap()) {
+            ring.push(ring[0]);
+        }
+
+        if ring.len() >= 4 && gps_points_match(ring.first().unwrap(), ring.last().unwrap()) {
+            rings.push(ring);
+        }
+    }
+
+    rings
+}
+
+fn synthetic_relation_member_id(relation_id: u64, member_index: usize) -> u64 {
+    let hashed = relation_id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (1u64 << 63) | (hashed & 0x7FFF_FFFF_FFFF_FF00) | ((member_index as u64 + 1) & 0xFF)
+}
+
 // ── Disk cache ────────────────────────────────────────────────────────────────
 
 /// Cache OSM tile data backed by RocksDB TileStore.
@@ -1423,7 +1509,7 @@ pub fn import_pbf_to_cache(
     cache_dir: &std::path::Path,
 ) -> Result<usize, String> {
     let cache = OsmDiskCache::new(cache_dir);
-    import_pbf_with_cache(pbf_path, &cache, None)
+    import_pbf_with_cache_options(pbf_path, &cache, None, false)
 }
 
 /// Same as `import_pbf_to_cache` but with a progress log sink for dashboard visibility.
@@ -1433,7 +1519,17 @@ pub fn import_pbf_with_log(
     log: Arc<std::sync::Mutex<Vec<String>>>,
 ) -> Result<usize, String> {
     let cache = OsmDiskCache::new(cache_dir);
-    import_pbf_with_cache(pbf_path, &cache, Some(log))
+    import_pbf_with_cache_options(pbf_path, &cache, Some(log), false)
+}
+
+pub fn import_pbf_with_log_options(
+    pbf_path: &std::path::Path,
+    cache_dir: &std::path::Path,
+    log: Arc<std::sync::Mutex<Vec<String>>>,
+    replace_existing: bool,
+) -> Result<usize, String> {
+    let cache = OsmDiskCache::new(cache_dir);
+    import_pbf_with_cache_options(pbf_path, &cache, Some(log), replace_existing)
 }
 
 /// Import PBF using a pre-opened TileStore — avoids LOCK conflict in the server.
@@ -1443,7 +1539,17 @@ pub fn import_pbf_with_store(
     log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Result<usize, String> {
     let cache = OsmDiskCache::from_arc(ts);
-    import_pbf_with_cache(pbf_path, &cache, log)
+    import_pbf_with_cache_options(pbf_path, &cache, log, false)
+}
+
+pub fn import_pbf_with_store_options(
+    pbf_path: &std::path::Path,
+    ts: std::sync::Arc<crate::tile_store::TileStore>,
+    log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    replace_existing: bool,
+) -> Result<usize, String> {
+    let cache = OsmDiskCache::from_arc(ts);
+    import_pbf_with_cache_options(pbf_path, &cache, log, replace_existing)
 }
 
 fn import_pbf_with_cache(
@@ -1451,19 +1557,40 @@ fn import_pbf_with_cache(
     cache: &OsmDiskCache,
     progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Result<usize, String> {
-    import_pbf_to_cache_inner(pbf_path, cache, progress_log)
+    import_pbf_with_cache_options(pbf_path, cache, progress_log, false)
+}
+
+fn import_pbf_with_cache_options(
+    pbf_path: &std::path::Path,
+    cache: &OsmDiskCache,
+    progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    replace_existing: bool,
+) -> Result<usize, String> {
+    import_pbf_to_cache_inner(pbf_path, cache, progress_log, replace_existing)
 }
 
 fn import_pbf_to_cache_inner(
     pbf_path: &std::path::Path,
     cache: &OsmDiskCache,
     progress_log: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    replace_existing: bool,
 ) -> Result<usize, String> {
     use osmpbfreader::{OsmObj, OsmPbfReader};
     use std::collections::HashMap;
 
+    #[derive(Clone)]
+    struct AerowayRelationSpec {
+        relation_id: i64,
+        aeroway_type: String,
+        name: Option<String>,
+        outer_way_ids: Vec<i64>,
+    }
+
     const TILE_SIZE: f64 = 0.01;
-    const FLUSH_THRESHOLD: usize = 2_000_000; // flush tile accumulator every 2M pushed features
+    const FLUSH_THRESHOLD: usize = 50_000; // hard cap on tile refs buffered before flush
+    const FLUSH_EST_BYTES: usize = 256 * 1024 * 1024; // estimated in-memory tile buffer target
+    const RSS_FLUSH_BYTES: u64 = 2 * 1024 * 1024 * 1024; // emergency flush when process RSS crosses 2 GiB
+    const RSS_CHECK_INTERVAL: usize = 512;
 
     fn snap(v: f64) -> f64 {
         (v / TILE_SIZE).floor() * TILE_SIZE
@@ -1514,6 +1641,7 @@ fn import_pbf_to_cache_inner(
     let file_mb = std::fs::metadata(pbf_path)
         .map(|m| m.len() / 1_048_576)
         .unwrap_or(0);
+    let import_start = std::time::Instant::now();
 
     macro_rules! plog {
         ($($arg:tt)*) => {{
@@ -1529,10 +1657,16 @@ fn import_pbf_to_cache_inner(
     let mut total_pushed: usize = 0;
     let mut written = 0usize;
     let mut skipped = 0usize;
+    let mut replaced = 0usize;
+    let mut buffered_bytes_est = 0usize;
+    let mut rss_check_counter = 0usize;
 
     // Flush accumulated tiles to disk and clear the accumulator.
     let flush =
-        |tiles: &mut HashMap<(i64, i64), OsmData>, written: &mut usize, skipped: &mut usize| {
+        |tiles: &mut HashMap<(i64, i64), OsmData>,
+         written: &mut usize,
+         skipped: &mut usize,
+         replaced: &mut usize| {
             for ((s_i, w_i), data) in tiles.drain() {
                 if data.is_empty() {
                     continue;
@@ -1541,69 +1675,211 @@ fn import_pbf_to_cache_inner(
                 let w_coord = w_i as f64 * TILE_SIZE;
                 let n = s + TILE_SIZE;
                 let e = w_coord + TILE_SIZE;
-                if !cache.exists(s, w_coord, n, e) {
+                let exists = cache.exists(s, w_coord, n, e);
+                if replace_existing || !exists {
                     cache.save(s, w_coord, n, e, &data);
-                    *written += 1;
+                    if exists {
+                        *replaced += 1;
+                    } else {
+                        *written += 1;
+                    }
                 } else {
                     *skipped += 1;
                 }
             }
         };
 
-    // ── PASS 1: collect only the node IDs referenced by ways we care about ──────
-    // Use a HashSet to deduplicate on insert (avoids collecting duplicates then sorting).
-    let needed_ids: std::collections::HashSet<i64> = {
-        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
-        let mut reader = OsmPbfReader::new(file);
-        let mut ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        for obj in reader.iter().filter_map(|r| r.ok()) {
-            if let OsmObj::Way(w) = obj {
-                if w.tags.contains_key("building")
-                    || w.tags.contains_key("highway")
-                    || w.tags.contains_key("natural")
-                    || w.tags.contains_key("waterway")
-                    || w.tags.contains_key("leisure")
-                    || w.tags.contains_key("landuse")
-                    || w.tags.contains_key("railway")
-                    || w.tags.contains_key("barrier")
-                    || w.tags.contains_key("power")
-                    || w.tags.contains_key("aeroway")
-                    || w.tags.contains_key("man_made")
-                    || w.tags.contains_key("tourism")
-                    || w.tags.contains_key("historic")
-                    || w.tags.contains_key("amenity")
-                    || w.tags.contains_key("military")
-                    || w.tags.contains_key("healthcare")
-                    || w.tags.contains_key("public_transport")
-                    || w.tags.contains_key("addr:housenumber")
-                    || w.tags.contains_key("place")
-                {
-                    for nr in &w.nodes {
-                        ids.insert(nr.0);
+    macro_rules! maybe_flush {
+        ($phase:expr, $force_rss_check:expr) => {{
+            let mut flush_reason: Option<String> = None;
+
+            if total_pushed >= FLUSH_THRESHOLD {
+                flush_reason = Some(format!("{} tile refs buffered", total_pushed));
+            } else if buffered_bytes_est >= FLUSH_EST_BYTES {
+                flush_reason = Some(format!(
+                    "estimated tile buffer {} MiB",
+                    buffered_bytes_est / 1_048_576
+                ));
+            }
+
+            rss_check_counter = rss_check_counter.saturating_add(1);
+            if flush_reason.is_none()
+                && ($force_rss_check || rss_check_counter >= RSS_CHECK_INTERVAL)
+            {
+                rss_check_counter = 0;
+                if let Some(rss_bytes) = current_process_rss_bytes() {
+                    if rss_bytes >= RSS_FLUSH_BYTES {
+                        flush_reason = Some(format!("process RSS {} MiB", rss_bytes / 1_048_576));
                     }
                 }
             }
+
+            if let Some(reason) = flush_reason {
+                flush(&mut tiles, &mut written, &mut skipped, &mut replaced);
+                plog!(
+                    "⚠️ [OSM] {} — {} flush triggered ({}): {} new tiles ({} replaced, {} already current)…",
+                    fname,
+                    $phase,
+                    reason,
+                    written,
+                    replaced,
+                    skipped
+                );
+                total_pushed = 0;
+                buffered_bytes_est = 0;
+            }
+        }};
+    }
+
+    // ── PASS 1: collect only the node IDs referenced by ways we care about ──────
+    // Keep a compact Vec and sort+dedup it afterwards. This uses far less peak
+    // memory than a huge HashSet on large extracts, which matters more than the
+    // extra sort cost for our long-running atlas refresh jobs.
+    let pass1_start = std::time::Instant::now();
+    let (mut needed_ids, aeroway_relations, aeroway_relation_way_ids): (
+        Vec<i64>,
+        Vec<AerowayRelationSpec>,
+        std::collections::HashSet<i64>,
+    ) = {
+        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
+        let mut reader = OsmPbfReader::new(file);
+        let mut ids: Vec<i64> = Vec::new();
+        let mut relation_specs = Vec::new();
+        let mut relation_way_ids = std::collections::HashSet::new();
+        for obj in reader.iter().filter_map(|r| r.ok()) {
+            match obj {
+                OsmObj::Way(w) => {
+                    if w.tags.contains_key("building")
+                        || w.tags.contains_key("highway")
+                        || w.tags.contains_key("natural")
+                        || w.tags.contains_key("waterway")
+                        || w.tags.contains_key("leisure")
+                        || w.tags.contains_key("landuse")
+                        || w.tags.contains_key("railway")
+                        || w.tags.contains_key("barrier")
+                        || w.tags.contains_key("power")
+                        || w.tags.contains_key("aeroway")
+                        || w.tags.contains_key("man_made")
+                        || w.tags.contains_key("tourism")
+                        || w.tags.contains_key("historic")
+                        || w.tags.contains_key("amenity")
+                        || w.tags.contains_key("military")
+                        || w.tags.contains_key("healthcare")
+                        || w.tags.contains_key("public_transport")
+                        || w.tags.contains_key("addr:housenumber")
+                        || w.tags.contains_key("place")
+                    {
+                        for nr in &w.nodes {
+                            ids.push(nr.0);
+                        }
+                    }
+                }
+                OsmObj::Relation(r) => {
+                    if r.tags.get("type").map(|s| s.as_str()) != Some("multipolygon") {
+                        continue;
+                    }
+                    let Some(aeroway_type) = r.tags.get("aeroway") else {
+                        continue;
+                    };
+
+                    let outer_way_ids: Vec<i64> = r
+                        .refs
+                        .iter()
+                        .filter_map(|member| {
+                            if member.role != "outer" {
+                                return None;
+                            }
+                            member.member.way().map(|way_id| way_id.0)
+                        })
+                        .collect();
+                    if outer_way_ids.is_empty() {
+                        continue;
+                    }
+                    relation_way_ids.extend(outer_way_ids.iter().copied());
+                    relation_specs.push(AerowayRelationSpec {
+                        relation_id: r.id.0,
+                        aeroway_type: aeroway_type.as_str().to_string(),
+                        name: r.tags.get("name").map(|s| s.to_string()),
+                        outer_way_ids,
+                    });
+                }
+                _ => {}
+            }
         }
-        ids
+        (ids, relation_specs, relation_way_ids)
     };
+    needed_ids.sort_unstable();
+    needed_ids.dedup();
+    let pass1_elapsed = pass1_start.elapsed();
+
+    let pass1_relations_start = std::time::Instant::now();
+    if !aeroway_relation_way_ids.is_empty() {
+        let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
+        let mut reader = OsmPbfReader::new(file);
+        for obj in reader.iter().filter_map(|r| r.ok()) {
+            if let OsmObj::Way(w) = obj {
+                if !aeroway_relation_way_ids.contains(&w.id.0) {
+                    continue;
+                }
+                for nr in &w.nodes {
+                    needed_ids.push(nr.0);
+                }
+            }
+        }
+    }
+    needed_ids.sort_unstable();
+    needed_ids.dedup();
+    let pass1_relations_elapsed = pass1_relations_start.elapsed();
 
     plog!(
-        "🔄 [OSM] {} — pass 1 done ({} relevant node IDs). Starting pass 2…",
+        "🔄 [OSM] {} — pass 1 done in {:.1}s + {:.1}s relation member scan ({} relevant node IDs, {} aeroway relations). Starting pass 2…",
         fname,
-        needed_ids.len()
+        pass1_elapsed.as_secs_f32(),
+        pass1_relations_elapsed.as_secs_f32(),
+        needed_ids.len(),
+        aeroway_relations.len(),
     );
 
     // ── PASS 2a: load only needed node coords into a sorted Vec; also collect point features ──
     // Vec<(id, lat, lon)> sorted by id uses ~3x less RAM than HashMap<i64,(f32,f32)>
     // because HashMap has ~40 bytes of overhead per entry beyond the key+value.
+    let pass2_nodes_start = std::time::Instant::now();
     let mut node_coords: Vec<(i64, f32, f32)> = Vec::with_capacity(needed_ids.len());
+    let mut point_features = 0usize;
+    let mut needed_cursor = 0usize;
+    let mut linear_node_lookup = true;
+    let mut last_node_id: Option<i64> = None;
     {
         let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
         let mut reader = OsmPbfReader::new(file);
         for obj in reader.iter().filter_map(|r| r.ok()) {
             match obj {
                 OsmObj::Node(n) => {
-                    if needed_ids.contains(&n.id.0) {
+                    let node_id = n.id.0;
+                    let mut capture_node = false;
+                    if linear_node_lookup {
+                        if last_node_id.is_some_and(|prev| node_id < prev) {
+                            linear_node_lookup = false;
+                        } else {
+                            while needed_cursor < needed_ids.len()
+                                && needed_ids[needed_cursor] < node_id
+                            {
+                                needed_cursor += 1;
+                            }
+                            if needed_cursor < needed_ids.len()
+                                && needed_ids[needed_cursor] == node_id
+                            {
+                                capture_node = true;
+                                needed_cursor += 1;
+                            }
+                        }
+                    }
+                    if !linear_node_lookup {
+                        capture_node = needed_ids.binary_search(&node_id).is_ok();
+                    }
+                    last_node_id = Some(node_id);
+
+                    if capture_node {
                         node_coords.push((n.id.0, n.lat() as f32, n.lon() as f32));
                     }
                     // Point features: tile directly (lat/lon available without lookup)
@@ -1616,7 +1892,14 @@ fn import_pbf_to_cache_inner(
                             amenity: amenity.as_str().to_string(),
                             name: n.tags.get("name").map(|s| s.to_string()),
                         });
+                        point_features += 1;
                         total_pushed += 1;
+                        buffered_bytes_est = buffered_bytes_est.saturating_add(
+                            std::mem::size_of::<OsmAmenity>()
+                                + amenity.as_str().len()
+                                + approx_string_bytes(n.tags.get("name")),
+                        );
+                        maybe_flush!("pass 2 nodes", false);
                     }
                     if let Some(power) = n.tags.get("power") {
                         let ptype = power.as_str();
@@ -1629,7 +1912,12 @@ fn import_pbf_to_cache_inner(
                                 lat: n.lat(),
                                 lon: n.lon(),
                             });
+                            point_features += 1;
                             total_pushed += 1;
+                            buffered_bytes_est = buffered_bytes_est.saturating_add(
+                                std::mem::size_of::<OsmPower>() + ptype.len(),
+                            );
+                            maybe_flush!("pass 2 nodes", false);
                         }
                     }
                     // Generic node catch-all: tourism, historic, natural=peak/cave_entrance,
@@ -1661,6 +1949,7 @@ fn import_pbf_to_cache_inner(
                             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
                             .collect();
                         tags.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        let tags_bytes = approx_tags_bytes(&tags);
                         tiles
                             .entry(tk)
                             .or_default()
@@ -1671,17 +1960,12 @@ fn import_pbf_to_cache_inner(
                                 lon: n.lon(),
                                 tags,
                             });
+                        point_features += 1;
                         total_pushed += 1;
-                    }
-                    if total_pushed >= FLUSH_THRESHOLD {
-                        flush(&mut tiles, &mut written, &mut skipped);
-                        plog!(
-                            "🔄 [OSM] {} — pass 2 nodes: {} new tiles ({} already current)…",
-                            fname,
-                            written,
-                            skipped
+                        buffered_bytes_est = buffered_bytes_est.saturating_add(
+                            std::mem::size_of::<GenericOsmNode>() + tags_bytes,
                         );
-                        total_pushed = 0;
+                        maybe_flush!("pass 2 nodes", false);
                     }
                 }
                 OsmObj::Way(_) | OsmObj::Relation(_) => break, // nodes always come first in PBF
@@ -1691,6 +1975,14 @@ fn import_pbf_to_cache_inner(
     // Sort by id for O(log n) binary_search lookup; drop needed_ids to free its RAM.
     node_coords.sort_unstable_by_key(|t| t.0);
     drop(needed_ids);
+    let pass2_nodes_elapsed = pass2_nodes_start.elapsed();
+    plog!(
+        "🔄 [OSM] {} — pass 2a done in {:.1}s ({} node coords, {} point features). Starting way pass…",
+        fname,
+        pass2_nodes_elapsed.as_secs_f32(),
+        node_coords.len(),
+        point_features
+    );
 
     // Lookup helper: binary search into sorted node_coords.
     let lookup = |id: i64| -> Option<(f64, f64)> {
@@ -1701,6 +1993,20 @@ fn import_pbf_to_cache_inner(
     };
 
     // ── PASS 2b: read ways only; look up node coords from sorted Vec ─────────────
+    let pass2_ways_start = std::time::Instant::now();
+    let mut accepted_way_features = 0usize;
+    let mut way_tile_refs = 0usize;
+    let mut max_tiles_per_way = 0usize;
+    let relation_specs_by_id: HashMap<i64, AerowayRelationSpec> = aeroway_relations
+        .into_iter()
+        .map(|spec| (spec.relation_id, spec))
+        .collect();
+    let mut relation_way_geometries: HashMap<i64, Vec<GPS>> = HashMap::new();
+    let mut note_way = |n_tiles: usize| {
+        accepted_way_features += 1;
+        way_tile_refs += n_tiles;
+        max_tiles_per_way = max_tiles_per_way.max(n_tiles);
+    };
     {
         let file = std::fs::File::open(pbf_path).map_err(|e| e.to_string())?;
         let mut reader = OsmPbfReader::new(file);
@@ -1722,7 +2028,18 @@ fn import_pbf_to_cache_inner(
                         continue;
                     }
                     let gps = to_gps(&coords);
+                    if aeroway_relation_way_ids.contains(&w.id.0) {
+                        relation_way_geometries.insert(w.id.0, gps.clone());
+                    }
                     let n_tiles = tks.len();
+                    let base_tile_bytes = approx_gps_vec_bytes(&gps).saturating_add(256);
+                    if buffered_bytes_est > 0
+                        && buffered_bytes_est.saturating_add(n_tiles.saturating_mul(base_tile_bytes))
+                            >= FLUSH_EST_BYTES
+                    {
+                        maybe_flush!("pass 2 ways", true);
+                    }
+                    let mut per_tile_bytes = base_tile_bytes;
 
                     if w.tags.contains_key("building") {
                         let btype = w
@@ -1737,6 +2054,9 @@ fn import_pbf_to_cache_inner(
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(2);
                         let height_m = levels as f64 * 3.0;
+                        per_tile_bytes = std::mem::size_of::<OsmBuilding>()
+                            + approx_gps_vec_bytes(&gps)
+                            + btype.len();
                         for tk in tks {
                             tiles.entry(tk).or_default().buildings.push(OsmBuilding {
                                 osm_id: w.id.0 as u64,
@@ -1780,6 +2100,9 @@ fn import_pbf_to_cache_inner(
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
                         let road_type = RoadType::from_highway_tag(hval);
+                        per_tile_bytes = std::mem::size_of::<OsmRoad>()
+                            + approx_gps_vec_bytes(&gps)
+                            + approx_string_bytes(name.as_ref());
                         for tk in tks {
                             tiles.entry(tk).or_default().roads.push(OsmRoad {
                                 osm_id: w.id.0 as u64,
@@ -1803,6 +2126,10 @@ fn import_pbf_to_cache_inner(
                                 .map(|s| s.as_str())
                                 .unwrap_or(nval)
                                 .to_string();
+                            per_tile_bytes = std::mem::size_of::<OsmWater>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(name.as_ref())
+                                + water_type.len();
                             for tk in tks {
                                 tiles.entry(tk).or_default().water.push(OsmWater {
                                     osm_id: w.id.0 as u64,
@@ -1826,6 +2153,11 @@ fn import_pbf_to_cache_inner(
                                 | "glacier"
                         ) {
                             let name = w.tags.get("name").map(|s| s.to_string());
+                            per_tile_bytes = std::mem::size_of::<OsmLandArea>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(name.as_ref())
+                                + nval.len()
+                                + "natural".len();
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().land_areas.push(OsmLandArea {
                                     osm_id: w.id.0 as u64,
@@ -1843,6 +2175,9 @@ fn import_pbf_to_cache_inner(
                         if wval == "dam" {
                             // Dam wall — capture as OsmDam
                             let name = w.tags.get("name").map(|s| s.to_string());
+                            per_tile_bytes = std::mem::size_of::<OsmDam>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(name.as_ref());
                             for tk in tks {
                                 tiles.entry(tk).or_default().dams.push(OsmDam {
                                     osm_id: w.id.0 as u64,
@@ -1850,6 +2185,11 @@ fn import_pbf_to_cache_inner(
                                     name: name.clone(),
                                 });
                             }
+                            note_way(n_tiles);
+                            total_pushed += n_tiles;
+                            buffered_bytes_est = buffered_bytes_est
+                                .saturating_add(n_tiles.saturating_mul(per_tile_bytes));
+                            maybe_flush!("pass 2 ways", false);
                             continue;
                         }
                         if !matches!(wval, "river" | "canal" | "stream" | "drain") {
@@ -1858,6 +2198,10 @@ fn import_pbf_to_cache_inner(
                         let closed = coords.first() == coords.last() && coords.len() > 3;
                         if closed {
                             let name = w.tags.get("name").map(|s| s.to_string());
+                            per_tile_bytes = std::mem::size_of::<OsmWater>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(name.as_ref())
+                                + wval.len();
                             for tk in tks {
                                 tiles.entry(tk).or_default().water.push(OsmWater {
                                     osm_id: w.id.0 as u64,
@@ -1869,6 +2213,10 @@ fn import_pbf_to_cache_inner(
                             }
                         } else {
                             let wname = w.tags.get("name").map(|s| s.to_string());
+                            per_tile_bytes = std::mem::size_of::<WaterwayLine>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(wname.as_ref())
+                                + wval.len();
                             for tk in tks {
                                 tiles
                                     .entry(tk)
@@ -1885,6 +2233,12 @@ fn import_pbf_to_cache_inner(
                         let lval = leisure.as_str();
                         let name = w.tags.get("name").map(|s| s.to_string());
                         if lval == "park" {
+                            per_tile_bytes = std::mem::size_of::<OsmPark>()
+                                + std::mem::size_of::<OsmLandArea>()
+                                + 2 * approx_gps_vec_bytes(&gps)
+                                + 2 * approx_string_bytes(name.as_ref())
+                                + "park".len()
+                                + "leisure".len();
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().parks.push(OsmPark {
                                     osm_id: w.id.0 as u64,
@@ -1909,6 +2263,11 @@ fn import_pbf_to_cache_inner(
                                 | "marina"
                                 | "swimming_pool"
                         ) {
+                            per_tile_bytes = std::mem::size_of::<OsmLandArea>()
+                                + approx_gps_vec_bytes(&gps)
+                                + approx_string_bytes(name.as_ref())
+                                + lval.len()
+                                + "leisure".len();
                             for tk in tks {
                                 tiles.entry(tk).or_default().land_areas.push(OsmLandArea {
                                     osm_id: w.id.0 as u64,
@@ -1925,7 +2284,18 @@ fn import_pbf_to_cache_inner(
                         let lval = landuse.as_str();
                         let name = w.tags.get("name").map(|s| s.to_string());
                         let is_grass = lval == "grass";
+                        per_tile_bytes = std::mem::size_of::<OsmLandArea>()
+                            + approx_gps_vec_bytes(&gps)
+                            + approx_string_bytes(name.as_ref())
+                            + lval.len()
+                            + "landuse".len();
                         if is_grass {
+                            per_tile_bytes = per_tile_bytes
+                                .saturating_add(
+                                    std::mem::size_of::<OsmPark>()
+                                        + approx_gps_vec_bytes(&gps)
+                                        + approx_string_bytes(name.as_ref()),
+                                );
                             for tk in &tks {
                                 tiles.entry(*tk).or_default().parks.push(OsmPark {
                                     osm_id: w.id.0 as u64,
@@ -1953,6 +2323,10 @@ fn import_pbf_to_cache_inner(
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
                         let rtype = railway.as_str().to_string();
+                        per_tile_bytes = std::mem::size_of::<OsmRailway>()
+                            + approx_gps_vec_bytes(&gps)
+                            + approx_string_bytes(name.as_ref())
+                            + rtype.len();
                         for tk in tks {
                             tiles.entry(tk).or_default().railways.push(OsmRailway {
                                 osm_id: w.id.0 as u64,
@@ -1978,6 +2352,9 @@ fn import_pbf_to_cache_inner(
                             continue;
                         }
                         let btype = btype.to_string();
+                        per_tile_bytes = std::mem::size_of::<OsmBarrier>()
+                            + approx_gps_vec_bytes(&gps)
+                            + btype.len();
                         for tk in tks {
                             tiles.entry(tk).or_default().barriers.push(OsmBarrier {
                                 osm_id: w.id.0 as u64,
@@ -1991,6 +2368,9 @@ fn import_pbf_to_cache_inner(
                             continue;
                         }
                         let ptype = ptype.to_string();
+                        per_tile_bytes = std::mem::size_of::<OsmPower>()
+                            + approx_gps_vec_bytes(&gps)
+                            + ptype.len();
                         for tk in tks {
                             tiles.entry(tk).or_default().power.push(OsmPower {
                                 osm_id: w.id.0 as u64,
@@ -2009,6 +2389,11 @@ fn import_pbf_to_cache_inner(
                         } else {
                             (vec![], gps.clone())
                         };
+                        per_tile_bytes = std::mem::size_of::<OsmAeroway>()
+                            + approx_gps_vec_bytes(&polygon)
+                            + approx_gps_vec_bytes(&nodes)
+                            + approx_string_bytes(name.as_ref())
+                            + atype.len();
                         for tk in tks {
                             tiles.entry(tk).or_default().aeroways.push(OsmAeroway {
                                 osm_id: w.id.0 as u64,
@@ -2038,6 +2423,9 @@ fn import_pbf_to_cache_inner(
                             .map(|(k, v)| (k.as_str().to_string(), v.as_str().to_string()))
                             .collect();
                         tags.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                        per_tile_bytes = std::mem::size_of::<GenericOsmWay>()
+                            + approx_gps_vec_bytes(&gps)
+                            + approx_tags_bytes(&tags);
                         for tk in tks {
                             tiles.entry(tk).or_default().extra_ways.push(GenericOsmWay {
                                 osm_id: w.id.0 as u64,
@@ -2050,30 +2438,119 @@ fn import_pbf_to_cache_inner(
                         continue;
                     }
 
+                    note_way(n_tiles);
                     total_pushed += n_tiles;
-                    if total_pushed >= FLUSH_THRESHOLD {
-                        flush(&mut tiles, &mut written, &mut skipped);
-                        plog!(
-                            "🔄 [OSM] {} — pass 2 ways: {} new tiles ({} already current)…",
-                            fname,
-                            written,
-                            skipped
-                        );
-                        total_pushed = 0;
-                    }
+                    buffered_bytes_est = buffered_bytes_est
+                        .saturating_add(n_tiles.saturating_mul(per_tile_bytes));
+                    maybe_flush!("pass 2 ways", false);
                 }
 
-                OsmObj::Relation(_) => {}
+                OsmObj::Relation(r) => {
+                    let Some(spec) = relation_specs_by_id.get(&r.id.0) else {
+                        continue;
+                    };
+                    let outer_ways: Vec<Vec<GPS>> = spec
+                        .outer_way_ids
+                        .iter()
+                        .filter_map(|way_id| relation_way_geometries.get(way_id).cloned())
+                        .collect();
+                    let rings = stitch_relation_outer_rings(outer_ways);
+                    if rings.is_empty() {
+                        continue;
+                    }
+
+                    for (ring_index, ring) in rings.into_iter().enumerate() {
+                        let ring_coords: Vec<(f64, f64)> =
+                            ring.iter().map(|p| (p.lat, p.lon)).collect();
+                        let tks = bbox_tile_keys(&ring_coords);
+                        if tks.is_empty() {
+                            continue;
+                        }
+                        let per_tile_bytes = std::mem::size_of::<OsmAeroway>()
+                            + approx_gps_vec_bytes(&ring)
+                            + approx_string_bytes(spec.name.as_ref())
+                            + spec.aeroway_type.len();
+                        let osm_id = synthetic_relation_member_id(
+                            spec.relation_id as u64,
+                            ring_index,
+                        );
+                        for tk in tks.iter().copied() {
+                            tiles.entry(tk).or_default().aeroways.push(OsmAeroway {
+                                osm_id,
+                                polygon: ring.clone(),
+                                nodes: vec![],
+                                aeroway_type: spec.aeroway_type.clone(),
+                                name: spec.name.clone(),
+                                is_area: true,
+                            });
+                        }
+
+                        let n_tiles = tks.len();
+                        note_way(n_tiles);
+                        total_pushed += n_tiles;
+                        buffered_bytes_est = buffered_bytes_est
+                            .saturating_add(n_tiles.saturating_mul(per_tile_bytes));
+                        maybe_flush!("pass 2 relations", false);
+                    }
+                }
             }
         }
     }
+    let pass2_ways_elapsed = pass2_ways_start.elapsed();
 
-    flush(&mut tiles, &mut written, &mut skipped);
+    flush(&mut tiles, &mut written, &mut skipped, &mut replaced);
     plog!(
-        "✅ [OSM] {} — done: {} new tiles written, {} already current",
+        "ℹ️ [OSM] {} — pass summary: pass1={:.1}s, relation-pass1b={:.1}s, pass2a={:.1}s, pass2b={:.1}s, total={:.1}s",
+        fname,
+        pass1_elapsed.as_secs_f32(),
+        pass1_relations_elapsed.as_secs_f32(),
+        pass2_nodes_elapsed.as_secs_f32(),
+        pass2_ways_elapsed.as_secs_f32(),
+        import_start.elapsed().as_secs_f32()
+    );
+    plog!(
+        "ℹ️ [OSM] {} — feature summary: point_features={}, tiled_way_features={}, way_tile_refs={}, max_tiles_per_way={}",
+        fname,
+        point_features,
+        accepted_way_features,
+        way_tile_refs,
+        max_tiles_per_way
+    );
+    plog!(
+        "✅ [OSM] {} — done: {} new tiles written, {} tiles replaced, {} already current",
         fname,
         written,
+        replaced,
         skipped
     );
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GPS, stitch_relation_outer_rings, synthetic_relation_member_id};
+
+    #[test]
+    fn stitches_relation_outer_ring_from_segments() {
+        let ways = vec![
+            vec![GPS::new(0.0, 0.0, 0.0), GPS::new(0.0, 1.0, 0.0)],
+            vec![GPS::new(1.0, 1.0, 0.0), GPS::new(1.0, 0.0, 0.0)],
+            vec![GPS::new(0.0, 1.0, 0.0), GPS::new(1.0, 1.0, 0.0)],
+            vec![GPS::new(1.0, 0.0, 0.0), GPS::new(0.0, 0.0, 0.0)],
+        ];
+
+        let rings = stitch_relation_outer_rings(ways);
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 5);
+        assert_eq!(rings[0].first(), rings[0].last());
+    }
+
+    #[test]
+    fn synthetic_relation_member_ids_are_stable_and_distinct() {
+        let a = synthetic_relation_member_id(12345, 0);
+        let b = synthetic_relation_member_id(12345, 1);
+        assert_ne!(a, b);
+        assert_eq!(a, synthetic_relation_member_id(12345, 0));
+        assert_ne!(a >> 63, 0);
+    }
 }

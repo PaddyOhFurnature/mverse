@@ -592,10 +592,12 @@ mod tests {
     use super::*;
 
     fn create_test_peer_id(n: u8) -> PeerId {
-        // Create a deterministic peer ID for testing
-        let mut bytes = [0u8; 32];
-        bytes[0] = n;
-        PeerId::from_bytes(&bytes).unwrap()
+        // Create a valid peer ID for testing.
+        // The old raw-byte constructor drifted when PeerId encoding changed.
+        let _ = n;
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
     }
 
     #[test]

@@ -12,9 +12,10 @@ use metaverse_core::coordinates::{ECEF, GPS};
 use metaverse_core::elevation::{
     ElevationPipeline, egm96_undulation, make_offline_elevation_pipeline,
 };
-use metaverse_core::osm::{OsmDiskCache, OsmLandArea, OsmWater};
+use metaverse_core::osm::{OsmAeroway, OsmDiskCache, OsmLandArea, OsmWater};
 use metaverse_core::terrain::{SurfaceCache, TerrainGenerator};
 use metaverse_core::terrain_analysis::{RegionDem, TerrainAnalysis};
+use metaverse_core::tile_store::TileStore;
 use metaverse_core::voxel::{VoxelCoord, WORLD_MIN_METERS};
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +39,13 @@ struct Args {
     #[arg(long, default_value = "world_data/osm")]
     osm_cache: PathBuf,
     #[arg(long)]
+    osm_db: Option<PathBuf>,
+    #[arg(long)]
     coastline: Option<PathBuf>,
     #[arg(long, value_delimiter = ',')]
     categories: Vec<String>,
+    #[arg(long, value_delimiter = ',')]
+    controls: Vec<String>,
     #[arg(long)]
     max_per_category: Option<usize>,
     #[arg(long)]
@@ -432,9 +437,9 @@ fn collect_osm_features(
     lat_max: f64,
     lon_min: f64,
     lon_max: f64,
-) -> (Vec<OsmWater>, Vec<OsmLandArea>) {
+) -> (Vec<OsmWater>, Vec<OsmLandArea>, Vec<OsmAeroway>) {
     let Some(cache) = cache else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     };
 
     let tile_lat_start = (lat_min / OSM_TILE_DEGREES).floor() as i64;
@@ -444,6 +449,7 @@ fn collect_osm_features(
 
     let mut water = Vec::new();
     let mut land_areas = Vec::new();
+    let mut aeroways = Vec::new();
     for tile_lat in tile_lat_start..=tile_lat_end {
         let lat = tile_lat as f64 * OSM_TILE_DEGREES;
         for tile_lon in tile_lon_start..=tile_lon_end {
@@ -452,10 +458,11 @@ fn collect_osm_features(
             {
                 water.extend(tile.water);
                 land_areas.extend(tile.land_areas);
+                aeroways.extend(tile.aeroways);
             }
         }
     }
-    (water, land_areas)
+    (water, land_areas, aeroways)
 }
 
 fn terrain_surface_height_m(analysis: &TerrainAnalysis, lat: f64, lon: f64, source_m: f64) -> f64 {
@@ -679,13 +686,16 @@ fn build_analysis(
             analysis.compute_coastal_dist(gshhg);
         }
     }
-    let (water, land_areas) = collect_osm_features(osm_cache, lat_min, lat_max, lon_min, lon_max);
+    let (water, land_areas, aeroways) =
+        collect_osm_features(osm_cache, lat_min, lat_max, lon_min, lon_max);
     if !water.is_empty() {
         analysis.compute_reservoirs(&water);
     }
     if !land_areas.is_empty() {
         analysis.compute_osm_landuse(&land_areas);
-        analysis.compute_engineered_ground(&land_areas);
+    }
+    if !land_areas.is_empty() || !aeroways.is_empty() {
+        analysis.compute_engineered_ground_with_aeroways(&land_areas, &aeroways);
     }
     let osm_landuse_cell_count = analysis
         .osm_landuse_mask
@@ -1303,13 +1313,26 @@ fn main() -> Result<(), String> {
         .map_err(|e| format!("failed to read atlas {}: {}", args.atlas.display(), e))?;
     let atlas: ControlAtlas = serde_json::from_str(&atlas_raw)
         .map_err(|e| format!("failed to parse atlas {}: {}", args.atlas.display(), e))?;
+    let mut warnings = Vec::new();
 
     fs::create_dir_all(&args.output)
         .map_err(|e| format!("failed to create {}: {}", args.output.display(), e))?;
 
     let pipeline = make_elevation_pipeline(&args.srtm_dir, args.cop30_dir.as_deref());
 
-    let osm_cache = if args.osm_cache.exists() {
+    let osm_cache = if let Some(ref db_path) = args.osm_db {
+        match TileStore::open(db_path) {
+            Ok(store) => Some(OsmDiskCache::from_arc(Arc::new(store))),
+            Err(err) => {
+                warnings.push(format!(
+                    "failed to open OSM TileStore {}: {}",
+                    db_path.display(),
+                    err
+                ));
+                None
+            }
+        }
+    } else if args.osm_cache.exists() {
         Some(OsmDiskCache::new(&args.osm_cache))
     } else {
         None
@@ -1326,8 +1349,36 @@ fn main() -> Result<(), String> {
         )
     };
 
-    let mut warnings = Vec::new();
     let mut category_reports = Vec::new();
+    let control_filter: Option<BTreeMap<String, ()>> = if args.controls.is_empty() {
+        None
+    } else {
+        Some(
+            args.controls
+                .iter()
+                .map(|value| (value.trim().to_string(), ()))
+                .collect(),
+        )
+    };
+
+    if let Some(filter) = &control_filter {
+        let mut missing = Vec::new();
+        for requested in filter.keys() {
+            let found = atlas
+                .categories
+                .iter()
+                .any(|category| category.controls.iter().any(|site| site.id == *requested));
+            if !found {
+                missing.push(requested.clone());
+            }
+        }
+        if !missing.is_empty() {
+            warnings.push(format!(
+                "requested control ids were not found in atlas: {}",
+                missing.join(", ")
+            ));
+        }
+    }
 
     for category in &atlas.categories {
         if let Some(filter) = &category_filter {
@@ -1345,9 +1396,19 @@ fn main() -> Result<(), String> {
             ));
         }
 
-        let limit = args.max_per_category.unwrap_or(category.controls.len());
+        let filtered_controls: Vec<&ControlSite> = category
+            .controls
+            .iter()
+            .filter(|site| {
+                control_filter
+                    .as_ref()
+                    .map(|filter| filter.contains_key(&site.id))
+                    .unwrap_or(true)
+            })
+            .collect();
+        let limit = args.max_per_category.unwrap_or(filtered_controls.len());
         let mut control_reports = Vec::new();
-        for site in category.controls.iter().take(limit) {
+        for site in filtered_controls.into_iter().take(limit) {
             eprintln!(
                 "[terrain_controls] {} / {} ({:.6}, {:.6})",
                 category.id, site.id, site.lat, site.lon

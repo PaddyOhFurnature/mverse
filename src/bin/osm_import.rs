@@ -18,6 +18,7 @@ fn main() {
     let mut pbf_path = PathBuf::from("./world_data/map.osm.pbf");
     let mut cache_dir = PathBuf::from("./world_data/osm");
     let mut db_path: Option<PathBuf> = None;
+    let mut replace_existing = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -40,6 +41,9 @@ fn main() {
             "--help" => {
                 print_help();
                 return;
+            }
+            "--replace-existing" => {
+                replace_existing = true;
             }
             other => {
                 eprintln!("Unknown argument: {other}");
@@ -69,6 +73,7 @@ fn main() {
     if let Some(ref db) = db_path {
         println!("    DB:    {}", db.display());
     }
+    println!("    Replace existing: {}", replace_existing);
     println!();
 
     let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -97,9 +102,19 @@ fn main() {
             metaverse_core::tile_store::TileStore::open(&db)
                 .unwrap_or_else(|e| panic!("Failed to open TileStore at {db:?}: {e}")),
         );
-        metaverse_core::osm::import_pbf_with_store(&pbf_path, ts, Some(Arc::clone(&log)))
+        metaverse_core::osm::import_pbf_with_store_options(
+            &pbf_path,
+            ts,
+            Some(Arc::clone(&log)),
+            replace_existing,
+        )
     } else {
-        metaverse_core::osm::import_pbf_with_log(&pbf_path, &cache_dir, Arc::clone(&log))
+        metaverse_core::osm::import_pbf_with_log_options(
+            &pbf_path,
+            &cache_dir,
+            Arc::clone(&log),
+            replace_existing,
+        )
     };
     match result {
         Ok(tiles_written) => {
@@ -165,10 +180,12 @@ fn print_help() {
         "    --db <path>     TileStore (RocksDB) output path  [default: derived from --cache]"
     );
     println!("                    Use to avoid LOCK conflict when another import is running.");
+    println!("    --replace-existing  Overwrite existing OSM tiles instead of skipping them.");
     println!("    --help          Show this help");
     println!();
     println!("EXAMPLES:");
     println!("    osm-import");
     println!("    osm-import --pbf ~/downloads/brisbane.osm.pbf --cache ./world_data/osm");
     println!("    osm-import --pbf gympie.osm.pbf --cache ./osm_gympie --db ./gympie.db");
+    println!("    osm-import --pbf extract.osm.pbf --db ./atlas-osm.db --replace-existing");
 }

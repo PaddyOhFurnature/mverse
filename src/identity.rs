@@ -280,7 +280,7 @@ impl std::fmt::Display for KeyType {
 ///
 /// ## Trust chain
 ///
-/// For **user keys** (Personal, Business, Anonymous, Guest):
+/// For **user keys** (User, Business, Guest, Trial):
 /// - `self_sig` is the only signature required.
 /// - No authority needs to issue it; users self-register.
 ///
@@ -305,7 +305,7 @@ impl std::fmt::Display for KeyType {
 /// Peers keep the record with the highest `updated_at` timestamp.
 ///
 /// `peer_id`, `public_key`, and `created_at` are permanent — they define the identity.
-/// `key_type` cannot be self-upgraded (Guest → Personal requires a new keypair).
+/// `key_type` cannot be self-upgraded (Guest → User requires a new keypair).
 ///
 /// ## Revocation
 ///
@@ -671,7 +671,7 @@ impl Identity {
     /// On first run, a **Guest** key is generated automatically. This lets the
     /// player explore and build in free zones immediately without any sign-up
     /// friction. Guest keys expire after 30 days and cannot claim parcels or
-    /// trade. Use [`Identity::upgrade_key_type`] to promote the key to Personal.
+    /// trade. Use [`Identity::upgrade_key_type`] to promote the key to User.
     ///
     /// Returns `true` if an identity key file already exists on disk.
     /// Used for first-run detection before calling `load_or_create`.
@@ -710,7 +710,7 @@ impl Identity {
             // Ensure .keyrec companion exists; generate one if missing
             let keyrec_path = Self::keyrec_path_for(&path);
             if !keyrec_path.exists() {
-                // Load key type from environment hint or default to Personal for existing keys
+                // Load key type from environment hint or default to User for existing keys
                 let record = id.create_key_record(KeyType::User, None, None, None, None, None);
                 if let Ok(bytes) = record.to_bytes() {
                     let _ = fs::write(&keyrec_path, bytes);
@@ -723,7 +723,7 @@ impl Identity {
             identity.save_to_path(&path)?;
 
             // Auto-generate a Guest KeyRecord (30-day expiry, no display name).
-            // The player can upgrade to Personal at any time via upgrade_key_type().
+            // The player can upgrade to User at any time via upgrade_key_type().
             let keyrec_path = Self::keyrec_path_for(&path);
             let record = identity.create_guest_record();
             if let Ok(bytes) = record.to_bytes() {
@@ -741,7 +741,7 @@ impl Identity {
             eprintln!("│    • Trade or sign contracts                               │");
             eprintln!("│    • Deploy scripts                                        │");
             eprintln!("│                                                             │");
-            eprintln!("│  To upgrade to a Personal key (full capabilities):         │");
+            eprintln!("│  To upgrade to a User key (full capabilities):             │");
             eprintln!("│    metaworld_alpha --upgrade-key --name \"Your Name\"        │");
             eprintln!("│                                                             │");
             eprintln!("│  ⚠️  CRITICAL: Back up your key file!                      │");
@@ -764,8 +764,8 @@ impl Identity {
     ///
     /// # When to use
     ///
-    /// - Upgrading from Guest → Personal (add `display_name`)
-    /// - Upgrading from Personal → Business (add business name)
+    /// - Upgrading from Guest → User (add `display_name`)
+    /// - Upgrading from User → Business (add business name)
     /// - Changing display name or bio at any time
     ///
     /// The resulting record must be published to the network via the key-registry
@@ -774,7 +774,7 @@ impl Identity {
     /// # Arguments
     ///
     /// * `new_type` — the new key type (must not downgrade to Guest)
-    /// * `display_name` — required for Personal and Business keys (strongly recommended)
+    /// * `display_name` — required for User and Business keys (strongly recommended)
     /// * `bio` — optional short bio (max 280 chars)
     /// * `avatar_hash` — optional content-addressed avatar hash
     ///

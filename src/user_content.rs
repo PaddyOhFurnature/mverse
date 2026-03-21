@@ -141,7 +141,7 @@ impl UserContentLayer {
                 version: 1,
                 peer_id: op.author,
                 public_key: op.public_key,
-                key_type: crate::identity::KeyType::User, // assume Personal for layer check
+                key_type: crate::identity::KeyType::User, // assume User for layer check
                 display_name: None,
                 bio: None,
                 avatar_hash: None,
@@ -206,7 +206,7 @@ impl UserContentLayer {
             version: 1,
             peer_id: op.author,
             public_key: op.public_key,
-            key_type: crate::identity::KeyType::User, // local ops are at least Personal
+            key_type: crate::identity::KeyType::User, // local ops are at least User
             display_name: None,
             bio: None,
             avatar_hash: None,

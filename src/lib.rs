@@ -3,6 +3,7 @@
 //! Fresh implementation starting from foundation research.
 
 pub mod billboard;
+pub mod client_app;
 pub mod construct; // The Construct — bundled lobby scene, always available offline
 pub mod coordinates;
 pub mod elevation;
@@ -26,6 +27,7 @@ pub mod chunk_loader;
 pub mod chunk_manager;
 pub mod chunk_placeholder;
 pub mod chunk_streaming;
+pub mod control_pack_merge;
 pub mod feature_record; // OSM-derived feature records stored alongside chunk passes
 pub mod http_tunnel; // HTTP fallback for firewall bypass
 pub mod identity;

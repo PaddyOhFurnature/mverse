@@ -144,8 +144,11 @@ pub fn classify_biome(
         return Biome::Ocean;
     }
 
-    // Coastal zone (within 500 m of coast)
-    if coastal_dist_m > 0.0 && coastal_dist_m < 500.0 {
+    // Coastal zone (within 500 m of coast).
+    // Zero-distance cells are the coastline itself and should still classify as
+    // coastal; excluding them creates a one-cell inland strip that falls back
+    // to climate-based grass/forest logic right at the shoreline.
+    if coastal_dist_m < 500.0 {
         if slope_deg > 20.0 {
             return Biome::RockyCoast;
         }
@@ -355,17 +358,25 @@ pub fn classify_column(
     };
 
     let climate = koppen_climate(lat, elevation_m);
-    let biome = classify_biome(
-        lat,
-        lon,
-        elevation_m,
-        slope,
-        twi,
-        tri,
-        coastal_dist_m,
-        osm_landuse,
-        climate,
-    );
+    let biome = if analysis
+        .map(|a| a.ocean_at(lat, lon) && elevation_m <= 5.0)
+        .unwrap_or(false)
+        && osm_landuse != Some(OsmLanduse::Water)
+    {
+        Biome::Ocean
+    } else {
+        classify_biome(
+            lat,
+            lon,
+            elevation_m,
+            slope,
+            twi,
+            tri,
+            coastal_dist_m,
+            osm_landuse,
+            climate,
+        )
+    };
     let substrate =
         classify_substrate(biome, climate, slope, twi, tri, elevation_m, coastal_dist_m);
 
@@ -390,5 +401,36 @@ pub fn classify_column(
         climate,
         soil_depth_voxels,
         surface_is_sealed: matches!(substrate, SubstrateType::UrbanFill),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_biome_treats_zero_distance_coastline_as_beach() {
+        let biome = classify_biome(
+            -33.89,
+            151.28,
+            0.4,
+            2.0,
+            4.0,
+            0.0,
+            0.0,
+            None,
+            ClimateZone::HumidSubtropical,
+        );
+
+        assert_eq!(biome, Biome::Beach);
+    }
+
+    #[test]
+    fn classify_column_maps_zero_distance_coastline_to_sand() {
+        let column = classify_column(-33.89, 151.28, 0.4, None, None, 0.0);
+
+        assert_eq!(column.biome, Biome::Beach);
+        assert_eq!(column.substrate, SubstrateType::Sand);
+        assert_eq!(column.soil_depth_voxels, 6);
     }
 }

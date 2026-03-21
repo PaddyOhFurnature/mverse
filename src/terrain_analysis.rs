@@ -8,7 +8,7 @@
 use crate::biome::OsmLanduse;
 use crate::coordinates::GPS;
 use crate::elevation::ElevationPipeline;
-use crate::osm::{OsmLandArea, OsmWater};
+use crate::osm::{OsmAeroway, OsmLandArea, OsmWater};
 use std::io::{self, BufReader, Read};
 
 // ── RegionDem ────────────────────────────────────────────────────────────────
@@ -133,6 +133,9 @@ pub struct TerrainAnalysis {
     /// Distance to nearest coastline in metres.
     /// Empty when GSHHG data is not provided; `coastal_dist_at` returns 100 000 m.
     pub coastal_dist: Vec<f32>,
+    /// True when the DEM cell center falls outside all nearby level-1 GSHHG
+    /// land polygons, i.e. the cell is open ocean rather than land.
+    pub ocean_mask: Vec<bool>,
     /// Reservoir water surface elevation in metres per cell.
     /// 0.0 means "not a reservoir".  Populated by `compute_reservoirs`.
     pub reservoir_mask: Vec<f32>,
@@ -229,8 +232,13 @@ fn landuse_override_for_area(area: &OsmLandArea) -> Option<OsmLanduse> {
     }
 }
 
-fn engineered_ground_profile(area: &OsmLandArea) -> Option<EngineeredGroundProfile> {
-    match area.area_type.as_str() {
+fn engineered_ground_profile(area_type: &str) -> Option<EngineeredGroundProfile> {
+    match area_type {
+        "aerodrome" => Some(EngineeredGroundProfile {
+            priority: 1,
+            boundary_strength: 0.9,
+            interior_strength: 0.95,
+        }),
         "recreation_ground" => Some(EngineeredGroundProfile {
             priority: 1,
             boundary_strength: 0.85,
@@ -241,12 +249,22 @@ fn engineered_ground_profile(area: &OsmLandArea) -> Option<EngineeredGroundProfi
             boundary_strength: 1.0,
             interior_strength: 1.0,
         }),
+        "taxiway" | "apron" | "helipad" => Some(EngineeredGroundProfile {
+            priority: 3,
+            boundary_strength: 0.95,
+            interior_strength: 1.0,
+        }),
+        "runway" => Some(EngineeredGroundProfile {
+            priority: 4,
+            boundary_strength: 1.0,
+            interior_strength: 1.0,
+        }),
         _ => None,
     }
 }
 
-fn engineered_ground_support_profile(area: &OsmLandArea) -> Option<EngineeredGroundProfile> {
-    match area.area_type.as_str() {
+fn engineered_ground_support_profile(area_type: &str) -> Option<EngineeredGroundProfile> {
+    match area_type {
         // Broader park/grass polygons often wrap explicit sports grounds in OSM.
         // We only activate these as weaker support surfaces when they spatially
         // intersect an explicit engineered-ground polygon.
@@ -259,13 +277,37 @@ fn engineered_ground_support_profile(area: &OsmLandArea) -> Option<EngineeredGro
     }
 }
 
+fn engineered_ground_support_seed(area_type: &str) -> bool {
+    matches!(
+        area_type,
+        "recreation_ground"
+            | "pitch"
+            | "stadium"
+            | "sports_centre"
+            | "runway"
+            | "taxiway"
+            | "apron"
+            | "helipad"
+    )
+}
+
+fn engineered_ground_line_half_width_m(area_type: &str) -> Option<f64> {
+    match area_type {
+        "runway" => Some(35.0),
+        "taxiway" => Some(18.0),
+        "apron" => Some(25.0),
+        "helipad" => Some(12.0),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct EngineeredGroundHaloProfile {
     ring_strengths: [f32; 2],
 }
 
-fn engineered_ground_halo_profile(area: &OsmLandArea) -> Option<EngineeredGroundHaloProfile> {
-    match area.area_type.as_str() {
+fn engineered_ground_halo_profile(area_type: &str) -> Option<EngineeredGroundHaloProfile> {
+    match area_type {
         // Recreation grounds often have short unmapped shoulders or gaps around
         // the formal polygon boundary that still belong to the levelled complex.
         "recreation_ground" => Some(EngineeredGroundHaloProfile {
@@ -297,6 +339,129 @@ fn polygon_bounds(polygon: &[GPS]) -> Option<(f64, f64, f64, f64)> {
         .map(|p| p.lon)
         .fold(f64::NEG_INFINITY, f64::max);
     Some((lat_min, lat_max, lon_min, lon_max))
+}
+
+fn bounds_to_polygon(bounds: (f64, f64, f64, f64)) -> Vec<GPS> {
+    let (lat_min, lat_max, lon_min, lon_max) = bounds;
+    vec![
+        GPS::new(lat_min, lon_min, 0.0),
+        GPS::new(lat_min, lon_max, 0.0),
+        GPS::new(lat_max, lon_max, 0.0),
+        GPS::new(lat_max, lon_min, 0.0),
+        GPS::new(lat_min, lon_min, 0.0),
+    ]
+}
+
+fn polyline_bounds(nodes: &[GPS], pad_m: f64) -> Option<(f64, f64, f64, f64)> {
+    if nodes.len() < 2 {
+        return None;
+    }
+    let lat_min = nodes.iter().map(|p| p.lat).fold(f64::INFINITY, f64::min);
+    let lat_max = nodes
+        .iter()
+        .map(|p| p.lat)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let lon_min = nodes.iter().map(|p| p.lon).fold(f64::INFINITY, f64::min);
+    let lon_max = nodes
+        .iter()
+        .map(|p| p.lon)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mid_lat = 0.5 * (lat_min + lat_max);
+    let lat_pad = pad_m / 111_320.0;
+    let lon_pad = pad_m / (111_320.0 * mid_lat.to_radians().cos().abs().max(0.1));
+    Some((
+        lat_min - lat_pad,
+        lat_max + lat_pad,
+        lon_min - lon_pad,
+        lon_max + lon_pad,
+    ))
+}
+
+fn point_to_polyline_segment_distance_m(lat: f64, lon: f64, a: &GPS, b: &GPS) -> f64 {
+    let scale_y = 111_320.0;
+    let scale_x = 111_320.0 * lat.to_radians().cos().abs().max(0.1);
+
+    let ax = (a.lon - lon) * scale_x;
+    let ay = (a.lat - lat) * scale_y;
+    let bx = (b.lon - lon) * scale_x;
+    let by = (b.lat - lat) * scale_y;
+    let abx = bx - ax;
+    let aby = by - ay;
+    let denom = abx * abx + aby * aby;
+    if denom <= 1.0e-12 {
+        return (ax * ax + ay * ay).sqrt();
+    }
+    let t = (-(ax * abx + ay * aby) / denom).clamp(0.0, 1.0);
+    let cx = ax + t * abx;
+    let cy = ay + t * aby;
+    (cx * cx + cy * cy).sqrt()
+}
+
+fn point_to_polyline_distance_m(lat: f64, lon: f64, nodes: &[GPS]) -> Option<f64> {
+    if nodes.len() < 2 {
+        return None;
+    }
+    let mut best = f64::INFINITY;
+    for segment in nodes.windows(2) {
+        best = best.min(point_to_polyline_segment_distance_m(
+            lat,
+            lon,
+            &segment[0],
+            &segment[1],
+        ));
+    }
+    Some(best)
+}
+
+fn rasterize_polyline_buffer_cells(
+    dem: &RegionDem,
+    nodes: &[GPS],
+    half_width_m: f64,
+) -> Vec<(usize, usize)> {
+    let Some(bounds) = polyline_bounds(nodes, half_width_m) else {
+        return Vec::new();
+    };
+    let (lat_min, lat_max, lon_min, lon_max) = bounds;
+    if lat_max < dem.lat_min
+        || lat_min > dem.lat_max
+        || lon_max < dem.lon_min
+        || lon_min > dem.lon_max
+    {
+        return Vec::new();
+    }
+
+    let r0 = ((lat_min - dem.lat_min) / dem.cell_size_deg)
+        .floor()
+        .max(0.0) as usize;
+    let r1 = ((lat_max - dem.lat_min) / dem.cell_size_deg)
+        .ceil()
+        .min(dem.rows as f64 - 1.0) as usize;
+    let c0 = ((lon_min - dem.lon_min) / dem.cell_size_deg)
+        .floor()
+        .max(0.0) as usize;
+    let c1 = ((lon_max - dem.lon_min) / dem.cell_size_deg)
+        .ceil()
+        .min(dem.cols as f64 - 1.0) as usize;
+
+    let cell_size_lat_m = 111_320.0 * dem.cell_size_deg;
+    let cell_size_lon_m =
+        111_320.0 * dem.cell_size_deg * (0.5 * (lat_min + lat_max)).to_radians().cos().abs().max(0.1);
+    let cell_radius_m = 0.5 * (cell_size_lat_m * cell_size_lat_m + cell_size_lon_m * cell_size_lon_m).sqrt();
+
+    let mut inside_cells = Vec::new();
+    for r in r0..=r1 {
+        let center_lat = dem.lat_min + (r as f64 + 0.5) * dem.cell_size_deg;
+        for c in c0..=c1 {
+            let center_lon = dem.lon_min + (c as f64 + 0.5) * dem.cell_size_deg;
+            let Some(dist_m) = point_to_polyline_distance_m(center_lat, center_lon, nodes) else {
+                continue;
+            };
+            if dist_m <= half_width_m + cell_radius_m {
+                inside_cells.push((r, c));
+            }
+        }
+    }
+    inside_cells
 }
 
 fn bounds_overlap(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
@@ -608,6 +773,7 @@ impl TerrainAnalysis {
             tri,
             slope_deg,
             coastal_dist: Vec::new(),
+            ocean_mask: Vec::new(),
             reservoir_mask: Vec::new(),
             osm_landuse_mask: Vec::new(),
             engineered_ground_level: Vec::new(),
@@ -748,6 +914,13 @@ impl TerrainAnalysis {
         } else {
             direct_coastal_dist_fallback(&self.dem, gshhg_path, 50_000.0)
         };
+        self.ocean_mask = rasterise_ocean_mask(&self.dem, gshhg_path);
+        let ocean_cells = self.ocean_mask.iter().filter(|&&v| v).count();
+        eprintln!(
+            "[terrain_analysis] Ocean mask raster complete: {} / {} ocean cells",
+            ocean_cells,
+            self.dem.rows * self.dem.cols,
+        );
         eprintln!("[terrain_analysis] Coastal distance raster complete.");
     }
 
@@ -762,6 +935,15 @@ impl TerrainAnalysis {
         }
         let (r, c) = self.row_col(lat, lon);
         self.coastal_dist[self.idx(r, c)]
+    }
+
+    /// Whether the queried cell is classified as open ocean by the GSHHG mask.
+    pub fn ocean_at(&self, lat: f64, lon: f64) -> bool {
+        if self.ocean_mask.is_empty() {
+            return false;
+        }
+        let (r, c) = self.row_col_centered(lat, lon);
+        self.ocean_mask[self.idx(r, c)]
     }
 
     /// Rasterise conservative OSM landuse overrides onto the DEM grid.
@@ -866,6 +1048,18 @@ impl TerrainAnalysis {
     /// receive a weaker support profile when they spatially wrap or touch those
     /// explicit engineered-ground polygons.
     pub fn compute_engineered_ground(&mut self, land_areas: &[OsmLandArea]) {
+        self.compute_engineered_ground_with_aeroways(land_areas, &[]);
+    }
+
+    /// Rasterise engineered flat-ground controls from land areas plus aeroway polygons.
+    ///
+    /// Aeroway polygons let airport surfaces (runways, aprons, taxiways, helipads)
+    /// participate in the same coarse DEM flattening pass as recreation/sports grounds.
+    pub fn compute_engineered_ground_with_aeroways(
+        &mut self,
+        land_areas: &[OsmLandArea],
+        aeroways: &[OsmAeroway],
+    ) {
         #[derive(Clone)]
         struct EngineeredGroundHaloSource {
             cells: Vec<(usize, usize)>,
@@ -888,6 +1082,7 @@ impl TerrainAnalysis {
             target_cells: Vec<(usize, usize)>,
             profile: EngineeredGroundProfile,
             halo_profile: Option<EngineeredGroundHaloProfile>,
+            allows_support_extensions: bool,
         }
 
         let n = self.dem.rows * self.dem.cols;
@@ -903,24 +1098,24 @@ impl TerrainAnalysis {
         let mut areas: Vec<EngineeredGroundArea> = Vec::new();
         let mut halo_sources: Vec<EngineeredGroundHaloSource> = Vec::new();
 
-        for area in land_areas {
-            if !seen.insert(area.osm_id) {
-                continue;
+        let mut register_area = |osm_id: u64, polygon: &[GPS], area_type: &str| {
+            if !seen.insert(osm_id) {
+                return;
             }
-            if area.polygon.len() < 3 {
-                continue;
+            if polygon.len() < 3 {
+                return;
             }
-            let Some(bounds) = polygon_bounds(&area.polygon) else {
-                continue;
+            let Some(bounds) = polygon_bounds(polygon) else {
+                return;
             };
-            let inside_cells = rasterize_polygon_cells(&self.dem, &area.polygon, bounds);
+            let inside_cells = rasterize_polygon_cells(&self.dem, polygon, bounds);
             if inside_cells.is_empty() {
-                continue;
+                return;
             }
 
-            if let Some(profile) = engineered_ground_profile(area) {
+            if let Some(profile) = engineered_ground_profile(area_type) {
                 let target_cells = {
-                    let cells = rasterize_polygon_center_cells(&self.dem, &area.polygon, bounds);
+                    let cells = rasterize_polygon_center_cells(&self.dem, polygon, bounds);
                     if cells.is_empty() {
                         inside_cells.clone()
                     } else {
@@ -929,24 +1124,69 @@ impl TerrainAnalysis {
                 };
                 areas.push(EngineeredGroundArea {
                     kind: EngineeredGroundAreaKind::Explicit,
-                    polygon: area.polygon.clone(),
+                    polygon: polygon.to_vec(),
                     bounds,
                     cells: inside_cells,
                     target_cells,
                     profile,
-                    halo_profile: engineered_ground_halo_profile(area),
+                    halo_profile: engineered_ground_halo_profile(area_type),
+                    allows_support_extensions: engineered_ground_support_seed(area_type),
                 });
-            } else if let Some(profile) = engineered_ground_support_profile(area) {
+            } else if let Some(profile) = engineered_ground_support_profile(area_type) {
                 areas.push(EngineeredGroundArea {
                     kind: EngineeredGroundAreaKind::Support,
-                    polygon: area.polygon.clone(),
+                    polygon: polygon.to_vec(),
                     bounds,
                     cells: inside_cells,
                     target_cells: Vec::new(),
                     profile,
-                    halo_profile: engineered_ground_halo_profile(area),
+                    halo_profile: engineered_ground_halo_profile(area_type),
+                    allows_support_extensions: false,
                 });
             }
+        };
+
+        for area in land_areas {
+            register_area(area.osm_id, &area.polygon, &area.area_type);
+        }
+        for aeroway in aeroways {
+            if !aeroway.is_area {
+                continue;
+            }
+            register_area(aeroway.osm_id, &aeroway.polygon, &aeroway.aeroway_type);
+        }
+        for aeroway in aeroways {
+            if aeroway.is_area {
+                continue;
+            }
+            if !seen.insert(aeroway.osm_id) {
+                continue;
+            }
+            let Some(profile) = engineered_ground_profile(&aeroway.aeroway_type) else {
+                continue;
+            };
+            let Some(half_width_m) = engineered_ground_line_half_width_m(&aeroway.aeroway_type)
+            else {
+                continue;
+            };
+            let Some(bounds) = polyline_bounds(&aeroway.nodes, half_width_m) else {
+                continue;
+            };
+            let inside_cells =
+                rasterize_polyline_buffer_cells(&self.dem, &aeroway.nodes, half_width_m);
+            if inside_cells.is_empty() {
+                continue;
+            }
+            areas.push(EngineeredGroundArea {
+                kind: EngineeredGroundAreaKind::Explicit,
+                polygon: bounds_to_polygon(bounds),
+                bounds,
+                cells: inside_cells.clone(),
+                target_cells: inside_cells,
+                profile,
+                halo_profile: engineered_ground_halo_profile(&aeroway.aeroway_type),
+                allows_support_extensions: engineered_ground_support_seed(&aeroway.aeroway_type),
+            });
         }
 
         let mut visited = vec![false; areas.len()];
@@ -979,21 +1219,33 @@ impl TerrainAnalysis {
                 }
             }
 
-            let mut explicit_cells: std::collections::HashSet<(usize, usize)> =
-                std::collections::HashSet::new();
-            for &area_idx in &component {
-                if areas[area_idx].kind == EngineeredGroundAreaKind::Explicit {
-                    explicit_cells.extend(areas[area_idx].target_cells.iter().copied());
-                }
-            }
-            let explicit_cells: Vec<(usize, usize)> = explicit_cells.into_iter().collect();
-            let Some(target) = engineered_ground_target_for_cells(&self.dem, &explicit_cells)
+            let Some(target) = component
+                .iter()
+                .filter_map(|&area_idx| {
+                    let area = &areas[area_idx];
+                    if area.kind != EngineeredGroundAreaKind::Explicit {
+                        return None;
+                    }
+                    let full_target = engineered_ground_target_for_cells(&self.dem, &area.cells)?;
+                    let center_target =
+                        engineered_ground_target_for_cells(&self.dem, &area.target_cells)
+                            .unwrap_or(full_target);
+                    Some(full_target.min(center_target))
+                })
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             else {
                 continue;
             };
+            let component_support_enabled = component.iter().any(|&area_idx| {
+                areas[area_idx].kind == EngineeredGroundAreaKind::Explicit
+                    && areas[area_idx].allows_support_extensions
+            });
 
             for &area_idx in &component {
                 let area = &areas[area_idx];
+                if area.kind == EngineeredGroundAreaKind::Support && !component_support_enabled {
+                    continue;
+                }
                 let inside_set: std::collections::HashSet<(usize, usize)> =
                     area.cells.iter().copied().collect();
 
@@ -1034,12 +1286,16 @@ impl TerrainAnalysis {
                     }
                 }
 
-                if let Some(halo_profile) = area.halo_profile {
+                let allow_halo = area.kind == EngineeredGroundAreaKind::Explicit
+                    || component_support_enabled;
+                if allow_halo {
+                    if let Some(halo_profile) = area.halo_profile {
                     halo_sources.push(EngineeredGroundHaloSource {
                         cells: area.cells.clone(),
                         target,
                         halo_profile,
                     });
+                    }
                 }
             }
         }
@@ -1518,6 +1774,87 @@ fn rasterise_coastline(dem: &RegionDem, path: &std::path::Path) -> Vec<bool> {
          rasterised {seg_count} edge segments"
     );
     on_coast
+}
+
+fn collect_level1_land_polygons(dem: &RegionDem, path: &std::path::Path) -> Vec<Vec<GPS>> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[terrain_analysis] Cannot open GSHHG {:?}: {e}", path);
+            return Vec::new();
+        }
+    };
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let mid_lon = (dem.lon_min + dem.lon_max) * 0.5;
+    let mut polygons = Vec::new();
+
+    loop {
+        let _id = match read_i32_be(&mut reader) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let n_pts = read_i32_be(&mut reader).unwrap_or(0);
+        let flag = read_i32_be(&mut reader).unwrap_or(0);
+        let west_raw = read_i32_be(&mut reader).unwrap_or(0);
+        let east_raw = read_i32_be(&mut reader).unwrap_or(0);
+        let south_us = read_i32_be(&mut reader).unwrap_or(0);
+        let north_us = read_i32_be(&mut reader).unwrap_or(0);
+        let _ = skip_bytes(&mut reader, 16);
+
+        let level = (flag & 0xFF) as u8;
+        let poly_south = south_us as f64 / 1_000_000.0;
+        let poly_north = north_us as f64 / 1_000_000.0;
+        let mut poly_west = wrap_lon_near(gshhg_lon(west_raw), mid_lon);
+        let mut poly_east = wrap_lon_near(gshhg_lon(east_raw), mid_lon);
+        if poly_west > poly_east {
+            std::mem::swap(&mut poly_west, &mut poly_east);
+        }
+
+        let in_region = level == 1
+            && poly_east >= dem.lon_min
+            && poly_west <= dem.lon_max
+            && poly_north >= dem.lat_min
+            && poly_south <= dem.lat_max;
+
+        if n_pts <= 0 {
+            continue;
+        }
+
+        let mut polygon = Vec::with_capacity(n_pts as usize);
+        for _ in 0..n_pts {
+            let x = read_i32_be(&mut reader).unwrap_or(0);
+            let y = read_i32_be(&mut reader).unwrap_or(0);
+            if in_region {
+                polygon.push(GPS::new(
+                    y as f64 / 1_000_000.0,
+                    wrap_lon_near(gshhg_lon(x), mid_lon),
+                    0.0,
+                ));
+            }
+        }
+
+        if in_region && polygon.len() >= 3 {
+            polygons.push(polygon);
+        }
+    }
+
+    polygons
+}
+
+fn rasterise_ocean_mask(dem: &RegionDem, path: &std::path::Path) -> Vec<bool> {
+    let n = dem.rows * dem.cols;
+    let mut land_mask = vec![false; n];
+
+    for polygon in collect_level1_land_polygons(dem, path) {
+        let Some(bounds) = polygon_bounds(&polygon) else {
+            continue;
+        };
+        for (r, c) in rasterize_polygon_center_cells(dem, &polygon, bounds) {
+            land_mask[r * dem.cols + c] = true;
+        }
+    }
+
+    land_mask.into_iter().map(|is_land| !is_land).collect()
 }
 
 /// Rasterise a single great-circle segment `(lat0,lon0)→(lat1,lon1)` onto the
@@ -2193,6 +2530,231 @@ mod tests {
             .expect("pitch cell should retain explicit engineered ground");
         assert!((pitch_target - 100.0).abs() < 0.01);
         assert!(pitch_strength > 0.95);
+    }
+
+    #[test]
+    fn park_with_nested_playground_does_not_inherit_support_ground_level() {
+        let dem = RegionDem {
+            elevations: vec![
+                100.0, 100.0, 100.0, 100.0, 100.0, //
+                100.0, 130.0, 135.0, 140.0, 100.0, //
+                100.0, 125.0, 100.0, 138.0, 100.0, //
+                100.0, 128.0, 134.0, 136.0, 100.0, //
+                100.0, 100.0, 100.0, 100.0, 100.0,
+            ],
+            rows: 5,
+            cols: 5,
+            lat_min: 0.0,
+            lat_max: 0.05,
+            lon_min: 0.0,
+            lon_max: 0.05,
+            cell_size_deg: 0.01,
+        };
+        let mut analysis = TerrainAnalysis::compute(dem);
+        let park = OsmLandArea {
+            osm_id: 30,
+            polygon: vec![
+                GPS::new(0.01, 0.01, 0.0),
+                GPS::new(0.01, 0.04, 0.0),
+                GPS::new(0.04, 0.04, 0.0),
+                GPS::new(0.04, 0.01, 0.0),
+                GPS::new(0.01, 0.01, 0.0),
+            ],
+            name: Some("Play Park".into()),
+            area_type: "park".into(),
+            category: "leisure".into(),
+        };
+        let playground = OsmLandArea {
+            osm_id: 31,
+            polygon: vec![
+                GPS::new(0.02, 0.02, 0.0),
+                GPS::new(0.02, 0.03, 0.0),
+                GPS::new(0.03, 0.03, 0.0),
+                GPS::new(0.03, 0.02, 0.0),
+                GPS::new(0.02, 0.02, 0.0),
+            ],
+            name: Some("Central Playground".into()),
+            area_type: "playground".into(),
+            category: "leisure".into(),
+        };
+
+        analysis.compute_engineered_ground(&[park, playground]);
+
+        assert!(
+            analysis
+                .engineered_ground_control_at(0.025, 0.015)
+                .is_none(),
+            "park support should stay local when the only explicit owner is a playground"
+        );
+
+        let (playground_target, playground_strength) = analysis
+            .engineered_ground_control_at(0.025, 0.025)
+            .expect("playground cell should retain explicit engineered ground");
+        assert!((playground_target - 100.0).abs() < 0.01);
+        assert!(playground_strength > 0.95);
+    }
+
+    #[test]
+    fn aerodrome_with_nested_runway_inherits_support_ground_level() {
+        let dem = RegionDem {
+            elevations: vec![
+                100.0, 100.0, 100.0, 100.0, 100.0, //
+                100.0, 130.0, 135.0, 140.0, 100.0, //
+                100.0, 125.0, 100.0, 138.0, 100.0, //
+                100.0, 128.0, 134.0, 136.0, 100.0, //
+                100.0, 100.0, 100.0, 100.0, 100.0,
+            ],
+            rows: 5,
+            cols: 5,
+            lat_min: 0.0,
+            lat_max: 0.05,
+            lon_min: 0.0,
+            lon_max: 0.05,
+            cell_size_deg: 0.01,
+        };
+        let mut analysis = TerrainAnalysis::compute(dem);
+        let aerodrome = OsmAeroway {
+            osm_id: 32,
+            polygon: vec![
+                GPS::new(0.01, 0.01, 0.0),
+                GPS::new(0.01, 0.04, 0.0),
+                GPS::new(0.04, 0.04, 0.0),
+                GPS::new(0.04, 0.01, 0.0),
+                GPS::new(0.01, 0.01, 0.0),
+            ],
+            nodes: Vec::new(),
+            aeroway_type: "aerodrome".into(),
+            name: Some("Test Airport".into()),
+            is_area: true,
+        };
+        let runway = OsmAeroway {
+            osm_id: 33,
+            polygon: vec![
+                GPS::new(0.02, 0.02, 0.0),
+                GPS::new(0.02, 0.03, 0.0),
+                GPS::new(0.03, 0.03, 0.0),
+                GPS::new(0.03, 0.02, 0.0),
+                GPS::new(0.02, 0.02, 0.0),
+            ],
+            nodes: Vec::new(),
+            aeroway_type: "runway".into(),
+            name: Some("Runway 09/27".into()),
+            is_area: true,
+        };
+
+        analysis.compute_engineered_ground_with_aeroways(&[], &[aerodrome, runway]);
+
+        let (support_target, support_strength) = analysis
+            .engineered_ground_control_at(0.025, 0.015)
+            .expect("aerodrome support cell should inherit runway engineered ground");
+        assert!((support_target - 100.0).abs() < 0.01);
+        assert!(support_strength >= 0.89);
+
+        let (runway_target, runway_strength) = analysis
+            .engineered_ground_control_at(0.025, 0.025)
+            .expect("runway cell should retain explicit engineered ground");
+        assert!((runway_target - 100.0).abs() < 0.01);
+        assert!(runway_strength > 0.95);
+    }
+
+    #[test]
+    fn aerodrome_with_nested_runway_centerline_inherits_support_ground_level() {
+        let dem = RegionDem {
+            elevations: vec![
+                100.0, 100.0, 100.0, 100.0, 100.0, //
+                100.0, 130.0, 135.0, 140.0, 100.0, //
+                100.0, 125.0, 100.0, 138.0, 100.0, //
+                100.0, 128.0, 134.0, 136.0, 100.0, //
+                100.0, 100.0, 100.0, 100.0, 100.0,
+            ],
+            rows: 5,
+            cols: 5,
+            lat_min: 0.0,
+            lat_max: 0.05,
+            lon_min: 0.0,
+            lon_max: 0.05,
+            cell_size_deg: 0.01,
+        };
+        let mut analysis = TerrainAnalysis::compute(dem);
+        let aerodrome = OsmAeroway {
+            osm_id: 34,
+            polygon: vec![
+                GPS::new(0.01, 0.01, 0.0),
+                GPS::new(0.01, 0.04, 0.0),
+                GPS::new(0.04, 0.04, 0.0),
+                GPS::new(0.04, 0.01, 0.0),
+                GPS::new(0.01, 0.01, 0.0),
+            ],
+            nodes: Vec::new(),
+            aeroway_type: "aerodrome".into(),
+            name: Some("Line Airport".into()),
+            is_area: true,
+        };
+        let runway_centerline = OsmAeroway {
+            osm_id: 35,
+            polygon: Vec::new(),
+            nodes: vec![GPS::new(0.025, 0.015, 0.0), GPS::new(0.025, 0.035, 0.0)],
+            aeroway_type: "runway".into(),
+            name: Some("Runway Centreline".into()),
+            is_area: false,
+        };
+
+        analysis.compute_engineered_ground_with_aeroways(&[], &[aerodrome, runway_centerline]);
+
+        let (support_target, support_strength) = analysis
+            .engineered_ground_control_at(0.025, 0.015)
+            .expect("aerodrome support cell should inherit centerline runway target");
+        assert!((support_target - 100.0).abs() < 0.01);
+        assert!(support_strength >= 0.89);
+
+        let (runway_target, runway_strength) = analysis
+            .engineered_ground_control_at(0.025, 0.025)
+            .expect("buffered runway centerline should seed explicit engineered ground");
+        assert!((runway_target - 100.0).abs() < 0.01);
+        assert!(runway_strength > 0.95);
+    }
+
+    #[test]
+    fn standalone_aerodrome_marks_engineered_ground() {
+        let dem = RegionDem {
+            elevations: vec![
+                25.0, 25.0, 25.0, 25.0, 25.0, //
+                25.0, 27.0, 28.0, 27.0, 25.0, //
+                25.0, 26.0, 29.0, 26.0, 25.0, //
+                25.0, 27.0, 28.0, 27.0, 25.0, //
+                25.0, 25.0, 25.0, 25.0, 25.0,
+            ],
+            rows: 5,
+            cols: 5,
+            lat_min: 0.0,
+            lat_max: 0.05,
+            lon_min: 0.0,
+            lon_max: 0.05,
+            cell_size_deg: 0.01,
+        };
+        let mut analysis = TerrainAnalysis::compute(dem);
+        let aerodrome = OsmAeroway {
+            osm_id: 36,
+            polygon: vec![
+                GPS::new(0.01, 0.01, 0.0),
+                GPS::new(0.01, 0.04, 0.0),
+                GPS::new(0.04, 0.04, 0.0),
+                GPS::new(0.04, 0.01, 0.0),
+                GPS::new(0.01, 0.01, 0.0),
+            ],
+            nodes: Vec::new(),
+            aeroway_type: "aerodrome".into(),
+            name: Some("Standalone Airport".into()),
+            is_area: true,
+        };
+
+        analysis.compute_engineered_ground_with_aeroways(&[], &[aerodrome]);
+
+        let (target, strength) = analysis
+            .engineered_ground_control_at(0.025, 0.025)
+            .expect("standalone aerodrome should mark engineered ground");
+        assert!((target - 25.0).abs() < 0.01);
+        assert!(strength >= 0.9);
     }
 
     #[test]

@@ -16,3 +16,4 @@ key_registry.db
 *.log
 metaworld_debug.log
 .DS_Store
+.env

@@ -22,6 +22,9 @@ use crate::terrain_analysis::TerrainAnalysis;
 use crate::voxel::{Octree, VoxelCoord, WORLD_MIN_METERS};
 use crate::worldgen_river::RiverProfileCache;
 
+const WGS84_A: f64 = 6_378_137.0;
+const WGS84_B: f64 = 6_356_752.3142;
+
 #[derive(Debug, Clone, Copy)]
 struct WaterwayCarveProfile {
     water_surface_m: f32,
@@ -86,7 +89,9 @@ impl OsmProcessor {
     /// Currently implements: water polygons, waterway channels.
     /// The octree must already contain terrain voxels from `TerrainGenerator`.
     pub fn apply_to_chunk(&self, chunk_id: &ChunkId, octree: &mut Octree) {
-        let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+        let origin_ecef_y = (self.origin_voxel.y as f64 + 0.5) + WORLD_MIN_METERS;
+        let (lat_min, lat_max, lon_min, lon_max) =
+            chunk_gps_bounds(chunk_id, origin_ecef_y);
         let osm = crate::osm::fetch_osm_for_chunk_with_cache(
             lat_min,
             lat_max,
@@ -408,6 +413,40 @@ impl OsmProcessor {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Compute a chunk GPS bounding box using the same X/Z ellipsoid projection as
+/// terrain sampling and per-column OSM application.
+pub(crate) fn chunk_gps_bounds(chunk_id: &ChunkId, origin_ecef_y: f64) -> (f64, f64, f64, f64) {
+    let min_v = chunk_id.min_voxel();
+    let max_v = chunk_id.max_voxel();
+    let corners = [
+        voxel_to_gps(min_v.x, min_v.z, origin_ecef_y, WGS84_A, WGS84_B),
+        voxel_to_gps(min_v.x, max_v.z - 1, origin_ecef_y, WGS84_A, WGS84_B),
+        voxel_to_gps(max_v.x - 1, min_v.z, origin_ecef_y, WGS84_A, WGS84_B),
+        voxel_to_gps(max_v.x - 1, max_v.z - 1, origin_ecef_y, WGS84_A, WGS84_B),
+    ];
+
+    let mut lat_min = f64::INFINITY;
+    let mut lat_max = f64::NEG_INFINITY;
+    let mut lon_min = f64::INFINITY;
+    let mut lon_max = f64::NEG_INFINITY;
+    for (lat, lon) in corners {
+        lat_min = lat_min.min(lat);
+        lat_max = lat_max.max(lat);
+        lon_min = lon_min.min(lon);
+        lon_max = lon_max.max(lon);
+    }
+
+    // Half-voxel geographic pad (~15 m) so edge features whose centerlines sit
+    // just outside the chunk can still be fetched and carved consistently.
+    let pad_deg = 0.00015_f64;
+    (
+        lat_min - pad_deg,
+        lat_max + pad_deg,
+        lon_min - pad_deg,
+        lon_max + pad_deg,
+    )
+}
 
 /// Convert voxel (vx, vz) to (lat, lon) using the same ellipsoid ECEF formula as terrain.rs.
 ///

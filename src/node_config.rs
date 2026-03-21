@@ -101,6 +101,15 @@ pub struct NodeConfig {
     pub max_ping_ms: u32,
     pub max_retries: u32,
     pub always_on: bool,
+    /// Enable libp2p networking for this process.
+    /// Set false for fully local/offline testing.
+    pub network_enabled: bool,
+    /// Whether the node should bootstrap against remote peers on startup.
+    /// Keep false for local LAN-only testing.
+    pub bootstrap_enabled: bool,
+    /// Enable key/security/permission enforcement.
+    /// Set false for local iteration when auth is not part of the test.
+    pub security_enabled: bool,
 
     // ── Feature flags (client has all true; strip down per node type) ──
     pub graphics_enabled: bool, // wgpu renderer — false for server/relay
@@ -181,6 +190,9 @@ impl NodeConfig {
             node_type: "client".to_string(),
             port: 0, // ephemeral
             always_on: false,
+            network_enabled: true,
+            bootstrap_enabled: true,
+            security_enabled: true,
             graphics_enabled: true,
             world_enabled: true,
             relay_enabled: true,
@@ -193,6 +205,24 @@ impl NodeConfig {
         }
     }
 
+    /// Defaults for the current local-testing client workflow.
+    ///
+    /// The client runs the world locally, skips remote bootstrap, and leaves
+    /// key/security enforcement disabled unless the user explicitly turns it on.
+    pub fn client_local_defaults() -> Self {
+        let mut cfg = Self::client_defaults();
+        cfg.network_enabled = false;
+        cfg.bootstrap_enabled = false;
+        cfg.security_enabled = false;
+        cfg.relay_enabled = false;
+        cfg.web_enabled = false;
+        cfg.world_dir = Some("world_data".to_string());
+        cfg.max_loaded_chunks = 600;
+        cfg.chunk_load_radius_m = 150.0;
+        cfg.chunk_unload_radius_m = 250.0;
+        cfg
+    }
+
     /// Defaults for a server node (no graphics).
     pub fn server_defaults() -> Self {
         Self {
@@ -200,6 +230,9 @@ impl NodeConfig {
             node_type: "server".to_string(),
             port: 4001,
             always_on: true,
+            network_enabled: true,
+            bootstrap_enabled: true,
+            security_enabled: true,
             graphics_enabled: false,
             world_enabled: true,
             relay_enabled: true,
@@ -223,6 +256,9 @@ impl NodeConfig {
             node_type: "relay".to_string(),
             port: 4001,
             always_on: true,
+            network_enabled: true,
+            bootstrap_enabled: true,
+            security_enabled: true,
             graphics_enabled: false,
             world_enabled: false,
             relay_enabled: true,
@@ -268,6 +304,9 @@ impl Default for NodeConfig {
             max_ping_ms: 0,
             max_retries: 5,
             always_on: true,
+            network_enabled: true,
+            bootstrap_enabled: true,
+            security_enabled: true,
             graphics_enabled: false,
             world_enabled: true,
             relay_enabled: true,

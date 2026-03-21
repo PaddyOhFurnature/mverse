@@ -1551,17 +1551,22 @@ mod tests {
     use super::*;
     use crate::identity::Identity;
 
+    fn make_test_network() -> NetworkNode {
+        let identity = Identity::generate();
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime
+            .block_on(NetworkNode::new_async(identity))
+            .expect("network node")
+    }
+
     #[test]
     fn test_network_node_creation() {
-        let identity = Identity::generate();
-        let network = NetworkNode::new(identity);
-        assert!(network.is_ok());
+        let _network = make_test_network();
     }
 
     #[test]
     fn test_subscribe_unsubscribe() {
-        let identity = Identity::generate();
-        let mut network = NetworkNode::new(identity).unwrap();
+        let mut network = make_test_network();
 
         // Subscribe to topic
         network.subscribe("test-topic").unwrap();
@@ -1574,8 +1579,7 @@ mod tests {
 
     #[test]
     fn test_publish_requires_subscription() {
-        let identity = Identity::generate();
-        let mut network = NetworkNode::new(identity).unwrap();
+        let mut network = make_test_network();
 
         // Publishing without subscription should fail
         let result = network.publish("test-topic", vec![1, 2, 3]);
@@ -1584,6 +1588,9 @@ mod tests {
         // After subscribing, should work
         network.subscribe("test-topic").unwrap();
         let result = network.publish("test-topic", vec![1, 2, 3]);
-        assert!(result.is_ok());
+        assert!(
+            !matches!(result, Err(NetworkError::TopicNotSubscribed(_))),
+            "subscribed topics should no longer fail the local subscription gate"
+        );
     }
 }

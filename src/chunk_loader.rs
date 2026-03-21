@@ -1,7 +1,12 @@
-/// Terrain chunk binary format version — must match `TERRAIN_TILE_VERSION` in tile_store.rs.
-/// Bump both together; the TileStore wipes all stale terrain entries on open, and the
-/// per-chunk header provides a secondary check when reading individual bytes.
-pub const TERRAIN_CACHE_VERSION: u32 = 13; // v0.1.62: density field requires fresh fractional surface heights
+/// Legacy terrain chunk binary format version.
+/// Payload was `[u32 version][bincode Octree]` with no persisted surface cache.
+const LEGACY_TERRAIN_CACHE_VERSION: u32 = 13;
+
+/// Terrain chunk binary format version.
+/// Payload is `[u32 version][bincode StoredChunkPayload]`, which carries the
+/// exact smooth-surface cache used by marching cubes. Legacy chunks are still
+/// decoded for backward compatibility.
+pub const TERRAIN_CACHE_VERSION: u32 = 14; // v0.1.82: persist exact SurfaceCache with stored chunks
 
 /// Asynchronous chunk loading subsystem
 ///
@@ -20,6 +25,49 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Instant;
+
+#[derive(serde::Serialize)]
+struct StoredChunkPayloadRef<'a> {
+    octree: &'a Octree,
+    surface_cache: Option<&'a SurfaceCache>,
+}
+
+#[derive(serde::Deserialize)]
+struct StoredChunkPayload {
+    octree: Octree,
+    surface_cache: Option<SurfaceCache>,
+}
+
+pub fn encode_stored_chunk(
+    octree: &Octree,
+    surface_cache: Option<&SurfaceCache>,
+) -> Result<Vec<u8>, String> {
+    let mut buf: Vec<u8> = Vec::new();
+    buf.extend_from_slice(&TERRAIN_CACHE_VERSION.to_le_bytes());
+    let payload = StoredChunkPayloadRef {
+        octree,
+        surface_cache,
+    };
+    let encoded = bincode::serialize(&payload).map_err(|e| format!("bincode error: {e}"))?;
+    buf.extend_from_slice(&encoded);
+    Ok(buf)
+}
+
+pub fn decode_stored_chunk(data: &[u8]) -> Option<(Octree, Option<SurfaceCache>)> {
+    if data.len() < 4 {
+        return None;
+    }
+    let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let payload = &data[4..];
+
+    match version {
+        TERRAIN_CACHE_VERSION => bincode::deserialize::<StoredChunkPayload>(payload)
+            .ok()
+            .map(|stored| (stored.octree, stored.surface_cache)),
+        LEGACY_TERRAIN_CACHE_VERSION => Octree::from_bytes(payload).ok().map(|octree| (octree, None)),
+        _ => None,
+    }
+}
 
 /// Request to load a chunk in the background
 #[derive(Debug, Clone)]
@@ -169,18 +217,38 @@ impl ChunkLoader {
                     // Try TileStore first — avoids ~2s regeneration on every launch
                     let (octree, surface_cache) = if let Some(ref ts) = tile_store {
                         match Self::load_from_store(ts, id) {
-                            Some(cached) => {
-                                let upper_cached =
-                                    Self::load_from_store(ts, &ChunkId::new(id.x, id.y + 1, id.z));
-                                let sc =
-                                    Self::compute_surface_cache(&cached, upper_cached.as_ref(), id);
+                            Some((pass_id, cached, cached_surface_cache)) => {
+                                let sc = if let Some(surface_cache) = cached_surface_cache {
+                                    if pass_id == PassId::Terrain {
+                                        surface_cache
+                                    } else {
+                                        let upper_cached = Self::load_from_store(
+                                            ts,
+                                            &ChunkId::new(id.x, id.y + 1, id.z),
+                                        )
+                                        .map(|(_, octree, _)| octree);
+                                        Self::merge_stored_surface_cache(
+                                            &cached,
+                                            upper_cached.as_ref(),
+                                            id,
+                                            surface_cache,
+                                        )
+                                    }
+                                } else {
+                                    let upper_cached = Self::load_from_store(
+                                        ts,
+                                        &ChunkId::new(id.x, id.y + 1, id.z),
+                                    )
+                                    .map(|(_, octree, _)| octree);
+                                    Self::compute_surface_cache(&cached, upper_cached.as_ref(), id)
+                                };
                                 (Some(cached), Some(sc))
                             }
                             None => {
                                 // Cache miss: generate, then persist
                                 match terrain_generator.lock().unwrap().generate_chunk(id) {
                                     Ok((octree, cache)) => {
-                                        Self::save_to_store(ts, id, &octree);
+                                        Self::save_to_store(ts, id, &octree, Some(&cache));
                                         (Some(octree), Some(cache))
                                     }
                                     Err(e) => {
@@ -264,6 +332,117 @@ impl ChunkLoader {
         false
     }
 
+    fn top_material_in_column(
+        octree: &Octree,
+        vx: i64,
+        vz: i64,
+        min_y: i64,
+        max_y: i64,
+    ) -> Option<MaterialId> {
+        for vy in (min_y..max_y).rev() {
+            let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
+            if mat != MaterialId::AIR {
+                return Some(mat);
+            }
+        }
+        None
+    }
+
+    fn compute_surface_cache_column(
+        octree: &Octree,
+        upper_octree: Option<&Octree>,
+        chunk_id: &ChunkId,
+        vx: i64,
+        vz: i64,
+    ) -> f64 {
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+        let upper_chunk_id = ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z);
+        let upper_min_v = upper_chunk_id.min_voxel();
+        let upper_max_v = upper_chunk_id.max_voxel();
+
+        let mut top_vy: Option<i64> = None;
+        for vy in (min_v.y..max_v.y).rev() {
+            let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
+            if mat != MaterialId::AIR && mat != MaterialId::WATER {
+                top_vy = Some(vy);
+                break;
+            }
+        }
+
+        match top_vy {
+            None => min_v.y as f64 - 1.0,
+            Some(vy) if vy < max_v.y - 1 => vy as f64 + 0.5,
+            Some(_) => {
+                if upper_octree
+                    .map(|upper| {
+                        Self::column_has_solid(upper, vx, vz, upper_min_v.y, upper_max_v.y)
+                    })
+                    .unwrap_or(false)
+                {
+                    max_v.y as f64 + 2.0
+                } else {
+                    (max_v.y - 1) as f64 + 0.5
+                }
+            }
+        }
+    }
+
+    fn column_prefers_reconstructed_surface(
+        top_material: Option<MaterialId>,
+        stored_surface_y: f64,
+        reconstructed_surface_y: f64,
+    ) -> bool {
+        let height_delta = (reconstructed_surface_y - stored_surface_y).abs();
+        let road_like_surface = matches!(
+            top_material,
+            Some(
+                MaterialId::ASPHALT
+                    | MaterialId::CONCRETE
+                    | MaterialId::GRAVEL
+                    | MaterialId::STONE
+            )
+        );
+        road_like_surface || height_delta > 1.0
+    }
+
+    fn merge_stored_surface_cache(
+        octree: &Octree,
+        upper_octree: Option<&Octree>,
+        chunk_id: &ChunkId,
+        mut stored_surface_cache: SurfaceCache,
+    ) -> SurfaceCache {
+        let min_v = chunk_id.min_voxel();
+        let max_v = chunk_id.max_voxel();
+
+        for vx in min_v.x..max_v.x {
+            for vz in min_v.z..max_v.z {
+                let reconstructed_surface_y =
+                    Self::compute_surface_cache_column(octree, upper_octree, chunk_id, vx, vz);
+                let top_material =
+                    Self::top_material_in_column(octree, vx, vz, min_v.y, max_v.y);
+
+                match stored_surface_cache.get_mut(&(vx, vz)) {
+                    Some(stored_surface_y)
+                        if Self::column_prefers_reconstructed_surface(
+                            top_material,
+                            *stored_surface_y,
+                            reconstructed_surface_y,
+                        ) =>
+                    {
+                        *stored_surface_y = reconstructed_surface_y;
+                    }
+                    Some(_) => {}
+                    None => {
+                        stored_surface_cache.insert((vx, vz), reconstructed_surface_y);
+                    }
+                }
+            }
+        }
+
+        stored_surface_cache
+    }
+
     fn compute_surface_cache(
         octree: &Octree,
         upper_octree: Option<&Octree>,
@@ -272,50 +451,26 @@ impl ChunkLoader {
         use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Z};
         let min_v = chunk_id.min_voxel();
         let max_v = chunk_id.max_voxel();
-        let upper_chunk_id = ChunkId::new(chunk_id.x, chunk_id.y + 1, chunk_id.z);
-        let upper_min_v = upper_chunk_id.min_voxel();
-        let upper_max_v = upper_chunk_id.max_voxel();
         let mut cache = SurfaceCache::with_capacity((CHUNK_SIZE_X * CHUNK_SIZE_Z) as usize);
         for vx in min_v.x..max_v.x {
             for vz in min_v.z..max_v.z {
-                // Scan top-to-bottom for the first solid voxel.
-                let mut top_vy: Option<i64> = None;
-                for vy in (min_v.y..max_v.y).rev() {
-                    let mat = octree.get_voxel(VoxelCoord::new(vx, vy, vz));
-                    if mat != MaterialId::AIR && mat != MaterialId::WATER {
-                        top_vy = Some(vy);
-                        break;
-                    }
-                }
-
-                let surface_y = match top_vy {
-                    None => min_v.y as f64 - 1.0, // all air → density always negative → no mesh
-                    Some(vy) if vy < max_v.y - 1 => vy as f64 + 0.5, // surface below chunk top
-                    Some(_) => {
-                        // Topmost solid is the VERY TOP of the chunk (max_v.y − 1).
-                        // Distinguish a genuine surface from buried terrain by looking at
-                        // the chunk above, not by guessing from the top material.
-                        if upper_octree
-                            .map(|upper| {
-                                Self::column_has_solid(upper, vx, vz, upper_min_v.y, upper_max_v.y)
-                            })
-                            .unwrap_or(false)
-                        {
-                            max_v.y as f64 + 2.0
-                        } else {
-                            (max_v.y - 1) as f64 + 0.5
-                        }
-                    }
-                };
+                let surface_y =
+                    Self::compute_surface_cache_column(octree, upper_octree, chunk_id, vx, vz);
                 cache.insert((vx, vz), surface_y);
             }
         }
         cache
     }
 
-    /// Load a chunk octree from the TileStore. Returns None on miss or version mismatch.
-    fn load_from_store(ts: &TileStore, chunk_id: &ChunkId) -> Option<Octree> {
-        let data = [PassId::Roads, PassId::Hydro, PassId::Terrain]
+    /// Load a chunk payload from the TileStore.
+    /// Returns `(selected_pass, octree, surface_cache)` on hit; legacy octree-only payloads
+    /// decode with `surface_cache = None` so callers can fall back to
+    /// reconstruction when exact smooth-surface data is unavailable.
+    fn load_from_store(
+        ts: &TileStore,
+        chunk_id: &ChunkId,
+    ) -> Option<(PassId, Octree, Option<SurfaceCache>)> {
+        let (pass_id, data) = [PassId::Roads, PassId::Hydro, PassId::Terrain]
             .into_iter()
             .find_map(|pass| {
                 ts.get_chunk_pass(
@@ -324,22 +479,19 @@ impl ChunkLoader {
                     chunk_id.z as i32,
                     pass,
                 )
+                .map(|data| (pass, data))
             })?;
-        if data.len() < 4 {
-            return None;
-        }
-        let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if version != TERRAIN_CACHE_VERSION {
-            return None;
-        }
-        Octree::from_bytes(&data[4..]).ok()
+        decode_stored_chunk(&data).map(|(octree, surface_cache)| (pass_id, octree, surface_cache))
     }
 
     /// Persist a generated chunk octree to the TileStore.
-    fn save_to_store(ts: &TileStore, chunk_id: &ChunkId, octree: &Octree) {
-        if let Ok(octree_bytes) = octree.to_bytes() {
-            let mut data = TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
-            data.extend_from_slice(&octree_bytes);
+    fn save_to_store(
+        ts: &TileStore,
+        chunk_id: &ChunkId,
+        octree: &Octree,
+        surface_cache: Option<&SurfaceCache>,
+    ) {
+        if let Ok(data) = encode_stored_chunk(octree, surface_cache) {
             ts.put_chunk_pass(
                 chunk_id.x as i32,
                 chunk_id.y as i32,
@@ -399,7 +551,7 @@ pub fn migrate_flat_terrain_cache(cache_dir: &Path, ts: &TileStore) {
         if let Ok(data) = std::fs::read(&path) {
             if data.len() >= 4 {
                 let version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                if version == TERRAIN_CACHE_VERSION {
+                if version == TERRAIN_CACHE_VERSION || version == LEGACY_TERRAIN_CACHE_VERSION {
                     ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &data);
                     migrated += 1;
                 }
@@ -560,5 +712,42 @@ mod tests {
             cache.get(&(vx, vz)).copied(),
             Some((max_v.y - 1) as f64 + 0.5)
         );
+    }
+
+    #[test]
+    fn stored_chunk_payload_round_trips_surface_cache() {
+        let pos = VoxelCoord::new(10, 20, 30);
+        let mut octree = Octree::new();
+        octree.set_voxel(pos, MaterialId::GRASS_DRY);
+
+        let mut surface_cache = SurfaceCache::new();
+        surface_cache.insert((10, 30), 1234.25);
+
+        let data = encode_stored_chunk(&octree, Some(&surface_cache)).expect("encode stored chunk");
+        let (decoded_octree, decoded_surface_cache) =
+            decode_stored_chunk(&data).expect("decode stored chunk");
+
+        assert_eq!(decoded_octree.get_voxel(pos), MaterialId::GRASS_DRY);
+        assert_eq!(
+            decoded_surface_cache
+                .and_then(|cache| cache.get(&(10, 30)).copied()),
+            Some(1234.25)
+        );
+    }
+
+    #[test]
+    fn stored_chunk_payload_decodes_legacy_octree_only_format() {
+        let pos = VoxelCoord::new(8, 9, 10);
+        let mut octree = Octree::new();
+        octree.set_voxel(pos, MaterialId::STONE);
+
+        let mut data = LEGACY_TERRAIN_CACHE_VERSION.to_le_bytes().to_vec();
+        data.extend_from_slice(&octree.to_bytes().expect("legacy encode octree"));
+
+        let (decoded_octree, decoded_surface_cache) =
+            decode_stored_chunk(&data).expect("decode legacy stored chunk");
+
+        assert_eq!(decoded_octree.get_voxel(pos), MaterialId::STONE);
+        assert!(decoded_surface_cache.is_none());
     }
 }

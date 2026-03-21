@@ -8,17 +8,17 @@
 //!
 //! # Chunk Size
 //!
-//! Chunks are 100×100×100 voxels (100m³ cube):
-//! - Player view distance: ~100-200m
-//! - Chunk download: ~150 KB (reasonable for network)
-//! - File count: Manageable (not millions of tiny files)
-//! - Spatial granularity: Good for pub/sub topics
+//! Chunks are **30×200×30 voxels**:
+//! - Horizontal footprint matches the terrain generator's 30 m sampling scale
+//! - Vertical span covers meaningful terrain relief plus some headroom per layer
+//! - Chunk downloads stay compact enough for streaming and P2P sync
+//! - Spatial granularity stays useful for topic-based streaming and persistence
 //!
 //! # Coordinate System
 //!
 //! Chunk coordinates are signed integers:
-//! - Origin chunk (0,0,0) contains voxels (0..100, 0..100, 0..100)
-//! - Chunk (-1,0,0) contains voxels (-100..-1, 0..100, 0..100)
+//! - Origin chunk (0,0,0) contains voxels `(0..30, 0..200, 0..30)`
+//! - Chunk `(-1,0,0)` contains voxels `(-30..-1, 0..200, 0..30)`
 //! - Deterministic: Same voxel → same chunk ID always
 //!
 //! # File Organization
@@ -37,11 +37,11 @@
 //!
 //! # Design Rationale
 //!
-//! **Why 100m chunks?**
-//! - Player sees ~100m radius → ~8 chunks loaded
-//! - Matches human-scale interaction distance
-//! - Small enough for quick downloads
-//! - Large enough to avoid millions of files
+//! **Why 30×200×30 chunks?**
+//! - Horizontal size matches the terrain bake grid more closely
+//! - Vertical span reduces unnecessary vertical fragmentation
+//! - Small enough for quick downloads and localized updates
+//! - Large enough to avoid pathological file/topic explosion
 //!
 //! **Why not dynamic sizing?**
 //! - Deterministic chunk ID from coordinates (critical for P2P)
@@ -411,7 +411,7 @@ impl fmt::Display for ChunkId {
 ///
 /// # Arguments
 /// * `center` - Center chunk
-/// * `radius` - Radius in chunks (Manhattan distance)
+/// * `radius` - Horizontal radius in chunks (XZ Manhattan distance)
 ///
 /// # Example
 /// ```
@@ -420,8 +420,8 @@ impl fmt::Display for ChunkId {
 /// let center = ChunkId::new(0, 0, 0);
 /// let nearby = chunks_in_radius(&center, 1);
 ///
-/// // Radius 1 = 3×3×3 cube = 27 chunks
-/// assert_eq!(nearby.len(), 27);
+/// // Radius 1 = center + four horizontal neighbors = 5 chunks
+/// assert_eq!(nearby.len(), 5);
 /// assert!(nearby.contains(&center));
 /// assert!(nearby.contains(&ChunkId::new(1, 0, 0)));
 /// ```
@@ -457,12 +457,12 @@ mod tests {
     fn test_chunk_from_voxel() {
         // Positive coordinates
         assert_eq!(
-            ChunkId::from_voxel(&VoxelCoord::new(50, 50, 50)),
+            ChunkId::from_voxel(&VoxelCoord::new(15, 50, 15)),
             ChunkId::new(0, 0, 0)
         );
         assert_eq!(
             ChunkId::from_voxel(&VoxelCoord::new(150, 200, 50)),
-            ChunkId::new(1, 2, 0)
+            ChunkId::new(5, 1, 1)
         );
 
         // Negative coordinates (floor division)
@@ -472,16 +472,20 @@ mod tests {
         );
         assert_eq!(
             ChunkId::from_voxel(&VoxelCoord::new(-150, 50, 0)),
-            ChunkId::new(-2, 0, 0)
+            ChunkId::new(-5, 0, 0)
         );
 
         // Chunk boundaries
         assert_eq!(
-            ChunkId::from_voxel(&VoxelCoord::new(99, 99, 99)),
+            ChunkId::from_voxel(&VoxelCoord::new(
+                CHUNK_SIZE_X - 1,
+                CHUNK_SIZE_Y - 1,
+                CHUNK_SIZE_Z - 1,
+            )),
             ChunkId::new(0, 0, 0)
         );
         assert_eq!(
-            ChunkId::from_voxel(&VoxelCoord::new(100, 100, 100)),
+            ChunkId::from_voxel(&VoxelCoord::new(CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z)),
             ChunkId::new(1, 1, 1)
         );
     }
@@ -490,14 +494,20 @@ mod tests {
     fn test_chunk_bounds() {
         let chunk = ChunkId::new(1, 2, 0);
 
-        assert_eq!(chunk.min_voxel(), VoxelCoord::new(100, 200, 0));
-        assert_eq!(chunk.max_voxel(), VoxelCoord::new(200, 300, 100));
+        assert_eq!(
+            chunk.min_voxel(),
+            VoxelCoord::new(CHUNK_SIZE_X, CHUNK_SIZE_Y * 2, 0)
+        );
+        assert_eq!(
+            chunk.max_voxel(),
+            VoxelCoord::new(CHUNK_SIZE_X * 2, CHUNK_SIZE_Y * 3, CHUNK_SIZE_Z)
+        );
 
         // Contains tests
-        assert!(chunk.contains(&VoxelCoord::new(100, 200, 0))); // Min corner
-        assert!(chunk.contains(&VoxelCoord::new(150, 250, 50))); // Center
-        assert!(!chunk.contains(&VoxelCoord::new(200, 300, 100))); // Max corner (exclusive)
-        assert!(!chunk.contains(&VoxelCoord::new(99, 200, 0))); // Just outside
+        assert!(chunk.contains(&VoxelCoord::new(CHUNK_SIZE_X, CHUNK_SIZE_Y * 2, 0))); // Min corner
+        assert!(chunk.contains(&VoxelCoord::new(45, 500, 15))); // Center
+        assert!(!chunk.contains(&VoxelCoord::new(CHUNK_SIZE_X * 2, CHUNK_SIZE_Y * 3, CHUNK_SIZE_Z))); // Max corner (exclusive)
+        assert!(!chunk.contains(&VoxelCoord::new(CHUNK_SIZE_X - 1, CHUNK_SIZE_Y * 2, 0))); // Just outside
     }
 
     #[test]
@@ -538,15 +548,16 @@ mod tests {
         assert_eq!(r0.len(), 1);
         assert!(r0.contains(&center));
 
-        // Radius 1 = 3×3×3 cube
+        // Radius 1 = horizontal diamond on the same Y level
         let r1 = chunks_in_radius(&center, 1);
-        assert_eq!(r1.len(), 27);
+        assert_eq!(r1.len(), 5);
         assert!(r1.contains(&center));
         assert!(r1.contains(&ChunkId::new(1, 0, 0)));
-        assert!(r1.contains(&ChunkId::new(1, 1, 1)));
+        assert!(r1.contains(&ChunkId::new(0, 0, 1)));
 
         // Should not include chunks at distance > 1
         assert!(!r1.contains(&ChunkId::new(2, 0, 0)));
+        assert!(!r1.contains(&ChunkId::new(0, 1, 0)));
     }
 
     #[test]

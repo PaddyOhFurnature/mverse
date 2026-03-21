@@ -23,7 +23,7 @@ echo ""
 cargo build $CARGO_FLAGS \
   --bin metaverse-relay \
   --bin metaverse-server \
-  --example metaworld_alpha \
+  --bin metaworld_alpha \
   2>&1 | grep -E "^error|Compiling metaverse|Finished"
 
 echo ""
@@ -33,7 +33,7 @@ mkdir -p bin
 
 cp target/$PROFILE/metaverse-relay    bin/metaverse-relay
 cp target/$PROFILE/metaverse-server   bin/metaverse-server
-cp target/$PROFILE/examples/metaworld_alpha bin/metaworld_alpha
+cp target/$PROFILE/metaworld_alpha    bin/metaworld_alpha
 
 chmod +x bin/metaverse-relay bin/metaverse-server bin/metaworld_alpha
 

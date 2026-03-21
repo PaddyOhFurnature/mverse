@@ -611,6 +611,7 @@ impl ChunkStreamer {
         &mut self,
         chunk_id: ChunkId,
         octree: Octree,
+        surface_cache: Option<SurfaceCache>,
         collider: Option<ColliderHandle>,
     ) {
         // Remove from queue/in-progress so workers don't duplicate work.
@@ -627,7 +628,7 @@ impl ChunkStreamer {
             LoadedChunk {
                 id: chunk_id,
                 octree,
-                surface_cache: None,
+                surface_cache,
                 mesh_buffer: None, // GPU mesh built on first render pass
                 water_mesh_buffer: None,
                 collider,
@@ -800,6 +801,7 @@ mod tests {
                 last_modified: 0,
                 lod_level: 0,
             };
+            streamer.loaded_chunks.insert(chunk_id, chunk);
         }
 
         // Emergency unload should trigger

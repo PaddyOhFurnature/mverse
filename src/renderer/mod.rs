@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_vertex_size() {
-        assert_eq!(std::mem::size_of::<Vertex>(), 32); // 3+3+3 floats + 1 pad
+        assert_eq!(std::mem::size_of::<Vertex>(), 40); // 3+3+3 floats + 1 pad float
     }
 
     #[test]

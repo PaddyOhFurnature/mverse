@@ -109,8 +109,9 @@ mod tests {
     fn test_create_remote_player_capsule() {
         let mesh = create_remote_player_capsule();
         assert!(!mesh.vertices.is_empty());
-        // Wireframe cube has 8 vertices
-        assert_eq!(mesh.vertices.len(), 8);
+        // 8 corner vertices + 12 line segments expanded into 4 vertices each.
+        assert_eq!(mesh.vertices.len(), 56);
+        assert_eq!(mesh.triangles.len(), 48);
     }
 
     #[test]

@@ -142,46 +142,58 @@ pub fn enumerate_surface_chunks(
     origin_gps: &GPS,
     origin_voxel: &VoxelCoord,
     extra_y_layers: i32,
+    dem_min_elev_m: f64,
+    dem_max_elev_m: f64,
 ) -> Vec<ChunkId> {
     use crate::chunk::{CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z};
 
-    // terrain.rs places surface voxels at: origin_voxel.y + (srtm_ell - origin_gps.alt)
-    // Highest terrain (at spawn altitude) → surface at origin_voxel.y
-    // Lowest terrain (river/sea, ~57 voxels below origin) → origin_voxel.y - 57
-    //
-    // Start one chunk below origin_chunk_y so low-lying terrain (river level)
-    // is captured. extra_y_layers adds chunks above for buildings.
-    let origin_chunk_y = origin_voxel.y.div_euclid(CHUNK_SIZE_Y);
-    let surface_chunk_y = origin_chunk_y - 1;
+    // terrain.rs places surface voxels at: origin_voxel.y + (dem_elev - origin_gps.alt)
+    // so regions with large local relief need a Y range derived from the DEM,
+    // not the old “one chunk below origin” approximation that only works for
+    // relatively flat terrain.
+    let min_surface_y = origin_voxel.y as f64 + (dem_min_elev_m - origin_gps.alt);
+    let max_surface_y = origin_voxel.y as f64 + (dem_max_elev_m - origin_gps.alt);
+    let min_chunk_y = (min_surface_y.floor() as i64).div_euclid(CHUNK_SIZE_Y) - 1;
+    let max_chunk_y = (max_surface_y.ceil() as i64).div_euclid(CHUNK_SIZE_Y)
+        + extra_y_layers as i64;
 
     // Corners → voxel space → chunk XZ range.
-    let corners = [
-        GPS::new(bounds.lat_min, bounds.lon_min, origin_gps.alt),
-        GPS::new(bounds.lat_min, bounds.lon_max, origin_gps.alt),
-        GPS::new(bounds.lat_max, bounds.lon_min, origin_gps.alt),
-        GPS::new(bounds.lat_max, bounds.lon_max, origin_gps.alt),
-    ];
+    // High-relief regions can shift X/Z noticeably with altitude in ECEF space,
+    // so cover both the DEM minimum and maximum elevations rather than assuming
+    // the whole bbox lives at the origin altitude.
+    let sample_alts = if (dem_max_elev_m - dem_min_elev_m).abs() < f64::EPSILON {
+        vec![origin_gps.alt]
+    } else {
+        vec![dem_min_elev_m, origin_gps.alt, dem_max_elev_m]
+    };
 
     let mut min_cx = i64::MAX;
     let mut max_cx = i64::MIN;
     let mut min_cz = i64::MAX;
     let mut max_cz = i64::MIN;
 
-    for gps in &corners {
-        let ecef = gps.to_ecef();
-        let vox = VoxelCoord::from_ecef(&ecef);
-        let dx = vox.x - origin_voxel.x;
-        let dz = vox.z - origin_voxel.z;
-        let cx = dx.div_euclid(CHUNK_SIZE_X) + origin_voxel.x.div_euclid(CHUNK_SIZE_X);
-        let cz = dz.div_euclid(CHUNK_SIZE_Z) + origin_voxel.z.div_euclid(CHUNK_SIZE_Z);
-        min_cx = min_cx.min(cx);
-        max_cx = max_cx.max(cx);
-        min_cz = min_cz.min(cz);
-        max_cz = max_cz.max(cz);
+    for alt_m in sample_alts {
+        let corners = [
+            GPS::new(bounds.lat_min, bounds.lon_min, alt_m),
+            GPS::new(bounds.lat_min, bounds.lon_max, alt_m),
+            GPS::new(bounds.lat_max, bounds.lon_min, alt_m),
+            GPS::new(bounds.lat_max, bounds.lon_max, alt_m),
+        ];
+
+        for gps in &corners {
+            let ecef = gps.to_ecef();
+            let vox = VoxelCoord::from_ecef(&ecef);
+            let cx = vox.x.div_euclid(CHUNK_SIZE_X);
+            let cz = vox.z.div_euclid(CHUNK_SIZE_Z);
+            min_cx = min_cx.min(cx);
+            max_cx = max_cx.max(cx);
+            min_cz = min_cz.min(cz);
+            max_cz = max_cz.max(cz);
+        }
     }
 
     let mut ids = Vec::new();
-    for cy in surface_chunk_y..=(surface_chunk_y + extra_y_layers as i64) {
+    for cy in min_chunk_y..=max_chunk_y {
         for cx in min_cx..=max_cx {
             for cz in min_cz..=max_cz {
                 ids.push(ChunkId::new(cx, cy, cz));
@@ -193,15 +205,14 @@ pub fn enumerate_surface_chunks(
 
 // ─── Chunk serialisation ──────────────────────────────────────────────────────
 
-/// Serialise an octree to the TileStore wire format:
-///   `[u32 TERRAIN_CACHE_VERSION LE][bincode Octree bytes]`
-/// (The TileStore then wraps this with a blake3 checksum internally.)
-pub fn serialise_chunk(octree: &crate::voxel::Octree) -> Result<Vec<u8>, String> {
-    let mut buf: Vec<u8> = Vec::new();
-    buf.extend_from_slice(&TERRAIN_CACHE_VERSION.to_le_bytes());
-    let encoded = bincode::serialize(octree).map_err(|e| format!("bincode error: {e}"))?;
-    buf.extend_from_slice(&encoded);
-    Ok(buf)
+/// Serialise an octree plus optional smooth-surface cache to the TileStore wire format.
+/// The payload format is handled by `chunk_loader::encode_stored_chunk` so baked
+/// chunks can preserve exact fractional terrain heights across cache reloads.
+pub fn serialise_chunk(
+    octree: &crate::voxel::Octree,
+    surface_cache: Option<&crate::terrain::SurfaceCache>,
+) -> Result<Vec<u8>, String> {
+    crate::chunk_loader::encode_stored_chunk(octree, surface_cache)
 }
 
 fn fnv1a_hex(data: &[u8]) -> String {
@@ -258,15 +269,6 @@ pub fn generate_region(
                 .map_err(|e| format!("TileStore open failed: {e}"))?,
         ),
     };
-
-    let chunk_ids =
-        enumerate_surface_chunks(&cfg.region, origin_gps, origin_voxel, cfg.extra_y_layers);
-    let total = chunk_ids.len() as u64;
-
-    eprintln!(
-        "[worldgen] {} chunks to generate → {:?}/tiles.db",
-        total, cfg.output_dir
-    );
 
     // Compute (or reuse) terrain analysis before entering the parallel loop.
     let analysis: Option<Arc<TerrainAnalysis>> = if let Some(ref a) = cfg.analysis {
@@ -353,6 +355,7 @@ pub fn generate_region(
         if let Some(ref osm_cache) = cfg.osm_cache {
             let mut water_polys: Vec<crate::osm::OsmWater> = Vec::new();
             let mut land_areas: Vec<crate::osm::OsmLandArea> = Vec::new();
+            let mut aeroways: Vec<crate::osm::OsmAeroway> = Vec::new();
             const TILE: f64 = 0.01;
             let tile_lat_start = (cfg.region.lat_min / TILE).floor() as i64;
             let tile_lat_end = (cfg.region.lat_max / TILE).floor() as i64;
@@ -366,6 +369,7 @@ pub fn generate_region(
                     if let Some(tile) = osm_cache.load(lat, lon, lat + TILE, lon + TILE) {
                         water_polys.extend(tile.water);
                         land_areas.extend(tile.land_areas);
+                        aeroways.extend(tile.aeroways);
                     }
                 }
             }
@@ -376,17 +380,51 @@ pub fn generate_region(
                 );
                 analysis.compute_reservoirs(&water_polys);
             }
-            if !land_areas.is_empty() {
+            if !land_areas.is_empty() || !aeroways.is_empty() {
                 eprintln!(
-                    "[worldgen] computing OSM landuse and engineered-ground masks from {} land areas …",
-                    land_areas.len()
+                    "[worldgen] computing OSM landuse and engineered-ground masks from {} land areas and {} aeroways …",
+                    land_areas.len(),
+                    aeroways.len()
                 );
-                analysis.compute_osm_landuse(&land_areas);
-                analysis.compute_engineered_ground(&land_areas);
+                if !land_areas.is_empty() {
+                    analysis.compute_osm_landuse(&land_areas);
+                }
+                analysis.compute_engineered_ground_with_aeroways(&land_areas, &aeroways);
             }
         }
         Some(Arc::new(analysis))
     };
+
+    let (dem_min_elev_m, dem_max_elev_m) = analysis
+        .as_ref()
+        .map(|analysis| {
+            analysis
+                .dem
+                .elevations
+                .iter()
+                .copied()
+                .filter(|e| e.is_finite() && *e > -1000.0 && *e < 10000.0)
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(min_e, max_e), e| {
+                    (min_e.min(e as f64), max_e.max(e as f64))
+                })
+        })
+        .filter(|(min_e, max_e)| min_e.is_finite() && max_e.is_finite())
+        .unwrap_or((origin_gps.alt, origin_gps.alt));
+
+    let chunk_ids = enumerate_surface_chunks(
+        &cfg.region,
+        origin_gps,
+        origin_voxel,
+        cfg.extra_y_layers,
+        dem_min_elev_m,
+        dem_max_elev_m,
+    );
+    let total = chunk_ids.len() as u64;
+
+    eprintln!(
+        "[worldgen] {} chunks to generate → {:?}/tiles.db (DEM {:.1}m..{:.1}m)",
+        total, cfg.output_dir, dem_min_elev_m, dem_max_elev_m
+    );
 
     // Terrain generation must use the same derived analysis that later OSM/hydro
     // stages see, otherwise terrain shaping masks are computed but never applied.
@@ -451,10 +489,10 @@ pub fn generate_region(
 
             let t_gen = std::time::Instant::now();
             match terrain_gen.generate_chunk(id) {
-                Ok((terrain_octree, _surface_cache)) => {
+                Ok((terrain_octree, surface_cache)) => {
                     let gen_ms = t_gen.elapsed().as_millis() as u64;
                     let t_ser = std::time::Instant::now();
-                    match serialise_chunk(&terrain_octree) {
+                    match serialise_chunk(&terrain_octree, Some(&surface_cache)) {
                         Ok(terrain_data) => {
                             ts.put_chunk_pass(cx, cy, cz, PassId::Terrain, &terrain_data);
 
@@ -476,7 +514,9 @@ pub fn generate_region(
                                             processor = processor.with_river_profiles(Arc::clone(rp));
                                         }
                                         processor.apply_to_chunk(id, &mut hydro_octree);
-                                        if let Ok(hydro_data) = serialise_chunk(&hydro_octree) {
+                                        if let Ok(hydro_data) =
+                                            serialise_chunk(&hydro_octree, Some(&surface_cache))
+                                        {
                                             ts.put_chunk_pass(cx, cy, cz, PassId::Hydro, &hydro_data);
                                             final_pass = PassId::Hydro;
                                             final_data = hydro_data;
@@ -492,7 +532,9 @@ pub fn generate_region(
                                         )
                                         .with_elevation(terrain_gen.elevation_pipeline());
                                         road_proc.apply_to_chunk(id, &mut roads_octree);
-                                        if let Ok(roads_data) = serialise_chunk(&roads_octree) {
+                                        if let Ok(roads_data) =
+                                            serialise_chunk(&roads_octree, Some(&surface_cache))
+                                        {
                                             ts.put_chunk_pass(cx, cy, cz, PassId::Roads, &roads_data);
                                             final_pass = PassId::Roads;
                                             final_data = roads_data;

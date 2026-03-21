@@ -394,6 +394,9 @@ async fn measure_relay_latencies(nodes: &mut Vec<BootstrapNode>) {
 // ─── Cache ───────────────────────────────────────────────────────────────────
 
 fn cache_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("METAVERSE_BOOTSTRAP_CACHE_FILE") {
+        return PathBuf::from(path);
+    }
     PathBuf::from("bootstrap_cache.json")
 }
 

@@ -25,8 +25,8 @@ fn check_tile(dir: &str, tile: &str, test_pts: &[(f64, f64, &str)]) {
         data.waterway_lines.len()
     );
     for (i, line) in data.waterway_lines.iter().enumerate() {
-        let lats: Vec<f64> = line.iter().map(|p| p.lat).collect();
-        let lons: Vec<f64> = line.iter().map(|p| p.lon).collect();
+        let lats: Vec<f64> = line.nodes.iter().map(|p| p.lat).collect();
+        let lons: Vec<f64> = line.nodes.iter().map(|p| p.lon).collect();
         let lat_min = lats.iter().cloned().fold(f64::INFINITY, f64::min);
         let lat_max = lats.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let lon_min = lons.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -34,7 +34,12 @@ fn check_tile(dir: &str, tile: &str, test_pts: &[(f64, f64, &str)]) {
         let hits: Vec<&str> = test_pts
             .iter()
             .filter_map(|(lat, lon, label)| {
-                if metaverse_core::osm::point_near_waterway_line(*lat, *lon, line, 0.002) {
+                if metaverse_core::osm::point_near_waterway_line(
+                    *lat,
+                    *lon,
+                    &line.nodes,
+                    0.002,
+                ) {
                     Some(*label)
                 } else {
                     None
@@ -45,7 +50,7 @@ fn check_tile(dir: &str, tile: &str, test_pts: &[(f64, f64, &str)]) {
             "  {} centerline[{}] pts={} bbox=[{:.4}..{:.4}][{:.4}..{:.4}] hits={:?}",
             tile,
             i,
-            line.len(),
+            line.nodes.len(),
             lat_min,
             lat_max,
             lon_min,

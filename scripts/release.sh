@@ -33,7 +33,7 @@ echo "Building release binaries (version $SEMVER)..."
 RUST_MIN_STACK=16777216 cargo build --release \
   --bin metaverse-relay \
   --bin metaverse-server --features jemalloc \
-  --example metaworld_alpha \
+  --bin metaworld_alpha \
   2>&1 | grep -E "^error|Compiling metaverse|Finished"
 
 # ── 3. Copy to bin/ ───────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ echo "Copying to bin/..."
 mkdir -p bin
 cp target/release/metaverse-relay           bin/metaverse-relay
 cp target/release/metaverse-server          bin/metaverse-server
-cp target/release/examples/metaworld_alpha  bin/metaworld_alpha
+cp target/release/metaworld_alpha           bin/metaworld_alpha
 chmod +x bin/metaverse-relay bin/metaverse-server bin/metaworld_alpha
 
 # ── 4. Commit + tag + push ────────────────────────────────────────────────────

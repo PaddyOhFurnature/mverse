@@ -151,6 +151,11 @@ features = ["event-stream"]
 version = "0.33"
 
 [[bin]]
+name = "metaworld_alpha"
+path = "src/bin/metaworld_alpha.rs"
+required-features = ["client"]
+
+[[bin]]
 name = "metaverse-relay"
 path = "src/bin/metaverse_relay.rs"
 required-features = []  # Relay doesn't need terrain or client features

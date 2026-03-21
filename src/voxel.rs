@@ -785,12 +785,12 @@ mod tests {
     fn test_raycast_negative_direction() {
         let mut octree = Octree::new();
 
-        // Place block at (-5, 0, 0)
-        let target = VoxelCoord::new(-5, 0, 0);
+        // Place block in front of the ray on the -X side of the origin point.
+        let target = VoxelCoord::new(5, 0, 0);
         octree.set_voxel(target, MaterialId::GRASS);
 
-        // Raycast from origin in -X direction
-        let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        // Raycast from +X toward the block in -X direction.
+        let origin = VoxelCoord::new(10, 0, 0).to_ecef();
         let direction = Vec3::new(-1.0, 0.0, 0.0);
 
         let hit = raycast_voxels(&octree, &origin, direction, 10.0);
@@ -810,13 +810,13 @@ mod tests {
 
         // Test hitting from different directions
         let test_cases = vec![
-            (Vec3::new(1.0, 0.0, 0.0), (-1, 0, 0)), // From -X
-            (Vec3::new(0.0, 1.0, 0.0), (0, -1, 0)), // From -Y
-            (Vec3::new(0.0, 0.0, 1.0), (0, 0, -1)), // From -Z
+            (VoxelCoord::new(0, 5, 5), Vec3::new(1.0, 0.0, 0.0), (-1, 0, 0)),
+            (VoxelCoord::new(5, 0, 5), Vec3::new(0.0, 1.0, 0.0), (0, -1, 0)),
+            (VoxelCoord::new(5, 5, 0), Vec3::new(0.0, 0.0, 1.0), (0, 0, -1)),
         ];
 
-        for (dir, expected_normal) in test_cases {
-            let origin = VoxelCoord::new(0, 0, 0).to_ecef();
+        for (origin_voxel, dir, expected_normal) in test_cases {
+            let origin = origin_voxel.to_ecef();
             let hit = raycast_voxels(&octree, &origin, dir, 20.0);
 
             assert!(hit.is_some(), "Should hit from direction {:?}", dir);

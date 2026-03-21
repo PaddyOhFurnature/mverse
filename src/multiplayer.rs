@@ -435,6 +435,24 @@ pub struct MultiplayerSystem {
 
     /// Root directory for world data (osm/, elevation_cache/, chunks/).
     world_data_dir: std::path::PathBuf,
+
+    /// Whether networking is enabled for this runtime.
+    network_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MultiplayerRuntimeConfig {
+    pub network_enabled: bool,
+    pub bootstrap_enabled: bool,
+}
+
+impl Default for MultiplayerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            network_enabled: true,
+            bootstrap_enabled: true,
+        }
+    }
 }
 
 /// Statistics for monitoring and debugging
@@ -472,6 +490,14 @@ impl MultiplayerSystem {
     /// let mut mp = MultiplayerSystem::new_with_runtime(identity)?;
     /// ```
     pub fn new_with_runtime(identity: Identity) -> Result<Self> {
+        Self::new_with_runtime_config(identity, MultiplayerRuntimeConfig::default())
+    }
+
+    /// Create a multiplayer system with explicit runtime network toggles.
+    pub fn new_with_runtime_config(
+        identity: Identity,
+        runtime_config: MultiplayerRuntimeConfig,
+    ) -> Result<Self> {
         // Create bounded channels for command/event passing
         // Capacity of 1000 provides back-pressure if game loop falls behind
         let (cmd_tx, cmd_rx) = channel::bounded(1000);
@@ -482,7 +508,9 @@ impl MultiplayerSystem {
 
         // Create bounded channels for command/event passing
         // Capacity of 1000 provides back-pressure if game loop falls behind
-        let world_data_dir = std::path::PathBuf::from("./world_data");
+        let world_data_dir = std::env::var_os("METAVERSE_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("./world_data"));
         let world_data_dir_clone = world_data_dir.clone();
         let idle_queue: Arc<
             std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>,
@@ -498,6 +526,7 @@ impl MultiplayerSystem {
                 event_tx,
                 world_data_dir_clone,
                 idle_queue_for_net,
+                runtime_config,
             );
         });
 
@@ -553,6 +582,7 @@ impl MultiplayerSystem {
             failed_elev: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             failed_osm: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             world_data_dir,
+            network_enabled: runtime_config.network_enabled,
         };
         // Spawn idle tile downloader — drains the idle_queue, fetches from internet, announces
         let data_dir = s.world_data_dir.clone();
@@ -1980,10 +2010,18 @@ impl MultiplayerSystem {
         Sha256::digest(peer_id.to_bytes()).to_vec()
     }
 
+    #[inline]
+    fn network_is_disabled(&self) -> bool {
+        !self.network_enabled
+    }
+
     /// Request a peer's KeyRecord from the DHT.
     /// The result is returned later as a `NetworkEvent::DhtRecordFound` and handled in
     /// `handle_network_event()`.
     pub fn request_dht_key_lookup(&self, peer_id: &PeerId) {
+        if self.network_is_disabled() {
+            return;
+        }
         let key = Self::peer_dht_key(peer_id);
         let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
     }
@@ -1993,6 +2031,9 @@ impl MultiplayerSystem {
     /// Advertises the client as a `NodeTier::Client` with an optional storage
     /// budget so servers and other peers can route chunk fetches to it.
     pub fn publish_node_capabilities(&self, storage_budget_gb: u64) {
+        if self.network_is_disabled() {
+            return;
+        }
         use crate::node_capabilities::NodeCapabilities;
         let caps = NodeCapabilities::for_client(storage_budget_gb);
         let key = NodeCapabilities::dht_key(&self.local_peer_id.to_string());
@@ -2015,6 +2056,9 @@ impl MultiplayerSystem {
 
     /// Announce that this node has an OSM tile cached — other peers can find and fetch it.
     pub fn announce_osm_tile(&self, s: f64, w: f64, n: f64, e: f64) {
+        if self.network_is_disabled() {
+            return;
+        }
         let key = crate::osm::osm_dht_key(s, w, n, e);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -2022,6 +2066,9 @@ impl MultiplayerSystem {
     /// Scan a local OSM cache directory and announce every tile already on disk.
     /// Call once on startup so peers can find tiles this node caches.
     pub fn announce_cached_osm_tiles(&self, cache_dir: &std::path::Path) {
+        if self.network_is_disabled() {
+            return;
+        }
         // OsmDiskCache::new opens the TileStore and triggers old-file cleanup.
         // We then iterate all stored tile keys and announce each to the DHT.
         let cache = crate::osm::OsmDiskCache::new(cache_dir);
@@ -2032,6 +2079,9 @@ impl MultiplayerSystem {
 
     /// Announce that this node has an elevation tile cached.
     pub fn announce_elevation_tile(&self, lat: i32, lon: i32) {
+        if self.network_is_disabled() {
+            return;
+        }
         let key = crate::elevation::elevation_dht_key(lat, lon);
         let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey { key });
     }
@@ -2039,6 +2089,9 @@ impl MultiplayerSystem {
     /// Scan a local elevation cache directory and announce every tile already on disk.
     /// Call once at startup after the network is running.
     pub fn announce_cached_elevation_tiles(&self, cache_dir: &std::path::Path) {
+        if self.network_is_disabled() {
+            return;
+        }
         // Files are at: cache_dir/N{lat}/E{lon}/srtm_n{lat}_e{lon}.tif
         if let Ok(entries) = std::fs::read_dir(cache_dir) {
             for lat_dir in entries.flatten() {
@@ -2323,6 +2376,9 @@ impl MultiplayerSystem {
         movement_mode: u8,
         chunk_id: [i64; 3],
     ) {
+        if self.network_is_disabled() {
+            return;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -2363,6 +2419,9 @@ impl MultiplayerSystem {
     /// Call this early in startup when no local save exists (new machine).
     /// The result arrives asynchronously via `take_pending_session_record()`.
     pub fn fetch_session_record(&self) {
+        if self.network_is_disabled() {
+            return;
+        }
         let key = PlayerSessionRecord::dht_key(&self.local_peer_id);
         let _ = self.cmd_tx.send(NetworkCommand::GetDhtRecord { key });
         println!("📍 [Session] Requesting last session from DHT...");
@@ -2386,6 +2445,9 @@ impl MultiplayerSystem {
     /// This lets other peers discover us via `find_chunk_providers()` even
     /// when we are not connected to them via gossipsub.
     pub fn advertise_chunks(&self, chunk_ids: &[ChunkId]) {
+        if self.network_is_disabled() {
+            return;
+        }
         for chunk_id in chunk_ids {
             let _ = self.cmd_tx.send(NetworkCommand::StartProvidingKey {
                 key: chunk_id.dht_key(),
@@ -2398,6 +2460,9 @@ impl MultiplayerSystem {
     /// Results arrive as `NetworkEvent::ChunkProvidersFound` and are accessible
     /// via `take_pending_chunk_providers()`.
     pub fn find_chunk_providers(&self, chunk_id: &ChunkId) {
+        if self.network_is_disabled() {
+            return;
+        }
         let _ = self.cmd_tx.send(NetworkCommand::GetProviders {
             key: chunk_id.dht_key(),
         });
@@ -2409,6 +2474,9 @@ impl MultiplayerSystem {
     /// some chunks (e.g. 10s after entering OpenWorld with no connected peers).
     /// Results arrive via `take_pending_chunk_providers()`.
     pub fn query_missing_chunks(&self, chunk_ids: &[ChunkId]) {
+        if self.network_is_disabled() {
+            return;
+        }
         for chunk_id in chunk_ids {
             let _ = self.cmd_tx.send(NetworkCommand::GetProviders {
                 key: chunk_id.dht_key(),
@@ -2428,6 +2496,9 @@ impl MultiplayerSystem {
     /// is not yet in the routing table this is a no-op — they will be connected
     /// automatically if they appear via DHT routing updates later.
     pub fn connect_to_provider(&self, peer_id: PeerId) {
+        if self.network_is_disabled() {
+            return;
+        }
         let _ = self.cmd_tx.send(NetworkCommand::DialPeer { peer_id });
     }
 
@@ -2458,6 +2529,9 @@ impl MultiplayerSystem {
     /// multiplayer.request_chunk_state(loaded_chunk_ids)?;
     /// ```
     pub fn request_chunk_state(&mut self, chunk_ids: Vec<ChunkId>) -> Result<()> {
+        if self.network_is_disabled() {
+            return Ok(());
+        }
         if chunk_ids.is_empty() {
             return Ok(()); // No chunks to request
         }
@@ -2567,7 +2641,26 @@ fn run_network_thread(
     idle_queue: Arc<
         std::sync::Mutex<std::collections::VecDeque<crate::tile_protocol::TileRequest>>,
     >,
+    runtime_config: MultiplayerRuntimeConfig,
 ) {
+    if !runtime_config.network_enabled {
+        println!("📴 [Network Thread] Networking disabled by config — running offline");
+        loop {
+            match cmd_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(NetworkCommand::Shutdown) => {
+                    println!("📴 [Network Thread] Offline network thread shutting down");
+                    return;
+                }
+                Ok(NetworkCommand::RequestTile { response_tx, .. }) => {
+                    let _ = response_tx.send(crate::tile_protocol::TileResponse::NotFound);
+                }
+                Ok(_) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    }
+
     // Create tokio runtime in this thread
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2667,9 +2760,13 @@ fn run_network_thread(
         if let Err(e) = network.listen_on("/ip4/0.0.0.0/udp/0/quic-v1") {
             eprintln!("Failed to listen on QUIC: {}", e);
         }
-        println!("🌐 [Network Thread] Fetching bootstrap nodes...");
-        network.connect_to_bootstrap().await;
-        println!("🌐 [Network Thread] Bootstrap dial initiated");
+        if runtime_config.bootstrap_enabled {
+            println!("🌐 [Network Thread] Fetching bootstrap nodes...");
+            network.connect_to_bootstrap().await;
+            println!("🌐 [Network Thread] Bootstrap dial initiated");
+        } else {
+            println!("🏠 [Network Thread] Bootstrap disabled — LAN/direct peers only");
+        }
 
         let mut heartbeat_counter = 0u64;
         let mut last_peer_seen = tokio::time::Instant::now();
@@ -2814,7 +2911,8 @@ fn run_network_thread(
             let time_since_peer = last_peer_seen.elapsed().as_secs();
             let time_since_reconnect = last_reconnect.elapsed().as_secs();
             let reconnect_interval = if no_relay_peers { 10 } else { 60 };
-            if no_game_peers
+            if runtime_config.bootstrap_enabled
+                && no_game_peers
                 && no_relay_peers
                 && time_since_peer > 5
                 && time_since_reconnect > reconnect_interval

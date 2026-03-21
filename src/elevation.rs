@@ -48,6 +48,10 @@ impl SrtmTileStore {
         self.store.put_srtm(lat, lon, data);
     }
 
+    pub fn delete_bytes(&self, lat: i32, lon: i32) {
+        self.store.delete_srtm(lat, lon);
+    }
+
     pub fn tile_store_arc(&self) -> std::sync::Arc<crate::tile_store::TileStore> {
         std::sync::Arc::clone(&self.store)
     }
@@ -498,6 +502,7 @@ pub struct CopernicusElevationSource {
     pub cache_dir: PathBuf,
     pub tile_store: Option<SrtmTileStore>,
     source_dir: Option<PathBuf>,
+    allow_network: bool,
 }
 
 impl CopernicusElevationSource {
@@ -507,6 +512,7 @@ impl CopernicusElevationSource {
             cache_dir,
             tile_store: ts,
             source_dir: None,
+            allow_network: true,
         }
     }
 
@@ -519,6 +525,7 @@ impl CopernicusElevationSource {
             cache_dir,
             tile_store: Some(SrtmTileStore::from_arc(ts)),
             source_dir: None,
+            allow_network: true,
         }
     }
 
@@ -530,6 +537,11 @@ impl CopernicusElevationSource {
     /// - `<dir>/COP30_hh/<same-file-name>.tif`
     pub fn with_source_dir(mut self, dir: PathBuf) -> Self {
         self.source_dir = Some(dir);
+        self
+    }
+
+    pub fn with_network_enabled(mut self, allow_network: bool) -> Self {
+        self.allow_network = allow_network;
         self
     }
 
@@ -607,53 +619,161 @@ impl ElevationSource for CopernicusElevationSource {
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
         let tile_path = self.cache_tile_path(lat_tile, lon_tile);
+        let (_, hgt_path) = standard_elevation_tile_paths(&self.cache_dir, lat_tile, lon_tile);
         if let Some(ts) = &self.tile_store {
             if ts.has(lat_tile, lon_tile) {
                 if let Some(data) = ts.get_bytes(lat_tile, lon_tile) {
-                    if !tile_path.exists()
-                        || tile_path.metadata().map(|m| m.len()).unwrap_or(0) < 1024
-                    {
-                        let _ = std::fs::create_dir_all(tile_path.parent().unwrap());
-                        let _ = std::fs::write(&tile_path, &data);
+                    let materialized = match materialize_cached_elevation_bytes(
+                        &self.cache_dir,
+                        lat_tile,
+                        lon_tile,
+                        &data,
+                    ) {
+                        Ok(path) => path,
+                        Err(ElevationError::ParseError(msg)) => {
+                            eprintln!(
+                                "[elevation] Evicting unsupported TileStore payload for {},{}: {}",
+                                lat_tile, lon_tile, msg
+                            );
+                            evict_cached_elevation_tile(
+                                &self.cache_dir,
+                                lat_tile,
+                                lon_tile,
+                                Some(ts),
+                            );
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if let Some(elevation) = try_extract_cached_elevation_path(
+                        &materialized,
+                        gps,
+                        &self.cache_dir,
+                        lat_tile,
+                        lon_tile,
+                        Some(ts),
+                    )? {
+                        return Ok(Some(elevation));
                     }
-                    return Ok(Some(extract_elevation(&tile_path, gps)?));
                 }
             }
         }
-        let tile_file =
-            if tile_path.exists() && tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
-                tile_path
-            } else if let Some(source_path) = self.source_tile_path(lat_tile, lon_tile) {
-                source_path
-            } else {
-                self.fetch_tile(lat_tile, lon_tile)?
-            };
-        Ok(Some(extract_elevation(&tile_file, gps)?))
+
+        if tile_path.exists() && tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &tile_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                self.tile_store.as_ref(),
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
+
+        if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &hgt_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                self.tile_store.as_ref(),
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
+
+        if let Some(source_path) = self.source_tile_path(lat_tile, lon_tile) {
+            return Ok(Some(extract_elevation(&source_path, gps)?));
+        }
+
+        if !self.allow_network {
+            return Ok(None);
+        }
+
+        let fetched = self.fetch_tile(lat_tile, lon_tile)?;
+        if let Some(elevation) = try_extract_cached_elevation_path(
+            &fetched,
+            gps,
+            &self.cache_dir,
+            lat_tile,
+            lon_tile,
+            self.tile_store.as_ref(),
+        )? {
+            return Ok(Some(elevation));
+        }
+
+        Ok(None)
     }
     fn query_cached(&self, gps: &GPS) -> Result<Option<Elevation>, ElevationError> {
         let lat_tile = gps.lat.floor() as i32;
         let lon_tile = gps.lon.floor() as i32;
         let tile_path = self.cache_tile_path(lat_tile, lon_tile);
+        let (_, hgt_path) = standard_elevation_tile_paths(&self.cache_dir, lat_tile, lon_tile);
         if let Some(ts) = &self.tile_store {
             if ts.has(lat_tile, lon_tile) {
                 if let Some(data) = ts.get_bytes(lat_tile, lon_tile) {
-                    if !tile_path.exists()
-                        || tile_path.metadata().map(|m| m.len()).unwrap_or(0) < 1024
-                    {
-                        let _ = std::fs::create_dir_all(tile_path.parent().unwrap());
-                        let _ = std::fs::write(&tile_path, &data);
+                    let materialized = match materialize_cached_elevation_bytes(
+                        &self.cache_dir,
+                        lat_tile,
+                        lon_tile,
+                        &data,
+                    ) {
+                        Ok(path) => path,
+                        Err(ElevationError::ParseError(_)) => {
+                            evict_cached_elevation_tile(
+                                &self.cache_dir,
+                                lat_tile,
+                                lon_tile,
+                                Some(ts),
+                            );
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(e),
+                    };
+                    if let Some(elevation) = try_extract_cached_elevation_path(
+                        &materialized,
+                        gps,
+                        &self.cache_dir,
+                        lat_tile,
+                        lon_tile,
+                        Some(ts),
+                    )? {
+                        return Ok(Some(elevation));
                     }
-                    return Ok(Some(extract_elevation(&tile_path, gps)?));
                 }
             }
         }
         if tile_path.exists() && tile_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
-            Ok(Some(extract_elevation(&tile_path, gps)?))
-        } else if let Some(source_path) = self.source_tile_path(lat_tile, lon_tile) {
-            Ok(Some(extract_elevation(&source_path, gps)?))
-        } else {
-            Ok(None)
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &tile_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                self.tile_store.as_ref(),
+            )? {
+                return Ok(Some(elevation));
+            }
         }
+        if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &hgt_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                self.tile_store.as_ref(),
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
+        if let Some(source_path) = self.source_tile_path(lat_tile, lon_tile) {
+            return Ok(Some(extract_elevation(&source_path, gps)?));
+        }
+        Ok(None)
     }
     fn name(&self) -> &str {
         "Copernicus DEM (AWS)"
@@ -667,6 +787,7 @@ impl ElevationSource for CopernicusElevationSource {
 pub struct SkadiElevationSource {
     pub cache_dir: PathBuf,
     pub tile_store: Option<SrtmTileStore>,
+    allow_network: bool,
 }
 
 impl SkadiElevationSource {
@@ -675,6 +796,7 @@ impl SkadiElevationSource {
         Self {
             cache_dir,
             tile_store: ts,
+            allow_network: true,
         }
     }
 
@@ -686,7 +808,13 @@ impl SkadiElevationSource {
         Self {
             cache_dir,
             tile_store: Some(SrtmTileStore::from_arc(ts)),
+            allow_network: true,
         }
+    }
+
+    pub fn with_network_enabled(mut self, allow_network: bool) -> Self {
+        self.allow_network = allow_network;
+        self
     }
 
     fn fetch_tile(&self, lat: i32, lon: i32) -> Result<PathBuf, ElevationError> {
@@ -787,6 +915,8 @@ impl ElevationSource for SkadiElevationSource {
         let tile_file =
             if hgt_path.exists() && hgt_path.metadata().map(|m| m.len()).unwrap_or(0) >= 1024 {
                 hgt_path
+            } else if !self.allow_network {
+                return Ok(None);
             } else {
                 self.fetch_tile(lat_tile, lon_tile)?
             };
@@ -934,18 +1064,45 @@ impl ElevationSource for OpenTopographySource {
         );
         let hgt_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(&hgt_name);
 
-        let tile_file = if tile_path.exists() {
-            tile_path
-        } else if hgt_path.exists() {
-            hgt_path
-        } else {
-            // Fetch from API
-            self.fetch_tile(lat_tile, lon_tile)?
-        };
+        if tile_path.exists() {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &tile_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                None,
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
 
-        // Parse GeoTIFF and extract elevation
-        let elevation = extract_elevation(&tile_file, gps)?;
-        Ok(Some(elevation))
+        if hgt_path.exists() {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &hgt_path,
+                gps,
+                &self.cache_dir,
+                lat_tile,
+                lon_tile,
+                None,
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
+
+        let fetched = self.fetch_tile(lat_tile, lon_tile)?;
+        if let Some(elevation) = try_extract_cached_elevation_path(
+            &fetched,
+            gps,
+            &self.cache_dir,
+            lat_tile,
+            lon_tile,
+            None,
+        )? {
+            return Ok(Some(elevation));
+        }
+
+        Ok(None)
     }
 
     fn name(&self) -> &str {
@@ -1003,6 +1160,11 @@ fn hgt_tile_insert(lat: i32, lon: i32, data: Arc<Vec<u8>>) {
         w.insert((lat, lon), data);
     }
 }
+fn hgt_tile_remove(lat: i32, lon: i32) {
+    if let Ok(mut w) = global_hgt_tile_cache().write() {
+        w.remove(&(lat, lon));
+    }
+}
 
 fn cached_tiff_get(path: &PathBuf) -> Option<Arc<CachedTiffData>> {
     TIFF_CACHE.with(|c| c.borrow().get(path).cloned())
@@ -1014,6 +1176,12 @@ fn cached_tiff_insert(path: PathBuf, data: Arc<CachedTiffData>) {
     });
 }
 
+fn cached_tiff_remove(path: &PathBuf) {
+    TIFF_CACHE.with(|c| {
+        c.borrow_mut().remove(path);
+    });
+}
+
 fn cached_hgt_get(path: &PathBuf) -> Option<Arc<Vec<u8>>> {
     global_hgt_cache().read().ok()?.get(path).cloned()
 }
@@ -1021,6 +1189,174 @@ fn cached_hgt_get(path: &PathBuf) -> Option<Arc<Vec<u8>>> {
 fn cached_hgt_insert(path: PathBuf, data: Arc<Vec<u8>>) {
     if let Ok(mut w) = global_hgt_cache().write() {
         w.insert(path, data);
+    }
+}
+
+fn cached_hgt_remove(path: &PathBuf) {
+    if let Ok(mut w) = global_hgt_cache().write() {
+        w.remove(path);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElevationTileFormat {
+    Tiff,
+    Hgt,
+    Unknown,
+}
+
+fn bytes_look_like_tiff(data: &[u8]) -> bool {
+    matches!(
+        data,
+        [0x49, 0x49, 0x2A, 0x00, ..]
+            | [0x4D, 0x4D, 0x00, 0x2A, ..]
+            | [0x49, 0x49, 0x2B, 0x00, ..]
+            | [0x4D, 0x4D, 0x00, 0x2B, ..]
+    )
+}
+
+fn bytes_look_like_hgt(data: &[u8]) -> bool {
+    if data.len() < 1024 || data.len() % 2 != 0 {
+        return false;
+    }
+    let samples = data.len() / 2;
+    let side = (samples as f64).sqrt().round() as usize;
+    side * side == samples && matches!(side, 1201 | 3601)
+}
+
+fn sniff_elevation_tile_format(data: &[u8]) -> ElevationTileFormat {
+    if bytes_look_like_tiff(data) {
+        ElevationTileFormat::Tiff
+    } else if bytes_look_like_hgt(data) {
+        ElevationTileFormat::Hgt
+    } else {
+        ElevationTileFormat::Unknown
+    }
+}
+
+fn sniff_elevation_file_format(path: &PathBuf) -> Result<ElevationTileFormat, ElevationError> {
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        ElevationError::FileNotFound(format!("Cannot open {}: {}", path.display(), e))
+    })?;
+    let meta = file.metadata().map_err(|e| {
+        ElevationError::FileNotFound(format!("Cannot stat {}: {}", path.display(), e))
+    })?;
+    let mut head = [0u8; 4];
+    let read = std::io::Read::read(&mut file, &mut head)
+        .map_err(|e| ElevationError::ParseError(format!("Cannot read {}: {}", path.display(), e)))?;
+    if bytes_look_like_tiff(&head[..read]) {
+        return Ok(ElevationTileFormat::Tiff);
+    }
+    if meta.len() >= 1024 && meta.len() % 2 == 0 {
+        let samples = (meta.len() / 2) as usize;
+        let side = (samples as f64).sqrt().round() as usize;
+        if side * side == samples && matches!(side, 1201 | 3601) {
+            return Ok(ElevationTileFormat::Hgt);
+        }
+    }
+    Ok(ElevationTileFormat::Unknown)
+}
+
+fn standard_elevation_tile_paths(cache_dir: &std::path::Path, lat: i32, lon: i32) -> (PathBuf, PathBuf) {
+    let la = lat.unsigned_abs();
+    let lo = lon.unsigned_abs();
+    let lat_dir = if lat >= 0 {
+        format!("N{:02}", lat)
+    } else {
+        format!("S{:02}", la)
+    };
+    let lon_dir = if lon >= 0 {
+        format!("E{:03}", lon)
+    } else {
+        format!("W{:03}", lo)
+    };
+    let dir = cache_dir.join(lat_dir).join(lon_dir);
+    let tiff = dir.join(format!(
+        "srtm_{}{:02}_{}{:03}.tif",
+        if lat >= 0 { 'n' } else { 's' },
+        la,
+        if lon >= 0 { 'e' } else { 'w' },
+        lo
+    ));
+    let hgt = dir.join(format!(
+        "{}{:02}{}{:03}.hgt",
+        if lat >= 0 { 'N' } else { 'S' },
+        la,
+        if lon >= 0 { 'E' } else { 'W' },
+        lo
+    ));
+    (tiff, hgt)
+}
+
+fn materialize_cached_elevation_bytes(
+    cache_dir: &std::path::Path,
+    lat: i32,
+    lon: i32,
+    data: &[u8],
+) -> Result<PathBuf, ElevationError> {
+    let (tiff_path, hgt_path) = standard_elevation_tile_paths(cache_dir, lat, lon);
+    let target = match sniff_elevation_tile_format(data) {
+        ElevationTileFormat::Tiff => tiff_path,
+        ElevationTileFormat::Hgt => hgt_path,
+        ElevationTileFormat::Unknown => {
+            return Err(ElevationError::ParseError(format!(
+                "unsupported cached elevation payload for tile {},{} ({} bytes)",
+                lat,
+                lon,
+                data.len()
+            )))
+        }
+    };
+
+    std::fs::create_dir_all(target.parent().unwrap())
+        .map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+    std::fs::write(&target, data).map_err(|e| ElevationError::FileNotFound(e.to_string()))?;
+    Ok(target)
+}
+
+fn evict_cached_elevation_file(path: &PathBuf) {
+    cached_tiff_remove(path);
+    cached_hgt_remove(path);
+    let _ = std::fs::remove_file(path);
+}
+
+fn evict_cached_elevation_tile(
+    cache_dir: &std::path::Path,
+    lat: i32,
+    lon: i32,
+    tile_store: Option<&SrtmTileStore>,
+) {
+    let (tiff_path, hgt_path) = standard_elevation_tile_paths(cache_dir, lat, lon);
+    evict_cached_elevation_file(&tiff_path);
+    evict_cached_elevation_file(&hgt_path);
+    hgt_tile_remove(lat, lon);
+    if let Some(ts) = tile_store {
+        ts.delete_bytes(lat, lon);
+    }
+}
+
+fn try_extract_cached_elevation_path(
+    path: &PathBuf,
+    gps: &GPS,
+    cache_dir: &std::path::Path,
+    lat: i32,
+    lon: i32,
+    tile_store: Option<&SrtmTileStore>,
+) -> Result<Option<Elevation>, ElevationError> {
+    match extract_elevation(path, gps) {
+        Ok(elevation) => Ok(Some(elevation)),
+        Err(ElevationError::ParseError(msg)) => {
+            eprintln!(
+                "[elevation] Evicting unreadable cached tile {} for {},{}: {}",
+                path.display(),
+                lat,
+                lon,
+                msg
+            );
+            evict_cached_elevation_tile(cache_dir, lat, lon, tile_store);
+            Ok(None)
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -1043,6 +1379,17 @@ fn extract_elevation(tiff_path: &PathBuf, gps: &GPS) -> Result<Elevation, Elevat
         .to_lowercase();
     if ext == "hgt" {
         return extract_elevation_hgt(tiff_path, gps);
+    }
+
+    match sniff_elevation_file_format(tiff_path)? {
+        ElevationTileFormat::Hgt => return extract_elevation_hgt(tiff_path, gps),
+        ElevationTileFormat::Unknown => {
+            return Err(ElevationError::ParseError(format!(
+                "Unsupported elevation file format: {}",
+                tiff_path.display()
+            )))
+        }
+        ElevationTileFormat::Tiff => {}
     }
 
     // Check the thread-local TIFF cache first — avoid re-reading the 26MB file on each query.
@@ -1295,14 +1642,7 @@ fn copernicus_tile_id(lat: i32, lon: i32, cog: bool) -> String {
 
 /// Extract elevation from a raw SRTM HGT file (big-endian signed int16, row-major N→S, W→E).
 fn extract_elevation_hgt(hgt_path: &PathBuf, gps: &GPS) -> Result<Elevation, ElevationError> {
-    let stem = hgt_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let (tile_lat, tile_lon) = parse_hgt_style(&stem).ok_or_else(|| {
-        ElevationError::ParseError(format!("Cannot parse HGT filename: {}", hgt_path.display()))
-    })?;
+    let (tile_lat, tile_lon) = parse_tile_coords_from_path(hgt_path)?;
 
     let bytes: Arc<Vec<u8>> = if let Some(b) = cached_hgt_get(hgt_path) {
         b
@@ -1451,47 +1791,55 @@ impl ElevationSource for P2PElevationSource {
         let lat = gps.lat.floor() as i32;
         let lon = gps.lon.floor() as i32;
 
-        let lat_prefix = if lat >= 0 { 'n' } else { 's' };
-        let lon_prefix = if lon >= 0 { 'e' } else { 'w' };
-        let lat_dir = if lat >= 0 {
-            format!("N{:02}", lat)
-        } else {
-            format!("S{:02}", lat.unsigned_abs())
-        };
-        let lon_dir = if lon >= 0 {
-            format!("E{:03}", lon)
-        } else {
-            format!("W{:03}", lon.unsigned_abs())
-        };
-        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(format!(
-            "srtm_{}{:02}_{}{:03}.tif",
-            lat_prefix,
-            lat.unsigned_abs(),
-            lon_prefix,
-            lon.unsigned_abs()
-        ));
+        let (tile_path, hgt_path) = standard_elevation_tile_paths(&self.cache_dir, lat, lon);
 
-        if !tile_path.exists() {
+        if !tile_path.exists() && !hgt_path.exists() {
             // TileFetcher tracks failed tiles across all instances; skip if already tried
             if let Some(bytes) = self.fetcher.fetch_elevation(lat, lon) {
-                if let Some(parent) = tile_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                if std::fs::write(&tile_path, &bytes).is_ok() {
-                    // Announce to DHT — we now have this tile (also clears failed set)
-                    self.fetcher.announce_elevation(lat, lon);
+                match materialize_cached_elevation_bytes(&self.cache_dir, lat, lon, &bytes) {
+                    Ok(_) => {
+                        // Announce to DHT — we now have this tile (also clears failed set)
+                        self.fetcher.announce_elevation(lat, lon);
+                    }
+                    Err(ElevationError::ParseError(msg)) => {
+                        eprintln!(
+                            "[elevation] Ignoring unsupported P2P elevation payload for {},{}: {}",
+                            lat, lon, msg
+                        );
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }
 
-        if !tile_path.exists() {
-            return Ok(None);
+        if tile_path.exists() {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &tile_path,
+                gps,
+                &self.cache_dir,
+                lat,
+                lon,
+                None,
+            )? {
+                return Ok(Some(elevation));
+            }
         }
 
-        match extract_elevation(&tile_path, gps) {
-            Ok(elev) => Ok(Some(elev)),
-            Err(e) => Err(e),
+        if hgt_path.exists() {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &hgt_path,
+                gps,
+                &self.cache_dir,
+                lat,
+                lon,
+                None,
+            )? {
+                return Ok(Some(elevation));
+            }
         }
+
+        Ok(None)
     }
 
     fn name(&self) -> &str {
@@ -1503,33 +1851,32 @@ impl ElevationSource for P2PElevationSource {
         // query_cached just skips the P2P request entirely and checks the file directly.
         let lat = gps.lat.floor() as i32;
         let lon = gps.lon.floor() as i32;
-        let lat_prefix = if lat >= 0 { 'n' } else { 's' };
-        let lon_prefix = if lon >= 0 { 'e' } else { 'w' };
-        let lat_dir = if lat >= 0 {
-            format!("N{:02}", lat)
-        } else {
-            format!("S{:02}", lat.unsigned_abs())
-        };
-        let lon_dir = if lon >= 0 {
-            format!("E{:03}", lon)
-        } else {
-            format!("W{:03}", lon.unsigned_abs())
-        };
-        let tile_path = self.cache_dir.join(&lat_dir).join(&lon_dir).join(format!(
-            "srtm_{}{:02}_{}{:03}.tif",
-            lat_prefix,
-            lat.unsigned_abs(),
-            lon_prefix,
-            lon.unsigned_abs()
-        ));
+        let (tile_path, hgt_path) = standard_elevation_tile_paths(&self.cache_dir, lat, lon);
         if tile_path.exists() {
-            match extract_elevation(&tile_path, gps) {
-                Ok(elev) => Ok(Some(elev)),
-                Err(e) => Err(e),
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &tile_path,
+                gps,
+                &self.cache_dir,
+                lat,
+                lon,
+                None,
+            )? {
+                return Ok(Some(elevation));
             }
-        } else {
-            Ok(None)
         }
+        if hgt_path.exists() {
+            if let Some(elevation) = try_extract_cached_elevation_path(
+                &hgt_path,
+                gps,
+                &self.cache_dir,
+                lat,
+                lon,
+                None,
+            )? {
+                return Ok(Some(elevation));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1714,8 +2061,8 @@ impl ElevationPipeline {
 /// Build the shared offline DEM pipeline used by worldgen-style tools.
 ///
 /// Priority order:
-/// 1. Local bulk COP30 tiles (when provided), with AWS Copernicus fallback for missing tiles.
-/// 2. Skadi HGT cache/network fallback.
+/// 1. Local bulk COP30 tiles (when provided), with no network fallback.
+/// 2. Local Skadi/HGT cache only, with no network fallback.
 pub fn make_offline_elevation_pipeline(
     cache_dir: PathBuf,
     cop30_source_dir: Option<PathBuf>,
@@ -1729,7 +2076,8 @@ pub fn make_offline_elevation_pipeline(
         } else {
             CopernicusElevationSource::new(cache_dir.clone())
         }
-        .with_source_dir(source_dir);
+        .with_source_dir(source_dir)
+        .with_network_enabled(false);
         pipeline.add_source(Box::new(copernicus));
     }
 
@@ -1737,7 +2085,8 @@ pub fn make_offline_elevation_pipeline(
         SkadiElevationSource::with_tile_store(cache_dir.clone(), ts)
     } else {
         SkadiElevationSource::new(cache_dir)
-    };
+    }
+    .with_network_enabled(false);
     pipeline.add_source(Box::new(skadi));
 
     pipeline

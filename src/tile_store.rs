@@ -188,19 +188,20 @@ impl TileStore {
             path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
         });
 
-        // Check registry first — return existing Arc if already open
-        {
-            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(weak) = reg.get(&canonical) {
-                if let Some(strong) = weak.upgrade() {
-                    return Ok(TileStore { db: strong });
-                }
-                // Weak expired — remove stale entry and open fresh
-                reg.remove(&canonical);
-            }
-        }
-
         std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
+
+        // IMPORTANT: hold the registry lock across the first open for a path.
+        // Without this, two threads can both miss the registry, race into
+        // RocksDB::open on the same LOCK file, and one panics with
+        // "lock hold by current process" before the winning thread inserts the Arc.
+        let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(weak) = reg.get(&canonical) {
+            if let Some(strong) = weak.upgrade() {
+                return Ok(TileStore { db: strong });
+            }
+            // Weak expired — remove stale entry and open fresh.
+            reg.remove(&canonical);
+        }
 
         let mut db_opts = Options::default();
         db_opts.create_if_missing(true);
@@ -223,13 +224,11 @@ impl TileStore {
             .map_err(|e| format!("TileStore open failed: {e}"))?;
 
         let inner = Arc::new(TileStoreInner { db });
-        {
-            let mut reg = registry().lock().unwrap_or_else(|e| e.into_inner());
-            reg.insert(canonical, Arc::downgrade(&inner));
-        }
-
-        let store = TileStore { db: inner };
+        let store = TileStore {
+            db: Arc::clone(&inner),
+        };
         store.check_versions()?;
+        reg.insert(canonical, Arc::downgrade(&inner));
         Ok(store)
     }
 
@@ -589,6 +588,30 @@ impl TileStore {
         result
     }
 
+    /// Iterate all current-version chunk coordinates stored for a specific pass.
+    pub fn iter_chunk_pass_coords(&self, pass: PassId) -> Vec<(i32, i32, i32)> {
+        let Some(cf) = self.db.db.cf_handle(pass.cf_name()) else {
+            return vec![];
+        };
+        let mut result = Vec::new();
+        for item in self.db.db.iterator_cf(&cf, rocksdb::IteratorMode::Start) {
+            if let Ok((key, value)) = item {
+                if key.len() != 12 || value.len() < 2 {
+                    continue;
+                }
+                let stored_version = u16::from_le_bytes([value[0], value[1]]);
+                if stored_version != pass.current_version() {
+                    continue;
+                }
+                let cx = i32::from_le_bytes(key[0..4].try_into().unwrap());
+                let cy = i32::from_le_bytes(key[4..8].try_into().unwrap());
+                let cz = i32::from_le_bytes(key[8..12].try_into().unwrap());
+                result.push((cx, cy, cz));
+            }
+        }
+        result
+    }
+
     /// Scan all tiles in a CF and verify checksums.
     /// Returns `(total, corrupt)` — corrupt entries are deleted automatically.
     pub fn verify_cf(&self, cf_name: &str) -> (u64, u64) {
@@ -725,6 +748,52 @@ impl PassId {
             PassId::Roads => PASS_ROADS_VERSION,
             PassId::Buildings => PASS_BUILDINGS_VERSION,
             PassId::FeatureRules => 1,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TileStore;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    #[test]
+    fn concurrent_open_same_path_does_not_hit_rocksdb_lock_race() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let rel_path = tempdir.path().join("tiles.db");
+        let abs_path = tempdir
+            .path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .join("tiles.db");
+
+        for _round in 0..4 {
+            let start = Arc::new(Barrier::new(12));
+            let hold = Arc::new(Barrier::new(12));
+            let mut handles = Vec::new();
+
+            for idx in 0..12 {
+                let start = Arc::clone(&start);
+                let hold = Arc::clone(&hold);
+                let path = if idx % 2 == 0 {
+                    rel_path.clone()
+                } else {
+                    abs_path.clone()
+                };
+
+                handles.push(thread::spawn(move || {
+                    start.wait();
+                    let store = TileStore::open(&path)
+                        .unwrap_or_else(|e| panic!("concurrent TileStore::open failed: {e}"));
+                    hold.wait();
+                    store
+                }));
+            }
+
+            for handle in handles {
+                let _store = handle.join().expect("join concurrent open thread");
+            }
         }
     }
 }

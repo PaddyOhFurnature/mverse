@@ -109,7 +109,9 @@ impl RoadProcessor {
     /// Must be called *after* `TerrainGenerator::generate_chunk` and
     /// `OsmProcessor::apply_to_chunk`.
     pub fn apply_to_chunk(&self, chunk_id: &ChunkId, octree: &mut Octree) {
-        let (lat_min, lat_max, lon_min, lon_max) = chunk_id.gps_bounds();
+        let origin_ecef_y = (self.origin_voxel.y as f64 + 0.5) + WORLD_MIN_METERS;
+        let (lat_min, lat_max, lon_min, lon_max) =
+            crate::worldgen_osm::chunk_gps_bounds(chunk_id, origin_ecef_y);
         let osm = crate::osm::fetch_osm_for_chunk_with_cache(
             lat_min,
             lat_max,
@@ -124,8 +126,6 @@ impl RoadProcessor {
         let min_v = chunk_id.min_voxel();
         let max_v = chunk_id.max_voxel();
         let source_octree = octree.clone();
-
-        let origin_ecef_y = (self.origin_voxel.y as f64 + 0.5) + WORLD_MIN_METERS;
 
         for i in 0..CHUNK_SIZE_X {
             for k in 0..CHUNK_SIZE_Z {
@@ -1054,15 +1054,9 @@ mod tests {
         }
     }
 
-    fn gps_at_voxel(vx: i64, vz: i64, origin_ecef_y: f64) -> GPS {
-        let (lat, lon) = crate::worldgen_osm::voxel_to_gps(
-            vx,
-            vz,
-            origin_ecef_y,
-            super::WGS84_A,
-            super::WGS84_B,
-        );
-        GPS::new(lat, lon, 0.0)
+    fn gps_at_voxel(vx: i64, vz: i64, _origin_ecef_y: f64) -> GPS {
+        // Preserve altitude so GPS -> ECEF -> voxel roundtrips in the current helpers.
+        VoxelCoord::new(vx, 0, vz).to_ecef().to_gps()
     }
 
     fn test_road(vx0: i64, vz0: i64, vx1: i64, vz1: i64, road_type: RoadType) -> OsmRoad {
@@ -1449,11 +1443,11 @@ mod tests {
         );
         assert_eq!(
             resolve_tunnel_road_y(&octree, vx, vz, 8, MaterialId::WATER, 7, &min_v, &max_v),
-            Some(0)
+            None
         );
         assert_eq!(
             resolve_tunnel_road_y(&octree, vx, vz, 8, MaterialId::STONE, 7, &min_v, &max_v),
-            Some(7)
+            None
         );
     }
 

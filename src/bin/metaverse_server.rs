@@ -2888,7 +2888,7 @@ struct KeyRequestBody {
 
 /// POST /api/v1/key-requests — submit a key upgrade or relay issuance request.
 ///
-/// The applicant must have an existing Guest or Personal key registered.
+/// The applicant must have an existing Guest or User key registered.
 /// A server operator reviews via GET /api/v1/key-requests and then
 /// POST /api/v1/key-requests/{id}/approve or /deny.
 async fn api_v1_post_key_request(
@@ -2905,7 +2905,7 @@ async fn api_v1_post_key_request(
     };
     if !exists {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "error": "peer_id has no registered key — submit a Guest/Personal key first via POST /api/v1/keys"
+            "error": "peer_id has no registered key — submit a Guest/User key first via POST /api/v1/keys"
         }))).into_response();
     }
 

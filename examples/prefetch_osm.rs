@@ -34,6 +34,7 @@ fn main() {
     let mut n_fetched = 0usize;
     let mut n_cached = 0usize;
     let mut n_failed = 0usize;
+    let endpoints: Vec<String> = Vec::new();
 
     for i in 0..lat_n {
         for j in 0..lon_n {
@@ -45,7 +46,7 @@ fn main() {
             let idx = i * lon_n + j + 1;
             print!("  [{idx}/{total}] ({s:.4},{w:.4})→({n:.4},{e:.4})  ");
 
-            match metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, osm_dir) {
+            match metaverse_core::osm::fetch_osm_for_bounds(s, w, n, e, osm_dir, &endpoints) {
                 Ok(data) => {
                     if data.is_empty() {
                         println!("(empty tile)");
